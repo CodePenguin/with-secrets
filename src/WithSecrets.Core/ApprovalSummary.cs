@@ -12,7 +12,19 @@ public static class ApprovalSummary
 {
     public const int MaxReasonLength = 200;
 
-    /// <summary>The text of the Windows Hello prompt.</summary>
+    /// <summary>The start of the line that names the request (its fingerprint key) in the text the person signs.</summary>
+    public const string RequestIdPrefix = "Request id: ";
+
+    /// <summary>The start of the line with the time the page was made (server UTC, round-trip format) in the text the person signs.</summary>
+    public const string IssuedPrefix = "Page issued: ";
+
+    /// <summary>The page issued line for <paramref name="time" />, in UTC.</summary>
+    public static string IssuedLine(DateTimeOffset time) => IssuedPrefix + time.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// The text the person reads on the approval page. Every line the agent controls starts with a fixed label and has its
+    /// line breaks marked, so the agent cannot add a line of its own (such as a request id line).
+    /// </summary>
     public static string BuildMessage(ApprovalRequest request)
     {
         StringBuilder text = new();
@@ -26,21 +38,17 @@ public static class ApprovalSummary
 
         text.Append("In: ").Append(Clean(request.WorkingDirectory)).Append('\n');
         text.Append("Agent says: ").Append(Truncate(Clean(request.Reason), MaxReasonLength));
-        if (request.ReuseMinutes > 0)
+        if (request.Reuse is { IsOn: true } reuse)
         {
-            text.Append('\n').Append($"Approving also covers the same program, script, folder, and secrets for {request.ReuseMinutes} min, whatever the other arguments.");
+            text.Append('\n').Append($"Approve for a time (up to {reuse.Choices[^1]} min) also covers the same program, script, folder, and secrets until it ends, whatever the other arguments. Approve once covers only this run.");
+        }
+
+        if (request.RequestId is { Length: > 0 } id)
+        {
+            text.Append('\n').Append(RequestIdPrefix).Append(Clean(id));
         }
 
         return text.ToString();
-    }
-
-    /// <summary>
-    /// The short text for the confirmation step that follows the approval window. The window already showed everything, so this
-    /// only names the secrets. It is short on purpose: a short text cannot be cut off by the Windows dialog.
-    /// </summary>
-    public static string BuildConfirmMessage(ApprovalRequest request)
-    {
-        return "Confirm the request you just read in the approval window.\nSecrets: " + string.Join(", ", request.SecretNames);
     }
 
     /// <summary>The command line with quotes around any argument that needs them.</summary>

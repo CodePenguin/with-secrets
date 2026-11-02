@@ -7,8 +7,7 @@ namespace WithSecrets;
 public static class Policy
 {
     /// <summary>
-    /// A technical limit, not a review limit. The approval window shows the command in a text box, which holds about 32,000
-    /// characters. A command longer than this is refused, never cut short.
+    /// A technical limit, not a review limit. A command longer than this is refused, never cut short.
     /// </summary>
     public const int MaxCommandLength = 16000;
 

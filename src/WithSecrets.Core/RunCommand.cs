@@ -1,46 +1,15 @@
-using System.Text.Json;
-
 namespace WithSecrets;
-
-/// <summary>Writes one JSON line per event. It records names, never values.</summary>
-public sealed class AuditLog(string path)
-{
-    /// <summary>Returns false when the line could not be written. The caller then refuses to continue.</summary>
-    public bool TryWrite(string eventName, ApprovalRequest request, string detail, int? exitCode = null, IReadOnlyDictionary<string, string>? files = null)
-    {
-        try
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            string line = JsonSerializer.Serialize(new
-            {
-                time = DateTimeOffset.UtcNow,
-                @event = eventName,
-                program = request.ResolvedProgram,
-                arguments = request.Arguments,
-                directory = request.WorkingDirectory,
-                reason = request.Reason,
-                secrets = request.SecretNames,
-                detail,
-                files,
-                typedArguments = request.TypedArguments,
-                links = request.Links,
-                exitCode
-            });
-            File.AppendAllText(path, line + Environment.NewLine);
-
-            return true;
-        }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
-        {
-            return false;
-        }
-    }
-}
 
 public sealed record RunArgs(IReadOnlyList<string> Secrets, string Reason, string Program, IReadOnlyList<string> Arguments);
 
-/// <summary>Exit codes: 2 usage, 3 denied, 4 store error, 5 audit error, 127 program not found. Anything else is the program's own.</summary>
-public sealed class RunCommand(ISecretStore store, IApprover approver, AuditLog audit, TextWriter stdout, TextWriter stderr, GrantStore? grants = null, TimeSpan reuse = default)
+/// <summary>
+/// Exit codes: 2 usage, 3 denied, 4 store error, 5 audit error, 127 program not found. Anything else is the program's own.
+/// <paramref name="reuse" /> is what the approval page may offer besides "Approve once" (from the settings); without
+/// <paramref name="grants" /> nothing is offered. A saved approval is made only when the person chose a time on the page and
+/// signed it, for exactly that time, keeps that signature, and is used only while it verifies and its lifetime is within the
+/// current ceiling. One that does not verify is reported once on stderr and ignored: the person is asked again.
+/// </summary>
+public sealed class RunCommand(ISecretStore store, IApprover approver, AuditLog audit, TextWriter stdout, TextWriter stderr, GrantStore? grants = null, ReuseOffer? reuse = null)
 {
     public const int Usage = 2;
     public const int Denied = 3;
@@ -112,16 +81,26 @@ public sealed class RunCommand(ISecretStore store, IApprover approver, AuditLog 
             }
         }
 
-        bool reuseOn = grants is not null && reuse > TimeSpan.Zero;
-        ApprovalRequest request = new(args.Program, resolved, arguments, workingDirectory, args.Reason, names, reuseOn ? (int)reuse.TotalMinutes : 0, args.Arguments, links);
+        ReuseOffer offer = grants is not null && reuse is { IsOn: true } ? reuse : ReuseOffer.Off;
+        ApprovalRequest request = new(args.Program, resolved, arguments, workingDirectory, args.Reason, names, offer.IsOn ? offer : null, args.Arguments, links);
         Fingerprint fingerprint = RequestFingerprint.Compute(request);
 
-        if (reuseOn && grants!.TryGet(fingerprint.Key, out DateTimeOffset approvedAt, out DateTimeOffset expiresAt))
+        // The request id goes into the text the person signs, so a saved approval names the request it covers.
+        request = request with { RequestId = fingerprint.Key };
+
+        // A saved approval that does not verify is never used; the person is asked again.
+        GrantLookup saved = offer.IsOn ? grants!.Find(fingerprint.Key, offer.MaxMinutes) : GrantLookup.None;
+        if (saved.Rejected is not null)
+        {
+            await stderr.WriteLineAsync($"with-secrets: {GrantStore.RejectedMessage} ({saved.Rejected}).");
+        }
+
+        if (saved.Grant is { } grant)
         {
             DateTimeOffset now = DateTimeOffset.UtcNow;
-            string detail = $"approval from {approvedAt:O}, ends {expiresAt:O}";
-            await stderr.WriteLineAsync($"with-secrets: reusing the approval for this exact request ({Math.Max(0, (int)(expiresAt - now).TotalMinutes)} min left).");
-            if (!audit.TryWrite("reused", request, detail, files: fingerprint.Files))
+            string detail = $"approval by passkey {grant.KeyName} from {grant.Approved:O}, ends {grant.Expires:O}";
+            await stderr.WriteLineAsync($"with-secrets: reusing the approval for this exact request ({Math.Max(0, (int)(grant.Expires - now).TotalMinutes)} min left).");
+            if (!audit.TryWrite("reused", request, detail, files: fingerprint.Files, keyName: grant.KeyName))
             {
                 return await Fail(AuditError, "cannot write the audit log, so nothing was run.");
             }
@@ -132,7 +111,12 @@ public sealed class RunCommand(ISecretStore store, IApprover approver, AuditLog 
             await stderr.WriteLineAsync(ApprovalSummary.BuildMessage(request));
 
             ApprovalDecision decision = approver.Request(request);
-            if (!audit.TryWrite(decision.Approved ? "approved" : "denied", request, decision.Detail, files: fingerprint.Files))
+            if (decision.Approved && !offer.Allows(decision.ReuseMinutes))
+            {
+                decision = ApprovalDecision.Deny("the approval named a reuse time that was not offered");
+            }
+
+            if (!audit.TryWrite(decision.Approved ? "approved" : "denied", request, decision.Detail, files: fingerprint.Files, reuseMinutes: decision.Approved ? decision.ReuseMinutes : null))
             {
                 return await Fail(AuditError, "cannot write the audit log, so nothing was run.");
             }
@@ -148,9 +132,11 @@ public sealed class RunCommand(ISecretStore store, IApprover approver, AuditLog 
                 return await Fail(Denied, "A file named in the command changed while the prompt was open, so nothing was run. Ask again.");
             }
 
-            if (reuseOn)
+            // Only the time the person signed, never longer than the ceiling now (Allows checked it), and only with what they
+            // signed: the grant keeps the assertion and is checked again at every use.
+            if (decision.ReuseMinutes > 0 && decision.Evidence is { } evidence && grants!.Add(fingerprint.Key, decision.ReuseMinutes, evidence))
             {
-                grants!.Add(fingerprint.Key, reuse);
+                await stderr.WriteLineAsync($"with-secrets: the user approved this for {decision.ReuseMinutes} min; the same request runs again without asking until then.");
             }
         }
 
