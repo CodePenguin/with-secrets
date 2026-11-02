@@ -23,6 +23,7 @@ internal static class ManifestTests
             Tampers(check, root);
             await NoRun(check, root);
             Stale(check, root);
+            Admins(check, root);
             SignCounts(check, root);
             Parallel(check, root);
             await Revoke(check, root);
@@ -45,19 +46,25 @@ internal static class ManifestTests
         Manifest first = Manifest.First(Record(laptop, "laptop"), ToolSettings.Defaults);
         string id = TestAuthenticator.Encode(laptop.CredentialId);
         string expected = "{\"v\":1,\"keys\":[{\"id\":\"" + id + "\",\"name\":\"laptop\",\"pub\":\"" + TestAuthenticator.Encode(laptop.CoseKey())
-            + "\",\"alg\":-7,\"rp\":\"localhost\",\"created\":\"2026-11-01T10:00:00.0000000+00:00\",\"admin\":true}],\"settings\":" + ToolSettings.Defaults.Canonical() + "}";
+            + "\",\"alg\":-7,\"rp\":\"localhost\",\"created\":\"2026-11-01T10:00:00.0000000+00:00\",\"admin\":true}],\"store\":\"\",\"secrets\":{},\"settings\":" + ToolSettings.Defaults.Canonical() + "}";
         check(first.Canonical() == expected, "manifest: the canonical text has a fixed key order (" + first.Canonical() + ")");
-        check(first.Version == 1 && first.Admin?.Id == id && first.Keys.Count == 1, "manifest: the first manifest is version 1 with the first key as admin");
+        check(first.Version == 1 && first.Admins.Single().Id == id && first.Keys.Count == 1, "manifest: the first manifest is version 1 with the first key as admin");
 
         Manifest second = first.WithKey(Record(phone, "phone", "ws.example.com"));
-        check(second.Version == 2 && second.Keys.Count == 2 && second.Keys.Count(key => key.Admin) == 1 && second.Admin?.Id == id, "manifest: adding a key is version + 1 and the new key is not admin");
+        check(second.Version == 2 && second.Keys.Count == 2 && second.Keys.Count(key => key.Admin) == 1 && second.Admins.Single().Id == id, "manifest: adding a key is version + 1 and the new key is not admin by default");
+        Manifest twoAdmins = first.WithKey(Record(phone, "phone", "ws.example.com"), true);
+        check(twoAdmins.Version == 2 && twoAdmins.Admins.Count == 2 && twoAdmins.Problem() is null && twoAdmins.Canonical().Split("\"admin\":true").Length == 3, "manifest: a key added as an admin is a second admin, in the text (" + twoAdmins.Problem() + ")");
+        check(Manifest.Parse(twoAdmins.Canonical(), out string? twoError) is { Admins.Count: 2 } && twoError is null, "manifest: a manifest with two admins parses (" + twoError + ")");
+        Manifest older = first.WithKey(Record(phone, "phone") with { Created = Created.AddDays(-1) }, true);
+        Manifest newer = first.WithKey(Record(phone, "phone") with { Created = Created.AddDays(1) }, true);
+        check(older.Admins.Select(key => key.Name).SequenceEqual(["phone", "laptop"]) && newer.Admins.Select(key => key.Name).SequenceEqual(["laptop", "phone"]), "manifest: the admins are listed oldest first");
         check(second.Keys.Select(key => key.Id).SequenceEqual(second.Keys.Select(key => key.Id).Order(StringComparer.Ordinal)), "manifest: keys are sorted by id");
         Manifest parsed = Manifest.Parse(second.Canonical(), out string? error)!;
         check(parsed is not null && error is null && parsed.Canonical() == second.Canonical() && parsed.Keys.SequenceEqual(second.Keys) && parsed.Settings == second.Settings, "manifest: round trip (" + error + ")");
         Manifest settings = second.WithSettings(ToolSettings.Defaults with { Port = 8765 });
         check(settings.Version == 3 && settings.Settings.Port == 8765 && settings.Keys.SequenceEqual(second.Keys), "manifest: a settings change is version + 1 with the same keys");
         Manifest removed = settings.WithoutKey(TestAuthenticator.Encode(phone.CredentialId));
-        check(removed.Version == 4 && removed.Keys.Count == 1 && removed.Admin?.Id == id, "manifest: removing a key is version + 1");
+        check(removed.Version == 4 && removed.Keys.Count == 1 && removed.Admins.Single().Id == id, "manifest: removing a key is version + 1");
         check(settings.SettingsPrefix() + settings.Settings.Canonical() + "}" == settings.Canonical(), "manifest: the text is the prefix, the settings and a closing brace");
 
         byte[] bind = [1, 2, 3];
@@ -76,12 +83,11 @@ internal static class ManifestTests
         [
             ("white space", text.Replace(",\"keys\"", ", \"keys\"", StringComparison.Ordinal)),
             ("zero admins", text.Replace("\"admin\":true", "\"admin\":false", StringComparison.Ordinal)),
-            ("two admins", text.Replace("\"admin\":false", "\"admin\":true", StringComparison.Ordinal)),
             ("version 0", text.Replace("{\"v\":2,", "{\"v\":0,", StringComparison.Ordinal)),
             ("a settings value out of range", text.Replace("\"timeoutMinutes\":5", "\"timeoutMinutes\":99", StringComparison.Ordinal)),
             ("an unknown algorithm", text.Replace("\"alg\":-7", "\"alg\":-8", StringComparison.Ordinal)),
             ("an extra member", text.Replace("{\"v\":2,", "{\"v\":2,\"x\":1,", StringComparison.Ordinal)),
-            ("keys out of order", "{\"v\":2,\"keys\":[" + string.Join(",", Keys(text).Reverse()) + "]" + text[text.IndexOf(",\"settings\"", StringComparison.Ordinal)..]),
+            ("keys out of order", "{\"v\":2,\"keys\":[" + string.Join(",", Keys(text).Reverse()) + "]" + text[text.IndexOf(",\"store\"", StringComparison.Ordinal)..]),
             ("a duplicate id", text.Replace(phoneId, TestAuthenticator.Encode(laptop.CredentialId), StringComparison.Ordinal)),
             ("a duplicate name", text.Replace("\"name\":\"phone\"", "\"name\":\"LAPTOP\"", StringComparison.Ordinal)),
             ("not JSON", "not json"),
@@ -90,6 +96,11 @@ internal static class ManifestTests
         {
             check(Manifest.Parse(value, out string? error) is null && error is not null, "manifest parse: " + name + " is refused (" + error + ")");
         }
+
+        Manifest.Parse(text.Replace("\"admin\":true", "\"admin\":false", StringComparison.Ordinal), out string? none);
+        check(none == "the manifest has no admin key", "manifest parse: zero admins says so (" + none + ")");
+        string both = text.Replace("\"admin\":false", "\"admin\":true", StringComparison.Ordinal);
+        check(Manifest.Parse(both, out string? two) is { Admins.Count: 2 } && two is null, "manifest parse: two admins are valid (" + two + ")");
     }
 
     /// <summary>The key objects of a manifest text, in order, as raw JSON.</summary>
@@ -114,8 +125,8 @@ internal static class ManifestTests
         check(keys.Count == 2 && keys.Single(key => key.Admin).Name == "laptop" && !keys.Single(key => key.Name == "phone").Admin, "manifest store: keys come from the manifest, the first is the admin");
         check(ToolSettings.Load(again, out error).Port == 8765 && error is null, "manifest store: settings come from the manifest");
         check(TestState.Current(again)!.Version == 2, "manifest store: the version is 2 after two changes");
-        check(Tables(db.FilePath).SequenceEqual(["audit", "grants", "manifest", "schema_version", "sign_counts"]), "manifest store: no passkeys or settings table (" + string.Join(",", Tables(db.FilePath)) + ")");
-        check(StateDatabase.SchemaVersion == 5, "manifest store: the schema version is 5");
+        check(Tables(db.FilePath).SequenceEqual(["audit", "grants", "manifest", "schema_version", "secrets", "sign_counts"]), "manifest store: no passkeys or settings table; secrets have their own (" + string.Join(",", Tables(db.FilePath)) + ")");
+        check(StateDatabase.SchemaVersion == 7, "manifest store: the schema version is 7");
         check(new GrantStore(again).Add("K", 10, "laptop") && new GrantStore(again).TryGet("K", out _, out _), "manifest store: grants work with a valid manifest");
         check(StateDatabase.InFolder(Path.Combine(root, "stored-empty")) is { } empty && !new GrantStore(empty).Add("K", 10) && !File.Exists(empty.FilePath), "manifest store: no grant is saved without a manifest");
     }
@@ -203,10 +214,17 @@ internal static class ManifestTests
                 string text = Scalar(db.FilePath, "SELECT text FROM manifest").Replace("\"admin\":true", "\"admin\":false", StringComparison.Ordinal);
                 ReplaceRow(db.FilePath, TestState.Sign(laptop, text));
             }),
-            ("a manifest with two admins, signed", db =>
+            ("the manifest signed by a key in it that is not an admin", db => ReplaceRow(db.FilePath, TestState.Sign(phone, Scalar(db.FilePath, "SELECT text FROM manifest")))),
+            ("a manifest with zero admins, signed by a key in it", db =>
             {
-                string text = Scalar(db.FilePath, "SELECT text FROM manifest").Replace("\"admin\":false", "\"admin\":true", StringComparison.Ordinal);
-                ReplaceRow(db.FilePath, TestState.Sign(laptop, text));
+                string text = Scalar(db.FilePath, "SELECT text FROM manifest").Replace("\"admin\":true", "\"admin\":false", StringComparison.Ordinal);
+                ReplaceRow(db.FilePath, TestState.Sign(phone, text));
+            }),
+            ("the manifest with the signer's credential id changed to another admin's", db =>
+            {
+                // The phone signs, and the row claims the laptop's id: the laptop's key does not verify the phone's signature.
+                ReplaceRow(db.FilePath, TestState.Sign(phone, Scalar(db.FilePath, "SELECT text FROM manifest")));
+                Execute(db.FilePath, "UPDATE manifest SET credential_id = $id", ("$id", laptopId));
             }),
             ("a passkey table inserted directly", db => Execute(db.FilePath, "CREATE TABLE passkeys (id TEXT); INSERT INTO passkeys VALUES ('planted')")),
             ("a sign count row for a key that is not in the manifest", db => Execute(db.FilePath, "INSERT INTO sign_counts (id, count) VALUES ('planted', 1)")),
@@ -334,7 +352,7 @@ internal static class ManifestTests
             Keys = [.. current.Keys.Select(key => key with { Admin = false }).Append(ManifestKey.From(tabletRecord, true)).OrderBy(key => key.Id, StringComparer.Ordinal)],
         };
         problem = db.Write((connection, transaction) => db.TryReplace(connection, transaction, current.Version, TestState.Sign(tablet, swapped.Canonical())));
-        check(swapped.Problem() is null && problem is not null && TestState.Current(db)!.Admin?.Id == TestAuthenticator.Encode(laptop.CredentialId), "manifest stale: a new manifest with another admin key, signed by it, is refused (" + problem + ")");
+        check(swapped.Problem() is null && problem is not null && TestState.Current(db)!.Admins.Single().Id == TestAuthenticator.Encode(laptop.CredentialId), "manifest stale: a new manifest with another admin key, signed by it, is refused (" + problem + ")");
         Manifest otherPub = current with
         {
             Version = current.Version + 1,
@@ -346,6 +364,56 @@ internal static class ManifestTests
         Manifest unsigned = TestState.Current(db)!.WithSettings(ToolSettings.Defaults with { Port = 2 });
         problem = db.Write((connection, transaction) => db.TryReplace(connection, transaction, 2, TestState.Sign(phone, unsigned.Canonical())));
         check(problem is not null && TestState.Current(db)!.Version == 2, "manifest stale: a new manifest not signed by its admin is refused");
+    }
+
+    /// <summary>
+    /// Several admins. A new manifest must be signed by a key that is an admin in the stored manifest (and stays one, so it
+    /// verifies when read); a key that is an admin only in the new manifest cannot sign it.
+    /// </summary>
+    private static void Admins(Action<bool, string> check, string root)
+    {
+        using TestAuthenticator laptop = TestAuthenticator.ES256();
+        using TestAuthenticator phone = TestAuthenticator.ES256();
+        using TestAuthenticator tablet = TestAuthenticator.ES256();
+        using TestAuthenticator watch = TestAuthenticator.ES256();
+        string laptopId = TestAuthenticator.Encode(laptop.CredentialId);
+        string phoneId = TestAuthenticator.Encode(phone.CredentialId);
+        StateDatabase db = StateDatabase.InFolder(Path.Combine(root, "admins"));
+        TestState.Add(db, Record(laptop, "laptop"));
+        TestState.Add(db, Record(tablet, "tablet") with { Created = Created.AddDays(2) });
+        Manifest v2 = TestState.Current(db)!;
+        string? Replace(Manifest next, TestAuthenticator signer) => db.Write((connection, transaction) => db.TryReplace(connection, transaction, next.Version - 1, TestState.Sign(signer, next.Canonical())));
+
+        // Promoting oneself: the tablet is not an admin in the stored manifest, so its signature over a manifest that makes it one is refused.
+        Manifest promoted = v2 with { Version = 3, Keys = [.. v2.Keys.Select(key => key.Name == "tablet" ? key with { Admin = true } : key)] };
+        string? problem = Replace(promoted, tablet);
+        check(promoted.Problem() is null && problem is not null && problem.Contains("not an admin", StringComparison.Ordinal) && TestState.Current(db)!.Version == 2, "manifest admins: a key that is an admin only in the new manifest cannot sign it (" + problem + ")");
+        Manifest withPhone = v2.WithKey(Record(phone, "phone") with { Created = Created.AddDays(1) }, true);
+        problem = Replace(withPhone, phone);
+        check(problem is not null && TestState.Current(db)!.Version == 2, "manifest admins: a new admin key cannot sign its own addition (" + problem + ")");
+
+        // The admin adds a second admin.
+        check(Replace(withPhone, laptop) is null && TestState.Current(db)!.Admins.Select(key => key.Name).SequenceEqual(["laptop", "phone"]), "manifest admins: an admin adds a second admin");
+        check(new StateDatabase(db.FilePath).TryCheck(out string? error) && error is null, "manifest admins: a state with two admins verifies (" + error + ")");
+
+        // The second admin can change the settings and add a key.
+        Manifest settings = TestState.Current(db)!.WithSettings(ToolSettings.Defaults with { Port = 4321 });
+        check(Replace(settings, phone) is null && TestState.Current(db)!.Settings.Port == 4321, "manifest admins: the second admin signs a settings change");
+        check(new StateDatabase(db.FilePath).TryCheck(out error) && error is null, "manifest admins: a manifest signed by the second admin verifies when read (" + error + ")");
+        Manifest withWatch = TestState.Current(db)!.WithKey(Record(watch, "watch"));
+        check(Replace(withWatch, phone) is null && TestState.Current(db)!.Keys.Count == 4, "manifest admins: the second admin adds a key");
+        check(Replace(TestState.Current(db)!.WithSettings(ToolSettings.Defaults with { Port = 1 }), watch) is not null && TestState.Current(db)!.Settings.Port == 4321, "manifest admins: a key that is not an admin still cannot sign");
+
+        // An admin cannot sign its own removal (it would not be an admin of the state it signed); another admin can.
+        Manifest noLaptop = TestState.Current(db)!.WithoutKey(laptopId);
+        problem = Replace(noLaptop, laptop);
+        check(problem is not null && problem.Contains("another admin", StringComparison.Ordinal) && TestState.Current(db)!.Keys.Any(key => key.Id == laptopId), "manifest admins: an admin cannot sign its own removal (" + problem + ")");
+        check(Replace(noLaptop, phone) is null && TestState.Current(db)!.Admins.Select(key => key.Name).SequenceEqual(["phone"]), "manifest admins: the second admin removes the first");
+        check(Replace(TestState.Current(db)!.WithSettings(ToolSettings.Defaults with { Port = 2 }), laptop) is not null, "manifest admins: a removed admin can sign nothing");
+
+        // The last admin cannot be removed: a manifest with no admin is not valid.
+        Manifest none = TestState.Current(db)!.WithoutKey(phoneId);
+        check(none.Problem() == "the manifest has no admin key" && Replace(none, phone) is not null && TestState.Current(db)!.Admins.Count == 1, "manifest admins: a state without an admin is refused (" + none.Problem() + ")");
     }
 
     private static void SignCounts(Action<bool, string> check, string root)

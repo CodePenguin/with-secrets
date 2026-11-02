@@ -5,7 +5,8 @@ namespace WithSecrets;
 
 internal static class Program
 {
-    // The store lives in the user profile: %USERPROFILE%\.with-secrets\.env.local
+    // Everything lives in the user profile: %USERPROFILE%\.with-secrets\state.db (passkeys, settings, approvals, audit and the
+    // secrets as Dotenvx ciphertext). The store's private key is in Windows Credential Manager.
     private const string StoreFolder = ".with-secrets";
 
     private static async Task<int> Main(string[] args)
@@ -25,10 +26,9 @@ internal static class Program
             return 0;
         }
 
-        string storeFile = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), StoreFolder, ".env.local");
-        string folder = Path.GetDirectoryName(storeFile)!;
-        ISecretStore store = new DotenvxSecretStore(storeFile);
+        string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), StoreFolder);
         StateDatabase state = StateDatabase.InFolder(folder);
+        SecretStore store = new(state, new CredentialManagerKeys());
 
         // Every command checks state.db first, and its signed manifest. A database that cannot be used (damaged, locked, of
         // another schema version, or failing verification) stops here: nothing is asked, nothing is listed and nothing runs.
@@ -43,9 +43,8 @@ internal static class Program
             return AuditCommand.Run(state, audit, Console.Out, Console.Error);
         }
 
-        // --revoke, --enroll, --enrolled, --unenroll and --config (not --config --show) are for a person in their own terminal,
-        // and so is the first --set (it creates the Dotenvx store, and Dotenvx asks where to keep its key).
-        if (CliArgs.NeedsTerminal(command, File.Exists(storeFile)) && !HumanCommands.RequireTerminal(CliArgs.NoTerminalMessage(command)))
+        // --revoke, --enroll, --enrolled, --unenroll and --config (not --config --show) are for a person in their own terminal.
+        if (CliArgs.NeedsTerminal(command) && !HumanCommands.RequireTerminal(CliArgs.NoTerminalMessage(command)))
         {
             return RunCommand.Denied;
         }
@@ -115,7 +114,7 @@ internal static class HumanCommands
     /// --set and --remove. The values are typed on a web page, never here, so these need no terminal of their own. The
     /// terminal shows only the link and the result, which has names only.
     /// </summary>
-    public static int Change(CliCommand command, ISecretStore store, StateDatabase state)
+    public static int Change(CliCommand command, SecretStore store, StateDatabase state)
     {
         ApprovalSettings? settings = LoadSettings(state);
         if (settings is null)
@@ -138,7 +137,7 @@ internal static class HumanCommands
         return change.Code;
     }
 
-    /// <summary>--revoke: the admin passkey approves on a web page, then every saved approval ends.</summary>
+    /// <summary>--revoke: an admin passkey approves on a web page, then every saved approval ends.</summary>
     public static int Revoke(StateDatabase state, GrantStore grants)
     {
         ApprovalSettings? settings = LoadSettings(state);
@@ -185,13 +184,13 @@ internal static class HumanCommands
                     return RunCommand.StoreError;
                 }
 
-                // The admin key's fingerprint, then one line per key: name, host, date, and "admin" for the admin key.
+                // The admin keys' fingerprints, then one line per key: name, host, date, and "admin" for each admin key.
                 EnrolledListing.Write(state, entries, Console.Out, Console.Error);
 
                 return 0;
 
-            case CliCommand.Enroll enroll:
-                return Finish(enrollment.Enroll(enroll.Name ?? Enrollment.DefaultName));
+            case CliCommand.Enroll:
+                return Finish(enrollment.Enroll());
 
             case CliCommand.Unenroll unenroll:
                 return Finish(enrollment.Unenroll(unenroll.Name));

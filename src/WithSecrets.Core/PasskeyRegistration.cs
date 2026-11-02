@@ -17,7 +17,7 @@ namespace WithSecrets;
 /// <param name="Page">Builds the page from the rpId and the creation options JSON.</param>
 /// <param name="Read">From the server's challenge and the POST body: the challenge the passkey signed and the registration JSON, or null when the body is not valid.</param>
 /// <param name="Accept">After the registration is checked and before the manifest step: null to go on, else why not.</param>
-/// <param name="Next">The new manifest that holds the new key. Its admin key signs it: the new key itself on the first run.</param>
+/// <param name="Next">The new manifest that holds the new key, an admin or not (the page's box). An admin of the stored state signs it: the new key itself on the first run.</param>
 /// <param name="Commit">After the signed manifest and the right code: stores it (and anything that goes with it) and says how it went.</param>
 internal sealed record RegistrationPlan(
     string Prefix,
@@ -25,7 +25,7 @@ internal sealed record RegistrationPlan(
     Func<string, string, OneShotResponse> Page,
     Func<byte[], string, (byte[] Challenge, string Registration)?> Read,
     Func<string?> Accept,
-    Func<PasskeyRecord, Manifest> Next,
+    Func<PasskeyRecord, bool, Manifest> Next,
     Func<SignedManifest, PasskeyRecord, ApprovalDecision> Commit);
 
 /// <summary>An approval of a new manifest: the decision and, when approved, the manifest with the admin assertion over it.</summary>
@@ -34,9 +34,9 @@ public sealed record ManifestApproval(ApprovalDecision Decision, SignedManifest?
 /// <summary>
 /// Adds a passkey through a web page served once, the same way the approval page is served. The terminal gets only the
 /// link. The page asks the browser to create a passkey for the page's host; only a registration made for this page's own
-/// challenge and origin can be accepted. Then the admin key signs the new manifest that holds the new key: on the same page
-/// when the admin key works at this host (on the first run the new key is the admin and signs it itself), else on an
-/// approval page where the admin key works, after the code. The key is stored only after both and after the person types,
+/// challenge and origin can be accepted. Then an admin key signs the new manifest that holds the new key: on the same page
+/// when an admin key works at this host (on the first run the new key is the admin and signs it itself), else on an
+/// approval page where an admin key works, after the code. The key is stored only after both and after the person types,
 /// in the terminal, the code the page shows. The link alone is not enough: whoever registers first gets the code on their
 /// page, not in the terminal. Cancel, a bad registration, a wrong or missing admin assertion, a wrong code, a store that
 /// changed, the time limit and any error store nothing.
@@ -48,27 +48,62 @@ internal static class PasskeyRegistration
 
     private const string NameTaken = "a passkey with that name is already enrolled";
 
-    private const string Script = """
+    internal const string Script = """
         (function () {
             "use strict";
             var options = JSON.parse(document.getElementById("options").textContent);
             var create = document.getElementById("create");
+            var second = document.getElementById("confirm");
             var cancel = document.getElementById("deny");
             var status = document.getElementById("status");
             var code = document.getElementById("code");
+            var keyName = document.getElementById("f-key-name");
+            var makeAdmin = document.getElementById("make-admin");
             var base = location.pathname.replace(/\/+$/, "");
+            var encoder = new TextEncoder();
             var busy = false;
             var finished = false;
+            var pending = null;
+            var chosen = null;
 
             function show(text) {
                 status.textContent = text;
             }
 
+            function inputs(on) {
+                keyName.disabled = !on;
+                makeAdmin.disabled = !on;
+            }
+
             function finish(text) {
                 finished = true;
                 create.disabled = true;
+                second.disabled = true;
                 cancel.disabled = true;
+                inputs(false);
                 show(text);
+            }
+
+            // The name, checked with the rules the program applies again: empty is the suggested name; at most the field's
+            // length; no control, hidden or line-break characters; not a name already enrolled (without regard to case).
+            function chosenName() {
+                var text = keyName.value.trim();
+                if (text.length === 0) {
+                    text = keyName.getAttribute("data-default");
+                }
+                var taken = JSON.parse(keyName.getAttribute("data-taken"));
+                if (text.length > Number(keyName.getAttribute("maxlength"))) {
+                    return { error: "The name is longer than " + keyName.getAttribute("maxlength") + " characters." };
+                }
+                if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Cs}]/u.test(text)) {
+                    return { error: "The name has a control or hidden character." };
+                }
+                for (var i = 0; i < taken.length; i++) {
+                    if (taken[i].toUpperCase() === text.toUpperCase()) {
+                        return { error: "A passkey named \"" + taken[i] + "\" is already enrolled. Choose another name." };
+                    }
+                }
+                return { name: text };
             }
 
             function post(what, body) {
@@ -111,14 +146,18 @@ internal static class PasskeyRegistration
                 return out;
             }
 
-            // The second prompt: the admin passkey (on the first run, the new one) signs the new state, the manifest.
-            function sign(step) {
-                var encoder = new TextEncoder();
-                show(step.first ? "Confirm with your new passkey..." : "Confirm with your admin passkey...");
+            // Step 2: an admin passkey (on the first run, the new one) signs the new state, the manifest. Its challenge and
+            // options are made here, before the person taps the Step 2 button, so the tap starts the prompt at once (iOS
+            // WebKit refuses a second prompt that does not start in its own tap).
+            function prepare(step) {
                 return window.crypto.subtle.digest("SHA-256", encoder.encode(step.manifest)).then(function (hash) {
                     return window.crypto.subtle.digest("SHA-256", join(fromBase64Url(step.bind), new Uint8Array(hash)));
                 }).then(function (challenge) {
-                    return navigator.credentials.get({ publicKey: {
+                    busy = false;
+                    if (finished) {
+                        return;
+                    }
+                    pending = {
                         challenge: new Uint8Array(challenge),
                         rpId: step.rpId,
                         allowCredentials: step.allowCredentials.map(function (item) {
@@ -126,19 +165,17 @@ internal static class PasskeyRegistration
                         }),
                         timeout: step.timeout,
                         userVerification: "required"
-                    } });
-                }).then(function (credential) {
-                    var response = credential.response;
-                    return post("sign", JSON.stringify({
-                        id: toBase64Url(credential.rawId),
-                        authenticatorData: toBase64Url(response.authenticatorData),
-                        clientDataJSON: toBase64Url(response.clientDataJSON),
-                        signature: toBase64Url(response.signature)
-                    }));
+                    };
+                    second.textContent = step.first ? "Step 2 of 2: confirm with your new passkey" : "Step 2 of 2: confirm with your admin passkey";
+                    second.hidden = false;
+                    second.disabled = false;
+                    show("Step 1 is done: your passkey \"" + step.name + "\" was made. " + (step.makeAdmin ? "It will be an admin. " : "It will only approve runs (not an admin). ")
+                        + "Now tap \"" + second.textContent + "\". Nothing is added until you do and type the code in the terminal.");
+                    second.focus();
                 });
             }
 
-            // A reply with a code ends the page; a reply with a sign step runs it first.
+            // A reply with a code ends the page; a reply with a sign step shows the Step 2 button.
             function answer(reply) {
                 if (!reply.ok) {
                     busy = false;
@@ -148,28 +185,29 @@ internal static class PasskeyRegistration
                     return;
                 }
                 return reply.json().then(function (data) {
-                    if (data.sign && typeof data.sign.manifest === "string") {
-                        return sign(data.sign).then(answer);
+                    if (data.sign && typeof data.sign.manifest === "string" && pending === null) {
+                        return prepare(data.sign);
                     }
                     busy = false;
                     if (typeof data.code !== "string") {
                         throw new Error("no code");
                     }
-                    finish((data.later ? "Type this code in the terminal. The terminal then shows a link where your admin passkey confirms the change."
+                    finish((data.later ? "Type this code in the terminal. The terminal then shows a link where an admin passkey confirms the change"
+                        + (data.makeAdmin ? " (the new passkey will be an admin)." : " (the new passkey will only approve runs).")
                         : "Type this code in the terminal to finish.")
                         + (typeof data.admin === "string" ? " " + data.admin + ". Pages and --enrolled show this; if it ever changes, the state was replaced." : ""));
                     code.textContent = data.code;
                 });
             }
 
-            function publicKey() {
+            function publicKey(name) {
                 return {
                     challenge: fromBase64Url(options.challenge),
                     rp: { id: options.rp.id, name: options.rp.name },
                     user: {
                         id: fromBase64Url(options.user.id),
                         name: options.user.name,
-                        displayName: options.user.displayName
+                        displayName: name
                     },
                     pubKeyCredParams: options.pubKeyCredParams,
                     authenticatorSelection: options.authenticatorSelection,
@@ -207,20 +245,29 @@ internal static class PasskeyRegistration
                 }
                 var request;
                 try {
-                    request = publicKey();
+                    chosen = chosenName();
+                    request = chosen.error ? null : publicKey(chosen.name);
                 } catch (error) {
                     show("The page data is not valid. Nothing was added.");
                     return;
                 }
+                if (chosen.error) {
+                    show(chosen.error + " Nothing was added.");
+                    keyName.focus();
+                    return;
+                }
                 busy = true;
                 create.disabled = true;
+                inputs(false);
                 show("Waiting for your passkey...");
                 navigator.credentials.create({ publicKey: request }).then(function (credential) {
                     var response = credential.response;
                     return JSON.stringify({
                         id: toBase64Url(credential.rawId),
                         clientDataJSON: toBase64Url(response.clientDataJSON),
-                        attestationObject: toBase64Url(response.attestationObject)
+                        attestationObject: toBase64Url(response.attestationObject),
+                        name: chosen.name,
+                        admin: makeAdmin.checked
                     });
                 }).then(function (body) {
                     if (finished) {
@@ -228,17 +275,50 @@ internal static class PasskeyRegistration
                         return;
                     }
                     show("Checking your passkey...");
-                    return post("create", body).then(answer).then(null, function () {
-                        // Also when the second prompt was cancelled: tell the program, so it stops waiting.
-                        busy = false;
-                        finish("Nothing was added. If the terminal asks for a code, press Ctrl+C.");
-                        post("deny", "").then(null, function () { });
-                    });
+                    return post("create", body).then(answer).then(null, failed);
                 }, function () {
                     busy = false;
                     if (!finished) {
                         create.disabled = false;
+                        inputs(true);
                         show("No passkey was made. Nothing was added. You can try again or cancel.");
+                    }
+                });
+            });
+
+            // A step that failed after the server took part: tell the program, so it stops waiting.
+            function failed() {
+                busy = false;
+                finish("Nothing was added. If the terminal asks for a code, press Ctrl+C.");
+                post("deny", "").then(null, function () { });
+            }
+
+            // Step 2 runs in its own tap: the prompt starts at once, with the challenge made before.
+            second.addEventListener("click", function () {
+                if (finished || busy || pending === null) {
+                    return;
+                }
+                busy = true;
+                second.disabled = true;
+                show("Waiting for your passkey...");
+                navigator.credentials.get({ publicKey: pending }).then(function (credential) {
+                    var response = credential.response;
+                    if (finished) {
+                        busy = false;
+                        return;
+                    }
+                    show("Checking...");
+                    return post("sign", JSON.stringify({
+                        id: toBase64Url(credential.rawId),
+                        authenticatorData: toBase64Url(response.authenticatorData),
+                        clientDataJSON: toBase64Url(response.clientDataJSON),
+                        signature: toBase64Url(response.signature)
+                    })).then(answer).then(null, failed);
+                }, function () {
+                    busy = false;
+                    if (!finished) {
+                        second.disabled = false;
+                        show("No passkey was used. Nothing was added yet. Tap \"" + second.textContent + "\" again, or cancel.");
                     }
                 });
             });
@@ -247,9 +327,11 @@ internal static class PasskeyRegistration
         """;
 
     /// <summary>
-    /// Serves the page until the first outcome or the time limit. Refuses before anything starts when the name, the address
-    /// or the store cannot be used. After the browser's registration is checked, the page shows a code; the key is stored
-    /// only when <paramref name="readCode" /> returns that code, within three tries and the time limit.
+    /// Serves the page until the first outcome or the time limit. Refuses before anything starts when the address or the
+    /// store cannot be used. The person chooses the key's name on the page (<paramref name="name" /> is the suggestion,
+    /// used when the field is empty); it follows the rules of <see cref="Enrollment.NameError" /> and must not be enrolled
+    /// already. After the browser's registration is checked, the page shows a code; the key is stored only when
+    /// <paramref name="readCode" /> returns that code, within three tries and the time limit.
     /// </summary>
     public static ApprovalDecision Run(PasskeyStore store, ApprovalSettings settings, string name, Action<string> announce, Func<string?> readCode, Func<string, ManifestApproval>? askAdmin = null)
     {
@@ -259,8 +341,8 @@ internal static class PasskeyRegistration
     /// <summary>
     /// The same, with a page of another kind (<paramref name="plan" />; null is the plain enrollment page, which needs an
     /// enrolled admin key). Everything else is the same: the checks before start, the one accepted registration, the signed
-    /// manifest, the code in the terminal, the time limit. <paramref name="askAdmin" /> asks the admin key to sign the new
-    /// manifest on another page, for when the admin key does not work at this page's host; without it that case is refused.
+    /// manifest, the code in the terminal, the time limit. <paramref name="askAdmin" /> asks an admin key to sign the new
+    /// manifest on another page, for when no admin key works at this page's host; without it that case is refused.
     /// </summary>
     internal static ApprovalDecision Run(PasskeyStore store, ApprovalSettings settings, string name, Action<string> announce, Func<string?> readCode, RegistrationPlan? plan, Func<string, ManifestApproval>? askAdmin = null)
     {
@@ -296,21 +378,29 @@ internal static class PasskeyRegistration
 
         if (snapshot.Any(item => string.Equals(item.Name, name, StringComparison.OrdinalIgnoreCase)))
         {
-            return ApprovalDecision.Deny(NameTaken);
+            name = Enrollment.Suggest(snapshot.Select(item => item.Name));
         }
 
-        string enrolledName = name;
+        string suggestion = name;
         string adminLine = AdminKey.Line(current);
+        string[] taken = [.. snapshot.Select(item => item.Name)];
         plan ??= new RegistrationPlan(
             "e",
             AnnouncePrefix,
-            (rp, options) => Build(enrolledName, rp, options, Script, ApprovalPage.Style + CodeStyle, adminLine),
+            (rp, options) => Build(suggestion, rp, options, Script, ApprovalPage.Style + CodeStyle, adminLine, taken),
             (challenge, body) => (challenge, body),
             () => null,
-            key => current!.WithKey(key),
-            (signed, key) => Commit(store.Database, signed, () => ApprovalDecision.Allow($"Added the passkey named \"{enrolledName}\" for {key.RpId}."),
-                (connection, transaction) => AuditLog.Append(connection, transaction, AuditLog.ChangeRow("key-enrolled",
-                    $"passkey \"{enrolledName}\" added for {key.RpId}; admin passkey {current!.Admin!.Name} verified", current.Admin.Name))));
+            (key, admin) => current!.WithKey(key, admin),
+            (signed, key) =>
+            {
+                Manifest next = Manifest.Parse(signed.Text, out _) ?? current!;
+                bool admin = next.IsAdmin(key.Id);
+                string signer = PasskeyMethod.Signer(current!, signed);
+
+                return Commit(store.Database, signed, () => ApprovalDecision.Allow($"Added the passkey named \"{key.Name}\" for {key.RpId}" + (admin ? ", as an admin." : ".")),
+                    (connection, transaction) => AuditLog.Append(connection, transaction, AuditLog.ChangeRow("key-enrolled",
+                        $"passkey \"{key.Name}\" added for {key.RpId}" + (admin ? " as an admin" : " (approves runs only)") + $"; admin passkey {signer} verified", signer)));
+            });
 
         try
         {
@@ -327,6 +417,7 @@ internal static class PasskeyRegistration
             {
                 challenge = Base64Url.EncodeToString(challenge),
                 rp = new { id = rpId, name = "with-secrets" },
+                // The page puts the name the person chose in place of this one.
                 user = new { id = Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(16)), name = "with-secrets", displayName = name },
                 pubKeyCredParams = new[] { new { type = "public-key", alg = WebAuthn.ES256 }, new { type = "public-key", alg = WebAuthn.RS256 } },
                 authenticatorSelection = new { residentKey = "preferred", userVerification = "required" },
@@ -379,20 +470,46 @@ internal static class PasskeyRegistration
         });
     }
 
+    /// <summary>The Step 2 button of a page with two passkey prompts: hidden until step 1 is done, then the script names the key.</summary>
+    internal const string StepTwoButton = "<button id=\"confirm\" type=\"button\" hidden disabled>Step 2 of 2: confirm with your passkey</button>";
+
     internal const string CodeStyle = """
         #code { font-size: 3rem; font-family: ui-monospace, monospace; letter-spacing: 0.3em; }
         """;
+
+    /// <summary>The style of the name field and the admin box on the enrollment page.</summary>
+    internal const string FieldStyle = """
+        .field { margin: 1rem 0; }
+        .field label { display: block; font-weight: bold; margin-bottom: 0.3rem; }
+        .field input[type=text] { font-size: 1rem; padding: 0.5rem; width: 100%; max-width: 30rem; box-sizing: border-box; }
+        .check label { display: inline; font-weight: normal; }
+        """;
+
+    /// <summary>
+    /// The "Name for this passkey" field of every page that creates a passkey: prefilled with <paramref name="suggestion" />
+    /// (also used when it is left empty), with the names already enrolled for the page's own check (the program checks
+    /// again). HTML-encoded.
+    /// </summary>
+    internal static string NameField(string suggestion, IEnumerable<string> taken)
+    {
+        string limit = Enrollment.MaxNameLength.ToString(CultureInfo.InvariantCulture);
+        string value = WebUtility.HtmlEncode(suggestion);
+
+        return "<div class=\"field\"><label for=\"f-key-name\">Name for this passkey</label><input id=\"f-key-name\" type=\"text\" autocomplete=\"off\" autocapitalize=\"off\" spellcheck=\"false\" maxlength=\""
+            + limit + "\" value=\"" + value + "\" data-default=\"" + value + "\" data-taken=\"" + WebUtility.HtmlEncode(JsonSerializer.Serialize(taken)) + "\">"
+            + "<p class=\"hint\">Up to " + limit + " characters, and not a name already enrolled (without regard to case). Empty is \"" + value + "\". Pages, --enrolled and --audit show it.</p></div>\n";
+    }
 
     /// <summary>
     /// Builds the page. Script and style line endings become LF before hashing and output, so the CSP hashes match what is
     /// served. The name is HTML-encoded; the options are JSON in a data block, with &lt; and &gt; escaped.
     /// </summary>
-    internal static OneShotResponse Build(string name, string rpId, string options, string script, string style, string adminLine)
+    internal static OneShotResponse Build(string name, string rpId, string options, string script, string style, string adminLine, IEnumerable<string>? taken = null)
     {
         script = script.ReplaceLineEndings("\n");
-        style = style.ReplaceLineEndings("\n");
+        style = (style + FieldStyle).ReplaceLineEndings("\n");
         string policy = ApprovalPage.Policy(script, style);
-        string text = "Name: " + ApprovalSummary.Clean(name) + "\nWorks on: " + ApprovalSummary.Clean(rpId) + "\n" + ApprovalSummary.Clean(adminLine);
+        string text = "Works on: " + ApprovalSummary.Clean(rpId) + "\n" + ApprovalSummary.Clean(adminLine);
 
         StringBuilder page = new();
         page.Append("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
@@ -403,9 +520,15 @@ internal static class PasskeyRegistration
         page.Append("<h1>Add a passkey for with-secrets</h1>\n");
         page.Append("<pre id=\"request\">").Append(WebUtility.HtmlEncode(text)).Append("</pre>\n");
         page.Append("<p>This passkey will be able to approve runs that use your secrets. Make it only on a device you keep with you.</p>\n");
+        page.Append(NameField(name, taken ?? []));
+        page.Append("<div class=\"field check\"><input id=\"make-admin\" type=\"checkbox\"> <label for=\"make-admin\">Also make this key an admin</label>"
+            + "<p class=\"hint\">An admin key can change the settings, the secrets and the passkeys, and remove other admin keys. Leave it off for a key that only approves runs. "
+            + "Two admin keys (for example a laptop and a phone) mean a lost device does not lock you out.</p></div>\n");
+        page.Append("<p>Choose the name, then tap Create passkey. When an admin passkey works on this page, a second button then appears: tap it to confirm with your admin passkey (Step 2 of 2). Otherwise the terminal shows a link for that after the code.</p>\n");
         page.Append("<div class=\"buttons\">");
         page.Append("<button id=\"deny\" type=\"button\" autofocus>Cancel</button>");
         page.Append("<button id=\"create\" type=\"button\">Create passkey</button>");
+        page.Append(StepTwoButton);
         page.Append("</div>\n<p id=\"status\" role=\"status\"></p>\n<p id=\"code\"></p>\n</main>\n");
         page.Append("<script type=\"application/json\" id=\"options\">").Append(options).Append("</script>\n");
         page.Append("<script>").Append(script).Append("</script>\n</body>\n</html>\n");
@@ -436,10 +559,15 @@ internal static class PasskeyRegistration
         private OneShotResponse? _page;
         private string _code = "";
 
-        // After an accepted registration: the key, the manifest to sign, who signs it, and (once signed) the signed manifest.
+        // The name the person chose on the page (the suggestion until a registration comes), and whether the key becomes an admin.
+        private readonly string _suggestion = name;
+        private string _name = name;
+        private bool _admin;
+
+        // After an accepted registration: the key, the manifest to sign, the keys that may sign it, and (once signed) the signed manifest.
         private PasskeyRecord? _key;
         private Manifest? _next;
-        private PasskeyRecord? _signer;
+        private IReadOnlyList<PasskeyRecord> _signers = [];
         private byte[]? _bind;
         private SignedManifest? _signed;
 
@@ -489,7 +617,7 @@ internal static class PasskeyRegistration
         }
 
         /// <summary>
-        /// When the admin key does not work at this page's host, it signs the new manifest on an approval page where it works.
+        /// When no admin key works at this page's host, one signs the new manifest on an approval page where it works.
         /// Null to go on to storing, else the end. Runs outside the lock, so Cancel on this page still ends it.
         /// </summary>
         private ApprovalDecision? SignElsewhere()
@@ -586,11 +714,77 @@ internal static class PasskeyRegistration
             return _decision.Task.Result;
         }
 
+        /// <summary>
+        /// The name the person chose and the "Also make this key an admin" box, from the body: "name" (a string; empty or
+        /// missing is the suggestion) and "admin" (true or false; missing is false). False when either has another type or
+        /// the body is not a JSON object.
+        /// </summary>
+        private bool TryChoice(string body, out string chosen, out bool admin)
+        {
+            chosen = _suggestion;
+            admin = false;
+            try
+            {
+                using JsonDocument document = JsonDocument.Parse(body, new JsonDocumentOptions { AllowDuplicateProperties = false });
+                JsonElement root = document.RootElement;
+                if (root.ValueKind != JsonValueKind.Object)
+                {
+                    return false;
+                }
+
+                if (root.TryGetProperty("name", out JsonElement typed))
+                {
+                    if (typed.ValueKind != JsonValueKind.String)
+                    {
+                        return false;
+                    }
+
+                    string text = typed.GetString()!.Trim();
+                    chosen = text.Length == 0 ? _suggestion : text;
+                }
+
+                if (root.TryGetProperty("admin", out JsonElement box))
+                {
+                    if (box.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                    {
+                        return false;
+                    }
+
+                    admin = box.ValueKind == JsonValueKind.True;
+                }
+
+                return true;
+            }
+            catch (JsonException)
+            {
+                return false;
+            }
+        }
+
         /// <summary>Called with the lock held. A checked registration goes on to the sign step or the code; anything else ends the enrollment.</summary>
         private OneShotResponse Register(string origin, string rpId, string body)
         {
             try
             {
+                // The name and the admin box: checked here again, whatever the page checked before its prompt.
+                if (!TryChoice(body, out string chosen, out bool admin))
+                {
+                    _decision.TrySetResult(ApprovalDecision.Deny("the page sent a request that is not valid"));
+
+                    return Invalid;
+                }
+
+                string? nameError = Enrollment.NameError(chosen);
+                if (nameError is not null)
+                {
+                    _decision.TrySetResult(ApprovalDecision.Deny(nameError + "; nothing was added"));
+
+                    return Invalid;
+                }
+
+                _name = chosen;
+                _admin = admin;
+
                 // What the passkey was asked to sign, and the registration itself, from the body.
                 (byte[] Challenge, string Registration)? read = plan.Read(challenge, body);
                 if (read is not { } signed)
@@ -600,7 +794,7 @@ internal static class PasskeyRegistration
                     return Invalid;
                 }
 
-                RegistrationResult result = WebAuthn.VerifyRegistration(signed.Challenge, origin, rpId, name, signed.Registration);
+                RegistrationResult result = WebAuthn.VerifyRegistration(signed.Challenge, origin, rpId, _name, signed.Registration);
                 if (!result.Ok || result.Key is null)
                 {
                     _decision.TrySetResult(ApprovalDecision.Deny("the passkey was not accepted: " + result.Detail));
@@ -613,7 +807,7 @@ internal static class PasskeyRegistration
                 {
                     _decision.TrySetResult(ApprovalDecision.Deny(problem));
 
-                    return Refused;
+                    return problem == NameTaken ? Invalid : Refused;
                 }
 
                 string? refused = plan.Accept();
@@ -624,24 +818,25 @@ internal static class PasskeyRegistration
                     return Invalid;
                 }
 
-                // The manifest with the new key, and who signs it: its admin key (the new key itself on the first run).
-                Manifest next = plan.Next(result.Key);
-                ManifestKey admin = next.Admin ?? throw new InvalidOperationException("no admin key");
-                PasskeyRecord? signer = admin.Id == result.Key.Id ? result.Key
-                    : store.TryAll(out IReadOnlyList<PasskeyRecord> keys) ? keys.FirstOrDefault(item => item.Id == admin.Id) : null;
-                if (signer is null)
+                // The manifest with the new key, and who may sign it: on the first run the new key itself, else every admin
+                // key of the stored state that stays an admin. Those that work at this host may sign here.
+                Manifest next = plan.Next(result.Key, _admin);
+                bool first = next.Version == 1;
+                List<PasskeyRecord> admins = first ? next.IsAdmin(result.Key.Id) ? [result.Key] : []
+                    : store.TryAll(out IReadOnlyList<PasskeyRecord> keys) ? [.. keys.Where(item => item.Admin && next.IsAdmin(item.Id))] : [];
+                if (admins.Count == 0)
                 {
-                    _decision.TrySetResult(ApprovalDecision.Deny("the admin passkey cannot be read"));
+                    _decision.TrySetResult(ApprovalDecision.Deny("no admin passkey can be read"));
 
                     return Failed;
                 }
 
                 _key = result.Key;
                 _next = next;
-                _signer = signer;
-                if (signer.RpId != rpId)
+                _signers = [.. admins.Where(item => item.RpId == rpId)];
+                if (_signers.Count == 0)
                 {
-                    // The admin key does not work here: it signs on another page after the code.
+                    // No admin key works here: one signs on another page after the code.
                     return Code(true);
                 }
 
@@ -655,9 +850,11 @@ internal static class PasskeyRegistration
                         manifest = next.Canonical(),
                         bind = Base64Url.EncodeToString(_bind),
                         rpId,
-                        allowCredentials = new[] { new { id = signer.Id, type = "public-key" } },
+                        allowCredentials = _signers.Select(item => new { id = item.Id, type = "public-key" }).ToArray(),
                         timeout = (long)settings.Timeout.TotalMilliseconds,
-                        first = signer.Id == result.Key.Id,
+                        first,
+                        name = _name,
+                        makeAdmin = next.IsAdmin(result.Key.Id),
                     },
                 }));
             }
@@ -669,7 +866,7 @@ internal static class PasskeyRegistration
             }
         }
 
-        /// <summary>Called with the lock held. The admin's assertion over the new manifest; then the code.</summary>
+        /// <summary>Called with the lock held. An admin's assertion over the new manifest, by a key the sign step offered; then the code.</summary>
         private OneShotResponse Sign(string origin, string rpId, string body)
         {
             try
@@ -682,9 +879,17 @@ internal static class PasskeyRegistration
                     return Invalid;
                 }
 
+                PasskeyRecord? signer = _signers.FirstOrDefault(item => item.Id == members["id"]);
+                if (signer is null)
+                {
+                    _decision.TrySetResult(ApprovalDecision.Deny("the admin passkey did not sign the new state: the key that signed is not an admin key offered here"));
+
+                    return Refused;
+                }
+
                 string proof = JsonSerializer.Serialize(members);
                 string text = _next!.Canonical();
-                AssertionResult result = WebAuthn.VerifyAssertion(_signer!, Manifest.Challenge(_bind!, text), origin, rpId, proof);
+                AssertionResult result = WebAuthn.VerifyAssertion(signer, Manifest.Challenge(_bind!, text), origin, rpId, proof);
                 if (!result.Ok)
                 {
                     _decision.TrySetResult(ApprovalDecision.Deny("the admin passkey did not sign the new state: " + result.Detail));
@@ -692,10 +897,10 @@ internal static class PasskeyRegistration
                     return Refused;
                 }
 
-                if (_signer!.Id != _key!.Id)
+                if (signer.Id != _key!.Id)
                 {
                     // The assertion was valid, so it stands even if the new count could not be saved.
-                    store.UpdateSignCount(_signer.Id, result.NewSignCount);
+                    store.UpdateSignCount(signer.Id, result.NewSignCount);
                 }
 
                 _signed = new SignedManifest(text, _bind!, proof);
@@ -716,11 +921,11 @@ internal static class PasskeyRegistration
             _code = RandomNumberGenerator.GetInt32(0, 1_000_000).ToString("D6", CultureInfo.InvariantCulture);
             _verified.TrySetResult(_key!);
 
-            // The admin key of the new state, so the person sees its fingerprint (on the first run, for the first time).
+            // The admin keys of the new state, so the person sees their fingerprints (on the first run, for the first time).
             string admin = AdminKey.Line(_next);
 
             return new OneShotResponse(200, "application/json", later
-                ? JsonSerializer.Serialize(new { ok = true, code = _code, later = true, admin })
+                ? JsonSerializer.Serialize(new { ok = true, code = _code, later = true, admin, name = _name, makeAdmin = _next!.IsAdmin(_key!.Id) })
                 : JsonSerializer.Serialize(new { ok = true, code = _code, admin }));
         }
 
@@ -769,7 +974,7 @@ internal static class PasskeyRegistration
                 return "the passkeys changed while you enrolled; nothing was added";
             }
 
-            return stored.Any(item => string.Equals(item.Name, name, StringComparison.OrdinalIgnoreCase)) ? NameTaken : null;
+            return stored.Any(item => string.Equals(item.Name, _name, StringComparison.OrdinalIgnoreCase)) ? NameTaken : null;
         }
     }
 }

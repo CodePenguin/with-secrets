@@ -14,22 +14,34 @@ public sealed record SecretChange(int Code, string Detail)
 
 /// <summary>
 /// Stores and removes secrets through a web page, never through the terminal. The terminal gets only the link and the names.
-/// The page is served at the first of the two targets where the admin passkey works, and only when something is enrolled;
-/// only the admin passkey can approve.
-/// <see cref="Set" />: the person types the values on the page; the page encrypts them (see <see cref="SecretCrypto" />) and
-/// signs the ciphertext with a passkey. The server checks the proof, then decrypts, then checks every name and value, then
-/// writes the audit line, then stores. <see cref="Remove" />: the person approves on the approval page; then the secrets are
-/// deleted. Any doubt or error changes nothing.
+/// The page is served at the first of the two targets where an admin passkey works, and only when something is enrolled;
+/// only an admin passkey can approve. Both write the rows and a new signed manifest (with the ciphertexts' hashes, see
+/// <see cref="SecretStore" />) in one transaction, with the audit row.
+/// <para>
+/// <see cref="Set" />: the person types the values on the page; the page encrypts them to the page's server key (see
+/// <see cref="SecretCrypto" />) and sends them to <c>/seal</c> as they are typed. The program decrypts them, checks every
+/// name and value, encrypts each value to the store's public key and answers with the next manifest. The Save tap then asks
+/// the passkey for one assertion over SHA-256(bind || SHA-256(ct) || SHA-256(manifest)) (see <see cref="SecretCrypto.ManifestBind" />),
+/// which covers both the values sent and the hashes of the new rows, and posts it to <c>/save</c>. The program checks the
+/// proof, then stores. One assertion is one passkey prompt per tap, which iOS needs.
+/// </para>
+/// <para>
+/// <see cref="Remove" />: the person approves the next manifest (without the removed hashes) on the approval page; then the
+/// rows are deleted with it. Any doubt or error changes nothing.
+/// </para>
 /// </summary>
-public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget localTarget, ISecretStore store, AuditLog audit, Action<string> announce)
+public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget localTarget, SecretStore store, AuditLog audit, Action<string> announce)
 {
-    // Only the admin key may change the secret store.
+    // Only admin keys may change the secret store.
     private readonly EnrollmentTarget primary = primaryTarget.Admin();
     private readonly EnrollmentTarget local = localTarget.Admin();
 
     public const int MaxNames = 20;
     public const int MaxValueLength = 4096;
     public const string AnnouncePrefix = "To store the secrets, open this link: ";
+
+    /// <summary>How many times one set page may send values to /seal before it ends.</summary>
+    internal const int MaxSeals = 500;
 
     private const string RemoveHeading = "Check this change to your secrets.";
 
@@ -71,17 +83,12 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
                 return problem!;
             }
 
-            HashSet<string> stored;
-            try
+            if (!TryCurrent(out Manifest? manifest, out HashSet<string> stored, out SecretChange? failed))
             {
-                stored = [.. store.ListNames()];
-            }
-            catch (Exception)
-            {
-                return new SecretChange(RunCommand.StoreError, "cannot read the secret store");
+                return failed!;
             }
 
-            return Serve(target, [.. names], stored);
+            return Serve(target, [.. names], stored, manifest!);
         }
         catch (ProofUnavailableException failure)
         {
@@ -109,14 +116,9 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
                 return problem!;
             }
 
-            HashSet<string> stored;
-            try
+            if (!TryCurrent(out Manifest? manifest, out HashSet<string> stored, out SecretChange? failed))
             {
-                stored = [.. store.ListNames()];
-            }
-            catch (Exception)
-            {
-                return new SecretChange(RunCommand.StoreError, "cannot read the secret store");
+                return failed!;
             }
 
             List<string> unknown = [.. names.Where(name => !stored.Contains(name))];
@@ -125,42 +127,19 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
                 return Denied("Unknown secret: " + string.Join(", ", unknown));
             }
 
+            // The admin signs the next state without these hashes; the rows go with it in one transaction.
             string list = string.Join(", ", names);
-            ApprovalDecision asked = target.Approver.Ask(new ApprovalPrompt(RemoveHeading, $"Remove these secrets: {list}. They will be deleted."));
-            if (!asked.Approved)
+            Manifest next = SecretStore.Next(manifest!, manifest!.Store, new Dictionary<string, string>(), names);
+            ManifestApproval asked = target.Approver.AskManifest(new ApprovalPrompt(RemoveHeading, $"Remove these secrets: {list}. They will be deleted."), next.Canonical());
+            if (!asked.Decision.Approved || asked.Signed is null)
             {
-                return Denied(asked.Detail);
+                return Denied(asked.Decision.Detail);
             }
 
-            if (!audit.TryWriteChange("secrets-removed", [.. names], asked.Detail))
-            {
-                return new SecretChange(RunCommand.AuditError, "the audit log could not be written; nothing was removed");
-            }
+            string detail = asked.Decision.Detail;
+            string? written = store.TryApply(manifest.Version, asked.Signed, new Dictionary<string, string>(), names, AuditLog.SecretsRow("secrets-removed", [.. names], detail, AuditLog.KeyName(detail)));
 
-            List<string> removed = [];
-            foreach (string name in names)
-            {
-                bool gone;
-                try
-                {
-                    gone = store.Remove(name);
-                }
-                catch (Exception)
-                {
-                    gone = false;
-                }
-
-                if (!gone)
-                {
-                    return new SecretChange(RunCommand.StoreError, removed.Count == 0
-                        ? $"could not remove {name}; nothing was removed"
-                        : $"could not remove {name}; removed only {string.Join(", ", removed)}");
-                }
-
-                removed.Add(name);
-            }
-
-            return new SecretChange(0, $"Removed {list}.");
+            return written is null ? new SecretChange(0, $"Removed {list}.") : new SecretChange(RunCommand.StoreError, written);
         }
         catch (ProofUnavailableException failure)
         {
@@ -170,6 +149,31 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
         {
             return Denied("the removal failed; nothing was removed");
         }
+    }
+
+    /// <summary>
+    /// The verified manifest and the stored names, after every row matched its signed hash. False with a store error (exit 4)
+    /// when the store fails verification or cannot be read.
+    /// </summary>
+    private bool TryCurrent(out Manifest? manifest, out HashSet<string> stored, out SecretChange? failed)
+    {
+        stored = [];
+        manifest = null;
+        try
+        {
+            (manifest, IReadOnlyList<string> names) = store.Current();
+            stored = [.. names];
+        }
+        catch (SecretStoreException failure)
+        {
+            failed = new SecretChange(RunCommand.StoreError, "cannot use the secret store: " + failure.Message);
+
+            return false;
+        }
+
+        failed = manifest is null ? Denied(PasskeyRegistration.NothingEnrolled) : null;
+
+        return failed is null;
     }
 
     private static SecretChange Denied(string detail)
@@ -223,8 +227,12 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
         return target;
     }
 
-    /// <summary>Serves the set page at the target until the first outcome or the time limit. The server key lives only here.</summary>
-    private SecretChange Serve(EnrollmentTarget target, List<string> names, HashSet<string> stored)
+    /// <summary>
+    /// Serves the set page at the target until the first outcome or the time limit. The page's server key lives only here.
+    /// Before the first secret the store key pair is made here, in memory; its private key is saved (to the key custody) only
+    /// when the change is stored, so an abandoned page leaves nothing behind.
+    /// </summary>
+    private SecretChange Serve(EnrollmentTarget target, List<string> names, HashSet<string> stored, Manifest manifest)
     {
         IProofMethod method = target.Method;
         ApprovalSettings settings = target.Approver.Settings;
@@ -233,8 +241,22 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
         // depend on the port. The passkey method checks this again in Start.
         PasskeyMethod.RpIdOf(settings.PageOrigin(settings.Port));
 
+        string storeKey = manifest.Store;
+        string? newPrivateKey = null;
+        if (storeKey.Length == 0)
+        {
+            // The first secret needs a place for the store's private key. Where there is none (not Windows, until the keys are
+            // wrapped by passkey PRF), refuse before any page opens.
+            if (store.KeyCustodyProblem is { } custody)
+            {
+                return new SecretChange(RunCommand.StoreError, custody + "; nothing was stored");
+            }
+
+            (storeKey, newPrivateKey) = store.NewKeyPair();
+        }
+
         (byte[] serverKey, string publicKey) = SecretCrypto.NewServerKey();
-        Session session = new(method, store, audit, names, serverKey);
+        Session session = new(method, store, manifest, storeKey, newPrivateKey, names, serverKey);
         try
         {
             using OneShotServer server = new("s", settings.Port, session.Handle);
@@ -264,17 +286,26 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
     /// The state of one set page. Requests are handled one at a time under one lock; the first outcome is final, and after
     /// it every request is 404. The store is written inside the lock, so the time limit cannot cut a write in half.
     /// </summary>
-    private sealed class Session(IProofMethod method, ISecretStore store, AuditLog audit, List<string> names, byte[] serverKey)
+    private sealed class Session(IProofMethod method, SecretStore store, Manifest manifest, string storeKey, string? newPrivateKey, List<string> names, byte[] serverKey)
     {
         private static readonly OneShotResponse Ok = new(200, "application/json", "{\"ok\":true}");
         private static readonly OneShotResponse Refused = new(403, "application/json", "{\"ok\":false}");
         private static readonly OneShotResponse Invalid = new(400, "application/json", "{\"ok\":false}");
         private static readonly OneShotResponse Failed = new(500, "application/json", "{\"ok\":false}");
 
+        private static readonly string[] SealFields = ["epk", "iv", "ct"];
         private static readonly string[] Fields = ["epk", "iv", "ct", "id", "authenticatorData", "clientDataJSON", "signature"];
+
+        /// <summary>How many sealed payloads are kept (the newest), each waiting for its Save.</summary>
+        private const int Kept = 16;
 
         private readonly Lock _gate = new();
         private readonly TaskCompletionSource<SecretChange> _decision = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        // By base64url SHA-256 of the page's ct: the next manifest and the store rows made from it. No value is kept.
+        private readonly Dictionary<string, (string Manifest, Dictionary<string, string> Rows)> _sealed = new(StringComparer.Ordinal);
+        private readonly Queue<string> _order = new();
+        private int _seals;
         private string? _origin;
         private byte[]? _bind;
         private OneShotResponse? _page;
@@ -299,13 +330,14 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
             return _decision.Task.Result;
         }
 
-        /// <summary>Ends the page if it has not ended and forgets the server key.</summary>
+        /// <summary>Ends the page if it has not ended and forgets the server key and what was sealed.</summary>
         public void Close()
         {
             lock (_gate)
             {
                 _decision.TrySetResult(Denied("the set page ended; nothing was stored"));
                 CryptographicOperations.ZeroMemory(serverKey);
+                _sealed.Clear();
             }
         }
 
@@ -324,6 +356,18 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
                         return _page;
                     case ("POST", "deny"):
                         return _decision.TrySetResult(Denied("cancelled on the page; nothing was stored")) ? Ok : NotFound;
+                    case ("POST", "seal"):
+                        try
+                        {
+                            return Seal(_bind, body);
+                        }
+                        catch (Exception)
+                        {
+                            _decision.TrySetResult(Denied("the set page failed; nothing was stored"));
+
+                            return Failed;
+                        }
+
                     case ("POST", "save"):
                         try
                         {
@@ -350,6 +394,86 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
             }
         }
 
+        /// <summary>
+        /// Called with the lock held, while the person types: decrypts and checks the values, encrypts each to the store key
+        /// and answers with the next manifest (names, the store key and hashes: nothing secret). A refusal says why (names only)
+        /// and does not end the page: the person may still be typing.
+        /// </summary>
+        private OneShotResponse Seal(byte[] bind, string body)
+        {
+            if (++_seals > MaxSeals)
+            {
+                _decision.TrySetResult(Denied("the page sent values too many times; nothing was stored"));
+
+                return Invalid;
+            }
+
+            Dictionary<string, string>? members = StringMembers(body);
+            if (members is null || SealFields.Any(field => !members.ContainsKey(field)))
+            {
+                return Refusal("the page sent a request that is not valid");
+            }
+
+            (Dictionary<string, string>? values, string? problem) = Open(bind, members);
+            if (values is null)
+            {
+                return Refusal(problem!);
+            }
+
+            // The same ct sealed again (a retried request) gets the first answer: encryption is randomized, so a new manifest
+            // would not match a challenge the page may already have made from the first one.
+            string key = Key(Base64Url.DecodeFromChars(members["ct"]));
+            if (_sealed.TryGetValue(key, out (string Manifest, Dictionary<string, string> Rows) earlier))
+            {
+                return Sealed(earlier.Manifest);
+            }
+
+            Dictionary<string, string> rows = new(StringComparer.Ordinal);
+            foreach (string name in names)
+            {
+                rows[name] = store.Encrypt(values[name], storeKey);
+            }
+
+            string text = SecretStore.Next(manifest, storeKey, rows, []).Canonical();
+            _sealed[key] = (text, rows);
+            _order.Enqueue(key);
+            while (_order.Count > Kept)
+            {
+                _sealed.Remove(_order.Dequeue());
+            }
+
+            return Sealed(text);
+        }
+
+        private static OneShotResponse Sealed(string manifestText)
+        {
+            return new OneShotResponse(200, "application/json", JsonSerializer.Serialize(new { ok = true, manifest = manifestText }));
+        }
+
+        private static OneShotResponse Refusal(string why) => new(400, "application/json", JsonSerializer.Serialize(new { ok = false, error = why }));
+
+        private static string Key(byte[] ct) => Base64Url.EncodeToString(SHA256.HashData(ct));
+
+        /// <summary>The values the page sent, decrypted and checked; or null and why not (names only, never a value).</summary>
+        private (Dictionary<string, string>? Values, string? Problem) Open(byte[] bind, Dictionary<string, string> members)
+        {
+            string plaintext;
+            try
+            {
+                plaintext = SecretCrypto.Decrypt(serverKey, bind, members["epk"], members["iv"], members["ct"]);
+            }
+            catch (CryptographicException)
+            {
+                return (null, "the secrets could not be decrypted");
+            }
+
+            // Every entry is checked before anything is encrypted or stored: all or nothing.
+            Dictionary<string, string>? values = StringMembers(plaintext);
+            string? problem = Problem(values);
+
+            return problem is null ? (values, null) : (null, problem);
+        }
+
         /// <summary>Called with the lock held. Every way out sets the outcome, so a proof is used once.</summary>
         private OneShotResponse Save(string origin, byte[] bind, string body)
         {
@@ -373,7 +497,19 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
                 return Invalid;
             }
 
-            // The passkey signed SHA-256(bind + SHA-256(ct)): the proof covers exactly this ciphertext on this page.
+            // Only values that went through /seal can be saved: the manifest the passkey signed is the one made from them. Values
+            // that were never sealed are checked again, so the answer says why they could not be.
+            if (!_sealed.TryGetValue(Key(ct), out (string Manifest, Dictionary<string, string> Rows) prepared))
+            {
+                (_, string? problem) = Open(bind, members);
+                _decision.TrySetResult(Denied((problem ?? "the values were not prepared on the page") + "; nothing was stored"));
+
+                return Invalid;
+            }
+
+            // The passkey signed SHA-256(bind || SHA-256(ct) || SHA-256(manifest)): exactly these values on this page, and the
+            // new state with the hashes of exactly these rows.
+            byte[] manifestBind = SecretCrypto.ManifestBind(bind, ct);
             string assertion = JsonSerializer.Serialize(new Dictionary<string, string>
             {
                 ["id"] = members["id"],
@@ -384,7 +520,7 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
             ProofResult result;
             try
             {
-                result = method.Verify(new ProofContext(SecretCrypto.Challenge(bind, ct), origin), assertion);
+                result = method.Verify(new ProofContext(Manifest.Challenge(manifestBind, prepared.Manifest), origin), assertion);
             }
             catch (Exception)
             {
@@ -398,52 +534,43 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
                 return Refused;
             }
 
-            string plaintext;
-            try
-            {
-                plaintext = SecretCrypto.Decrypt(serverKey, bind, members["epk"], members["iv"], members["ct"]);
-            }
-            catch (CryptographicException)
-            {
-                _decision.TrySetResult(Denied("the secrets could not be decrypted; nothing was stored"));
-
-                return Invalid;
-            }
-
-            // Every entry is checked before the first write: all or nothing.
-            Dictionary<string, string>? values = StringMembers(plaintext);
-            string? problem = Problem(values);
-            if (values is null || problem is not null)
-            {
-                _decision.TrySetResult(Denied((problem ?? "the secrets are not valid") + "; nothing was stored"));
-
-                return Invalid;
-            }
-
-            if (!audit.TryWriteChange("secrets-set", names, result.Detail))
-            {
-                _decision.TrySetResult(new SecretChange(RunCommand.AuditError, "the audit log could not be written; nothing was stored"));
-
-                return Failed;
-            }
-
-            List<string> done = [];
-            foreach (string name in names)
+            // The first secret: the store's private key goes to its custody now, before the state that names its public key.
+            // Only a key this call adds is removed again if the write then fails; one that was already there is never touched.
+            bool addedKey = false;
+            if (newPrivateKey is not null)
             {
                 try
                 {
-                    store.Set(name, values[name]);
+                    addedKey = !store.KeyExists(storeKey);
+                    store.SaveKey(storeKey, newPrivateKey);
                 }
-                catch (Exception)
+                catch (Exception failure)
                 {
-                    _decision.TrySetResult(new SecretChange(RunCommand.StoreError, done.Count == 0
-                        ? $"the store could not save {name}; nothing was stored"
-                        : $"the store could not save {name}; stored only {string.Join(", ", done)}"));
+                    _decision.TrySetResult(new SecretChange(RunCommand.StoreError, "the store key could not be saved (" + failure.GetType().Name + "); nothing was stored"));
 
                     return Failed;
                 }
+            }
 
-                done.Add(name);
+            SignedManifest signed = new(prepared.Manifest, manifestBind, assertion);
+            string? problemWriting = store.TryApply(manifest.Version, signed, prepared.Rows, [], AuditLog.SecretsRow("secrets-set", names, result.Detail, AuditLog.KeyName(result.Detail)));
+            if (problemWriting is not null)
+            {
+                if (addedKey)
+                {
+                    try
+                    {
+                        store.DeleteKey(storeKey);
+                    }
+                    catch (Exception)
+                    {
+                        problemWriting += " (the unused store key could not be removed from the key custody)";
+                    }
+                }
+
+                _decision.TrySetResult(new SecretChange(RunCommand.StoreError, problemWriting));
+
+                return Failed;
             }
 
             _decision.TrySetResult(new SecretChange(0, $"Stored {string.Join(", ", names)}."));
@@ -525,8 +652,10 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
 internal static class SetPage
 {
     /// <summary>
-    /// The one inline script. On Save it reads the inputs, encrypts them with Web Crypto to the server key, asks the passkey
-    /// to sign SHA-256(bind + SHA-256(ct)), and posts the result. The values leave the page only inside the ciphertext.
+    /// The one inline script. As the values are typed it encrypts them with Web Crypto to the server key, sends the ciphertext
+    /// to /seal and makes the challenge SHA-256(bind || SHA-256(ct) || SHA-256(manifest)) from the manifest it gets back; Save
+    /// then asks the passkey to sign it at once (nothing awaited in the tap, which iOS WebKit needs) and posts the result. The
+    /// values leave the page only inside the ciphertext.
     /// </summary>
     private const string Script = """
         (function () {
@@ -540,6 +669,7 @@ internal static class SetPage
             var encoder = new TextEncoder();
             var busy = false;
             var finished = false;
+            var ready = null;
 
             function show(text) {
                 status.textContent = text;
@@ -547,6 +677,7 @@ internal static class SetPage
 
             function finish(text) {
                 finished = true;
+                ready = null;
                 save.disabled = true;
                 cancel.disabled = true;
                 inputs.forEach(function (input) {
@@ -652,6 +783,78 @@ internal static class SetPage
                 });
             }
 
+            // Encrypts the values as they are typed (not in the tap) and sends them to /seal. The program answers with the next
+            // manifest: the hashes of the rows it will store. The challenge is SHA-256(bind || SHA-256(ct) || SHA-256(manifest)),
+            // so the one passkey signature covers both. All of this happens before the tap, so the Save tap starts the passkey
+            // prompt at once: iOS WebKit refuses a prompt that follows an awaited step. Only a result for the values still in the
+            // form, from the newest request, is kept.
+            var waiting = "Encrypting these values. Tap Save again.";
+            var sealing = 0;
+            var timer = null;
+
+            function current() {
+                try {
+                    return JSON.stringify(values());
+                } catch (error) {
+                    return null;
+                }
+            }
+
+            function prepare() {
+                if (finished || busy || start.mode !== "webauthn" || !window.isSecureContext || !window.crypto || !window.crypto.subtle) {
+                    return;
+                }
+                var text = current();
+                var bind;
+                var serverKey;
+                if (text === null || (ready !== null && ready.text === text)) {
+                    return;
+                }
+                try {
+                    bind = fromBase64Url(start.bind);
+                    serverKey = fromBase64Url(start.serverKey);
+                } catch (error) {
+                    return;
+                }
+                var mine = ++sealing;
+                var sent;
+                var subtle = window.crypto.subtle;
+                seal(encoder.encode(text), bind, serverKey).then(function (sealed) {
+                    sent = sealed;
+                    if (mine !== sealing || finished) {
+                        throw new Error("newer values");
+                    }
+                    return post("seal", JSON.stringify({ epk: toBase64Url(sent.epk), iv: toBase64Url(sent.iv), ct: toBase64Url(sent.ct) }));
+                }).then(function (reply) {
+                    return reply.json().then(function (data) {
+                        if (!reply.ok || !data || data.ok !== true || typeof data.manifest !== "string") {
+                            if (mine === sealing && !finished && data && typeof data.error === "string") {
+                                show(data.error + ". Nothing was stored.");
+                            }
+                            throw new Error("not sealed");
+                        }
+                        return Promise.all([subtle.digest("SHA-256", sent.ct), subtle.digest("SHA-256", encoder.encode(data.manifest))]);
+                    });
+                }).then(function (hashes) {
+                    return subtle.digest("SHA-256", join(join(bind, new Uint8Array(hashes[0])), new Uint8Array(hashes[1])));
+                }).then(function (challenge) {
+                    if (!finished && !busy && mine === sealing && current() === text) {
+                        ready = { text: text, sent: sent, challenge: new Uint8Array(challenge) };
+                        if (status.textContent === waiting) {
+                            show("Ready. Tap Save.");
+                        }
+                    }
+                }, function () { });
+            }
+
+            // Typing waits a moment before sending, so that not every key press is a request.
+            function later() {
+                if (timer !== null) {
+                    clearTimeout(timer);
+                }
+                timer = setTimeout(prepare, 300);
+            }
+
             cancel.addEventListener("click", function () {
                 if (finished) {
                     return;
@@ -680,46 +883,43 @@ internal static class SetPage
                     show("This browser does not support passkeys. Nothing was stored.");
                     return;
                 }
-                var plain;
+                var text;
                 var payload;
-                var bind;
-                var serverKey;
                 try {
-                    plain = encoder.encode(JSON.stringify(values()));
+                    text = JSON.stringify(values());
                 } catch (error) {
                     show(error.message + " Nothing was stored.");
                     return;
                 }
                 try {
                     payload = JSON.parse(start.payload);
-                    bind = fromBase64Url(start.bind);
-                    serverKey = fromBase64Url(start.serverKey);
+                    fromBase64Url(start.bind);
+                    fromBase64Url(start.serverKey);
                 } catch (error) {
                     show("The page data is not valid. Nothing was stored.");
                     return;
                 }
+                if (ready === null || ready.text !== text) {
+                    // These values are not encrypted yet (they just changed): encrypt them, and ask for another tap.
+                    prepare();
+                    show(waiting);
+                    return;
+                }
+                var sent = ready.sent;
                 busy = true;
                 save.disabled = true;
-                show("Encrypting...");
-                var sent;
-                seal(plain, bind, serverKey).then(function (sealed) {
-                    sent = sealed;
-                    return window.crypto.subtle.digest("SHA-256", sent.ct);
-                }).then(function (ctHash) {
-                    return window.crypto.subtle.digest("SHA-256", join(bind, new Uint8Array(ctHash)));
-                }).then(function (challenge) {
-                    show("Waiting for your passkey...");
-                    return navigator.credentials.get({
-                        publicKey: {
-                            challenge: challenge,
-                            rpId: payload.rpId,
-                            allowCredentials: payload.allowCredentials.map(function (item) {
-                                return { id: fromBase64Url(item.id), type: item.type };
-                            }),
-                            timeout: payload.timeout,
-                            userVerification: "required"
-                        }
-                    });
+                show("Waiting for your passkey...");
+                // Runs in the tap: nothing is awaited before the passkey prompt.
+                navigator.credentials.get({
+                    publicKey: {
+                        challenge: ready.challenge,
+                        rpId: payload.rpId,
+                        allowCredentials: payload.allowCredentials.map(function (item) {
+                            return { id: fromBase64Url(item.id), type: item.type };
+                        }),
+                        timeout: payload.timeout,
+                        userVerification: "required"
+                    }
                 }).then(function (credential) {
                     var response = credential.response;
                     return JSON.stringify({
@@ -764,6 +964,11 @@ internal static class SetPage
                     }
                 });
             });
+            inputs.forEach(function (input) {
+                input.addEventListener("input", later);
+                input.addEventListener("change", prepare);
+            });
+            prepare();
             if (inputs.length > 0) {
                 inputs[0].focus();
             }

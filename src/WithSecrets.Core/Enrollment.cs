@@ -5,7 +5,7 @@ using System.Text;
 namespace WithSecrets;
 
 /// <summary>
-/// <c>--enrolled</c>: a header line with the admin key's fingerprint (see <see cref="AdminKey" />), then one line per entry:
+/// <c>--enrolled</c>: a header line with the admin keys' fingerprints (see <see cref="AdminKey" />), then one line per entry:
 /// name, host, date, and "admin" for the admin entry, separated by tabs. Never key bytes.
 /// </summary>
 public static class EnrolledListing
@@ -28,15 +28,15 @@ public static class EnrolledListing
 
 /// <summary>
 /// Adds and removes what a proof method trusts, the same way for every method. The first entry comes with the settings
-/// (<c>--config</c>) and is the admin. Every change needs the admin: adding asks the admin first, then the method's own setup
-/// has the admin sign the new manifest; removing has the admin sign the new manifest on the approval page. The admin entry
-/// cannot be removed. Names are unique without regard to case. Any doubt or error denies. The change happens at the command
+/// (<c>--config</c>) and is an admin; more admins can be added. Every change needs an admin: adding asks an admin first, then
+/// the method's own setup has an admin sign the new manifest; removing has an admin sign the new manifest on the approval
+/// page. Any entry can be removed except the last admin. Names are chosen on the page and are unique without regard to case. Any doubt or error denies. The change happens at the command
 /// target; the approval happens at the first of the command target and the other target where the targets' methods can
 /// prove (Program gives both targets admin-only methods).
 /// </summary>
 public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget otherTarget, Action<string> announce, AuditLog? audit = null)
 {
-    // Every change is approved by the admin key.
+    // Every change is approved by an admin key.
     private readonly EnrollmentTarget command = commandTarget.Admin();
     private readonly EnrollmentTarget other = otherTarget.Admin();
 
@@ -45,18 +45,20 @@ public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget 
 
     private const string Heading = "Check this change to what can approve runs.";
 
-    /// <summary>Why the admin entry cannot be removed, and the way to replace it.</summary>
-    public const string AdminStays = "The admin passkey cannot be removed. To replace it, delete state.db and run with-secrets --config again.";
+    /// <summary>Why the last admin entry cannot be removed, and the ways on.</summary>
+    public const string LastAdmin = "The last admin passkey cannot be removed. First add another admin passkey (with-secrets --enroll, and tick \"Also make this key an admin\"), "
+        + "or, with no other admin device, delete state.db and run with-secrets --config again.";
 
     private IProofMethod Method => command.Method;
 
     /// <summary>
-    /// Asks first with what is enrolled, when anything is. Then the method's own setup runs. A refusal or failure is recorded in
-    /// the audit log (event change-denied) when one is given.
+    /// Asks first with what is enrolled, when anything is. Then the method's own setup runs, where the person chooses the
+    /// name (the page suggests <see cref="DefaultName" />, or one not taken yet). A refusal or failure is recorded in the
+    /// audit log (event change-denied) when one is given.
     /// </summary>
-    public ApprovalDecision Enroll(string name)
+    public ApprovalDecision Enroll()
     {
-        return Logged("--enroll", EnrollCore(name));
+        return Logged("--enroll", EnrollCore());
     }
 
     /// <summary>A refused or failed change goes into the audit log; the decision is returned as it is.</summary>
@@ -70,23 +72,24 @@ public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget 
         return decision;
     }
 
-    private ApprovalDecision EnrollCore(string name)
+    /// <summary><see cref="DefaultName" />, or "passkey 2", "passkey 3"... : the first that no entry has (without regard to case).</summary>
+    public static string Suggest(IEnumerable<string> taken)
     {
-        string? error = NameError(name);
-        if (error is not null)
+        HashSet<string> names = new(taken, StringComparer.OrdinalIgnoreCase);
+        string name = DefaultName;
+        for (int number = 2; names.Contains(name); number++)
         {
-            return ApprovalDecision.Deny(error);
+            name = DefaultName + " " + number.ToString(CultureInfo.InvariantCulture);
         }
 
-        name = name.Trim();
+        return name;
+    }
+
+    private ApprovalDecision EnrollCore()
+    {
         try
         {
             IReadOnlyList<EnrolledEntry> entries = Method.Enrolled();
-            if (entries.Any(item => string.Equals(item.Name, name, StringComparison.OrdinalIgnoreCase)))
-            {
-                return ApprovalDecision.Deny($"a {Method.Id} with that name is already enrolled");
-            }
-
             if (entries.Count == 0)
             {
                 return ApprovalDecision.Deny(PasskeyRegistration.NothingEnrolled);
@@ -98,14 +101,15 @@ public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget 
                 return NoTarget();
             }
 
-            string text = $"Add a {Method.Id} named \"{name}\" for {command.Approver.Origin}.";
+            string text = $"Add a {Method.Id} for {command.Approver.Origin}. Its name is chosen on the next page.";
             ApprovalDecision asked = approval.Approver.Ask(new ApprovalPrompt(Heading, text));
             if (!asked.Approved)
             {
                 return asked;
             }
 
-            return Method.Enroll(name, announce, manifest => approval.Approver.AskManifest(new ApprovalPrompt(Heading, text + "\nConfirm the new state with the admin " + Method.Id + "."), manifest));
+            return Method.Enroll(Suggest(entries.Select(item => item.Name)), announce,
+                manifest => approval.Approver.AskManifest(new ApprovalPrompt(Heading, SignText(manifest, entries)), manifest));
         }
         catch (ProofUnavailableException failure)
         {
@@ -116,6 +120,24 @@ public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget 
         {
             return ApprovalDecision.Deny("the enrollment failed: " + failure.Message);
         }
+    }
+
+    /// <summary>
+    /// What the page that signs a new state with one more entry says: the new entry's name and whether it becomes an admin
+    /// (the "Also make this key an admin" box), both read from the manifest that is signed.
+    /// </summary>
+    private string SignText(string manifest, IReadOnlyList<EnrolledEntry> entries)
+    {
+        string text = $"Add a {Method.Id} for {command.Approver.Origin}.";
+        ManifestKey? added = Manifest.Parse(manifest, out _)?.Keys.FirstOrDefault(key => !entries.Any(item => string.Equals(item.Name, key.Name, StringComparison.OrdinalIgnoreCase)));
+        if (added is not null)
+        {
+            text += "\nNew key: " + added.Name + "\n" + (added.Admin
+                ? $"The new {Method.Id} will be an admin: it can change the settings and the {Method.Id}s."
+                : $"The new {Method.Id} will only approve runs (not an admin).");
+        }
+
+        return text + "\nConfirm the new state with an admin " + Method.Id + ".";
     }
 
     /// <summary>The first of the command target and the other target where an enrolled entry works, else null.</summary>
@@ -144,7 +166,7 @@ public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget 
         return Method.Enrolled();
     }
 
-    /// <summary>Always asks the admin, who signs the new manifest. The admin entry cannot be removed. A refusal is recorded like Enroll's.</summary>
+    /// <summary>Always asks an admin, who signs the new manifest. The last admin entry cannot be removed. A refusal is recorded like Enroll's.</summary>
     public ApprovalDecision Unenroll(string name)
     {
         return Logged("--unenroll", UnenrollCore(name));
@@ -178,9 +200,9 @@ public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget 
                 return ApprovalDecision.Deny($"more than one {Method.Id} has that name");
             }
 
-            if (entries.Any(item => item.Name == stored && item.Admin))
+            if (entries.Any(item => item.Name == stored && item.Admin) && entries.Count(item => item.Admin) == 1)
             {
-                return ApprovalDecision.Deny(AdminStays);
+                return ApprovalDecision.Deny(LastAdmin);
             }
 
             EnrollmentTarget? approval = ApprovalTarget();

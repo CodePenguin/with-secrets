@@ -17,12 +17,12 @@ public sealed record ConfigChange(int Code, string Detail)
 /// <c>--config</c>: the settings change only on a web page served once, never in the terminal, which gets only the link. The
 /// page shows every setting with its current value and its limits as a form, and a summary of the changes.
 /// <para>
-/// With a passkey enrolled, Save is approved with the admin passkey: it signs the new manifest (the current one with the new
+/// With a passkey enrolled, Save is approved with an admin passkey: it signs the new manifest (the current one with the new
 /// settings and the next version, see <see cref="Manifest" />), <c>SHA-256(bind || SHA-256(manifest))</c>. The page builds the
 /// manifest text from the prefix it is given and the canonical JSON of the form (see <see cref="ToolSettings.Canonical" />).
-/// The server checks the assertion with the admin key first, then checks every value, then writes the new manifest (only if
+/// The server checks the assertion with an admin key first, then checks every value, then writes the new manifest (only if
 /// the stored one is still the version the page started from) and an audit row (the names of the settings that changed,
-/// old -> new, and the key) in one transaction. The page is served at the first of the two targets where the admin key works.
+/// old -> new, and the key) in one transaction. The page is served at the first of the two targets where an admin key works.
 /// </para>
 /// <para>
 /// With nothing enrolled this is the first-run setup: the same form, and Save creates the first passkey for the page's host
@@ -36,7 +36,7 @@ public sealed record ConfigChange(int Code, string Detail)
 /// </summary>
 public sealed class SettingsPage(StateDatabase db, EnrollmentTarget primaryTarget, EnrollmentTarget localTarget, Action<string> announce, Func<string?>? readCode)
 {
-    // Only the admin key may change the settings.
+    // Only admin keys may change the settings.
     private readonly EnrollmentTarget primary = primaryTarget.Admin();
     private readonly EnrollmentTarget local = localTarget.Admin();
 
@@ -85,7 +85,7 @@ public sealed class SettingsPage(StateDatabase db, EnrollmentTarget primaryTarge
 
     private static ConfigChange Denied(string detail) => new(RunCommand.Denied, detail);
 
-    /// <summary>Something is enrolled: the page is served where the admin key works, and Save needs the admin key.</summary>
+    /// <summary>Something is enrolled: the page is served where an admin key works, and Save needs an admin key.</summary>
     private ConfigChange Gated(Manifest manifest)
     {
         ToolSettings current = manifest.Settings;
@@ -182,7 +182,7 @@ public sealed class SettingsPage(StateDatabase db, EnrollmentTarget primaryTarge
 
                 return chosen is null ? "the settings are not valid (" + error + "); nothing was saved" : null;
             },
-            key => Manifest.First(key, chosen!),
+            (key, _) => Manifest.First(key, chosen!),
             (signed, key) =>
             {
                 IReadOnlyList<SettingChange> changes = current.Changes(chosen!);
@@ -191,7 +191,7 @@ public sealed class SettingsPage(StateDatabase db, EnrollmentTarget primaryTarge
                     // Version 0 expected: a passkey enrolled elsewhere meanwhile makes this stale, and nothing is saved.
                     ApprovalDecision done = PasskeyRegistration.Commit(db, signed,
                         () => ApprovalDecision.Allow($"Saved the settings and added the passkey named \"{key.Name}\" for {key.RpId}.\n"
-                            + $"Admin key: {AdminKey.Fingerprint(key.PublicKey)} ({ApprovalSummary.Clean(key.Name)}). Note this fingerprint down: every page shows it, and if it ever changes, the state was replaced."),
+                            + $"Admins: {AdminKey.Entry(key.Name, key.PublicKey)}. Note this fingerprint down: every page shows it, and if it ever changes, the state was replaced."),
                         (connection, transaction) => AuditLog.Append(connection, transaction, AuditLog.SettingsRow("settings-setup", changes, key.Name, $"first passkey \"{key.Name}\" (admin) added for {key.RpId}")));
 
                     return done.Approved ? done : ApprovalDecision.Deny("a passkey was enrolled or the state changed while the page was open; nothing was saved");
@@ -446,16 +446,18 @@ internal static class ConfigPageHtml
 {
     /// <summary>
     /// The one inline script. It keeps the change summary up to date, and on Save builds the canonical JSON of the form (the
-    /// same text as <see cref="ToolSettings.Canonical" />). Flow "assert": the admin passkey signs the new manifest, the given
+    /// same text as <see cref="ToolSettings.Canonical" />). Flow "assert": an admin passkey signs the new manifest, the given
     /// prefix, those settings and "}". Flow "register" (the first run): a new passkey is created over the settings, then the
-    /// server sends the first manifest and the new passkey signs it (a second prompt); then the page shows the code to type
-    /// in the terminal. There is no keyboard shortcut.
+    /// server sends the first manifest and the new passkey signs it (a second prompt, behind its own Step 2 button); then the
+    /// page shows the code to type in the terminal. Every challenge is made before the tap that uses it (as the form changes,
+    /// or when step 1 ends), so each tap starts its passkey prompt with nothing awaited first. There is no keyboard shortcut.
     /// </summary>
     private const string Script = """
         (function () {
             "use strict";
             var start = JSON.parse(document.getElementById("start").textContent);
             var save = document.getElementById("save");
+            var second = document.getElementById("confirm");
             var cancel = document.getElementById("deny");
             var status = document.getElementById("status");
             var changes = document.getElementById("changes");
@@ -467,19 +469,49 @@ internal static class ConfigPageHtml
             var encoder = new TextEncoder();
             var busy = false;
             var finished = false;
+            var ready = null;
+            var pending = null;
+            var keyName = document.getElementById("f-key-name");
 
             function show(text) {
                 status.textContent = text;
             }
 
+            // The form fields (and the first run's name field) on or off: off while a passkey prompt is open and at the end.
+            function inputs(on) {
+                fields.forEach(function (field) {
+                    field.disabled = !on;
+                });
+                if (keyName) {
+                    keyName.disabled = !on;
+                }
+            }
+
             function finish(text) {
                 finished = true;
                 save.disabled = true;
+                if (second) {
+                    second.disabled = true;
+                }
                 cancel.disabled = true;
-                fields.forEach(function (field) {
-                    field.disabled = true;
-                });
+                inputs(false);
                 show(text);
+            }
+
+            // The first run's name, checked with the rules the program applies again: empty is the default name; at most the
+            // field's length; no control, hidden or line-break characters.
+            function chosenName() {
+                var text = keyName.value.trim();
+                if (text.length === 0) {
+                    text = keyName.getAttribute("data-default");
+                }
+                if (text.length > Number(keyName.getAttribute("maxlength"))) {
+                    return { error: "The name is longer than " + keyName.getAttribute("maxlength") + " characters." };
+                }
+                if (/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Cs}]/u.test(text)) {
+                    return { error: "The name has a control or hidden character." };
+                }
+                return { name: text };
             }
 
             function post(what, body) {
@@ -593,7 +625,7 @@ internal static class ConfigPageHtml
                 return values;
             }
 
-            function creation(challenge) {
+            function creation(challenge, name) {
                 var options = start.options;
                 return {
                     challenge: challenge,
@@ -601,7 +633,7 @@ internal static class ConfigPageHtml
                     user: {
                         id: fromBase64Url(options.user.id),
                         name: options.user.name,
-                        displayName: options.user.displayName
+                        displayName: name
                     },
                     pubKeyCredParams: options.pubKeyCredParams,
                     authenticatorSelection: options.authenticatorSelection,
@@ -626,13 +658,50 @@ internal static class ConfigPageHtml
                 };
             }
 
-            // The first run's second prompt: the new passkey signs the first manifest; the reply then has the code.
+            // The challenge for the values in the form, made as they change (not in the tap), so that the Save tap starts the
+            // passkey prompt at once: iOS WebKit refuses a prompt that follows an awaited step. The first run hashes the
+            // settings into the registration; a save signs the whole new manifest.
+            function prepare() {
+                if (finished || busy || !window.crypto || !window.crypto.subtle) {
+                    return;
+                }
+                var text;
+                var seed;
+                try {
+                    text = canonical(read());
+                    seed = fromBase64Url(register ? start.options.challenge : start.bind);
+                } catch (error) {
+                    return;
+                }
+                if (ready !== null && ready.text === text) {
+                    return;
+                }
+                window.crypto.subtle.digest("SHA-256", encoder.encode(register ? text : start.prefix + text + "}")).then(function (hash) {
+                    return window.crypto.subtle.digest("SHA-256", join(seed, new Uint8Array(hash)));
+                }).then(function (challenge) {
+                    var now = null;
+                    try {
+                        now = canonical(read());
+                    } catch (error) {
+                        now = null;
+                    }
+                    if (now === text) {
+                        ready = { text: text, challenge: new Uint8Array(challenge) };
+                    }
+                }, function () { });
+            }
+
+            // The first run's step 2: the new passkey signs the first manifest. Its challenge is made here, before the
+            // person taps the Step 2 button, so that tap starts the prompt at once; the reply then has the code.
             function confirm(step) {
-                show("Confirm with your new passkey...");
                 return window.crypto.subtle.digest("SHA-256", encoder.encode(step.manifest)).then(function (hash) {
                     return window.crypto.subtle.digest("SHA-256", join(fromBase64Url(step.bind), new Uint8Array(hash)));
                 }).then(function (challenge) {
-                    return navigator.credentials.get({ publicKey: {
+                    busy = false;
+                    if (finished) {
+                        return;
+                    }
+                    pending = {
                         challenge: new Uint8Array(challenge),
                         rpId: step.rpId,
                         allowCredentials: step.allowCredentials.map(function (item) {
@@ -640,27 +709,70 @@ internal static class ConfigPageHtml
                         }),
                         timeout: step.timeout,
                         userVerification: "required"
-                    } });
-                }).then(function (credential) {
-                    var response = credential.response;
-                    return post("sign", JSON.stringify({
-                        id: toBase64Url(credential.rawId),
-                        authenticatorData: toBase64Url(response.authenticatorData),
-                        clientDataJSON: toBase64Url(response.clientDataJSON),
-                        signature: toBase64Url(response.signature)
-                    }));
-                }).then(function (reply) {
-                    if (!reply.ok) {
-                        throw new Error("refused");
+                    };
+                    inputs(false);
+                    second.textContent = "Step 2 of 2: confirm with your new passkey";
+                    second.hidden = false;
+                    second.disabled = false;
+                    show("Step 1 is done: your passkey \"" + step.name + "\" was made with these settings. Now tap \"" + second.textContent + "\". Nothing is saved until you do and type the code in the terminal.");
+                    second.focus();
+                });
+            }
+
+            function coded(data) {
+                if (typeof data.code !== "string") {
+                    throw new Error("no code");
+                }
+                finish("Type this code in the terminal to finish. Nothing is saved until you do." + (typeof data.admin === "string" ? " " + data.admin + ". Note this fingerprint down: every page shows it, and if it ever changes, the state was replaced." : ""));
+                code.textContent = data.code;
+            }
+
+            // A first-run step that failed after the server took part: tell the program, so it stops waiting.
+            function failed() {
+                busy = false;
+                finish("Nothing was saved, or the answer could not be read. The terminal says what was saved.");
+                if (register) {
+                    post("deny", "").then(null, function () { });
+                }
+            }
+
+            if (second) {
+                // Step 2 runs in its own tap: the prompt starts at once, with the challenge made before.
+                second.addEventListener("click", function () {
+                    if (finished || busy || pending === null) {
+                        return;
                     }
-                    return reply.json();
-                }).then(function (data) {
-                    busy = false;
-                    if (typeof data.code !== "string") {
-                        throw new Error("no code");
-                    }
-                    finish("Type this code in the terminal to finish. Nothing is saved until you do." + (typeof data.admin === "string" ? " " + data.admin + ". Note this fingerprint down: every page shows it, and if it ever changes, the state was replaced." : ""));
-                    code.textContent = data.code;
+                    busy = true;
+                    second.disabled = true;
+                    show("Waiting for your passkey...");
+                    navigator.credentials.get({ publicKey: pending }).then(function (credential) {
+                        var response = credential.response;
+                        if (finished) {
+                            busy = false;
+                            return;
+                        }
+                        show("Checking...");
+                        return post("sign", JSON.stringify({
+                            id: toBase64Url(credential.rawId),
+                            authenticatorData: toBase64Url(response.authenticatorData),
+                            clientDataJSON: toBase64Url(response.clientDataJSON),
+                            signature: toBase64Url(response.signature)
+                        })).then(function (reply) {
+                            if (!reply.ok) {
+                                throw new Error("refused");
+                            }
+                            return reply.json();
+                        }).then(function (data) {
+                            busy = false;
+                            coded(data);
+                        }).then(null, failed);
+                    }, function () {
+                        busy = false;
+                        if (!finished) {
+                            second.disabled = false;
+                            show("No passkey was used. Nothing was saved yet. Tap \"" + second.textContent + "\" again, or cancel.");
+                        }
+                    });
                 });
             }
 
@@ -694,25 +806,40 @@ internal static class ConfigPageHtml
                     return;
                 }
                 var text = canonical(values);
-                var seed;
                 var request;
+                var named = register ? chosenName() : null;
+                if (named && named.error) {
+                    show(named.error + " Nothing was saved.");
+                    keyName.focus();
+                    return;
+                }
                 try {
-                    seed = fromBase64Url(register ? start.options.challenge : start.bind);
-                    request = register ? creation(seed) : assertion(seed);
+                    // The seed of the challenge must be there and be base64url, or no tap can ever succeed: say so now,
+                    // rather than asking for another tap.
+                    var seed = register ? start.options.challenge : start.bind;
+                    if (typeof seed !== "string" || !/^[A-Za-z0-9_-]+$/.test(seed)) {
+                        throw new Error("no seed");
+                    }
+                    fromBase64Url(seed);
+                    request = register ? creation(null, named.name) : assertion(null);
                 } catch (error) {
                     show("The page data is not valid. Nothing was saved.");
                     return;
                 }
+                if (ready === null || ready.text !== text) {
+                    // The challenge for these values is not made yet (they just changed): make it, and ask for another tap.
+                    prepare();
+                    show("Getting ready for these values. Tap the button again.");
+                    return;
+                }
+                request.challenge = ready.challenge;
                 busy = true;
                 save.disabled = true;
-                // The first run hashes the settings into the registration; a save signs the whole new manifest.
-                window.crypto.subtle.digest("SHA-256", encoder.encode(register ? text : start.prefix + text + "}")).then(function (hash) {
-                    return window.crypto.subtle.digest("SHA-256", join(seed, new Uint8Array(hash)));
-                }).then(function (challenge) {
-                    request.challenge = new Uint8Array(challenge);
-                    show("Waiting for your passkey...");
-                    return register ? navigator.credentials.create({ publicKey: request }) : navigator.credentials.get({ publicKey: request });
-                }).then(function (credential) {
+                // Nothing can be edited while the prompt is open: what is signed is what the form shows.
+                inputs(false);
+                show("Waiting for your passkey...");
+                // Runs in the tap: nothing is awaited before the passkey prompt.
+                (register ? navigator.credentials.create({ publicKey: request }) : navigator.credentials.get({ publicKey: request })).then(function (credential) {
                     var response = credential.response;
                     var body = {
                         settings: text,
@@ -721,6 +848,7 @@ internal static class ConfigPageHtml
                     };
                     if (register) {
                         body.attestationObject = toBase64Url(response.attestationObject);
+                        body.name = named.name;
                     } else {
                         body.authenticatorData = toBase64Url(response.authenticatorData);
                         body.signature = toBase64Url(response.signature);
@@ -740,16 +868,13 @@ internal static class ConfigPageHtml
                             return;
                         }
                         return reply.json().then(function (data) {
-                            if (register && data.sign && typeof data.sign.manifest === "string") {
+                            if (register && second && data.sign && typeof data.sign.manifest === "string") {
+                                // Step 1 is done; step 2 waits for its own tap.
                                 return confirm(data.sign);
                             }
                             busy = false;
                             if (register) {
-                                if (typeof data.code !== "string") {
-                                    throw new Error("no code");
-                                }
-                                finish("Type this code in the terminal to finish. Nothing is saved until you do." + (typeof data.admin === "string" ? " " + data.admin + ". Note this fingerprint down: every page shows it, and if it ever changes, the state was replaced." : ""));
-                                code.textContent = data.code;
+                                coded(data);
                             } else {
                                 if (!data.ok) {
                                     throw new Error("not saved");
@@ -757,27 +882,28 @@ internal static class ConfigPageHtml
                                 finish("Saved. You can close this page.");
                             }
                         });
-                    }).then(null, function () {
-                        busy = false;
-                        finish("Nothing was saved, or the answer could not be read. The terminal says what was saved.");
-                        if (register) {
-                            post("deny", "").then(null, function () { });
-                        }
-                    });
+                    }).then(null, failed);
                 }, function () {
                     busy = false;
                     if (!finished) {
                         save.disabled = false;
+                        inputs(true);
                         show("No passkey was used. Nothing was saved. You can try again or cancel.");
                     }
                 });
             });
 
+            function changed() {
+                summary();
+                prepare();
+            }
+
             fields.forEach(function (input) {
-                input.addEventListener("input", summary);
-                input.addEventListener("change", summary);
+                input.addEventListener("input", changed);
+                input.addEventListener("change", changed);
             });
             summary();
+            prepare();
             cancel.focus();
         })();
         """;
@@ -818,9 +944,9 @@ internal static class ConfigPageHtml
         page.Append("<style>").Append(style).Append("</style>\n</head>\n<body>\n<main>\n");
         page.Append("<h1>").Append(firstRun ? "Set up with-secrets" : "Change the with-secrets settings").Append("</h1>\n");
         page.Append(firstRun
-            ? "<p>Nothing is enrolled yet. Choose the settings, then create the first passkey. It will work on this page's host and it is the admin passkey: only it can change the settings or the passkeys later. Your browser asks for it twice: to create it, then to confirm the settings with it. Nothing is saved until you type the code this page then shows into your terminal.</p>\n"
+            ? "<p>Nothing is enrolled yet. Choose the settings and a name for the first passkey, then create it. It will work on this page's host and it is the first admin passkey: only admin passkeys can change the settings or the passkeys later (--enroll can add more). There are two steps, each with its own button: step 1 creates it, then step 2 (a second button that appears) confirms the settings with it. Nothing is saved until you type the code this page then shows into your terminal.</p>\n"
             : "<p>Change any value, check the changes, then save. Your admin passkey approves exactly these values.</p>\n");
-        page.Append("<pre id=\"admin\">").Append(Encode(adminLine + (firstRun ? " (the passkey you create here becomes the admin key)" : ""))).Append("</pre>\n");
+        page.Append("<pre id=\"admin\">").Append(Encode(adminLine + (firstRun ? " (the passkey you create here becomes the first admin key)" : ""))).Append("</pre>\n");
         foreach (string name in ToolSettings.Names)
         {
             string id = "f-" + name;
@@ -856,9 +982,19 @@ internal static class ConfigPageHtml
         }
 
         page.Append("<h2>Changes</h2>\n<pre id=\"changes\">No changes.</pre>\n");
+        if (firstRun)
+        {
+            page.Append(PasskeyRegistration.NameField(Enrollment.DefaultName, []));
+        }
+
         page.Append("<div class=\"buttons\">");
         page.Append("<button id=\"deny\" type=\"button\" autofocus>Cancel</button>");
-        page.Append("<button id=\"save\" type=\"button\">").Append(firstRun ? "Save and create passkey" : "Save").Append("</button>");
+        page.Append("<button id=\"save\" type=\"button\">").Append(firstRun ? "Step 1 of 2: save and create passkey" : "Save").Append("</button>");
+        if (firstRun)
+        {
+            page.Append(PasskeyRegistration.StepTwoButton);
+        }
+
         page.Append("</div>\n<p id=\"status\" role=\"status\"></p>\n<p id=\"code\"></p>\n</main>\n");
         page.Append("<script type=\"application/json\" id=\"start\">").Append(start).Append("</script>\n");
         page.Append("<script>").Append(script).Append("</script>\n</body>\n</html>\n");

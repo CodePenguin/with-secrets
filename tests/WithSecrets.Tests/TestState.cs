@@ -6,8 +6,9 @@ using System.Text.Json;
 namespace WithSecrets.Tests;
 
 /// <summary>
-/// Writes signed manifests for tests, the way the pages do: the admin key of the new manifest signs
-/// SHA-256(bind || SHA-256(manifest)). Keys must come from a <see cref="TestAuthenticator" /> so the admin can sign.
+/// Writes signed manifests for tests, the way the pages do: an admin key of the stored manifest (the new key itself on the
+/// first write) signs SHA-256(bind || SHA-256(manifest)). Keys must come from a <see cref="TestAuthenticator" /> so an
+/// admin can sign.
 /// </summary>
 internal static class TestState
 {
@@ -128,15 +129,33 @@ internal static class TestState
         return db.TryManifest(out Manifest? manifest, out string? error) ? manifest : throw new InvalidOperationException(error);
     }
 
-    /// <summary>Signs <paramref name="next" /> with its admin key and stores it in place of version - 1. False when refused.</summary>
-    public static bool Write(StateDatabase db, Manifest next)
+    /// <summary>
+    /// Signs <paramref name="next" /> and stores it in place of version - 1. False when refused. The signer is
+    /// <paramref name="by" />, else the first admin of the stored manifest that is still an admin in <paramref name="next" />
+    /// (on the first write, the first admin of <paramref name="next" />).
+    /// </summary>
+    public static bool Write(StateDatabase db, Manifest next, TestAuthenticator? by = null)
     {
-        if (next.Admin is not { } admin || TestAuthenticator.ById(admin.Id) is not { } signer)
+        Manifest? current;
+        try
+        {
+            current = next.Version > 1 ? Current(db) : null;
+        }
+        catch (InvalidOperationException)
         {
             return false;
         }
 
-        SignedManifest signed = Sign(signer, next.Canonical(), admin.RpId);
+        IEnumerable<ManifestKey> candidates = current is null ? next.Admins : current.Admins.Where(key => next.Admins.Any(item => item.Id == key.Id));
+        ManifestKey? admin = by is null ? candidates.FirstOrDefault(key => TestAuthenticator.ById(key.Id) is not null)
+            : next.Keys.Concat(current?.Keys ?? []).FirstOrDefault(key => key.Id == TestAuthenticator.Encode(by.CredentialId));
+        TestAuthenticator? signer = by ?? (admin is null ? null : TestAuthenticator.ById(admin.Id));
+        if (signer is null)
+        {
+            return false;
+        }
+
+        SignedManifest signed = Sign(signer, next.Canonical(), admin?.RpId ?? "localhost");
         try
         {
             return db.Write((connection, transaction) => db.TryReplace(connection, transaction, next.Version - 1, signed) is null);
@@ -147,8 +166,11 @@ internal static class TestState
         }
     }
 
-    /// <summary>Adds a key: the first one is the admin (with <paramref name="settings" />), the rest are signed by the admin.</summary>
-    public static bool Add(StateDatabase db, PasskeyRecord record, ToolSettings? settings = null)
+    /// <summary>
+    /// Adds a key: the first one is an admin (with <paramref name="settings" />); the rest are signed by an admin and are
+    /// admins too when <paramref name="admin" /> says so.
+    /// </summary>
+    public static bool Add(StateDatabase db, PasskeyRecord record, ToolSettings? settings = null, bool admin = false)
     {
         Manifest? current;
         try
@@ -165,7 +187,7 @@ internal static class TestState
             return false;
         }
 
-        return Write(db, current is null ? Manifest.First(record, settings ?? ToolSettings.Defaults) : current.WithKey(record));
+        return Write(db, current is null ? Manifest.First(record, settings ?? ToolSettings.Defaults) : current.WithKey(record, admin));
     }
 
     /// <summary>A state at <paramref name="path" /> with one admin key (localhost) and these settings, for tests that need a manifest.</summary>
@@ -252,7 +274,7 @@ internal static class GrantStoreTestExtensions
             return false;
         }
 
-        ManifestKey? signer = manifest?.Keys.FirstOrDefault(item => item.Name == keyName) ?? manifest?.Admin;
+        ManifestKey? signer = manifest?.Keys.FirstOrDefault(item => item.Name == keyName) ?? manifest?.Admins.FirstOrDefault();
         if (signer is null || TestAuthenticator.ById(signer.Id) is not { } authenticator)
         {
             return false;

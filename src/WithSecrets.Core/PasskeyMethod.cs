@@ -7,24 +7,31 @@ namespace WithSecrets;
 /// Proof by passkey: the person signs the request's binding with a key that was enrolled for the page's host name. Only keys
 /// stored for that host (the rpId) may approve, and the key is chosen by the id in the response. <paramref name="readCode" />
 /// reads the confirmation code that enrollment shows on the page; it returns null when nothing can be read. With
-/// <paramref name="adminOnly" /> only the admin key may prove (for every change to the state); otherwise every enrolled key
-/// may (for runs).
+/// <paramref name="adminOnly" /> only admin keys may prove (for every change to the state); otherwise every enrolled key
+/// may (for runs). <paramref name="staysAdmin" /> narrows that to the admin keys that are still admins in a new state (see
+/// <see cref="Signing" />).
 /// </summary>
-public sealed class PasskeyMethod(PasskeyStore store, ApprovalSettings settings, Func<string?>? readCode = null, bool adminOnly = false) : IProofMethod
+public sealed class PasskeyMethod(PasskeyStore store, ApprovalSettings settings, Func<string?>? readCode = null, bool adminOnly = false, Manifest? staysAdmin = null) : IProofMethod
 {
     public string Id => "passkey";
 
-    /// <summary>True when only the admin key may prove with this method.</summary>
+    /// <summary>True when only admin keys may prove with this method.</summary>
     public bool AdminOnly => adminOnly;
 
-    /// <summary>The same method, where only the admin key may prove.</summary>
+    /// <summary>The same method, where only admin keys may prove.</summary>
     public PasskeyMethod ForAdmin() => new(store, settings, readCode, true);
 
-    /// <summary>What a verified proof says: "admin passkey NAME verified" for the admin key, else "passkey NAME verified".</summary>
+    /// <summary>
+    /// For signing <paramref name="next" />: only the admin keys that are admins in it too, so an admin never signs a state
+    /// in which it is not one (for example its own removal), which would not verify when read.
+    /// </summary>
+    public PasskeyMethod Signing(Manifest next) => adminOnly ? new(store, settings, readCode, true, next) : this;
+
+    /// <summary>What a verified proof says: "admin passkey NAME verified" for an admin key, else "passkey NAME verified".</summary>
     public static string Verified(PasskeyRecord key) => (key.Admin ? "admin passkey " : "passkey ") + key.Name + " verified";
 
-    /// <summary>The keys that may prove at this host: all of them, or only the admin key.</summary>
-    private IReadOnlyList<PasskeyRecord> Keys(string rpId) => [.. store.ForRp(rpId).Where(item => !adminOnly || item.Admin)];
+    /// <summary>The keys that may prove at this host: all of them, or only the admin keys (that stay admins).</summary>
+    private IReadOnlyList<PasskeyRecord> Keys(string rpId) => [.. store.ForRp(rpId).Where(item => !adminOnly || (item.Admin && (staysAdmin is null || staysAdmin.IsAdmin(item.Id))))];
 
     public ProofStart Start(ProofContext context)
     {
@@ -32,9 +39,10 @@ public sealed class PasskeyMethod(PasskeyStore store, ApprovalSettings settings,
         IReadOnlyList<PasskeyRecord> keys = Keys(rpId);
         if (keys.Count == 0)
         {
-            PasskeyRecord? admin = adminOnly ? store.All().FirstOrDefault(item => item.Admin) : null;
-            throw new ProofUnavailableException(admin is not null
-                ? $"Only the admin passkey (\"{admin.Name}\", for {admin.RpId}) can approve this change, and it does not work at {rpId}."
+            List<PasskeyRecord> admins = adminOnly ? [.. store.All().Where(item => item.Admin && (staysAdmin is null || staysAdmin.IsAdmin(item.Id)))] : [];
+            throw new ProofUnavailableException(admins.Count > 0
+                ? $"Only an admin passkey can approve this change ({string.Join(", ", admins.Select(item => $"\"{item.Name}\" for {item.RpId}"))}), and none works at {rpId}."
+                : adminOnly && store.All().Any(item => item.Admin) ? "No other admin passkey can approve this change: an admin passkey cannot approve its own removal."
                 : $"No passkey is enrolled for {rpId}. With nothing enrolled, set up the first one with: with-secrets --config (with-secrets --enroll adds more).");
         }
 
@@ -83,7 +91,7 @@ public sealed class PasskeyMethod(PasskeyStore store, ApprovalSettings settings,
         return Keys(rpId).Count > 0;
     }
 
-    /// <summary>The admin key's fingerprint line for the state this method reads.</summary>
+    /// <summary>The admin keys' fingerprint line for the state this method reads.</summary>
     public string AdminLine() => AdminKey.Line(store.Database);
 
     /// <summary>Throws <see cref="ProofUnavailableException" /> when the file exists but cannot be read, so it never looks empty.</summary>
@@ -93,10 +101,10 @@ public sealed class PasskeyMethod(PasskeyStore store, ApprovalSettings settings,
     }
 
     /// <summary>
-    /// Opens the enrollment page (see <see cref="PasskeyRegistration" />). Only the link goes to <paramref name="announce" />;
-    /// the key is stored after the admin key signed the new manifest and the person typed the code from the page. Without a
-    /// code reader nothing starts. <paramref name="askAdmin" /> asks the admin key on another page when it does not work at
-    /// this page's host.
+    /// Opens the enrollment page (see <see cref="PasskeyRegistration" />). <paramref name="name" /> is the name the page
+    /// suggests; the person chooses the name on the page. Only the link goes to <paramref name="announce" />; the key is
+    /// stored after an admin key signed the new manifest and the person typed the code from the page. Without a code reader
+    /// nothing starts. <paramref name="askAdmin" /> asks an admin key on another page when none works at this page's host.
     /// </summary>
     public ApprovalDecision Enroll(string name, Action<string> announce, Func<string, ManifestApproval>? askAdmin = null)
     {
@@ -107,8 +115,8 @@ public sealed class PasskeyMethod(PasskeyStore store, ApprovalSettings settings,
 
     /// <summary>
     /// Removes the one passkey with this name (the exact name, else the only one that matches without regard to case): a new
-    /// manifest without it, signed by the admin key through <paramref name="askAdmin" />, stored only if the state has not
-    /// changed since. The admin key, two passkeys with that name, or a store that cannot be read remove nothing.
+    /// manifest without it, signed by another admin key through <paramref name="askAdmin" />, stored only if the state has not
+    /// changed since. The last admin key, two passkeys with that name, or a store that cannot be read remove nothing.
     /// </summary>
     public ApprovalDecision Unenroll(string name, Func<string, ManifestApproval> askAdmin)
     {
@@ -124,9 +132,9 @@ public sealed class PasskeyMethod(PasskeyStore store, ApprovalSettings settings,
             return ApprovalDecision.Deny("nothing was removed");
         }
 
-        if (matches[0].Admin)
+        if (matches[0].Admin && records.Count(item => item.Admin) == 1)
         {
-            return ApprovalDecision.Deny(Enrollment.AdminStays);
+            return ApprovalDecision.Deny(Enrollment.LastAdmin);
         }
 
         Manifest next = current.WithoutKey(matches[0].Id);
@@ -140,7 +148,13 @@ public sealed class PasskeyMethod(PasskeyStore store, ApprovalSettings settings,
             ? ApprovalDecision.Deny("the admin approval did not sign the new state; nothing was removed")
             : PasskeyRegistration.Commit(store.Database, approval.Signed, () => ApprovalDecision.Allow($"Removed the passkey named \"{stored}\"."),
                 (connection, transaction) => AuditLog.Append(connection, transaction, AuditLog.ChangeRow("key-removed",
-                    $"passkey \"{stored}\" removed (with its saved approvals); admin passkey {current.Admin!.Name} verified", current.Admin.Name)));
+                    $"passkey \"{stored}\" removed (with its saved approvals){(matches[0].Admin ? ", it was an admin" : "")}; admin passkey {Signer(current, approval.Signed)} verified", Signer(current, approval.Signed))));
+    }
+
+    /// <summary>The name of the admin key that signed <paramref name="signed" />, as <paramref name="current" /> names it.</summary>
+    internal static string Signer(Manifest current, SignedManifest signed)
+    {
+        return signed.SignerId is { } id ? current.NameOf(id) ?? "?" : "?";
     }
 
     private IReadOnlyList<PasskeyRecord> Records()

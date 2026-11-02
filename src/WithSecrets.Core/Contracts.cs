@@ -17,26 +17,12 @@ public static class SecretNames
     }
 }
 
-/// <summary>Where secrets live. The production implementation wraps the Dotenvx library.</summary>
-public interface ISecretStore
-{
-    /// <summary>Names of the secret entries. Reads the file as text. Decrypts nothing.</summary>
-    IReadOnlyList<string> ListNames();
-
-    /// <summary>Decrypts the store and returns only the named values. Throws if a name is missing.</summary>
-    IReadOnlyDictionary<string, string> GetValues(IReadOnlyCollection<string> names);
-
-    void Set(string name, string value);
-
-    /// <summary>Returns false when the name does not exist.</summary>
-    bool Remove(string name);
-}
-
 /// <summary>
-/// What the agent asked for. Every field except <see cref="SecretNames" />, <see cref="Reuse" /> and <see cref="RequestId" />
-/// comes from the agent. <see cref="Reuse" /> is the reuse the page may offer (from the settings); null offers only "Approve
-/// once". <see cref="RequestId" /> is the request's fingerprint key (see <see cref="RequestFingerprint" />), shown in the text
-/// the person signs so that a saved approval names the request it covers.
+/// What the agent asked for. Every field except <see cref="SecretNames" />, <see cref="Reuse" />, <see cref="RequestId" /> and
+/// <see cref="Sources" /> comes from the agent. <see cref="Reuse" /> is the reuse the page may offer (from the settings); null
+/// offers only "Approve once". <see cref="RequestId" /> is the request's fingerprint key (see <see cref="RequestFingerprint" />),
+/// shown in the text the person signs so that a saved approval names the request it covers. <see cref="Sources" /> is where
+/// each secret comes from (see <see cref="ISecretSource.Label" />), shown after each name.
 /// </summary>
 public sealed record ApprovalRequest(
     string Program,
@@ -48,7 +34,8 @@ public sealed record ApprovalRequest(
     ReuseOffer? Reuse = null,
     IReadOnlyList<string>? TypedArguments = null,
     IReadOnlyList<string>? Links = null,
-    string? RequestId = null);
+    string? RequestId = null,
+    IReadOnlyDictionary<string, string>? Sources = null);
 
 /// <summary>
 /// What a person signed on an approval page: the page nonce, the exact text that was bound (see <see cref="RequestBinding" />)

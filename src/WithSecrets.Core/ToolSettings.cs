@@ -9,7 +9,7 @@ public sealed record SettingChange(string Name, string Old, string New);
 
 /// <summary>
 /// Every setting of the tool, kept in the signed manifest in <see cref="StateDatabase" /> (see <see cref="Manifest" />). An empty
-/// state uses the defaults. They change only on the <c>--config</c> page, signed by the admin passkey (see <see cref="SettingsPage" />).
+/// state uses the defaults. They change only on the <c>--config</c> page, signed by an admin passkey (see <see cref="SettingsPage" />).
 /// A state that fails verification gives the defaults and an error.
 /// </summary>
 public sealed record ToolSettings(int ReuseMinutes, int ReuseMaxMinutes, string Method, string? BaseUrl, int Port, int TimeoutMinutes)

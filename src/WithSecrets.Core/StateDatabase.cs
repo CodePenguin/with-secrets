@@ -17,19 +17,21 @@ public sealed class StateDatabaseException(string message, Exception? inner = nu
 /// each other (up to the busy timeout) and no update is lost. A missing database is empty. A database that exists but cannot be
 /// used (not a database, damaged, locked beyond the timeout, another schema version) is an error, never an empty store. A
 /// database of another schema version is never moved forward: the message says to delete it and start over. It holds no
-/// secret values. The tool reads no other file in the store folder.
+/// secret value in plain text: each secret is a row of Dotenvx ciphertext (see <see cref="SecretStore" />). The tool reads no
+/// other file in the store folder.
 /// </summary>
 public sealed class StateDatabase
 {
     public const string FileName = "state.db";
-    public const int SchemaVersion = 5;
+    public const int SchemaVersion = 7;
 
     public static readonly TimeSpan DefaultBusyTimeout = TimeSpan.FromSeconds(5);
 
     /// <summary>
     /// The tables. Keys and settings live only in the signed manifest (one row); sign counts sit beside it, outside the
     /// signature, because every approval raises them. Each saved approval keeps the passkey assertion that approved it, the
-    /// page nonce and the exact text that was signed (see <see cref="GrantStore" />), all base64url or text.
+    /// page nonce and the exact text that was signed (see <see cref="GrantStore" />), all base64url or text. Each secret is one
+    /// row with its Dotenvx ciphertext; the manifest has the hash of each (see <see cref="SecretStore" />).
     /// </summary>
     private const string Schema = """
         CREATE TABLE schema_version (version INTEGER NOT NULL);
@@ -45,13 +47,14 @@ public sealed class StateDatabase
             id INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT NOT NULL, event TEXT NOT NULL, secrets TEXT NOT NULL,
             program TEXT NOT NULL, detail TEXT NOT NULL, key_name TEXT NOT NULL, entry TEXT NOT NULL,
             prev_hash TEXT NOT NULL, hash TEXT NOT NULL);
+        CREATE TABLE secrets (name TEXT PRIMARY KEY NOT NULL, ciphertext TEXT NOT NULL);
         """;
 
     /// <summary>
     /// The tables a store holds, all of them (sqlite_sequence may or may not be there). Any other table, any view, trigger or
     /// index other than SQLite's own primary-key indexes is an edit made outside the tool.
     /// </summary>
-    private static readonly string[] Tables = ["audit", "grants", "manifest", "schema_version", "sign_counts"];
+    private static readonly string[] Tables = ["audit", "grants", "manifest", "schema_version", "secrets", "sign_counts"];
 
     /// <summary>Manifests already verified in this process, by the stored row, so the signature is checked once per process.</summary>
     private static readonly ConcurrentDictionary<string, Manifest> Verified = new(StringComparer.Ordinal);
@@ -210,9 +213,10 @@ public sealed class StateDatabase
         Dictionary<string, long> counts = SignCounts(connection, transaction);
         if (rows.Count == 0)
         {
-            if (counts.Count > 0 || Scalar(connection, transaction, "SELECT COUNT(*) FROM grants") is not 0L)
+            if (counts.Count > 0 || Scalar(connection, transaction, "SELECT COUNT(*) FROM grants") is not 0L
+                || Scalar(connection, transaction, "SELECT COUNT(*) FROM secrets") is not 0L)
             {
-                throw Failed("keys or saved approvals without a manifest");
+                throw Failed("keys, saved approvals or secrets without a manifest");
             }
 
             return null;
@@ -261,7 +265,8 @@ public sealed class StateDatabase
     /// <summary>
     /// Inside the caller's write transaction: replaces the manifest with <paramref name="next" />, only when the stored one is
     /// still version <paramref name="expectedVersion" /> (0 for none), <paramref name="next" /> is the version after it, and it
-    /// verifies with its own admin key. Sign counts and saved approvals of keys that are no longer in it are removed. Null when it was written,
+    /// is signed by a key that is an admin of the stored manifest and stays an admin in <paramref name="next" /> (see
+    /// <see cref="SignedManifest.Verify(Manifest?, out string?)" />; on the first run, by an admin of <paramref name="next" />). Sign counts and saved approvals of keys that are no longer in it are removed. Null when it was written,
     /// else why not (nothing is written). The caller has already checked the assertion in full on the page.
     /// </summary>
     internal string? TryReplace(SqliteConnection connection, SqliteTransaction transaction, long expectedVersion, SignedManifest next)
@@ -272,7 +277,9 @@ public sealed class StateDatabase
             return "the state changed while the page was open; nothing was saved";
         }
 
-        Manifest? manifest = next.Verify(out string? error);
+        // Signed by a key that is an admin of the stored state (on the first run, of the new one), and that stays an admin, so the
+        // new state verifies when it is read.
+        Manifest? manifest = next.Verify(current, out string? error);
         if (manifest is null)
         {
             return "the new state does not verify (" + error + "); nothing was saved";
@@ -281,12 +288,6 @@ public sealed class StateDatabase
         if (manifest.Version != expectedVersion + 1)
         {
             return "the new state is not the next version; nothing was saved";
-        }
-
-        // The admin key never changes: a new state must keep the current admin's id and public key.
-        if (current is not null && (manifest.Admin!.Id != current.Admin!.Id || manifest.Admin.PublicKey != current.Admin.PublicKey))
-        {
-            return "the new state has another admin key; nothing was saved";
         }
 
         using JsonDocument proof = JsonDocument.Parse(next.Proof);

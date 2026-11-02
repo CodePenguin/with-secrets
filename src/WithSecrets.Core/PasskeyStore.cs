@@ -2,13 +2,13 @@ namespace WithSecrets;
 
 /// <summary>
 /// A registered passkey. <see cref="Id" /> and <see cref="PublicKey" /> are base64url. The public key is the COSE key bytes.
-/// <see cref="Admin" /> marks the one key that may change the state (see <see cref="Manifest" />).
+/// <see cref="Admin" /> marks a key that may change the state (an admin key; see <see cref="Manifest" />).
 /// </summary>
 public sealed record PasskeyRecord(string Id, string PublicKey, int Alg, string RpId, string Name, DateTimeOffset Created, uint SignCount, bool Admin = false);
 
 /// <summary>
 /// The passkeys that may approve requests: the keys of the verified manifest in <see cref="StateDatabase" />, with their sign
-/// counts. Keys are added and removed only by writing a new manifest signed by the admin key. A database that cannot be used
+/// counts. Keys are added and removed only by writing a new manifest signed by an admin key. A database that cannot be used
 /// or fails verification means no passkeys for approval, so nobody can approve through the page, and an error for changes.
 /// </summary>
 public sealed class PasskeyStore
@@ -39,7 +39,7 @@ public sealed class PasskeyStore
 
     /// <summary>
     /// For changes: true with the records when the state is empty (none) or verified. False when it exists but cannot be used,
-    /// so a change never starts from a store that only looks empty. The admin key comes first, then the others by creation.
+    /// so a change never starts from a store that only looks empty. The admin keys come first, then the others, each by creation.
     /// </summary>
     public bool TryAll(out IReadOnlyList<PasskeyRecord> records)
     {

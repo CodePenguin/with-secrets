@@ -170,7 +170,7 @@ internal static class ConfigTests
         string path = SchemaOne(Path.Combine(root, "old-schema"));
         byte[] before = File.ReadAllBytes(path);
         StateDatabase db = new(path);
-        check(StateDatabase.SchemaVersion == 5, "db schema: the schema version is 5");
+        check(StateDatabase.SchemaVersion == 7, "db schema: the schema version is 7");
         check(!db.TryCheck(out string? error) && error is not null && error.Contains("delete state.db to start over", StringComparison.Ordinal), "db schema: an older database is an error that says to delete state.db (" + error + ")");
         check(!new PasskeyStore(db).TryAll(out _) && new PasskeyStore(db).All().Count == 0, "db schema: its passkeys are not used");
         check(ToolSettings.Load(db, out error) == ToolSettings.Defaults && error is not null && ReuseSettings.Load(db) == ReuseOffer.Off, "db schema: settings from it are an error");
@@ -183,7 +183,7 @@ internal static class ConfigTests
         {
             connection.Open();
             using SqliteCommand command = connection.CreateCommand();
-            command.CommandText = "UPDATE schema_version SET version = 6";
+            command.CommandText = "UPDATE schema_version SET version = " + (StateDatabase.SchemaVersion + 1);
             command.ExecuteNonQuery();
         }
 
@@ -238,7 +238,7 @@ internal static class ConfigTests
 
         check(CliArgs.NeedsTerminal(new CliCommand.Config(false)), "cli: --config needs a real terminal");
         check(!CliArgs.NeedsTerminal(new CliCommand.Config(true)), "cli: --config --show works anywhere");
-        check(CliArgs.NeedsTerminal(new CliCommand.Enroll(null)) && CliArgs.NeedsTerminal(new CliCommand.Enrolled()) && CliArgs.NeedsTerminal(new CliCommand.Unenroll("x")) && CliArgs.NeedsTerminal(new CliCommand.Revoke()), "cli: --enroll, --enrolled, --unenroll and --revoke need a real terminal");
+        check(CliArgs.NeedsTerminal(new CliCommand.Enroll()) && CliArgs.NeedsTerminal(new CliCommand.Enrolled()) && CliArgs.NeedsTerminal(new CliCommand.Unenroll("x")) && CliArgs.NeedsTerminal(new CliCommand.Revoke()), "cli: --enroll, --enrolled, --unenroll and --revoke need a real terminal");
         check(!CliArgs.NeedsTerminal(new CliCommand.List()) && !CliArgs.NeedsTerminal(new CliCommand.Set(["A_B"])) && !CliArgs.NeedsTerminal(new CliCommand.Audit(20, null, false)), "cli: --list, --set and --audit do not");
     }
 
@@ -513,6 +513,22 @@ internal static class ConfigTests
             check(run.AgainGone, $"config: {name}: after the outcome, the page and a second POST are 404");
         }
 
+        // A second admin key may change the settings too; the page offers both admin keys.
+        {
+            StateDatabase db = StateDatabase.InFolder(Path.Combine(root, "gated-two-" + Guid.NewGuid().ToString("N")));
+            TestState.Add(db, laptop.Record("localhost", "laptop"));
+            TestState.Add(db, phone.Record("localhost", "phone"), admin: true);
+            TestState.Add(db, stranger.Record("localhost", "runs-only"));
+            ConfigRun run = await Drive(db, local, null, Save(client, phone, wanted, wanted));
+            string payload = Start(run.Page) is { ValueKind: JsonValueKind.Object } start ? start.GetProperty("payload").GetString() ?? "" : "";
+            check(payload.Contains(TestAuthenticator.Encode(laptop.CredentialId), StringComparison.Ordinal) && payload.Contains(TestAuthenticator.Encode(phone.CredentialId), StringComparison.Ordinal)
+                && !payload.Contains(TestAuthenticator.Encode(stranger.CredentialId), StringComparison.Ordinal), "config: with two admins, allowCredentials lists both and no other key");
+            check(run.Result is { Code: 0 } && ToolSettings.Load(db, out _).Port == 8765 && db.TryCheck(out _), "config: the second admin key saves the settings (" + run.Result?.Detail + ")");
+            check(new AuditLog(db).TryRead(5, null, out IReadOnlyList<AuditRecord> rows, out _) && rows.Count == 1 && rows[0].KeyName == "phone", "config: the audit row names the second admin");
+            run = await Drive(db, local, null, Save(client, stranger, Canonical(10, "passkey", null, 0, 5), Canonical(10, "passkey", null, 0, 5)));
+            check(run.Result is { Code: RunCommand.Denied } && run.Status == 403 && ToolSettings.Load(db, out _).Port == 8765, "config: a key that is not an admin still cannot save (" + run.Result?.Detail + ")");
+        }
+
         // An admin assertion over the right values but an older manifest (the page started from another state): nothing saved.
         {
             StateDatabase db = NewDb();
@@ -565,7 +581,7 @@ internal static class ConfigTests
     }
 
     /// <summary>Gets the first-run page, registers a new passkey over <paramref name="text" />, and returns the code (or "").</summary>
-    private static string Register(HttpClient client, ConfigRun run, string url, TestAuthenticator key, string text, string? sent = null, TestAuthenticator? signer = null, bool skipSign = false)
+    private static string Register(HttpClient client, ConfigRun run, string url, TestAuthenticator key, string text, string? sent = null, TestAuthenticator? signer = null, bool skipSign = false, string? keyName = null)
     {
         using HttpResponseMessage? page = Send(client, HttpMethod.Get, url);
         run.Page = Text(page);
@@ -574,6 +590,11 @@ internal static class ConfigTests
         byte[] seed = start.ValueKind == JsonValueKind.Object && start.TryGetProperty("options", out JsonElement options) ? Base64Url.DecodeFromChars(options.GetProperty("challenge").GetString()!) : [];
         Dictionary<string, string> body = JsonSerializer.Deserialize<Dictionary<string, string>>(key.Attest(Challenge(seed, text), "http://localhost:" + run.Link!.Port, "localhost", "passkey"))!;
         body["settings"] = sent ?? text;
+        if (keyName is not null)
+        {
+            body["name"] = keyName;
+        }
+
         using HttpResponseMessage? reply = Send(client, HttpMethod.Post, url + "/create", JsonSerializer.Serialize(body));
         run.Status = (int?)reply?.StatusCode ?? 0;
         run.Reply = Text(reply);
@@ -632,7 +653,7 @@ internal static class ConfigTests
             IReadOnlyList<PasskeyRecord> keys = new PasskeyStore(db).All();
             check(keys.Count == 1 && keys[0].RpId == "localhost" && keys[0].Name == "passkey" && keys[0].Admin && keys[0].Id == TestAuthenticator.Encode(laptop.CredentialId), "config first run: the passkey is stored for localhost, as the admin");
             check(Version(db) == 1 && db.TryCheck(out _), "config first run: the first manifest (version 1) verifies");
-            string fingerprint = "Admin key: " + GrantTests.Expected(laptop) + " (passkey)";
+            string fingerprint = "Admins: passkey " + GrantTests.Expected(laptop);
             check(run.Page.Contains(AdminKey.NotSetUp, StringComparison.Ordinal), "config first run: the page says the admin key is not set up yet");
             check(run.Reply.Contains("\"admin\":\"" + fingerprint + "\"", StringComparison.Ordinal), "config first run: the code reply shows the new admin key's fingerprint (" + run.Reply + ")");
             check(run.Result!.Detail.Contains(fingerprint, StringComparison.Ordinal) && run.Result.Detail.Contains("Note this fingerprint down", StringComparison.Ordinal), "config first run: the terminal shows the fingerprint to note down (" + run.Result.Detail + ")");
@@ -640,7 +661,7 @@ internal static class ConfigTests
             {
                 JsonElement sign = step.RootElement.GetProperty("sign");
                 Manifest? first = Manifest.Parse(sign.GetProperty("manifest").GetString()!, out _);
-                check(first is { Version: 1 } && first.Settings == new ToolSettings(30, 480, "passkey", null, 8765, 10) && first.Admin?.Id == TestAuthenticator.Encode(laptop.CredentialId) && sign.GetProperty("first").GetBoolean()
+                check(first is { Version: 1 } && first.Settings == new ToolSettings(30, 480, "passkey", null, 8765, 10) && first.Admins.Single().Id == TestAuthenticator.Encode(laptop.CredentialId) && sign.GetProperty("first").GetBoolean()
                     && sign.GetProperty("allowCredentials").GetRawText() == "[{\"id\":\"" + TestAuthenticator.Encode(laptop.CredentialId) + "\",\"type\":\"public-key\"}]", "config first run: after the registration the new key is asked to sign the first manifest, with it as admin (" + run.First + ")");
             }
 
@@ -689,6 +710,34 @@ internal static class ConfigTests
             });
             check(run.Result is { Code: RunCommand.Denied }, $"config first run: {name}: denied ({run.Result?.Code} {run.Result?.Detail})");
             check(Empty(db), $"config first run: {name}: nothing stored");
+        }
+
+        // The name for the first passkey: a field on the page (default "passkey"), checked like the name field on the enroll page, in the signed
+        // manifest and the Admins line. Empty means the default.
+        foreach ((string sent, string stored) in new[] { ("work laptop", "work laptop"), ("  Büro  ", "Büro"), ("", Enrollment.DefaultName), ("   ", Enrollment.DefaultName) })
+        {
+            StateDatabase db = StateDatabase.InFolder(Path.Combine(root, "first-name-" + Guid.NewGuid().ToString("N")));
+            Codes codes = new();
+            ConfigRun run = await Drive(db, local, codes.Read, (r, url) => codes.Type(Register(client, r, url, laptop, wanted, keyName: sent)));
+            string line = "Admins: " + stored + " " + GrantTests.Expected(laptop);
+            string signedName = Manifest.Parse(JsonDocument.Parse(run.First).RootElement.GetProperty("sign").GetProperty("manifest").GetString() ?? "", out _)?.Keys.Single().Name ?? "";
+            check(run.Result is { Code: 0 } && new PasskeyStore(db).All().Single() is { Name: var name, Admin: true } && name == stored && signedName == stored && AdminKey.Line(db) == line
+                && run.Reply.Contains(JsonSerializer.Serialize(line)[1..^1], StringComparison.Ordinal) && run.Result.Detail.Contains(line, StringComparison.Ordinal),
+                $"config first run name: \"{sent}\" is stored as \"{stored}\", signed in the manifest and shown in the Admins line ({run.Result?.Detail})");
+            check(run.Page.Contains("<label for=\"f-key-name\">Name for this passkey</label>", StringComparison.Ordinal) && run.Page.Contains("id=\"f-key-name\"", StringComparison.Ordinal)
+                && run.Page.Contains("value=\"" + Enrollment.DefaultName + "\"", StringComparison.Ordinal) && run.Page.Contains("maxlength=\"" + Enrollment.MaxNameLength + "\"", StringComparison.Ordinal), "config first run name: the page has the name field with the default");
+        }
+
+        foreach (string bad in new[] { new string('a', Enrollment.MaxNameLength + 1), "a" + (char)1 + "b", "a\nb", "a" + (char)0x202E + "b", "a" + (char)0x200B + "b" })
+        {
+            StateDatabase db = StateDatabase.InFolder(Path.Combine(root, "first-badname-" + Guid.NewGuid().ToString("N")));
+            Codes codes = new();
+            ConfigRun run = await Drive(db, local, codes.Read, (r, url) =>
+            {
+                Register(client, r, url, laptop, wanted, keyName: bad);
+                codes.Type(null);
+            });
+            check(run.Result is { Code: RunCommand.Denied } && run.Status == 400 && Empty(db) && !run.First.Contains("\"sign\"", StringComparison.Ordinal), $"config first run name: a bad name (length {bad.Length}) is refused and nothing is stored ({run.Status} {run.Result?.Detail})");
         }
 
         // A good code, but a passkey was enrolled elsewhere meanwhile: nothing from this page is stored.

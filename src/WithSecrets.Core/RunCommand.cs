@@ -9,7 +9,7 @@ public sealed record RunArgs(IReadOnlyList<string> Secrets, string Reason, strin
 /// signed it, for exactly that time, keeps that signature, and is used only while it verifies and its lifetime is within the
 /// current ceiling. One that does not verify is reported once on stderr and ignored: the person is asked again.
 /// </summary>
-public sealed class RunCommand(ISecretStore store, IApprover approver, AuditLog audit, TextWriter stdout, TextWriter stderr, GrantStore? grants = null, ReuseOffer? reuse = null)
+public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog audit, TextWriter stdout, TextWriter stderr, GrantStore? grants = null, ReuseOffer? reuse = null)
 {
     public const int Usage = 2;
     public const int Denied = 3;
@@ -82,7 +82,8 @@ public sealed class RunCommand(ISecretStore store, IApprover approver, AuditLog 
         }
 
         ReuseOffer offer = grants is not null && reuse is { IsOn: true } ? reuse : ReuseOffer.Off;
-        ApprovalRequest request = new(args.Program, resolved, arguments, workingDirectory, args.Reason, names, offer.IsOn ? offer : null, args.Arguments, links);
+        Dictionary<string, string> sources = names.ToDictionary(name => name, _ => store.Label, StringComparer.Ordinal);
+        ApprovalRequest request = new(args.Program, resolved, arguments, workingDirectory, args.Reason, names, offer.IsOn ? offer : null, args.Arguments, links, Sources: sources);
         Fingerprint fingerprint = RequestFingerprint.Compute(request);
 
         // The request id goes into the text the person signs, so a saved approval names the request it covers.
@@ -140,17 +141,24 @@ public sealed class RunCommand(ISecretStore store, IApprover approver, AuditLog 
             }
         }
 
-        IReadOnlyDictionary<string, string> values;
+        // Only the approved names are decrypted. The bytes are zeroed when the program ends; the strings the redactor and the
+        // child's environment need cannot be wiped (see SecretValues).
+        SecretValues secrets;
         try
         {
-            values = store.GetValues(names);
+            secrets = store.GetValues(names);
         }
         catch (Exception error)
         {
             return await Fail(StoreError, $"cannot decrypt the secret store: {error.Message}");
         }
 
-        int exitCode = await ChildRunner.RunAsync(new ChildSpec(resolved, arguments, workingDirectory, values), stdout, stderr);
+        int exitCode;
+        using (secrets)
+        {
+            exitCode = await ChildRunner.RunAsync(new ChildSpec(resolved, arguments, workingDirectory, secrets.Texts()), stdout, stderr);
+        }
+
         audit.TryWrite("finished", request, "", exitCode, fingerprint.Files);
 
         return exitCode;

@@ -14,7 +14,7 @@ public sealed record ProofResult(bool Ok, string Detail);
 /// <summary>This proof method cannot run now (for example, nothing is enrolled).</summary>
 public sealed class ProofUnavailableException(string message) : Exception(message);
 
-/// <summary>One thing a proof method trusts, such as a key or a subject. <see cref="Admin" /> marks the one that may change the state.</summary>
+/// <summary>One thing a proof method trusts, such as a key or a subject. <see cref="Admin" /> marks one that may change the state (there may be several).</summary>
 public sealed record EnrolledEntry(string Name, string Detail, DateTimeOffset Created, bool Admin = false);
 
 /// <summary>A way for the person to prove they approve one specific request. Must fail closed.</summary>
@@ -34,16 +34,17 @@ public interface IProofMethod
     bool CanProve(string rpId);
 
     /// <summary>
-    /// Person-facing setup for this method. <paramref name="askAdmin" /> asks the admin to sign a new manifest text on an
-    /// approval page, when the method cannot ask for it on its own page.
+    /// Person-facing setup for this method. <paramref name="name" /> is the name the setup suggests; the person chooses the
+    /// name there. <paramref name="askAdmin" /> asks an admin to sign a new manifest text on an approval page, when the
+    /// method cannot ask for it on its own page.
     /// </summary>
     ApprovalDecision Enroll(string name, Action<string> announce, Func<string, ManifestApproval>? askAdmin = null);
 
-    /// <summary>Removes the entry with this stored name, with the admin's signature over the new manifest from <paramref name="askAdmin" />.</summary>
+    /// <summary>Removes the entry with this stored name, with an admin's signature over the new manifest from <paramref name="askAdmin" />.</summary>
     ApprovalDecision Unenroll(string name, Func<string, ManifestApproval> askAdmin);
 
     /// <summary>
-    /// The line every page shows about the admin key (see <see cref="AdminKey.Line(StateDatabase)" />), or null when the method
+    /// The line every page shows about the admin keys (see <see cref="AdminKey.Line(StateDatabase)" />), or null when the method
     /// keeps no state of its own.
     /// </summary>
     string? AdminLine() => null;

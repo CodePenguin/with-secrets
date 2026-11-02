@@ -27,6 +27,8 @@ public sealed record ApprovalPrompt(string Heading, string Text);
 public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, Action<string> announce, TimeSpan? approveDelay = null)
     : IApprover
 {
+    private readonly IProofMethod method = method;
+
     public const string RequestHeading = "An agent wants to run a program with these secrets. Read all of it before you approve.";
 
     private static readonly TimeSpan DefaultApproveDelay = TimeSpan.FromSeconds(2);
@@ -56,16 +58,20 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
     }
 
     /// <summary>Asks to approve a new state: the proof signs <paramref name="manifest" /> (see <see cref="Manifest.Challenge" />).</summary>
+    /// <remarks>An admin-only passkey method then offers (and accepts) only the admin keys that are admins in the new state too.</remarks>
     public ManifestApproval AskManifest(ApprovalPrompt prompt, string manifest)
     {
-        return Serve(prompt, ReuseOffer.Off, manifest);
+        IProofMethod signing = method is PasskeyMethod passkey && Manifest.Parse(manifest, out _) is { } next ? passkey.Signing(next) : method;
+
+        return Serve(prompt, ReuseOffer.Off, manifest, signing);
     }
 
-    private ManifestApproval Serve(ApprovalPrompt prompt, ReuseOffer reuse, string? manifest)
+    private ManifestApproval Serve(ApprovalPrompt prompt, ReuseOffer reuse, string? manifest, IProofMethod? signing = null)
     {
+        IProofMethod method = signing ?? this.method;
         try
         {
-            // The text ends with the admin key's fingerprint and the time the page is made (server UTC). Both are bound with the
+            // The text ends with the admin keys' fingerprints and the time the page is made (server UTC). Both are bound with the
             // rest: a saved approval is honoured only when it was approved soon enough after this time (see GrantStore).
             List<string> lines = [.. prompt.Text.Split('\n').Select(ApprovalSummary.Clean)];
             if (method.AdminLine() is { } admin)
@@ -280,8 +286,10 @@ internal static class ApprovalPage
     /// <summary>
     /// The one inline script. It reads the data block, keeps the approve controls off for a moment, and runs the webauthn
     /// proof. The challenge is SHA-256 of the server's own bind from the data block (not anything in the proof method's
-    /// payload), the ASCII text "reuse=" and the chosen minutes (0 for Approve once). Ctrl+Enter (Cmd+Enter) is Approve once;
-    /// it does nothing while the controls are off and never picks a longer time.
+    /// payload), the ASCII text "reuse=" and the chosen minutes (0 for Approve once). It makes the challenge for every time
+    /// offered before the controls go on, so the tap starts the passkey prompt with nothing awaited first (iOS WebKit refuses
+    /// a prompt that does not start in the tap). Ctrl+Enter (Cmd+Enter) is Approve once; it does nothing while the controls
+    /// are off and never picks a longer time.
     /// </summary>
     private const string Script = """
         (function () {
@@ -296,6 +304,9 @@ internal static class ApprovalPage
             var encoder = new TextEncoder();
             var busy = false;
             var finished = false;
+            var ready = {};
+            var prepared = false;
+            var waited = false;
 
             function show(text) {
                 status.textContent = text;
@@ -383,6 +394,40 @@ internal static class ApprovalPage
                 });
             });
 
+            // The challenges, made before the controls go on, so that a tap starts the passkey prompt at once (WebKit refuses a
+            // prompt that follows an awaited step). A new state is signed as SHA-256(bind || SHA-256(manifest)); a run as
+            // SHA-256(bind || "reuse=" || minutes): one for Approve once (0) and one for each time offered.
+            function prepare() {
+                var seed = fromBase64Url(start.bind);
+                if (typeof start.manifest === "string") {
+                    return window.crypto.subtle.digest("SHA-256", encoder.encode(start.manifest)).then(function (hash) {
+                        return window.crypto.subtle.digest("SHA-256", join(seed, new Uint8Array(hash)));
+                    }).then(function (challenge) {
+                        ready.manifest = new Uint8Array(challenge);
+                    });
+                }
+                var times = [0];
+                if (reuse) {
+                    Array.prototype.forEach.call(reuse.options, function (option) {
+                        if (/^[0-9]{1,4}$/.test(option.value) && Number(option.value) > 0) {
+                            times.push(Number(option.value));
+                        }
+                    });
+                }
+                return Promise.all(times.map(function (minutes) {
+                    return window.crypto.subtle.digest("SHA-256", join(seed, encoder.encode("reuse=" + minutes))).then(function (challenge) {
+                        ready["reuse=" + minutes] = new Uint8Array(challenge);
+                    });
+                }));
+            }
+
+            function enable() {
+                if (prepared && waited && !finished && !busy) {
+                    controls(true);
+                }
+            }
+
+            // Runs in the tap: nothing is awaited before the passkey prompt.
             function approveWith(minutes) {
                 if (finished || busy || approve.disabled) {
                     return;
@@ -399,28 +444,22 @@ internal static class ApprovalPage
                     show("This page needs an https address or localhost. Nothing was approved.");
                     return;
                 }
-                var publicKey;
-                var seed;
+                var publicKey = null;
+                var challenge = typeof start.manifest === "string" ? ready.manifest : ready["reuse=" + minutes];
                 try {
                     publicKey = options();
-                    seed = fromBase64Url(start.bind);
                 } catch (error) {
+                    challenge = null;
+                }
+                if (!challenge) {
                     show("The proof data is not valid. Nothing was approved.");
                     return;
                 }
+                publicKey.challenge = challenge;
                 busy = true;
                 controls(false);
                 show("Waiting for your passkey...");
-                // A new state is signed as SHA-256(bind || SHA-256(manifest)); a run as SHA-256(bind || "reuse=" || minutes).
-                var signed = typeof start.manifest === "string"
-                    ? window.crypto.subtle.digest("SHA-256", encoder.encode(start.manifest)).then(function (hash) {
-                        return window.crypto.subtle.digest("SHA-256", join(seed, new Uint8Array(hash)));
-                    })
-                    : window.crypto.subtle.digest("SHA-256", join(seed, encoder.encode("reuse=" + minutes)));
-                signed.then(function (challenge) {
-                    publicKey.challenge = new Uint8Array(challenge);
-                    return navigator.credentials.get({ publicKey: publicKey });
-                }).then(function (credential) {
+                navigator.credentials.get({ publicKey: publicKey }).then(function (credential) {
                     var response = credential.response;
                     return JSON.stringify({
                         reuse: minutes,
@@ -487,11 +526,24 @@ internal static class ApprovalPage
                 }
             }, true);
 
+            // The controls go on after the delay and once the challenges are made (or could not be made: then a tap says so).
+            function done() {
+                prepared = true;
+                enable();
+            }
+            if (start.mode === "webauthn" && window.isSecureContext && window.crypto && window.crypto.subtle) {
+                try {
+                    prepare().then(done, done);
+                } catch (error) {
+                    done();
+                }
+            } else {
+                done();
+            }
             var delay = Number(approve.getAttribute("data-delay")) || 0;
             setTimeout(function () {
-                if (!finished && !busy) {
-                    controls(true);
-                }
+                waited = true;
+                enable();
             }, delay);
             deny.focus();
         })();

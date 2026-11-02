@@ -1,0 +1,333 @@
+using System.Text.RegularExpressions;
+
+namespace WithSecrets.Tests;
+
+/// <summary>
+/// The page scripts start every passkey prompt inside the tap (iOS WebKit refuses a prompt that follows an awaited step).
+/// <see cref="TapRule" /> checks the served scripts; the page tests check the second-step buttons.
+/// </summary>
+internal static class PageScriptTests
+{
+    public static Task Run(Action<bool, string> check)
+    {
+        Rule(check);
+        Pages(check);
+
+        return Task.CompletedTask;
+    }
+
+    /// <summary>The checker itself, on small scripts it must pass and scripts it must refuse.</summary>
+    private static void Rule(Action<bool, string> check)
+    {
+        (string Name, string Script, bool Ok)[] cases =
+        [
+            ("a prompt directly in a click handler", "b.addEventListener(\"click\", function () { navigator.credentials.get({}); });", true),
+            ("a prompt in a function called from a click handler", "function go() { return navigator.credentials.create({}); }\nb.addEventListener(\"click\", function () { go(); });", true),
+            ("a named function given as the click handler", "function go() { navigator.credentials.get({}); }\nb.addEventListener(\"click\", go);", true),
+            ("a prompt called from a keydown handler", "function go(m) { navigator.credentials.get({}); }\ndocument.addEventListener(\"keydown\", function (e) { if (e.ctrlKey) { go(0); } }, true);", true),
+            ("braces in a regex, a string and a comment", "var r = /^[0-9]{1,5}$/; var s = \"}{\"; // }\nb.addEventListener(\"click\", function () { if (r.test(s)) { return; } navigator.credentials.get({}); });", true),
+            ("a prompt after a digest, in a then callback", "b.addEventListener(\"click\", function () { crypto.subtle.digest(\"SHA-256\", x).then(function (c) { return navigator.credentials.get({}); }); });", false),
+            ("a function passed to then", "function go() { navigator.credentials.get({}); }\nb.addEventListener(\"click\", function () { p.then(go); });", false),
+            ("a function also called from a then callback", "function go() { navigator.credentials.get({}); }\nb.addEventListener(\"click\", function () { go(); });\np.then(function () { go(); });", false),
+            ("an await before the prompt", "b.addEventListener(\"click\", async function () { await x; navigator.credentials.get({}); });", false),
+            ("a prompt in a timer", "setTimeout(function () { navigator.credentials.get({}); }, 1);", false),
+            ("a prompt on an input event", "i.addEventListener(\"input\", function () { navigator.credentials.get({}); });", false),
+            ("a prompt at the top level", "navigator.credentials.get({});", false),
+            ("an arrow function (not analysed)", "b.addEventListener(\"click\", () => navigator.credentials.get({}));", false),
+        ];
+        foreach ((string name, string script, bool ok) in cases)
+        {
+            IReadOnlyList<string> found = TapRule.Violations(script);
+            check(found.Count == 0 == ok, "tap rule: " + name + (ok ? " passes" : " is refused") + " (" + string.Join("; ", found) + ")");
+        }
+    }
+
+    private static void Pages(Action<bool, string> check)
+    {
+        string approval = ApprovalPage.Build(new ApprovalPrompt("h", "t"), new ProofStart("webauthn", "{}"), "n", [1], TimeSpan.Zero, new ReuseOffer(480, 10)).Body;
+        string enroll = PasskeyRegistration.Build("laptop", "localhost", "{}", PasskeyRegistration.Script, ApprovalPage.Style, "Admin key: x").Body;
+        string firstRun = ConfigPageHtml.Build(true, ToolSettings.Defaults, "{}", AdminKey.NotSetUp).Body;
+        string gated = ConfigPageHtml.Build(false, ToolSettings.Defaults, "{}", "Admin key: x").Body;
+        string set = SetPage.Build("t", [("A_NAME", false)], new ProofStart("webauthn", "{}"), "n", [1], "k").Body;
+        foreach ((string name, string page, int prompts) in new[] { ("approval", approval, 1), ("enroll", enroll, 2), ("config", firstRun, 3), ("set", set, 1) })
+        {
+            string script = Script(page);
+            int count = Regex.Count(script, @"credentials\.(get|create)\s*\(");
+            IReadOnlyList<string> found = TapRule.Violations(script);
+            check(count == prompts && found.Count == 0, "tap rule: every passkey prompt on the " + name + " page starts in the tap (" + count + " prompts; " + string.Join("; ", found) + ")");
+        }
+
+        const string Step2 = "<button id=\"confirm\" type=\"button\" hidden disabled>Step 2 of 2: confirm with your passkey</button>";
+        check(enroll.Contains(Step2, StringComparison.Ordinal), "step 2: the enroll page has the hidden second-step button");
+        check(firstRun.Contains(Step2, StringComparison.Ordinal) && firstRun.Contains(">Step 1 of 2: save and create passkey</button>", StringComparison.Ordinal), "step 2: the first-run page has both step buttons");
+        check(!gated.Contains("id=\"confirm\"", StringComparison.Ordinal), "step 2: the settings page with an admin key has one step");
+        check(Script(enroll).Contains("Step 2 of 2: confirm with your new passkey", StringComparison.Ordinal) && Script(enroll).Contains("Step 2 of 2: confirm with your admin passkey", StringComparison.Ordinal)
+            && Script(firstRun).Contains("Step 2 of 2: confirm with your new passkey", StringComparison.Ordinal), "step 2: the scripts label the second button with the key to use");
+        foreach ((string name, string page) in new[] { ("enroll", enroll), ("config", firstRun) })
+        {
+            check(!Regex.IsMatch(page, "\\son[a-z]+=", RegexOptions.IgnoreCase), "step 2: no inline event attributes on the " + name + " page");
+        }
+
+        // The Save tap on the settings page: page data that cannot work (no or a broken bind or registration challenge) says so
+        // at once, before the "tap again" path; and the form is turned off in the tap, before the prompt, so nothing can be
+        // edited while it is open (and on again if the prompt is cancelled).
+        string config = Script(firstRun);
+        int handler = config.IndexOf("save.addEventListener(\"click\"", StringComparison.Ordinal);
+        string tap = handler < 0 ? "" : config[handler..config.IndexOf("function changed()", handler, StringComparison.Ordinal)];
+        int invalid = tap.IndexOf("The page data is not valid.", StringComparison.Ordinal);
+        int seed = tap.IndexOf("var seed = register ? start.options.challenge : start.bind;", StringComparison.Ordinal);
+        int again = tap.IndexOf("Tap the button again.", StringComparison.Ordinal);
+        int off = tap.IndexOf("inputs(false);", StringComparison.Ordinal);
+        int prompt = tap.IndexOf("navigator.credentials.create", StringComparison.Ordinal);
+        check(seed > 0 && invalid > seed && again > invalid && tap.Contains("typeof seed !== \"string\"", StringComparison.Ordinal), "settings save: the tap checks the bind or challenge and says the page data is not valid before asking for another tap");
+        check(off > again && prompt > off && tap.IndexOf("inputs(true);", prompt, StringComparison.Ordinal) > prompt, "settings save: the fields are turned off in the tap before the prompt, and on again when it is cancelled");
+        int named = tap.IndexOf("chosenName()", StringComparison.Ordinal);
+        check(named > 0 && named < prompt && tap.Contains("body.name = named.name;", StringComparison.Ordinal), "settings save: the first run reads and checks the passkey name in the tap, before the prompt, and sends it");
+        check(firstRun.Contains("<label for=\"f-key-name\">Name for this passkey</label>", StringComparison.Ordinal) && !gated.Contains("id=\"f-key-name\"", StringComparison.Ordinal), "settings page: only the first run has the name field");
+        string enrollScript = Script(enroll);
+        int create = enrollScript.IndexOf("create.addEventListener(\"click\"", StringComparison.Ordinal);
+        string createTap = create < 0 ? "" : enrollScript[create..];
+        check(createTap.IndexOf("inputs(false);", StringComparison.Ordinal) is > 0 and var lock_ && lock_ < createTap.IndexOf("navigator.credentials.create", StringComparison.Ordinal), "enroll: the name and the admin box are turned off in the tap, before the prompt");
+    }
+
+    private static string Script(string page)
+    {
+        int at = page.LastIndexOf("<script>", StringComparison.Ordinal) + "<script>".Length;
+
+        return page[at..page.IndexOf("</script>", at, StringComparison.Ordinal)];
+    }
+}
+
+/// <summary>
+/// A text check of the rule "a passkey prompt starts synchronously in a tap": every <c>credentials.get(</c> and
+/// <c>credentials.create(</c> must be inside a function that is a click or keydown handler, or a named function that is
+/// only ever called synchronously from one (directly or through other such functions), with no <c>await</c> before it.
+/// <para>
+/// Limits: it masks strings, comments and regex literals, then matches braces and <c>function</c> headers. It does not
+/// understand arrow functions or <c>async</c> (it refuses scripts that use them), aliases (<c>var f = go</c>), <c>call</c>,
+/// <c>apply</c>, <c>bind</c> or <c>eval</c>, and it trusts the event name: it cannot tell that the handler really runs in a
+/// tap. For example, <c>p.then(function () { button.click(); })</c> fires the click handler from a promise, long after any
+/// tap, and the check still passes that handler. A function used as a value anywhere (passed to <c>then</c>, a timer, an array) counts as not synchronous. It is a
+/// guard against putting a prompt back behind a promise, not a proof.
+/// </para>
+/// </summary>
+internal static class TapRule
+{
+    private sealed record Function(int Start, string? Name, int NameAt, int Open, int Close);
+
+    private static readonly Regex Header = new(@"\bfunction\b\s*([A-Za-z_$][\w$]*)?\s*\([^()]*\)\s*\{", RegexOptions.Compiled);
+    private static readonly Regex Prompt = new(@"credentials\.(get|create)\s*\(", RegexOptions.Compiled);
+    private static readonly Regex HandlerBefore = new(@"addEventListener\(\s*""(click|keydown)""\s*,\s*$", RegexOptions.Compiled);
+    private static readonly Regex NamedHandler = new(@"addEventListener\(\s*""(click|keydown)""\s*,\s*([A-Za-z_$][\w$]*)\s*[,)]", RegexOptions.Compiled);
+
+    public static IReadOnlyList<string> Violations(string script)
+    {
+        List<string> found = [];
+        string masked = Mask(script);
+        if (masked.Contains("=>", StringComparison.Ordinal) || Regex.IsMatch(masked, @"\basync\b"))
+        {
+            found.Add("the script uses an arrow or async function, which this check does not analyse");
+        }
+
+        List<Function> functions = [];
+        foreach (Match header in Header.Matches(masked))
+        {
+            int open = header.Index + header.Length - 1;
+            int close = Match(masked, open);
+            Group name = header.Groups[1];
+            functions.Add(new Function(header.Index, name.Success ? name.Value : null, name.Success ? name.Index : -1, open, close));
+        }
+
+        HashSet<int> handlerArgs = [];
+        foreach (Match handler in NamedHandler.Matches(script))
+        {
+            handlerArgs.Add(handler.Groups[2].Index);
+        }
+
+        Function? Enclosing(int at) => functions.Where(item => item.Open < at && at < item.Close).OrderByDescending(item => item.Open).FirstOrDefault();
+
+        bool AwaitBefore(Function function, int at) => Regex.IsMatch(masked[function.Open..at], @"\bawait\b");
+
+        bool InTap(Function function, HashSet<Function> visiting)
+        {
+            if (!visiting.Add(function))
+            {
+                return true;
+            }
+
+            if (function.Name is null)
+            {
+                return HandlerBefore.IsMatch(script[..function.Start]);
+            }
+
+            List<Match> uses = [.. Regex.Matches(masked, @"(?<![\w$.])" + Regex.Escape(function.Name) + @"(?![\w$])").Where(use => use.Index != function.NameAt)];
+            if (uses.Count == 0)
+            {
+                return false;
+            }
+
+            foreach (Match use in uses)
+            {
+                if (handlerArgs.Contains(use.Index))
+                {
+                    continue;
+                }
+
+                bool called = Regex.IsMatch(masked[(use.Index + use.Length)..], @"^\s*\(");
+                Function? caller = called ? Enclosing(use.Index) : null;
+                if (caller is null || AwaitBefore(caller, use.Index) || !InTap(caller, visiting))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        foreach (Match prompt in Prompt.Matches(masked))
+        {
+            int line = script[..prompt.Index].Count(c => c == '\n') + 1;
+            Function? inside = Enclosing(prompt.Index);
+            if (inside is null)
+            {
+                found.Add($"line {line}: {prompt.Value} is not inside a function");
+            }
+            else if (AwaitBefore(inside, prompt.Index))
+            {
+                found.Add($"line {line}: {prompt.Value} follows an await");
+            }
+            else if (!InTap(inside, []))
+            {
+                found.Add($"line {line}: {prompt.Value} is in {inside.Name ?? "an anonymous function"}, which does not run synchronously in a click or keydown handler");
+            }
+        }
+
+        return found;
+    }
+
+    /// <summary>The index of the brace that closes the one at <paramref name="open" /> (in masked text), or the end.</summary>
+    private static int Match(string masked, int open)
+    {
+        int depth = 0;
+        for (int i = open; i < masked.Length; i++)
+        {
+            if (masked[i] == '{')
+            {
+                depth++;
+            }
+            else if (masked[i] == '}' && --depth == 0)
+            {
+                return i;
+            }
+        }
+
+        return masked.Length;
+    }
+
+    /// <summary>The script with the insides of strings, comments and regex literals replaced by spaces; the same length.</summary>
+    private static string Mask(string script)
+    {
+        char[] masked = script.ToCharArray();
+        int i = 0;
+        void Blank(int from, int to)
+        {
+            for (int k = from; k < to && k < masked.Length; k++)
+            {
+                if (masked[k] != '\n')
+                {
+                    masked[k] = ' ';
+                }
+            }
+        }
+
+        bool RegexMayStart()
+        {
+            int k = i - 1;
+            while (k >= 0 && char.IsWhiteSpace(masked[k]))
+            {
+                k--;
+            }
+
+            if (k < 0)
+            {
+                return true;
+            }
+
+            char before = masked[k];
+            if (char.IsLetterOrDigit(before) || before is '_' or '$')
+            {
+                int end = k + 1;
+                while (k >= 0 && (char.IsLetterOrDigit(masked[k]) || masked[k] is '_' or '$'))
+                {
+                    k--;
+                }
+
+                return masked[(k + 1)..end].AsSpan() is "return" or "typeof" or "case";
+            }
+
+            return before is not (')' or ']');
+        }
+
+        while (i < script.Length)
+        {
+            char c = script[i];
+            char next = i + 1 < script.Length ? script[i + 1] : '\0';
+            if (c == '/' && next == '/')
+            {
+                int end = script.IndexOf('\n', i);
+                end = end < 0 ? script.Length : end;
+                Blank(i, end);
+                i = end;
+            }
+            else if (c == '/' && next == '*')
+            {
+                int end = script.IndexOf("*/", i + 2, StringComparison.Ordinal);
+                end = end < 0 ? script.Length : end + 2;
+                Blank(i, end);
+                i = end;
+            }
+            else if (c is '"' or '\'' or '`')
+            {
+                int k = i + 1;
+                while (k < script.Length && script[k] != c)
+                {
+                    k += script[k] == '\\' ? 2 : 1;
+                }
+
+                Blank(i + 1, k);
+                i = k + 1;
+            }
+            else if (c == '/' && RegexMayStart())
+            {
+                int k = i + 1;
+                bool inClass = false;
+                while (k < script.Length && (inClass || script[k] != '/') && script[k] != '\n')
+                {
+                    if (script[k] == '\\')
+                    {
+                        k++;
+                    }
+                    else if (script[k] == '[')
+                    {
+                        inClass = true;
+                    }
+                    else if (script[k] == ']')
+                    {
+                        inClass = false;
+                    }
+
+                    k++;
+                }
+
+                Blank(i + 1, k);
+                i = k + 1;
+            }
+            else
+            {
+                i++;
+            }
+        }
+
+        return new string(masked);
+    }
+}

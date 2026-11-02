@@ -1,8 +1,8 @@
 namespace WithSecrets;
 
 /// <summary>
-/// <c>--revoke</c>: ends every saved approval, after the admin passkey approves on the approval page (served at the first of
-/// the two targets where the admin key works). With nothing enrolled there can be no saved approval, so nothing is asked.
+/// <c>--revoke</c>: ends every saved approval, after an admin passkey approves on the approval page (served at the first of
+/// the two targets where an admin key works). With nothing enrolled there can be no saved approval, so nothing is asked.
 /// It does not change the manifest. It stops further reuse only; a program that already ran has seen its secrets.
 /// </summary>
 public static class Revocation

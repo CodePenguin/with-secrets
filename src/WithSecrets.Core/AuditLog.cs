@@ -111,6 +111,25 @@ public sealed partial class AuditLog
         return TryAppend(new Row(time, ChangeDenied, names, "", detail, entry, ""));
     }
 
+    /// <summary>
+    /// A change to the secret store ("secrets-set" or "secrets-removed"), approved by <paramref name="keyName" />, for the
+    /// store's own write transaction. Names only, never values or ciphertext.
+    /// </summary>
+    internal static Row SecretsRow(string eventName, IReadOnlyList<string> names, string detail, string keyName)
+    {
+        DateTimeOffset time = DateTimeOffset.UtcNow;
+        string entry = JsonSerializer.Serialize(new
+        {
+            time,
+            @event = eventName,
+            names,
+            detail,
+            key = keyName
+        });
+
+        return new Row(time, eventName, names, "", detail, entry, keyName);
+    }
+
     /// <summary>A change to what can approve (a key added or removed, approvals revoked), approved by <paramref name="keyName" />.</summary>
     internal static Row ChangeRow(string eventName, string detail, string keyName)
     {
@@ -341,7 +360,7 @@ public sealed partial class AuditLog
 }
 
 /// <summary>
-/// <c>--audit [--last N] [--secret NAME] [--verify]</c>: prints a header line with the admin key's fingerprint (see
+/// <c>--audit [--last N] [--secret NAME] [--verify]</c>: prints a header line with the admin keys' fingerprints (see
 /// <see cref="AdminKey" />), then recent entries, one per line: time, event, secret names, program, outcome and key name,
 /// separated by tabs. Read-only: it creates nothing. Terminal output is public, and
 /// the log holds no values, so none can appear.
@@ -361,7 +380,7 @@ public static class AuditCommand
             return RunCommand.StoreError;
         }
 
-        // The header: the admin key's fingerprint, so the person can see that the state is still the one they set up.
+        // The header: the admin keys' fingerprints, so the person can see that the state is still the one they set up.
         stdout.WriteLine(AdminKey.Line(db));
         foreach (AuditRecord row in rows)
         {

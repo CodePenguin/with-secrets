@@ -18,8 +18,8 @@ public abstract record CliCommand
     /// <summary>--revoke: a person ends every saved approval.</summary>
     public sealed record Revoke : CliCommand;
 
-    /// <summary>--enroll [--name NAME] [--local]: a person adds something that can approve runs, such as a passkey.</summary>
-    public sealed record Enroll(string? Name, bool Local = false) : CliCommand;
+    /// <summary>--enroll [--local]: a person adds something that can approve runs, such as a passkey (named on the page).</summary>
+    public sealed record Enroll(bool Local = false) : CliCommand;
 
     /// <summary>--enrolled: print what can approve runs.</summary>
     public sealed record Enrolled : CliCommand;
@@ -66,15 +66,17 @@ public static class CliArgs
         passkey, stored only after the person types the code from the page in the terminal. --config --show prints the
         settings.
 
-        A person adds a passkey with --enroll, sees them with --enrolled, and removes one with --unenroll NAME.
-        Every page, --enrolled and --audit show the admin key's fingerprint ("Admin key: ab12 cd34 ef56 7890 (NAME)").
-        Note it down; if it ever changes, state.db was replaced.
+        A person adds a passkey with --enroll (its name, and whether it is also an admin, are chosen on the page), sees
+        them with --enrolled, and removes one with --unenroll NAME (any key but the last admin key). Admin keys change the
+        state; two admin keys (laptop and phone) mean a lost device does not lock you out.
+        Every page, --enrolled and --audit list the admin keys' fingerprints ("Admins: laptop ab12 cd34 ef56 7890, phone ...").
+        Note them down; if they ever change without you, state.db was replaced.
         If baseUrl is set, add --local to use a page at http://localhost instead.
 
         A person stores secrets with --set NAME[,NAME...] and deletes them with --remove NAME[,NAME...]. Both open a web
         page and need a passkey; the terminal shows only the link and the names. Values are never typed in a terminal.
 
-        --audit prints the admin key's fingerprint, then the newest audit entries (default 20; --last N, 1 to 1000; --secret NAME for one secret): time, event,
+        --audit prints the admin keys' fingerprints, then the newest audit entries (default 20; --last N, 1 to 1000; --secret NAME for one secret): time, event,
         secret names, program, outcome and key name. Never values. --verify also checks the hash chain (exit 4 if broken).
         """;
 
@@ -89,12 +91,11 @@ public static class CliArgs
         Option<string?> set = new("--set") { Description = "A person types the values on a web page, then approves with a passkey.", HelpName = "NAME[,NAME...]" };
         Option<string?> remove = new("--remove") { Description = "A person approves on a web page, then the secrets are deleted.", HelpName = "NAME[,NAME...]" };
         Option<bool> revoke = new("--revoke") { Description = "A person ends every saved approval now (real terminal)." };
-        Option<bool> enroll = new("--enroll") { Description = "A person adds a passkey on a web page; the terminal shows the link (real terminal)." };
-        Option<string?> enrollName = new("--name") { Description = "The name of the new passkey, with --enroll. Default: passkey.", HelpName = "NAME" };
+        Option<bool> enroll = new("--enroll") { Description = "A person adds a passkey on a web page and names it there; the terminal shows the link (real terminal)." };
         Option<bool> local = new("--local") { Description = "With --enroll or --unenroll: use the page at http://localhost:<port> and ignore baseUrl." };
-        Option<bool> enrolled = new("--enrolled") { Description = "Print the admin key's fingerprint, then the passkeys that can approve runs (real terminal)." };
+        Option<bool> enrolled = new("--enrolled") { Description = "Print the admin keys' fingerprints, then the passkeys that can approve runs (real terminal)." };
         Option<string?> unenroll = new("--unenroll") { Description = "A person removes a passkey by name (real terminal).", HelpName = "NAME" };
-        Option<bool> audit = new("--audit") { Description = "Print the admin key's fingerprint, then the newest audit entries: time, event, secret names, program, outcome, key name. Never values." };
+        Option<bool> audit = new("--audit") { Description = "Print the admin keys' fingerprints, then the newest audit entries: time, event, secret names, program, outcome, key name. Never values." };
         Option<string?> last = new("--last") { Description = "With --audit: how many entries, 1 to 1000. Default: 20.", HelpName = "N" };
         Option<string?> secret = new("--secret") { Description = "With --audit: only entries that name this secret.", HelpName = "NAME" };
         Option<bool> verify = new("--verify") { Description = "With --audit: check the audit hash chain and report the first broken entry (exit 4)." };
@@ -115,7 +116,6 @@ public static class CliArgs
         root.Options.Add(remove);
         root.Options.Add(revoke);
         root.Options.Add(enroll);
-        root.Options.Add(enrollName);
         root.Options.Add(local);
         root.Options.Add(enrolled);
         root.Options.Add(unenroll);
@@ -150,17 +150,9 @@ public static class CliArgs
         string? setName = result.GetValue(set);
         string? removeName = result.GetValue(remove);
         bool enrollRequested = result.GetValue(enroll);
-        string? nameText = result.GetValue(enrollName);
         string? unenrollName = result.GetValue(unenroll);
         bool localRequested = result.GetValue(local);
         bool runRequested = names.Length > 0 || reasonText is not null || separator >= 0;
-
-        if (nameText is not null && !enrollRequested)
-        {
-            error = "--name goes only with --enroll.";
-
-            return null;
-        }
 
         if (localRequested && !enrollRequested && unenrollName is null)
         {
@@ -228,7 +220,7 @@ public static class CliArgs
             return result.GetValue(list) ? new CliCommand.List()
                 : setName is not null ? new CliCommand.Set(changeNames!)
                 : removeName is not null ? new CliCommand.Remove(changeNames!)
-                : enrollRequested ? new CliCommand.Enroll(nameText, localRequested)
+                : enrollRequested ? new CliCommand.Enroll(localRequested)
                 : result.GetValue(enrolled) ? new CliCommand.Enrolled()
                 : unenrollName is not null ? new CliCommand.Unenroll(unenrollName, localRequested)
                 : new CliCommand.Revoke();
@@ -267,22 +259,10 @@ public static class CliArgs
         return command is CliCommand.Revoke or CliCommand.Enroll or CliCommand.Enrolled or CliCommand.Unenroll or CliCommand.Config { Show: false };
     }
 
-    /// <summary>
-    /// The same, knowing whether the Dotenvx store file exists. The first --set creates it, and Dotenvx then asks where to
-    /// keep its private key (without a terminal it writes a .env.keys file), so the first --set needs a terminal too. Later
-    /// --set runs keep their behaviour: the values are typed on the page.
-    /// </summary>
-    public static bool NeedsTerminal(CliCommand command, bool storeExists)
-    {
-        return NeedsTerminal(command) || (command is CliCommand.Set && !storeExists);
-    }
-
     /// <summary>What a command that needs a terminal says when it has none.</summary>
-    public static string NoTerminalMessage(CliCommand command)
+    public static string NoTerminalMessage(CliCommand _)
     {
-        return command is CliCommand.Set
-            ? "The secret store does not exist yet. The first --set creates it, and Dotenvx asks where to keep its private key. Run with-secrets --set in your own terminal, not the agent's."
-            : "This command needs a real terminal. It is for people, not agents.";
+        return "This command needs a real terminal. It is for people, not agents.";
     }
 
     /// <summary>Parses a run: --secrets NAME[,NAME...] --reason TEXT -- PROGRAM [ARGS...]. Returns null and a message for anything else.</summary>

@@ -64,15 +64,22 @@ internal static class GrantTests
         check(AdminKey.Fingerprint(two.Record("localhost", "a").PublicKey) != first, "fingerprint: another key has another fingerprint");
 
         StateDatabase db = StateDatabase.InFolder(Path.Combine(root, "fp"));
-        check(AdminKey.Line(db) == "Admin key: not set up yet", "fingerprint: an empty state has no admin key yet (" + AdminKey.Line(db) + ")");
-        TestState.Add(db, one.Record("localhost", "laptop"));
-        check(AdminKey.Line(db) == "Admin key: " + Expected(one) + " (laptop)", "fingerprint: the line names the fingerprint and the key name (" + AdminKey.Line(db) + ")");
-        TestState.Add(db, two.Record("localhost", "phone"));
-        check(AdminKey.Line(db) == "Admin key: " + Expected(one) + " (laptop)", "fingerprint: another key added does not change the admin fingerprint");
+        check(AdminKey.Line(db) == "Admins: not set up yet", "fingerprint: an empty state has no admin key yet (" + AdminKey.Line(db) + ")");
+        DateTimeOffset when = new(2026, 11, 2, 9, 0, 0, TimeSpan.Zero);
+        TestState.Add(db, one.Record("localhost", "laptop") with { Created = when });
+        check(AdminKey.Line(db) == "Admins: laptop " + Expected(one), "fingerprint: the line names the key and its fingerprint (" + AdminKey.Line(db) + ")");
+        TestState.Add(db, two.Record("localhost", "phone") with { Created = when.AddMinutes(1) });
+        check(AdminKey.Line(db) == "Admins: laptop " + Expected(one), "fingerprint: a key that is not an admin is not listed");
+
+        // Every admin is listed, oldest first: a second admin changes the line.
+        using TestAuthenticator three = TestAuthenticator.ES256();
+        TestState.Add(db, three.Record("localhost", "tablet") with { Created = when.AddMinutes(2) }, admin: true);
+        check(AdminKey.Line(db) == "Admins: laptop " + Expected(one) + ", tablet " + Expected(three), "fingerprint: the line lists every admin (" + AdminKey.Line(db) + ")");
 
         StateDatabase other = StateDatabase.InFolder(Path.Combine(root, "fp-other"));
         TestState.Add(other, two.Record("localhost", "laptop"));
         check(AdminKey.Line(other) != AdminKey.Line(db) && AdminKey.Line(other).Contains(Expected(two), StringComparison.Ordinal), "fingerprint: a state with another admin key shows another fingerprint");
+        check(AdminKey.Line(Manifest.First(one.Record("localhost", "a" + (char)0x202E + "b"), ToolSettings.Defaults)) == "Admins: a□b " + Expected(one), "fingerprint: the names in the line are cleaned");
     }
 
     /// <summary>A text as the approval page binds it: the request id line and the page issued line.</summary>
@@ -96,7 +103,7 @@ internal static class GrantTests
         TestState.Add(db, admin.Record("localhost", "laptop"));
         GrantStore grants = new(db, () => clock);
 
-        check(StateDatabase.SchemaVersion == 5, "grant store: the schema version is 5");
+        check(StateDatabase.SchemaVersion == 7, "grant store: the schema version is 7");
         check(grants.Add("K", 10, Evidence(admin, Text("K", issued), 10)), "grant store: a grant with the assertion over its request and time is saved");
         GrantLookup found = grants.Find("K", 480);
         check(found.Grant is { Minutes: 10, KeyName: "laptop" } grant && grant.Approved == clock && grant.Expires == clock.AddMinutes(10) && found.Rejected is null, "grant store: it is honoured, names the key from the manifest, and lasts exactly 10 minutes");
@@ -282,8 +289,8 @@ internal static class GrantTests
             Row row = Single(db);
             check(row.Minutes == 10 && row.Expires - row.Approved == 10 * TimeSpan.TicksPerMinute && row.CredentialId == TestAuthenticator.Encode(key.CredentialId), "grant chain: the row has the minutes, the times and the approving credential");
             check(row.Text.Split('\n').Contains(ApprovalSummary.RequestIdPrefix + row.Key) && row.Text.Split('\n').Any(line => line.StartsWith(ApprovalSummary.IssuedPrefix, StringComparison.Ordinal))
-                && row.Text.Split('\n').Contains("Admin key: " + Expected(key) + " (chain-key)"), "grant chain: the bound text has the request id, the page issued time and the admin key (" + row.Text + ")");
-            check(page.Contains(System.Net.WebUtility.HtmlEncode(ApprovalSummary.RequestIdPrefix + row.Key), StringComparison.Ordinal) && page.Contains("Admin key: " + Expected(key) + " (chain-key)", StringComparison.Ordinal), "grant chain: the page shows the request id and the admin key");
+                && row.Text.Split('\n').Contains("Admins: chain-key " + Expected(key)), "grant chain: the bound text has the request id, the page issued time and the admin key (" + row.Text + ")");
+            check(page.Contains(System.Net.WebUtility.HtmlEncode(ApprovalSummary.RequestIdPrefix + row.Key), StringComparison.Ordinal) && page.Contains("Admins: chain-key " + Expected(key), StringComparison.Ordinal), "grant chain: the page shows the request id and the admin key");
             check(!row.Text.Contains(Secret, StringComparison.Ordinal) && !page.Contains(Secret, StringComparison.Ordinal), "grant chain: no secret value in the bound text or the page");
 
             (code, stdout, stderr, announced, _) = await Drive(client, db, folder, program, key, offer, null, () => DateTimeOffset.UtcNow.AddMinutes(9));
@@ -375,7 +382,7 @@ internal static class GrantTests
     /// Runs <paramref name="call" />, answers approval pages with <paramref name="admin" /> while <paramref name="approve" /> says
     /// so, and returns every other page body (each then cancelled with /deny).
     /// </summary>
-    private static async Task<List<string>> Served(HttpClient client, Func<Action<string>, object?> call, TestAuthenticator admin, int approve = 0)
+    internal static async Task<List<string>> Served(HttpClient client, Func<Action<string>, object?> call, TestAuthenticator admin, int approve = 0)
     {
         System.Collections.Concurrent.BlockingCollection<string> queue = [];
         Task<object?> task = Task.Run(() => call(text => queue.Add(text)));
@@ -412,11 +419,17 @@ internal static class GrantTests
         using TestAuthenticator admin = TestAuthenticator.ES256();
         using TestAuthenticator phone = TestAuthenticator.ES256();
         StateDatabase db = StateDatabase.InFolder(Path.Combine(root, "pages"));
-        TestState.Add(db, admin.Record("localhost", "laptop"));
-        TestState.Add(db, phone.Record("localhost", "phone"));
-        string line = "Admin key: " + Expected(admin) + " (laptop)";
+        using TestAuthenticator second = TestAuthenticator.ES256();
+        DateTimeOffset when = new(2026, 11, 2, 9, 0, 0, TimeSpan.Zero);
+        TestState.Add(db, admin.Record("localhost", "laptop") with { Created = when });
+        TestState.Add(db, phone.Record("localhost", "phone") with { Created = when.AddMinutes(1) });
+        TestState.Add(db, second.Record("localhost", "desk") with { Created = when.AddMinutes(2) }, admin: true);
+
+        // Every page lists every admin.
+        string line = "Admins: laptop " + Expected(admin) + ", desk " + Expected(second);
         ApprovalSettings settings = new("passkey", null, 0, TimeSpan.FromSeconds(10));
-        MemoryStore secrets = new(new Dictionary<string, string> { ["OLD_NAME"] = Secret });
+        SecretStore secrets = new(db, new MemoryKeys());
+        SecretStoreTests.Put(secrets, new Dictionary<string, string> { ["OLD_NAME"] = Secret });
 
         (EnrollmentTarget, EnrollmentTarget) Targets(Action<string> announce)
         {
@@ -429,8 +442,8 @@ internal static class GrantTests
         (string Name, Func<Action<string>, object?> Call, int Approve)[] kinds =
         [
             ("run approval", announce => Targets(announce).Item1.Approver.Request(new ApprovalRequest("tool", "/bin/tool", [], "/work", "r", ["OLD_NAME"], null, null, null, "REQ")), 0),
-            ("enroll approval", announce => new Enrollment(Targets(announce).Item1, Targets(announce).Item2, announce).Enroll("tablet"), 0),
-            ("enroll page", announce => new Enrollment(Targets(announce).Item1, Targets(announce).Item2, announce).Enroll("tablet"), 1),
+            ("enroll approval", announce => new Enrollment(Targets(announce).Item1, Targets(announce).Item2, announce).Enroll(), 0),
+            ("enroll page", announce => new Enrollment(Targets(announce).Item1, Targets(announce).Item2, announce).Enroll(), 1),
             ("unenroll", announce => new Enrollment(Targets(announce).Item1, Targets(announce).Item2, announce).Unenroll("phone"), 0),
             ("set", announce => new SecretEntry(Targets(announce).Item1, Targets(announce).Item2, secrets, new AuditLog(db), announce).Set(["NEW_NAME"]), 0),
             ("remove", announce => new SecretEntry(Targets(announce).Item1, Targets(announce).Item2, secrets, new AuditLog(db), announce).Remove(["OLD_NAME"]), 0),
@@ -443,6 +456,15 @@ internal static class GrantTests
             string page = pages.Count > approve ? pages[approve] : "";
             check(page.Contains(line, StringComparison.Ordinal), "fingerprint page: " + name + ": shows \"" + line + "\" (" + pages.Count + " pages)");
             check(!page.Contains(Secret, StringComparison.Ordinal), "fingerprint page: " + name + ": no secret value");
+            if (name != "enroll page")
+            {
+                // Pages that change the state offer every admin key and no other; a run approval offers every key.
+                int at = page.IndexOf("\"payload\":\"", StringComparison.Ordinal);
+                string payload = at < 0 ? "" : page[at..page.IndexOf("\",\"", at, StringComparison.Ordinal)];
+                bool admins = payload.Contains(TestAuthenticator.Encode(admin.CredentialId), StringComparison.Ordinal) && payload.Contains(TestAuthenticator.Encode(second.CredentialId), StringComparison.Ordinal);
+                bool other = payload.Contains(TestAuthenticator.Encode(phone.CredentialId), StringComparison.Ordinal);
+                check(admins && other == (name == "run approval"), "fingerprint page: " + name + ": allowCredentials lists " + (name == "run approval" ? "every key" : "every admin key and no other"));
+            }
         }
 
         // The first run, before any key: the page says the admin key is not set up yet.
@@ -454,21 +476,21 @@ internal static class GrantTests
 
             return new SettingsPage(empty, target, target, announce, () => null).Run();
         }, admin);
-        check(first.Count == 1 && first[0].Contains("Admin key: not set up yet", StringComparison.Ordinal), "fingerprint page: the first-run settings page says the admin key is not set up yet");
+        check(first.Count == 1 && first[0].Contains("Admins: not set up yet", StringComparison.Ordinal), "fingerprint page: the first-run settings page says the admin key is not set up yet");
     }
 
     /// <summary>
     /// Runs --enroll through both pages: the admin approves, then <paramref name="creator" /> registers, the admin signs the
     /// new manifest on the registration page, and the code is typed. With <paramref name="deny" /> the approval page is denied.
     /// </summary>
-    private static async Task<ApprovalDecision?> Enroll(HttpClient client, StateDatabase db, TestAuthenticator admin, TestAuthenticator creator, string name, bool deny)
+    internal static async Task<ApprovalDecision?> Enroll(HttpClient client, StateDatabase db, TestAuthenticator admin, TestAuthenticator creator, string name, bool deny, bool makeAdmin = false, List<string>? replies = null)
     {
         System.Collections.Concurrent.BlockingCollection<string> queue = [];
         System.Collections.Concurrent.BlockingCollection<string?> codes = [];
         ApprovalSettings settings = new("passkey", null, 0, TimeSpan.FromSeconds(10));
         PasskeyMethod method = new(new PasskeyStore(db), settings, () => codes.TryTake(out string? code, TimeSpan.FromSeconds(15)) ? code : null);
         EnrollmentTarget target = EnrollmentTarget.For(method, new WebApprover(method, settings, text => queue.Add(text), TimeSpan.Zero));
-        Task<ApprovalDecision> task = Task.Run(() => new Enrollment(target, target, text => queue.Add(text), new AuditLog(db)).Enroll(name));
+        Task<ApprovalDecision> task = Task.Run(() => new Enrollment(target, target, text => queue.Add(text), new AuditLog(db)).Enroll());
         DateTime stop = DateTime.UtcNow.AddSeconds(25);
         while (!task.IsCompleted && DateTime.UtcNow < stop)
         {
@@ -498,8 +520,14 @@ internal static class GrantTests
             (_, string page) = TestState.Get(client, url);
             using JsonDocument options = JsonDocument.Parse(Between(page, "<script type=\"application/json\" id=\"options\">", "</script>"));
             byte[] challenge = Base64Url.DecodeFromChars(options.RootElement.GetProperty("challenge").GetString()!);
-            (_, string reply) = TestState.Post(client, url + "/create", creator.Attest(challenge, origin, link.IdnHost, name));
-            reply = TestState.SignStep(client, url, origin, reply);
+            // The page sends the "Also make this key an admin" box with the registration.
+            string registration = creator.Attest(challenge, origin, link.IdnHost, name);
+            registration = registration[..^1] + ",\"name\":" + JsonSerializer.Serialize(name) + ",\"admin\":" + (makeAdmin ? "true" : "false") + "}";
+            (_, string reply) = TestState.Post(client, url + "/create", registration);
+            replies?.Add(page);
+            replies?.Add(reply);
+            reply = TestState.SignStep(client, url, origin, reply, admin);
+            replies?.Add(reply);
             using JsonDocument done = JsonDocument.Parse(reply);
             codes.Add(done.RootElement.TryGetProperty("code", out JsonElement code) ? code.GetString() : null);
         }
@@ -520,7 +548,8 @@ internal static class GrantTests
         TestState.Add(db, admin.Record("localhost", "laptop"));
         TestState.Add(db, phone.Record("localhost", "phone"));
         ApprovalSettings settings = new("passkey", null, 0, TimeSpan.FromSeconds(10));
-        MemoryStore secrets = new(new Dictionary<string, string> { ["OLD_NAME"] = Secret });
+        SecretStore secrets = new(db, new MemoryKeys());
+        SecretStoreTests.Put(secrets, new Dictionary<string, string> { ["OLD_NAME"] = Secret });
 
         (EnrollmentTarget, EnrollmentTarget) Targets(Action<string> announce)
         {
@@ -535,7 +564,8 @@ internal static class GrantTests
         check(enrolled is { Approved: false } && Rows(db).Count(row => row.Event == AuditLog.ChangeDenied && row.Detail.StartsWith("--enroll: ", StringComparison.Ordinal)) == 1, "audit events: a denied --enroll is a change-denied row (" + enrolled?.Detail + ")");
         enrolled = await Enroll(client, db, admin, tablet, "tablet", false);
         AuditRecord? added = Rows(db).SingleOrDefault(row => row.Event == "key-enrolled");
-        check(enrolled is { Approved: true } && added is { KeyName: "laptop" } && added.Detail.Contains("\"tablet\"", StringComparison.Ordinal) && added.Detail.Contains("admin passkey laptop verified", StringComparison.Ordinal), "audit events: --enroll writes key-enrolled with the new key and the approving admin (" + enrolled?.Detail + "; " + added?.Detail + ")");
+        check(enrolled is { Approved: true } && added is { KeyName: "laptop" } && added.Detail.Contains("\"tablet\"", StringComparison.Ordinal) && added.Detail.Contains("admin passkey laptop verified", StringComparison.Ordinal)
+            && added.Detail.Contains("(approves runs only)", StringComparison.Ordinal), "audit events: --enroll writes key-enrolled with the new key, that it is not an admin, and the approving admin (" + enrolled?.Detail + "; " + added?.Detail + ")");
 
         // --unenroll: a denial, then a success.
         Func<Action<string>, object?> unenroll = announce => new Enrollment(Targets(announce).Item1, Targets(announce).Item2, announce, new AuditLog(db)).Unenroll("phone");
@@ -574,29 +604,36 @@ internal static class GrantTests
 
     private static void Listings(Action<bool, string> check, string root)
     {
-        // The first --set (no Dotenvx store yet) needs a terminal; later ones keep today's behaviour.
+        // The first --set no longer asks anything in the terminal (the store key pair is made in memory and kept in the key
+        // custody), so --set and --remove never need a terminal of their own; --revoke still does.
         CliCommand set = CliArgs.Parse(["--set", "A_NAME"], out _)!;
         CliCommand remove = CliArgs.Parse(["--remove", "A_NAME"], out _)!;
-        check(CliArgs.NeedsTerminal(set, false) && !CliArgs.NeedsTerminal(set, true), "first --set: needs a terminal only when the store does not exist yet");
-        check(!CliArgs.NeedsTerminal(remove, false) && CliArgs.NeedsTerminal(CliArgs.Parse(["--revoke"], out _)!, true), "first --set: --remove is unchanged; --revoke still needs a terminal");
-        check(CliArgs.NoTerminalMessage(set).Contains("your own terminal", StringComparison.Ordinal) && CliArgs.NoTerminalMessage(set).Contains("does not exist yet", StringComparison.Ordinal), "first --set: the message says to run it in your own terminal");
+        check(!CliArgs.NeedsTerminal(set) && !CliArgs.NeedsTerminal(remove) && CliArgs.NeedsTerminal(CliArgs.Parse(["--revoke"], out _)!), "first --set: --set and --remove need no terminal; --revoke does");
+        check(CliArgs.NoTerminalMessage(set) == CliArgs.NoTerminalMessage(new CliCommand.Revoke()) && !CliArgs.NoTerminalMessage(set).Contains("Dotenvx", StringComparison.Ordinal), "first --set: there is no Dotenvx key prompt message any more");
 
         using TestAuthenticator admin = TestAuthenticator.ES256();
         StateDatabase db = StateDatabase.InFolder(Path.Combine(root, "listings"));
-        TestState.Add(db, admin.Record("localhost", "laptop"));
-        string line = "Admin key: " + Expected(admin) + " (laptop)";
+        using TestAuthenticator phone = TestAuthenticator.ES256();
+        using TestAuthenticator desk = TestAuthenticator.ES256();
+        DateTimeOffset when = new(2026, 11, 2, 9, 0, 0, TimeSpan.Zero);
+        TestState.Add(db, admin.Record("localhost", "laptop") with { Created = when });
+        TestState.Add(db, phone.Record("localhost", "phone") with { Created = when.AddMinutes(1) }, admin: true);
+        TestState.Add(db, desk.Record("localhost", "desk") with { Created = when.AddMinutes(2) });
+        string line = "Admins: laptop " + Expected(admin) + ", phone " + Expected(phone);
         new AuditLog(db).TryWrite("approved", new ApprovalRequest("tool", "/bin/tool", [], "/work", "r", ["NAME_A"]), "passkey laptop verified");
 
         StringWriter audit = new();
-        check(AuditCommand.Run(db, new CliCommand.Audit(20, null, false), audit, new StringWriter()) == 0 && audit.ToString().Split('\n')[0].TrimEnd('\r') == line, "fingerprint --audit: the header line is the admin key (" + audit + ")");
+        check(AuditCommand.Run(db, new CliCommand.Audit(20, null, false), audit, new StringWriter()) == 0 && audit.ToString().Split('\n')[0].TrimEnd('\r') == line, "fingerprint --audit: the header line lists every admin key (" + audit + ")");
         StringWriter enrolled = new();
         StringWriter errors = new();
         EnrolledListing.Write(db, new PasskeyMethod(new PasskeyStore(db), new ApprovalSettings("passkey", null, 0, TimeSpan.FromSeconds(5))).Enrolled(), enrolled, errors);
-        string[] lines = enrolled.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries);
-        check(lines.Length == 2 && lines[0].TrimEnd('\r') == line && lines[1].StartsWith("laptop\tlocalhost\t", StringComparison.Ordinal) && lines[1].TrimEnd('\r').EndsWith("\tadmin", StringComparison.Ordinal), "fingerprint --enrolled: the header line, then one line per key (" + enrolled + ")");
+        string[] lines = [.. enrolled.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(item => item.TrimEnd('\r'))];
+        check(lines.Length == 4 && lines[0] == line && lines[1].StartsWith("laptop\tlocalhost\t", StringComparison.Ordinal) && lines[1].EndsWith("\tadmin", StringComparison.Ordinal)
+            && lines[2].StartsWith("phone\tlocalhost\t", StringComparison.Ordinal) && lines[2].EndsWith("\tadmin", StringComparison.Ordinal)
+            && lines[3].StartsWith("desk\tlocalhost\t", StringComparison.Ordinal) && !lines[3].EndsWith("\tadmin", StringComparison.Ordinal), "fingerprint --enrolled: the header line lists every admin, then one line per key, admins marked (" + enrolled + ")");
 
         StateDatabase empty = StateDatabase.InFolder(Path.Combine(root, "listings-empty"));
         StringWriter none = new();
-        check(AuditCommand.Run(empty, new CliCommand.Audit(20, null, false), none, new StringWriter()) == 0 && none.ToString().StartsWith("Admin key: not set up yet", StringComparison.Ordinal) && !File.Exists(empty.FilePath), "fingerprint --audit: an empty store says not set up yet and creates nothing");
+        check(AuditCommand.Run(empty, new CliCommand.Audit(20, null, false), none, new StringWriter()) == 0 && none.ToString().StartsWith("Admins: not set up yet", StringComparison.Ordinal) && !File.Exists(empty.FilePath), "fingerprint --audit: an empty store says not set up yet and creates nothing");
     }
 }

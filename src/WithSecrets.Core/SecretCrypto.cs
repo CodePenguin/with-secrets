@@ -41,6 +41,17 @@ internal static class SecretCrypto
     }
 
     /// <summary>
+    /// The bind of the manifest the set page signs: the page's bind followed by SHA-256(ct). The one passkey assertion is over
+    /// <see cref="Manifest.Challenge" /> of this and the manifest text, that is SHA-256(bind || SHA-256(ct) || SHA-256(manifest)),
+    /// so it covers both the values the page sent and the hashes of the ciphertexts the program made from them. The manifest
+    /// is stored with this bind, so it verifies at every read like any other.
+    /// </summary>
+    public static byte[] ManifestBind(byte[] bind, byte[] ct)
+    {
+        return [.. bind, .. SHA256.HashData(ct)];
+    }
+
+    /// <summary>
     /// Decrypts what the page sent and returns the plaintext (UTF-8 JSON). Throws <see cref="CryptographicException" /> on any
     /// failure: bad base64url, an epk that is not a 65-byte uncompressed P-256 point, a wrong iv length, a wrong key or tag.
     /// </summary>

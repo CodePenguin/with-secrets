@@ -4,7 +4,7 @@
 
 ## Dotenvx for .NET
 
-Packages: `Dotenvx.Core`, `Dotenvx.Primitives`, `Dotenvx.Providers` (https://github.com/CodePenguin/dotnet-dotenvx), a .NET port of dotenvx (https://github.com/dotenvx/dotenvx). License: BSD-3-Clause.
+Packages: `Dotenvx.Primitives`, `Dotenvx.Providers` (https://github.com/CodePenguin/dotnet-dotenvx), a .NET port of dotenvx (https://github.com/dotenvx/dotenvx). License: BSD-3-Clause.
 
 ```
 BSD 3-Clause License
@@ -283,7 +283,6 @@ a legal notice, here is a blessing:
 
 - `System.CommandLine` 2.0.0 (https://github.com/dotnet/command-line-api)
 - `Microsoft.Data.Sqlite` and `Microsoft.Data.Sqlite.Core` 10.0.14 (https://github.com/dotnet/efcore)
-- `Microsoft.Extensions.Configuration`, `Configuration.Abstractions`, `DependencyInjection.Abstractions`, `FileSystemGlobbing`, `Logging.Abstractions`, `Primitives` 10.0.0 (https://github.com/dotnet/runtime)
 - The .NET runtime and base class libraries, including ASP.NET Core (Kestrel) and `System.Formats.Cbor`, which are part of the shared framework (https://github.com/dotnet/runtime, https://github.com/dotnet/aspnetcore)
 
 License: MIT. The runtime also carries notices for the third-party code inside it: https://github.com/dotnet/runtime/blob/main/THIRD-PARTY-NOTICES.TXT

@@ -29,7 +29,9 @@ public static class ApprovalSummary
     {
         StringBuilder text = new();
         text.Append("Allow an agent to use secrets?").Append('\n');
-        text.Append("Secrets: ").Append(string.Join(", ", request.SecretNames)).Append('\n');
+        // Each name with its source, such as "DB_URL (global)", when the request says where it comes from.
+        text.Append("Secrets: ").Append(string.Join(", ", request.SecretNames.Select(name =>
+            request.Sources is not null && request.Sources.TryGetValue(name, out string? source) ? name + " (" + Clean(source) + ")" : name))).Append('\n');
         text.Append("Run: ").Append(Clean(CommandLine(request.ResolvedProgram, request.Arguments))).Append('\n');
         foreach (string link in request.Links ?? [])
         {

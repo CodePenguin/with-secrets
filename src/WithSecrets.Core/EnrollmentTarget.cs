@@ -15,7 +15,7 @@ public sealed record EnrollmentTarget(IProofMethod Method, WebApprover Approver,
     }
 
     /// <summary>
-    /// The same place for a change to the state: a passkey method there accepts only the admin key, on its pages and its
+    /// The same place for a change to the state: a passkey method there accepts only admin keys, on its pages and its
     /// approval page alike. Other methods are returned as they are.
     /// </summary>
     public EnrollmentTarget Admin()

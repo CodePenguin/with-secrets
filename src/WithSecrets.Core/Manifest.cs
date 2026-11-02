@@ -14,39 +14,60 @@ public sealed record ManifestKey(string Id, string Name, string PublicKey, int A
 }
 
 /// <summary>
-/// The one signed description of what the tool trusts: every enrolled key (exactly one of them the admin) and every setting,
-/// with a version that goes up by one with each change. It is stored as its canonical JSON text with the admin key's assertion
-/// over <see cref="Challenge" /> of that text (see <see cref="SignedManifest" />), and keys and settings are read only from it.
+/// The one signed description of what the tool trusts: every enrolled key (at least one of them an admin), the secret store's
+/// public key and the hash of every stored secret, and every setting, with a version that goes up by one with each change. It
+/// is stored as its canonical JSON text with an admin key's assertion over <see cref="Challenge" /> of that text (see
+/// <see cref="SignedManifest" />), and keys, the store key, the secret hashes and settings are read only from it.
 /// <para>
 /// The canonical text is exactly
-/// <c>{"v":N,"keys":[{"id":S,"name":S,"pub":S,"alg":N,"rp":S,"created":S,"admin":true|false},...],"settings":SETTINGS}</c>: this
-/// member order, no white space, keys sorted by id (ordinal), numbers as plain invariant integers, strings written as
-/// <see cref="ToolSettings.Canonical" /> writes them (only <c>"</c> and <c>\</c> escaped, U+007F and up as <c>\uXXXX</c>),
-/// <c>created</c> in the round-trip ("O") format and SETTINGS the canonical settings JSON. Sign counts are not in it.
+/// <c>{"v":N,"keys":[{"id":S,"name":S,"pub":S,"alg":N,"rp":S,"created":S,"admin":true|false},...],"store":S,"secrets":{NAME:HASH,...},"settings":SETTINGS}</c>:
+/// this member order, no white space, keys sorted by id (ordinal), secrets sorted by name (ordinal), numbers as plain invariant
+/// integers, strings written as <see cref="ToolSettings.Canonical" /> writes them (only <c>"</c> and <c>\</c> escaped, U+007F
+/// and up as <c>\uXXXX</c>), <c>created</c> in the round-trip ("O") format and SETTINGS the canonical settings JSON. Sign counts
+/// are not in it. <see cref="Store" /> is the store's public key (Dotenvx, 66 lower-case hex digits) or empty before the first
+/// secret; each HASH is <see cref="SecretStore.Hash" /> of that secret's stored ciphertext (64 lower-case hex digits). Anyone
+/// with the public key can make a valid ciphertext, so a row is trusted only when it matches its signed hash.
 /// </para>
 /// </summary>
-public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, ToolSettings Settings)
+public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, ToolSettings Settings, string Store, IReadOnlyDictionary<string, string> Secrets)
 {
     private static readonly JsonDocumentOptions Strict = new() { AllowDuplicateProperties = false };
 
-    /// <summary>The one admin key, or null when there is not exactly one.</summary>
-    public ManifestKey? Admin => Keys.Count(key => key.Admin) == 1 ? Keys.Single(key => key.Admin) : null;
+    private static readonly IReadOnlyDictionary<string, string> NoSecrets = new SortedDictionary<string, string>(StringComparer.Ordinal);
+
+    /// <summary>A manifest with no store key and no secrets.</summary>
+    public Manifest(long version, IReadOnlyList<ManifestKey> keys, ToolSettings settings) : this(version, keys, settings, "", NoSecrets)
+    {
+    }
+
+    /// <summary>True when the key with this id is an admin key here.</summary>
+    public bool IsAdmin(string id) => Keys.Any(key => key.Admin && key.Id == id);
+
+    /// <summary>The name of the key with this id, or null.</summary>
+    public string? NameOf(string id) => Keys.FirstOrDefault(key => key.Id == id)?.Name;
 
     /// <summary>The first manifest: the first key, which is the admin, and the settings.</summary>
     public static Manifest First(PasskeyRecord admin, ToolSettings settings) => new(1, [ManifestKey.From(admin, true)], settings);
 
-    /// <summary>The next version with <paramref name="key" /> added as a key that only approves runs.</summary>
-    public Manifest WithKey(PasskeyRecord key) => Next([.. Keys, ManifestKey.From(key, false)], Settings);
+    /// <summary>The admin keys, oldest first (then by id).</summary>
+    public IReadOnlyList<ManifestKey> Admins => [.. Keys.Where(key => key.Admin).OrderBy(key => key.Created).ThenBy(key => key.Id, StringComparer.Ordinal)];
+
+    /// <summary>The next version with <paramref name="key" /> added: an admin key, or (the default) a key that only approves runs.</summary>
+    public Manifest WithKey(PasskeyRecord key, bool admin = false) => Next([.. Keys, ManifestKey.From(key, admin)], Settings, Store, Secrets);
 
     /// <summary>The next version without the key with this Id.</summary>
-    public Manifest WithoutKey(string id) => Next([.. Keys.Where(key => key.Id != id)], Settings);
+    public Manifest WithoutKey(string id) => Next([.. Keys.Where(key => key.Id != id)], Settings, Store, Secrets);
 
     /// <summary>The next version with these settings.</summary>
-    public Manifest WithSettings(ToolSettings settings) => Next(Keys, settings);
+    public Manifest WithSettings(ToolSettings settings) => Next(Keys, settings, Store, Secrets);
 
-    private Manifest Next(IEnumerable<ManifestKey> keys, ToolSettings settings) => new(Version + 1, [.. keys.OrderBy(key => key.Id, StringComparer.Ordinal)], settings);
+    /// <summary>The next version with this store public key and exactly these secret hashes (by name).</summary>
+    public Manifest WithSecrets(string store, IReadOnlyDictionary<string, string> secrets) => Next(Keys, Settings, store, secrets);
 
-    /// <summary>What the admin key signs: SHA-256(bind || SHA-256(UTF-8 of the manifest text)).</summary>
+    private Manifest Next(IEnumerable<ManifestKey> keys, ToolSettings settings, string store, IReadOnlyDictionary<string, string> secrets)
+        => new(Version + 1, [.. keys.OrderBy(key => key.Id, StringComparer.Ordinal)], settings, store, new SortedDictionary<string, string>(secrets.ToDictionary(), StringComparer.Ordinal));
+
+    /// <summary>What an admin key signs: SHA-256(bind || SHA-256(UTF-8 of the manifest text)).</summary>
     public static byte[] Challenge(byte[] bind, string text)
     {
         return SHA256.HashData([.. bind, .. SHA256.HashData(Encoding.UTF8.GetBytes(text))]);
@@ -76,10 +97,23 @@ public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, Too
             text.Append(",\"admin\":").Append(key.Admin ? "true" : "false").Append('}');
         }
 
-        return text.Append("],\"settings\":").ToString();
+        text.Append("],\"store\":");
+        ToolSettings.Quote(text, Store);
+        text.Append(",\"secrets\":{");
+        first = true;
+        foreach (KeyValuePair<string, string> secret in Secrets.OrderBy(item => item.Key, StringComparer.Ordinal))
+        {
+            text.Append(first ? "" : ",");
+            first = false;
+            ToolSettings.Quote(text, secret.Key);
+            text.Append(':');
+            ToolSettings.Quote(text, secret.Value);
+        }
+
+        return text.Append("},\"settings\":").ToString();
     }
 
-    /// <summary>Null when the manifest may be stored, else why not: one admin, valid unique keys, valid settings.</summary>
+    /// <summary>Null when the manifest may be stored, else why not: an admin, valid unique keys, a valid store key and secret hashes, valid settings.</summary>
     public string? Problem()
     {
         if (Version < 1)
@@ -87,9 +121,9 @@ public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, Too
             return "the version is below 1";
         }
 
-        if (Keys.Count == 0 || Admin is null)
+        if (!Keys.Any(key => key.Admin))
         {
-            return "the manifest does not have exactly one admin key";
+            return "the manifest has no admin key";
         }
 
         if (Keys.Select(key => key.Id).Distinct(StringComparer.Ordinal).Count() != Keys.Count)
@@ -115,8 +149,34 @@ public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, Too
             }
         }
 
+        if (Store.Length > 0 && !IsHex(Store, 66))
+        {
+            return "the store key is not valid";
+        }
+
+        if (Secrets.Count > 0 && Store.Length == 0)
+        {
+            return "secrets without a store key";
+        }
+
+        if (!Secrets.Keys.SequenceEqual(Secrets.Keys.Order(StringComparer.Ordinal)))
+        {
+            return "the secrets are not sorted by name";
+        }
+
+        foreach (KeyValuePair<string, string> secret in Secrets)
+        {
+            if (!SecretNames.IsValid(secret.Key) || !IsHex(secret.Value, 64))
+            {
+                return "a secret hash is not valid";
+            }
+        }
+
         return Settings.Problem();
     }
+
+    /// <summary>Exactly <paramref name="length" /> lower-case hex digits.</summary>
+    private static bool IsHex(string value, int length) => value.Length == length && value.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     /// <summary>The manifest in <paramref name="text" />, or null and why not. The text must be exactly the canonical form of a valid manifest.</summary>
     public static Manifest? Parse(string text, out string? error)
@@ -127,9 +187,32 @@ public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, Too
             JsonElement root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("v", out JsonElement v) || !v.TryGetInt64(out long version)
                 || !root.TryGetProperty("keys", out JsonElement keys) || keys.ValueKind != JsonValueKind.Array
-                || !root.TryGetProperty("settings", out JsonElement settingsJson) || settingsJson.ValueKind != JsonValueKind.Object)
+                || !root.TryGetProperty("settings", out JsonElement settingsJson) || settingsJson.ValueKind != JsonValueKind.Object
+                || Text(root, "store") is not { } store
+                || !root.TryGetProperty("secrets", out JsonElement secretsJson) || secretsJson.ValueKind != JsonValueKind.Object)
             {
-                error = "the manifest does not have a version, keys and settings";
+                error = "the manifest does not have a version, keys, a store key, secrets and settings";
+
+                return null;
+            }
+
+            // Kept in the order of the text, so text out of order fails the canonical check below.
+            List<KeyValuePair<string, string>> secrets = [];
+            foreach (JsonProperty secret in secretsJson.EnumerateObject())
+            {
+                if (secret.Value.ValueKind != JsonValueKind.String)
+                {
+                    error = "a secret hash in the manifest is not valid";
+
+                    return null;
+                }
+
+                secrets.Add(new(secret.Name, secret.Value.GetString()!));
+            }
+
+            if (!secrets.Select(item => item.Key).SequenceEqual(secrets.Select(item => item.Key).Order(StringComparer.Ordinal)))
+            {
+                error = "the secrets are not sorted by name";
 
                 return null;
             }
@@ -160,7 +243,7 @@ public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, Too
                 return null;
             }
 
-            Manifest manifest = new(version, list, settings);
+            Manifest manifest = new(version, list, settings, store, new SortedDictionary<string, string>(secrets.ToDictionary(StringComparer.Ordinal), StringComparer.Ordinal));
             error = manifest.Problem();
             if (error is not null)
             {
@@ -191,15 +274,15 @@ public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, Too
 }
 
 /// <summary>
-/// The admin key's short fingerprint, which every page, <c>--enrolled</c> and <c>--audit</c> show so that a replaced admin key
-/// (a state.db written by someone else) is visible to the person. It is the first 8 bytes of SHA-256 of the admin public key
-/// bytes as the manifest stores them (the COSE key, decoded from base64url), as four groups of four lower-case hex digits,
-/// for example <c>ab12 cd34 ef56 7890</c>. It is not secret.
+/// The admin keys' short fingerprints, which every page, <c>--enrolled</c> and <c>--audit</c> show so that a replaced or added
+/// admin key (a state.db written by someone else) is visible to the person. A fingerprint is the first 8 bytes of SHA-256 of
+/// the public key bytes as the manifest stores them (the COSE key, decoded from base64url), as four groups of four lower-case
+/// hex digits, for example <c>ab12 cd34 ef56 7890</c>. It is not secret.
 /// </summary>
 public static class AdminKey
 {
     /// <summary>What every page shows before any key is enrolled.</summary>
-    public const string NotSetUp = "Admin key: not set up yet";
+    public const string NotSetUp = "Admins: not set up yet";
 
     /// <summary>The fingerprint of a public key as the manifest stores it (base64url).</summary>
     public static string Fingerprint(string publicKey)
@@ -209,33 +292,61 @@ public static class AdminKey
         return string.Join(' ', hex[..4], hex[4..8], hex[8..12], hex[12..]);
     }
 
-    /// <summary>"Admin key: ab12 cd34 ef56 7890 (NAME)", or <see cref="NotSetUp" /> without a manifest.</summary>
+    /// <summary>"NAME ab12 cd34 ef56 7890" for one key; the name is cleaned.</summary>
+    public static string Entry(string name, string publicKey) => ApprovalSummary.Clean(name) + " " + Fingerprint(publicKey);
+
+    /// <summary>"Admins: NAME ab12 cd34 ef56 7890, NAME ...", every admin oldest first, or <see cref="NotSetUp" /> without a manifest.</summary>
     public static string Line(Manifest? manifest)
     {
-        return manifest?.Admin is { } admin ? $"Admin key: {Fingerprint(admin.PublicKey)} ({ApprovalSummary.Clean(admin.Name)})" : NotSetUp;
+        return manifest is null || manifest.Admins.Count == 0 ? NotSetUp : "Admins: " + string.Join(", ", manifest.Admins.Select(key => Entry(key.Name, key.PublicKey)));
     }
 
     /// <summary>The line for the verified state in <paramref name="db" />; a state that cannot be read says so.</summary>
     public static string Line(StateDatabase db)
     {
-        return db.TryManifest(out Manifest? manifest, out _) ? Line(manifest) : "Admin key: cannot be read (the state failed verification)";
+        return db.TryManifest(out Manifest? manifest, out _) ? Line(manifest) : "Admins: cannot be read (the state failed verification)";
     }
 }
 
 /// <summary>
-/// A manifest text with the admin assertion over it: <paramref name="Proof" /> is the assertion JSON
+/// A manifest text with an admin assertion over it: <paramref name="Proof" /> is the assertion JSON
 /// (<c>{"id","authenticatorData","clientDataJSON","signature"}</c>, base64url), made over
 /// <see cref="Manifest.Challenge" /> of <paramref name="Bind" /> and <paramref name="Text" />.
 /// </summary>
 public sealed record SignedManifest(string Text, byte[] Bind, string Proof)
 {
+    /// <summary>The credential id of the key that signed, or null when the proof has none.</summary>
+    public string? SignerId
+    {
+        get
+        {
+            try
+            {
+                using System.Text.Json.JsonDocument document = System.Text.Json.JsonDocument.Parse(Proof);
+
+                return document.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object && document.RootElement.TryGetProperty("id", out System.Text.Json.JsonElement id)
+                    && id.ValueKind == System.Text.Json.JsonValueKind.String ? id.GetString() : null;
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                return null;
+            }
+        }
+    }
+
     /// <summary>
-    /// The check made every time the state is read: the text parses as a valid manifest, and the assertion verifies with the
-    /// public key of the manifest's own admin key (the signature, the challenge and type in the client data, user presence
-    /// and verification). The page origin, the rpId hash and the sign count were checked when it was made and are not checked
-    /// again. Null and why not when it fails.
+    /// The check made every time the state is read: the text parses as a valid manifest, the key that signed (by the id in
+    /// the assertion) is an admin key of this manifest, and the assertion verifies with that key (the signature, the challenge
+    /// and type in the client data, user presence and verification). The page origin, the rpId hash and the sign count were
+    /// checked when it was made and are not checked again. Null and why not when it fails.
     /// </summary>
-    public Manifest? Verify(out string? error)
+    public Manifest? Verify(out string? error) => Verify(null, out error);
+
+    /// <summary>
+    /// The same, and with <paramref name="authority" /> (the stored manifest this one replaces) the key that signed must
+    /// also be an admin key there, and the assertion must verify with the key as stored there too.
+    /// </summary>
+    public Manifest? Verify(Manifest? authority, out string? error)
     {
         Manifest? manifest = Manifest.Parse(Text, out error);
         if (manifest is null)
@@ -243,12 +354,31 @@ public sealed record SignedManifest(string Text, byte[] Bind, string Proof)
             return null;
         }
 
-        AssertionResult result = WebAuthn.VerifyStored(manifest.Admin!.Record(0), Manifest.Challenge(Bind, Text), Proof);
-        if (!result.Ok)
+        string? signer = SignerId;
+        if (authority is not null && (signer is null || !authority.IsAdmin(signer)))
         {
-            error = "the manifest signature does not verify (" + result.Detail + ")";
+            error = "the key that signed it is not an admin key of the current state";
 
             return null;
+        }
+
+        if (signer is null || !manifest.IsAdmin(signer))
+        {
+            error = authority is null ? "the key that signed it is not an admin key in it"
+                : "the key that signed it would not be an admin key of the new state; approve with another admin key";
+
+            return null;
+        }
+
+        foreach (Manifest by in authority is null ? [manifest] : new[] { authority, manifest })
+        {
+            AssertionResult result = WebAuthn.VerifyStored(by.Keys.Single(key => key.Id == signer).Record(0), Manifest.Challenge(Bind, Text), Proof);
+            if (!result.Ok)
+            {
+                error = "the manifest signature does not verify (" + result.Detail + ")";
+
+                return null;
+            }
         }
 
         return manifest;

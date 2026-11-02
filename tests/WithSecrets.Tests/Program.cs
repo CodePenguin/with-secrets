@@ -44,40 +44,15 @@ internal sealed class EditingApprover(string file) : IApprover
     }
 }
 
-internal sealed class MemoryStore(Dictionary<string, string> values) : ISecretStore
+/// <summary>A secret source in memory, for runs that do not need the signed store (that one is tested in <see cref="SecretStoreTests" />).</summary>
+internal sealed class MemoryStore(Dictionary<string, string> values) : ISecretSource
 {
-    /// <summary>Every Set and Remove, in order, as "set:NAME" and "remove:NAME". Names only.</summary>
-    public List<string> Calls { get; } = [];
-
-    /// <summary>The Set call (counted from 1) that throws instead of storing.</summary>
-    public int? FailOnSet { get; init; }
-
-    /// <summary>Runs at the start of every Set, before anything is stored.</summary>
-    public Action? BeforeSet { get; init; }
+    public string Label => SecretStore.GlobalLabel;
 
     public IReadOnlyList<string> ListNames() => values.Keys.ToList();
 
-    public IReadOnlyDictionary<string, string> GetValues(IReadOnlyCollection<string> names)
-        => names.ToDictionary(name => name, name => values[name]);
-
-    public void Set(string name, string value)
-    {
-        Calls.Add("set:" + name);
-        BeforeSet?.Invoke();
-        if (FailOnSet == Calls.Count(call => call.StartsWith("set:", StringComparison.Ordinal)))
-        {
-            throw new IOException("the test store failed");
-        }
-
-        values[name] = value;
-    }
-
-    public bool Remove(string name)
-    {
-        Calls.Add("remove:" + name);
-
-        return values.Remove(name);
-    }
+    public SecretValues GetValues(IReadOnlyCollection<string> names)
+        => new(names.ToDictionary(name => name, name => Encoding.UTF8.GetBytes(values[name]), StringComparer.Ordinal));
 }
 
 internal static class Program
@@ -322,6 +297,9 @@ internal static class Program
         StateDatabaseTests.Run(Check).GetAwaiter().GetResult();
         ConfigTests.Run(Check).GetAwaiter().GetResult();
         GrantTests.Run(Check).GetAwaiter().GetResult();
+        PageScriptTests.Run(Check).GetAwaiter().GetResult();
+        AdminKeysTests.Run(Check).GetAwaiter().GetResult();
+        SecretStoreTests.Run(Check).GetAwaiter().GetResult();
 
         Directory.Delete(temp, true);
         Console.WriteLine($"{_passed} passed, {_failed} failed");
