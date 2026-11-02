@@ -6,6 +6,9 @@ namespace WithSecrets;
 /// <summary>What the command line asks for. Exactly one of these per call.</summary>
 public abstract record CliCommand
 {
+    /// <summary>--port N: where the one-use page listens for this call, in place of the port setting. Null: use the setting.</summary>
+    public int? Port { get; init; }
+
     /// <summary>--list: print the secret names.</summary>
     public sealed record List : CliCommand;
 
@@ -55,6 +58,10 @@ public static class CliArgs
         The user approves the request. Then PROGRAM runs with only those secrets as environment variables, and its output is
         redacted. Write -- before the program. Use --list to see the names.
 
+        Saved approvals do not apply while the secret store is protected by a passkey PRF (the only kind of store): every run
+        asks, and the approval page offers only Approve once. The rest of this paragraph applies only to a store without that
+        protection (none exists today).
+
         On the approval page the user picks Approve once, or Approve for a time (10 minutes, 1 hour, 4 hours or 8 hours, up
         to the reuseMaxMinutes setting: default 480, 10 to 1440; reuseMinutes is the time the list starts on). A time-limited
         approval covers the same secrets, program, script, and folder, whatever the other arguments, until it ends: the same
@@ -76,6 +83,10 @@ public static class CliArgs
         A person stores secrets with --set NAME[,NAME...] and deletes them with --remove NAME[,NAME...]. Both open a web
         page and need a passkey; the terminal shows only the link and the names. Values are never typed in a terminal.
 
+        --port N (1 to 65535) with --set, --remove, --revoke, --enroll, --unenroll, --config or a run makes that call's web page listen
+        on port N instead of the port setting (random free port if the setting is 0). It is not saved. If N is in use the call fails.
+        Use it to forward the page over ssh: ssh -L N:localhost:N host.
+
         --audit prints the admin keys' fingerprints, then the newest audit entries (default 20; --last N, 1 to 1000; --secret NAME for one secret): time, event,
         secret names, program, outcome and key name. Never values. --verify also checks the hash chain (exit 4 if broken).
         """;
@@ -83,6 +94,25 @@ public static class CliArgs
     /// <summary>Returns the command, or null and an error message when the arguments are wrong.</summary>
     public static CliCommand? Parse(IReadOnlyList<string> args, out string error)
     {
+        CliCommand? command = ParseCommand(args, out int? port, out error);
+        if (command is null || port is null)
+        {
+            return command;
+        }
+
+        if (command is CliCommand.List or CliCommand.Enrolled or CliCommand.Audit or CliCommand.Config { Show: true })
+        {
+            error = "--port goes only with a command that opens a web page: --set, --remove, --revoke, --enroll, --unenroll, --config, or a run.";
+
+            return null;
+        }
+
+        return command with { Port = port };
+    }
+
+    private static CliCommand? ParseCommand(IReadOnlyList<string> args, out int? portNumber, out string error)
+    {
+        portNumber = null;
         int separator = IndexOfSeparator(args);
         List<string> head = args.Count == 0 ? ["--help"] : [.. separator < 0 ? args : args.Take(separator)];
         List<string> tail = separator < 0 ? [] : [.. args.Skip(separator + 1)];
@@ -101,6 +131,7 @@ public static class CliArgs
         Option<bool> verify = new("--verify") { Description = "With --audit: check the audit hash chain and report the first broken entry (exit 4)." };
         Option<bool> config = new("--config") { Description = "A person changes the settings on a web page with a passkey; with nothing enrolled, sets up the first passkey (real terminal)." };
         Option<bool> show = new("--show") { Description = "With --config: print the settings and their values (anywhere)." };
+        Option<string?> port = new("--port") { Description = "Where the one-use web page listens for this call, 1 to 65535, in place of the port setting (nothing is saved). If it is in use, the call fails. For ssh -L.", HelpName = "N" };
         Option<string[]> secrets = new("--secrets")
         {
             Description = "Names of the secrets to give the program, separated by commas. Write every name. There is no option for all secrets.",
@@ -125,6 +156,7 @@ public static class CliArgs
         root.Options.Add(verify);
         root.Options.Add(config);
         root.Options.Add(show);
+        root.Options.Add(port);
         root.Options.Add(secrets);
         root.Options.Add(reason);
 
@@ -179,6 +211,18 @@ public static class CliArgs
             error = "--show goes only with --config.";
 
             return null;
+        }
+
+        if (result.GetValue(port) is { } portText)
+        {
+            if (!int.TryParse(portText, NumberStyles.None, CultureInfo.InvariantCulture, out int parsed) || parsed < 1 || parsed > ToolSettings.MaxPort)
+            {
+                error = $"--port takes a number from 1 to {ToolSettings.MaxPort}.";
+
+                return null;
+            }
+
+            portNumber = parsed;
         }
 
         int modes = (auditRequested ? 1 : 0) + (result.GetValue(list) ? 1 : 0) + (setName is not null ? 1 : 0) + (removeName is not null ? 1 : 0) + (result.GetValue(revoke) ? 1 : 0)

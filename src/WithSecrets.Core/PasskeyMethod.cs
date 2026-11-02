@@ -52,6 +52,9 @@ public sealed class PasskeyMethod(PasskeyStore store, ApprovalSettings settings,
             rpId,
             allowCredentials = keys.Select(item => new { id = item.Id, type = "public-key" }).ToArray(),
             timeout = (long)settings.Timeout.TotalMilliseconds,
+
+            // The salt of every key's slot (public): a page that asks the passkey for its PRF output uses these, one per credential.
+            salts = keys.Where(item => item.Slot is not null).ToDictionary(item => item.Id, item => item.Slot!.Salt),
         });
 
         return new ProofStart("webauthn", payload);
@@ -106,11 +109,11 @@ public sealed class PasskeyMethod(PasskeyStore store, ApprovalSettings settings,
     /// stored after an admin key signed the new manifest and the person typed the code from the page. Without a code reader
     /// nothing starts. <paramref name="askAdmin" /> asks an admin key on another page when none works at this page's host.
     /// </summary>
-    public ApprovalDecision Enroll(string name, Action<string> announce, Func<string, ManifestApproval>? askAdmin = null)
+    public ApprovalDecision Enroll(string name, Action<string> announce, Func<string, ManifestApproval>? askAdmin = null, Unlock? approval = null)
     {
         return readCode is null
             ? ApprovalDecision.Deny("this enrollment has no way to ask for the code from the page")
-            : PasskeyRegistration.Run(store, settings, name, announce, readCode, askAdmin);
+            : PasskeyRegistration.Run(store, settings, name, announce, readCode, askAdmin, approval);
     }
 
     /// <summary>
@@ -180,7 +183,7 @@ public sealed class PasskeyMethod(PasskeyStore store, ApprovalSettings settings,
     }
 
     /// <summary>The "id" of the response, or null when the response is not a JSON object with a string id.</summary>
-    private static string? ResponseId(string response)
+    internal static string? ResponseId(string response)
     {
         try
         {

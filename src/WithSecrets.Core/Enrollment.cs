@@ -102,14 +102,22 @@ public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget 
             }
 
             string text = $"Add a {Method.Id} for {command.Approver.Origin}. Its name is chosen on the next page.";
-            ApprovalDecision asked = approval.Approver.Ask(new ApprovalPrompt(Heading, text));
-            if (!asked.Approved)
+            // The admin passkey that approves also releases the master key (WebAuthn PRF), so that the new key can get its slot.
+            ApprovalDecision asked = approval.Approver.Ask(new ApprovalPrompt(Heading, text), unlock: true);
+            try
             {
-                return asked;
-            }
+                if (!asked.Approved)
+                {
+                    return asked;
+                }
 
-            return Method.Enroll(Suggest(entries.Select(item => item.Name)), announce,
-                manifest => approval.Approver.AskManifest(new ApprovalPrompt(Heading, SignText(manifest, entries)), manifest));
+                return Method.Enroll(Suggest(entries.Select(item => item.Name)), announce,
+                    manifest => approval.Approver.AskManifest(new ApprovalPrompt(Heading, SignText(manifest, entries)), manifest), asked.Unlock);
+            }
+            finally
+            {
+                asked.Unlock?.Dispose();
+            }
         }
         catch (ProofUnavailableException failure)
         {

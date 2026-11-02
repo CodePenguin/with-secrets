@@ -32,11 +32,26 @@ internal sealed class TestAuthenticator : IDisposable
 
     public int Alg { get; }
 
+    /// <summary>The authenticator's PRF secret (what a real one keeps inside: the per-credential hmac-secret).</summary>
+    public byte[] PrfSecret { get; } = RandomNumberGenerator.GetBytes(32);
+
+    /// <summary>False plays an authenticator without the PRF extension: it returns no PRF result at create or at get.</summary>
+    public bool SupportsPrf { get; set; } = true;
+
+    /// <summary>
+    /// What the PRF extension returns for <paramref name="salt" />: HMAC-SHA256(secret, "WebAuthn PRF" || 0x00 || salt), or
+    /// null when this authenticator has no PRF. The same value comes at create and at get.
+    /// </summary>
+    public byte[]? Prf(byte[] salt)
+    {
+        return SupportsPrf ? HMACSHA256.HashData(PrfSecret, (byte[])[.. Encoding.ASCII.GetBytes("WebAuthn PRF"), 0, .. salt]) : null;
+    }
+
     public byte[] CredentialId { get; }
 
-    public static TestAuthenticator ES256() => new(ECDsa.Create(ECCurve.NamedCurves.nistP256), null, -7);
+    public static TestAuthenticator ES256(bool prf = true) => new(ECDsa.Create(ECCurve.NamedCurves.nistP256), null, -7) { SupportsPrf = prf };
 
-    public static TestAuthenticator RS256() => new(null, RSA.Create(2048), -257);
+    public static TestAuthenticator RS256(bool prf = true) => new(null, RSA.Create(2048), -257) { SupportsPrf = prf };
 
     public static string Encode(byte[] bytes) => Base64Url.EncodeToString(bytes);
 
@@ -109,9 +124,18 @@ internal sealed class TestAuthenticator : IDisposable
         return (parameters.Q.X!, parameters.Q.Y!);
     }
 
-    public PasskeyRecord Record(string rpId, string name)
+    public PasskeyRecord Record(string rpId, string name, byte[]? masterKey = null)
     {
-        return new PasskeyRecord(Encode(CredentialId), Encode(CoseKey()), Alg, rpId, name, DateTimeOffset.UtcNow, 0);
+        return new PasskeyRecord(Encode(CredentialId), Encode(CoseKey()), Alg, rpId, name, DateTimeOffset.UtcNow, 0, false, Slot(masterKey ?? KeyVault.NewMasterKey()));
+    }
+
+    /// <summary>A slot of <paramref name="masterKey" /> for this credential, as enrollment makes it; null for an authenticator without PRF.</summary>
+    public KeySlot? Slot(byte[] masterKey)
+    {
+        byte[] salt = KeyVault.NewSalt();
+        byte[]? output = Prf(salt);
+
+        return output is null ? null : new KeySlot(Encode(salt), KeyVault.WrapSlot(masterKey, output, CredentialId, salt));
     }
 
     /// <summary>Returns the JSON the page posts after navigator.credentials.get: id, authenticatorData, clientDataJSON, signature.</summary>

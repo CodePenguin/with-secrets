@@ -103,7 +103,7 @@ internal static class GrantTests
         TestState.Add(db, admin.Record("localhost", "laptop"));
         GrantStore grants = new(db, () => clock);
 
-        check(StateDatabase.SchemaVersion == 7, "grant store: the schema version is 7");
+        check(StateDatabase.SchemaVersion == 8, "grant store: the schema version is 8");
         check(grants.Add("K", 10, Evidence(admin, Text("K", issued), 10)), "grant store: a grant with the assertion over its request and time is saved");
         GrantLookup found = grants.Find("K", 480);
         check(found.Grant is { Minutes: 10, KeyName: "laptop" } grant && grant.Approved == clock && grant.Expires == clock.AddMinutes(10) && found.Rejected is null, "grant store: it is honoured, names the key from the manifest, and lasts exactly 10 minutes");
@@ -428,7 +428,7 @@ internal static class GrantTests
         // Every page lists every admin.
         string line = "Admins: laptop " + Expected(admin) + ", desk " + Expected(second);
         ApprovalSettings settings = new("passkey", null, 0, TimeSpan.FromSeconds(10));
-        SecretStore secrets = new(db, new MemoryKeys());
+        SecretStore secrets = new(db);
         SecretStoreTests.Put(secrets, new Dictionary<string, string> { ["OLD_NAME"] = Secret });
 
         (EnrollmentTarget, EnrollmentTarget) Targets(Action<string> announce)
@@ -520,8 +520,9 @@ internal static class GrantTests
             (_, string page) = TestState.Get(client, url);
             using JsonDocument options = JsonDocument.Parse(Between(page, "<script type=\"application/json\" id=\"options\">", "</script>"));
             byte[] challenge = Base64Url.DecodeFromChars(options.RootElement.GetProperty("challenge").GetString()!);
+            TestState.Note(options.RootElement);
             // The page sends the "Also make this key an admin" box with the registration.
-            string registration = creator.Attest(challenge, origin, link.IdnHost, name);
+            string registration = TestState.Register(creator, challenge, origin, link.IdnHost, name);
             registration = registration[..^1] + ",\"name\":" + JsonSerializer.Serialize(name) + ",\"admin\":" + (makeAdmin ? "true" : "false") + "}";
             (_, string reply) = TestState.Post(client, url + "/create", registration);
             replies?.Add(page);
@@ -548,7 +549,7 @@ internal static class GrantTests
         TestState.Add(db, admin.Record("localhost", "laptop"));
         TestState.Add(db, phone.Record("localhost", "phone"));
         ApprovalSettings settings = new("passkey", null, 0, TimeSpan.FromSeconds(10));
-        SecretStore secrets = new(db, new MemoryKeys());
+        SecretStore secrets = new(db);
         SecretStoreTests.Put(secrets, new Dictionary<string, string> { ["OLD_NAME"] = Secret });
 
         (EnrollmentTarget, EnrollmentTarget) Targets(Action<string> announce)

@@ -36,9 +36,10 @@ public interface IProofMethod
     /// <summary>
     /// Person-facing setup for this method. <paramref name="name" /> is the name the setup suggests; the person chooses the
     /// name there. <paramref name="askAdmin" /> asks an admin to sign a new manifest text on an approval page, when the
-    /// method cannot ask for it on its own page.
+    /// method cannot ask for it on its own page. <paramref name="approval" /> is what the approving admin passkey released (WebAuthn
+    /// PRF) at the approval that came first: it opens the master key, which the new key's slot wraps. The caller disposes it.
     /// </summary>
-    ApprovalDecision Enroll(string name, Action<string> announce, Func<string, ManifestApproval>? askAdmin = null);
+    ApprovalDecision Enroll(string name, Action<string> announce, Func<string, ManifestApproval>? askAdmin = null, Unlock? approval = null);
 
     /// <summary>Removes the entry with this stored name, with an admin's signature over the new manifest from <paramref name="askAdmin" />.</summary>
     ApprovalDecision Unenroll(string name, Func<string, ManifestApproval> askAdmin);

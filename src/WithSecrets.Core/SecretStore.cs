@@ -18,8 +18,17 @@ public interface ISecretSource
     /// <summary>The names of the secrets. Decrypts nothing.</summary>
     IReadOnlyList<string> ListNames();
 
-    /// <summary>Decrypts only the named values. Throws when a name is missing or the source cannot be trusted.</summary>
-    SecretValues GetValues(IReadOnlyCollection<string> names);
+    /// <summary>
+    /// True when the values can be opened only with what the approving passkey released (WebAuthn PRF, see <see cref="Unlock" />):
+    /// then every run is approved by a passkey tap, and a saved approval (which has no PRF output) is never offered or used.
+    /// </summary>
+    bool NeedsUnlock => false;
+
+    /// <summary>
+    /// Decrypts only the named values. <paramref name="unlock" /> is what the approving passkey released, or null when the
+    /// approval released nothing. Throws when a name is missing, the source cannot be trusted, or the key cannot be opened.
+    /// </summary>
+    SecretValues GetValues(IReadOnlyCollection<string> names, Unlock? unlock);
 }
 
 /// <summary>
@@ -107,27 +116,6 @@ public sealed class DotenvxCipher : ISecretCipher
     public string Derive(string privateKey) => Primitives.Derive(privateKey);
 }
 
-/// <summary>
-/// Custody of the store's private key, by its public key. The tool keeps it in Windows Credential Manager, where Dotenvx's
-/// native provider finds it; Task 18 replaces this with keys wrapped by passkey PRF.
-/// </summary>
-public interface IStoreKeys
-{
-    /// <summary>Null when keys can be kept here; else why not (for example, not Windows), so a first --set refuses before any page.</summary>
-    string? Unavailable { get; }
-
-    void Save(string publicKey, string privateKey);
-
-    /// <summary>True when custody already holds a key for <paramref name="publicKey" />.</summary>
-    bool Exists(string publicKey);
-
-    /// <summary>Removes the key for <paramref name="publicKey" />; used only for a key the same --set saved and could not use.</summary>
-    void Delete(string publicKey);
-
-    /// <summary>The private key for <paramref name="publicKey" />. Throws when there is none.</summary>
-    string PrivateKey(string publicKey);
-}
-
 /// <summary>The secret store cannot be used: it failed verification, a name is missing, or a value cannot be decrypted. Names only, never values.</summary>
 public sealed class SecretStoreException(string message, Exception? inner = null) : Exception(message, inner);
 
@@ -136,11 +124,12 @@ public sealed class SecretStoreException(string message, Exception? inner = null
 /// manifest holds the store's public key and <see cref="Hash" /> of every ciphertext, because anyone with the public key can
 /// write a valid ciphertext: a row is used only when it matches its signed hash, and a row without a hash, or a hash without a
 /// row, is a store that failed verification. Every read checks every row's hash (no decrypt); <see cref="GetValues" /> then
-/// decrypts only the requested rows, with the private key from <see cref="IStoreKeys" /> passed as a parameter (never an
+/// decrypts only the requested rows, with the private key opened from the manifest's vault by what an approving passkey released
+/// (WebAuthn PRF, see <see cref="KeyVault" />), held in memory for the call and passed as a parameter (never an
 /// environment variable or a file). Changes go through <see cref="TryApply" />: the rows and the new manifest (signed by an
 /// admin) are one transaction that re-checks the version it replaces.
 /// </summary>
-public sealed class SecretStore(StateDatabase db, IStoreKeys keys, ISecretCipher? cipher = null) : ISecretSource
+public sealed class SecretStore(StateDatabase db, ISecretCipher? cipher = null) : ISecretSource
 {
     public const string GlobalLabel = "global";
 
@@ -158,7 +147,16 @@ public sealed class SecretStore(StateDatabase db, IStoreKeys keys, ISecretCipher
 
     public IReadOnlyList<string> ListNames() => Verified((manifest, _, _) => (IReadOnlyList<string>)[.. manifest?.Secrets.Keys ?? []]);
 
-    public SecretValues GetValues(IReadOnlyCollection<string> names)
+    /// <summary>The key to the values is released by the approving passkey at every run, so a saved approval cannot stand in for it.</summary>
+    public bool NeedsUnlock => true;
+
+    /// <summary>
+    /// Decrypts only the named values. <paramref name="unlock" /> is what the approving passkey released (WebAuthn PRF): it
+    /// opens that key's slot (the master key), which opens the vault (the store's private key). Without it, or when it opens
+    /// nothing, nothing is decrypted. The private key, the master key and the slot key are zeroed before this returns; the
+    /// hex text of the private key is a .NET string for the decrypt call and cannot be wiped.
+    /// </summary>
+    public SecretValues GetValues(IReadOnlyCollection<string> names, Unlock? unlock)
     {
         if (names.Any(name => !SecretNames.IsValid(name)) || names.Distinct(StringComparer.Ordinal).Count() != names.Count)
         {
@@ -166,7 +164,7 @@ public sealed class SecretStore(StateDatabase db, IStoreKeys keys, ISecretCipher
         }
 
         // Only the requested rows are read for decryption, after every row was checked against its signed hash.
-        (string store, Dictionary<string, string> picked) = Verified((manifest, connection, transaction) =>
+        (Manifest? current, Dictionary<string, string> picked) = Verified((manifest, connection, transaction) =>
         {
             Dictionary<string, string> rows = new(StringComparer.Ordinal);
             foreach (string name in names)
@@ -175,17 +173,32 @@ public sealed class SecretStore(StateDatabase db, IStoreKeys keys, ISecretCipher
                     ?? throw new SecretStoreException(name + " is not in the store");
             }
 
-            return (manifest?.Store ?? "", rows);
+            return (manifest, rows);
         });
 
+        if (unlock is null || current is null)
+        {
+            throw new SecretStoreException("the approval did not release the secret store key (a passkey with PRF must approve), so nothing was decrypted");
+        }
+
+        byte[]? master = null;
+        byte[]? keyBytes = null;
         string privateKey;
         try
         {
-            privateKey = keys.PrivateKey(store);
+            master = KeyVault.OpenMaster(current, unlock);
+            keyBytes = KeyVault.UnwrapVault(current.Vault, master, current.Store);
+            privateKey = Encoding.UTF8.GetString(keyBytes);
         }
-        catch (Exception failure)
+        catch (Exception)
         {
-            throw new SecretStoreException("the private key of the secret store cannot be read (" + failure.GetType().Name + ")", failure);
+            // Nothing about why: not which key, not which input.
+            throw new SecretStoreException("the secret store key cannot be opened with this approval, so nothing was decrypted");
+        }
+        finally
+        {
+            SecretValues.Clear(master);
+            SecretValues.Clear(keyBytes);
         }
 
         Dictionary<string, byte[]> values = new(StringComparer.Ordinal);
@@ -218,15 +231,6 @@ public sealed class SecretStore(StateDatabase db, IStoreKeys keys, ISecretCipher
 
     internal (string PublicKey, string PrivateKey) NewKeyPair() => _cipher.NewKeyPair();
 
-    /// <summary>Null when the key custody works here, else why not.</summary>
-    internal string? KeyCustodyProblem => keys.Unavailable;
-
-    internal void SaveKey(string publicKey, string privateKey) => keys.Save(publicKey, privateKey);
-
-    internal bool KeyExists(string publicKey) => keys.Exists(publicKey);
-
-    internal void DeleteKey(string publicKey) => keys.Delete(publicKey);
-
     internal string Encrypt(string value, string publicKey) => _cipher.Encrypt(value, publicKey);
 
     /// <summary>
@@ -239,7 +243,7 @@ public sealed class SecretStore(StateDatabase db, IStoreKeys keys, ISecretCipher
     /// The next manifest: <paramref name="current" /> with <paramref name="publicKey" />, without <paramref name="removes" />,
     /// and with the hash of every ciphertext in <paramref name="rows" /> (new or replaced).
     /// </summary>
-    public static Manifest Next(Manifest current, string publicKey, IReadOnlyDictionary<string, string> rows, IReadOnlyCollection<string> removes)
+    public static Manifest Next(Manifest current, string publicKey, IReadOnlyDictionary<string, string> rows, IReadOnlyCollection<string> removes, string? vault = null)
     {
         Dictionary<string, string> secrets = new(current.Secrets.Where(item => !removes.Contains(item.Key)), StringComparer.Ordinal);
         foreach ((string name, string ciphertext) in rows)
@@ -247,7 +251,7 @@ public sealed class SecretStore(StateDatabase db, IStoreKeys keys, ISecretCipher
             secrets[name] = Hash(ciphertext);
         }
 
-        return current.WithSecrets(publicKey, secrets);
+        return current.WithSecrets(publicKey, secrets, vault);
     }
 
     /// <summary>

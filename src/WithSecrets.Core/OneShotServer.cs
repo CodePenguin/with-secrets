@@ -55,16 +55,29 @@ internal sealed class OneShotServer : IDisposable
         Token = Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(16));
 
         // IPv4 first, which picks the port when it is 0; then IPv6 on that same port.
-        _ipv4 = BindSocket(IPAddress.Loopback, port);
+        try
+        {
+            _ipv4 = BindSocket(IPAddress.Loopback, port);
+        }
+        catch (SocketException error) when (port != 0 && IsInUse(error))
+        {
+            throw InUse(port);
+        }
+
         int chosen = ((IPEndPoint)_ipv4.LocalEndPoint!).Port;
         Port = chosen;
         try
         {
             _ipv6 = BindIpv6(chosen);
         }
-        catch
+        catch (Exception error)
         {
             _ipv4.Dispose();
+            if (port != 0 && error is SocketException socket && IsInUse(socket))
+            {
+                throw InUse(port);
+            }
+
             throw;
         }
 
@@ -185,6 +198,12 @@ internal sealed class OneShotServer : IDisposable
             return null;
         }
     }
+
+    // Windows reports an address held with ExclusiveAddressUse as access denied; elsewhere it is address in use.
+    private static bool IsInUse(SocketException error) => error.SocketErrorCode is SocketError.AddressAlreadyInUse or SocketError.AccessDenied;
+
+    private static ProofUnavailableException InUse(int port) =>
+        new($"port {port.ToString(System.Globalization.CultureInfo.InvariantCulture)} is already in use; choose another with --port N, or stop the program that holds it");
 
     private static Socket BindSocket(IPAddress address, int port)
     {

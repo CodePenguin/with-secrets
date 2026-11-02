@@ -65,6 +65,7 @@ internal static class PasskeyRegistration
             var finished = false;
             var pending = null;
             var chosen = null;
+            var noPrf = false;
 
             function show(text) {
                 status.textContent = text;
@@ -146,6 +147,8 @@ internal static class PasskeyRegistration
                 return out;
             }
 
+            //@SEAL_PRF@
+
             // Step 2: an admin passkey (on the first run, the new one) signs the new state, the manifest. Its challenge and
             // options are made here, before the person taps the Step 2 button, so the tap starts the prompt at once (iOS
             // WebKit refuses a second prompt that does not start in its own tap).
@@ -179,7 +182,9 @@ internal static class PasskeyRegistration
             function answer(reply) {
                 if (!reply.ok) {
                     busy = false;
-                    finish(reply.status === 403
+                    finish(noPrf
+                        ? "This passkey cannot do PRF (it cannot protect the secret store key). Use a passkey from your phone or a security key. Nothing was added."
+                        : reply.status === 403
                         ? "The passkey was not accepted. Nothing was added. If the terminal asks for a code, press Ctrl+C."
                         : "Nothing was added. If the terminal asks for a code, press Ctrl+C.");
                     return;
@@ -215,7 +220,9 @@ internal static class PasskeyRegistration
                     excludeCredentials: options.excludeCredentials.map(function (item) {
                         return { id: fromBase64Url(item.id), type: item.type };
                     }),
-                    timeout: options.timeout
+                    timeout: options.timeout,
+                    // The new key's slot: its PRF output for the salt the program chose, returned at create.
+                    extensions: { prf: { eval: { first: fromBase64Url(options.prf.salt) } } }
                 };
             }
 
@@ -262,12 +269,25 @@ internal static class PasskeyRegistration
                 show("Waiting for your passkey...");
                 navigator.credentials.create({ publicKey: request }).then(function (credential) {
                     var response = credential.response;
-                    return JSON.stringify({
+                    var message = {
                         id: toBase64Url(credential.rawId),
                         clientDataJSON: toBase64Url(response.clientDataJSON),
                         attestationObject: toBase64Url(response.attestationObject),
                         name: chosen.name,
                         admin: makeAdmin.checked
+                    };
+                    var output = prfOutput(credential);
+                    if (output === null) {
+                        // No PRF at create: the program refuses this passkey (and says why) before anything is stored.
+                        noPrf = true;
+                        return JSON.stringify(message);
+                    }
+                    // The PRF output leaves the page only sealed to the program's key for this page.
+                    return sealPrf(output, fromBase64Url(options.challenge), fromBase64Url(options.prf.serverKey)).then(function (sealed) {
+                        message.prfEpk = sealed.epk;
+                        message.prfIv = sealed.iv;
+                        message.prfCt = sealed.ct;
+                        return JSON.stringify(message);
                     });
                 }).then(function (body) {
                     if (finished) {
@@ -333,9 +353,9 @@ internal static class PasskeyRegistration
     /// already. After the browser's registration is checked, the page shows a code; the key is stored only when
     /// <paramref name="readCode" /> returns that code, within three tries and the time limit.
     /// </summary>
-    public static ApprovalDecision Run(PasskeyStore store, ApprovalSettings settings, string name, Action<string> announce, Func<string?> readCode, Func<string, ManifestApproval>? askAdmin = null)
+    public static ApprovalDecision Run(PasskeyStore store, ApprovalSettings settings, string name, Action<string> announce, Func<string?> readCode, Func<string, ManifestApproval>? askAdmin = null, Unlock? approval = null)
     {
-        return Run(store, settings, name, announce, readCode, null, askAdmin);
+        return Run(store, settings, name, announce, readCode, null, askAdmin, approval);
     }
 
     /// <summary>
@@ -344,7 +364,7 @@ internal static class PasskeyRegistration
     /// manifest, the code in the terminal, the time limit. <paramref name="askAdmin" /> asks an admin key to sign the new
     /// manifest on another page, for when no admin key works at this page's host; without it that case is refused.
     /// </summary>
-    internal static ApprovalDecision Run(PasskeyStore store, ApprovalSettings settings, string name, Action<string> announce, Func<string?> readCode, RegistrationPlan? plan, Func<string, ManifestApproval>? askAdmin = null)
+    internal static ApprovalDecision Run(PasskeyStore store, ApprovalSettings settings, string name, Action<string> announce, Func<string?> readCode, RegistrationPlan? plan, Func<string, ManifestApproval>? askAdmin = null, Unlock? approval = null)
     {
         string? nameError = Enrollment.NameError(name);
         if (nameError is not null)
@@ -402,10 +422,38 @@ internal static class PasskeyRegistration
                         $"passkey \"{key.Name}\" added for {key.RpId}" + (admin ? " as an admin" : " (approves runs only)") + $"; admin passkey {signer} verified", signer)));
             });
 
+        // The master key the new key's slot will wrap. The first key makes it (nothing else needs it: it lives in this page only,
+        // wrapped for that key). A key added to a state gets it from the approval that came first: the PRF output an existing
+        // admin key released opens that key's slot. Zeroed on every way out.
+        byte[]? master = null;
+        (byte[] State, string PublicKey)? serverKey = null;
         try
         {
+            if (current is null)
+            {
+                master = KeyVault.NewMasterKey();
+            }
+            else
+            {
+                try
+                {
+                    master = approval is null ? null : KeyVault.OpenMaster(current, approval);
+                }
+                catch (CryptographicException)
+                {
+                    master = null;
+                }
+
+                if (master is null)
+                {
+                    return ApprovalDecision.Deny("the approving passkey did not release the key that opens the master key (a passkey with PRF must approve), so the new passkey cannot get its slot; nothing was added");
+                }
+            }
+
             byte[] challenge = RandomNumberGenerator.GetBytes(32);
-            Session session = new(store, name, challenge, [.. snapshot.Select(item => item.Id)], plan, settings, askAdmin);
+            byte[] slotSalt = KeyVault.NewSalt();
+            serverKey = SecretCrypto.NewServerKey();
+            Session session = new(store, name, challenge, [.. snapshot.Select(item => item.Id)], plan, settings, askAdmin, new PrfContext(serverKey.Value.State, slotSalt, master));
             using OneShotServer server = new(plan.Prefix, settings.Port, session.Handle);
             string origin = settings.PageOrigin(server.Port);
             if (PasskeyMethod.RpIdOf(origin) != rpId)
@@ -424,6 +472,9 @@ internal static class PasskeyRegistration
                 attestation = "none",
                 excludeCredentials = snapshot.Where(item => item.RpId == rpId).Select(item => new { id = item.Id, type = "public-key" }).ToArray(),
                 timeout = (long)settings.Timeout.TotalMilliseconds,
+
+                // The slot of the new key: the salt its PRF is asked with at create, and the key the page seals the PRF output to.
+                prf = new { salt = Base64Url.EncodeToString(slotSalt), serverKey = serverKey.Value.PublicKey },
             });
 
             session.Open(origin, rpId, plan.Page(rpId, options));
@@ -439,7 +490,20 @@ internal static class PasskeyRegistration
         {
             return ApprovalDecision.Deny("the enrollment page failed: " + error.Message);
         }
+        finally
+        {
+            SecretValues.Clear(master);
+            SecretValues.Clear(serverKey?.State);
+        }
     }
+
+    /// <summary>
+    /// What one registration page needs to give its new key a slot: the page's server key (private state, to open the PRF output
+    /// the page seals to it), the 32-byte salt the new key's PRF is evaluated with, and the master key the slot wraps. The
+    /// arrays belong to <see cref="Run(PasskeyStore, ApprovalSettings, string, Action{string}, Func{string?}, RegistrationPlan?, Func{string, ManifestApproval}?, Unlock?)" />,
+    /// which zeroes them when the page ends.
+    /// </summary>
+    private sealed record PrfContext(byte[] ServerState, byte[] Salt, byte[] Master);
 
     internal const string NothingEnrolled = "Nothing is enrolled. Set up the first passkey with: with-secrets --config (with-secrets --enroll adds more).";
 
@@ -506,7 +570,7 @@ internal static class PasskeyRegistration
     /// </summary>
     internal static OneShotResponse Build(string name, string rpId, string options, string script, string style, string adminLine, IEnumerable<string>? taken = null)
     {
-        script = script.ReplaceLineEndings("\n");
+        script = PrfClient.Fill(script.ReplaceLineEndings("\n"));
         style = (style + FieldStyle).ReplaceLineEndings("\n");
         string policy = ApprovalPage.Policy(script, style);
         string text = "Works on: " + ApprovalSummary.Clean(rpId) + "\n" + ApprovalSummary.Clean(adminLine);
@@ -520,6 +584,7 @@ internal static class PasskeyRegistration
         page.Append("<h1>Add a passkey for with-secrets</h1>\n");
         page.Append("<pre id=\"request\">").Append(WebUtility.HtmlEncode(text)).Append("</pre>\n");
         page.Append("<p>This passkey will be able to approve runs that use your secrets. Make it only on a device you keep with you.</p>\n");
+        page.Append("<p>" + WebUtility.HtmlEncode(PrfClient.RequiredText) + "</p>\n");
         page.Append(NameField(name, taken ?? []));
         page.Append("<div class=\"field check\"><input id=\"make-admin\" type=\"checkbox\"> <label for=\"make-admin\">Also make this key an admin</label>"
             + "<p class=\"hint\">An admin key can change the settings, the secrets and the passkeys, and remove other admin keys. Leave it off for a key that only approves runs. "
@@ -541,7 +606,7 @@ internal static class PasskeyRegistration
     /// on: to the admin's assertion over the new manifest (when it can be made on this page), then the code. After that the
     /// page answers only Cancel. The first final outcome wins.
     /// </summary>
-    private sealed class Session(PasskeyStore store, string name, byte[] challenge, HashSet<string> snapshot, RegistrationPlan plan, ApprovalSettings settings, Func<string, ManifestApproval>? askAdmin)
+    private sealed class Session(PasskeyStore store, string name, byte[] challenge, HashSet<string> snapshot, RegistrationPlan plan, ApprovalSettings settings, Func<string, ManifestApproval>? askAdmin, PrfContext prf)
     {
         private const int CodeTries = 3;
 
@@ -818,6 +883,16 @@ internal static class PasskeyRegistration
                     return Invalid;
                 }
 
+                // The new key's slot: only a passkey that did PRF at create (and sent its output, sealed to this page's server
+                // key) can be enrolled. Refused here, before anything is stored: the person is told why.
+                PasskeyRecord? slotted = WithSlot(result.Key, body);
+                if (slotted is null)
+                {
+                    return Invalid;
+                }
+
+                result = result with { Key = slotted };
+
                 // The manifest with the new key, and who may sign it: on the first run the new key itself, else every admin
                 // key of the stored state that stays an admin. Those that work at this host may sign here.
                 Manifest next = plan.Next(result.Key, _admin);
@@ -863,6 +938,72 @@ internal static class PasskeyRegistration
                 _decision.TrySetResult(ApprovalDecision.Deny("the passkey could not be checked"));
 
                 return Failed;
+            }
+        }
+
+        /// <summary>
+        /// Called with the lock held. The key with its slot: the master key wrapped under the PRF output the page sent (sealed to
+        /// this page's server key, with the page's bind as associated data), for this credential and this page's salt. Null, with
+        /// the decision set, when the page sent none or it does not open: a key that cannot do PRF is refused. The PRF output
+        /// and its copies are zeroed here.
+        /// </summary>
+        private PasskeyRecord? WithSlot(PasskeyRecord key, string body)
+        {
+            byte[]? output = null;
+            try
+            {
+                PrfBody? sealedPrf = ReadPrf(body);
+                if (sealedPrf is null)
+                {
+                    _decision.TrySetResult(ApprovalDecision.Deny(PrfClient.CannotPrf));
+
+                    return null;
+                }
+
+                output = SecretCrypto.DecryptBytes(prf.ServerState, challenge, sealedPrf.Epk, sealedPrf.Iv, sealedPrf.Ct, SecretCrypto.PrfInfo);
+                if (output.Length != KeyVault.KeyBytes)
+                {
+                    _decision.TrySetResult(ApprovalDecision.Deny(PrfClient.CannotPrf));
+
+                    return null;
+                }
+
+                string wrap = KeyVault.WrapSlot(prf.Master, output, Base64Url.DecodeFromChars(key.Id), prf.Salt);
+
+                return key with { Slot = new KeySlot(Base64Url.EncodeToString(prf.Salt), wrap) };
+            }
+            catch (Exception)
+            {
+                _decision.TrySetResult(ApprovalDecision.Deny("the PRF output from the page could not be opened, so the passkey cannot protect the secret store key; nothing was added"));
+
+                return null;
+            }
+            finally
+            {
+                SecretValues.Clear(output);
+            }
+        }
+
+        /// <summary>The sealed PRF output in the body (<c>prfEpk</c>, <c>prfIv</c>, <c>prfCt</c>), or null when it has none.</summary>
+        private static PrfBody? ReadPrf(string body)
+        {
+            try
+            {
+                using JsonDocument document = JsonDocument.Parse(body);
+                Dictionary<string, string> members = new(StringComparer.Ordinal);
+                foreach (JsonProperty property in document.RootElement.EnumerateObject())
+                {
+                    if (property.Value.ValueKind == JsonValueKind.String)
+                    {
+                        members[property.Name] = property.Value.GetString()!;
+                    }
+                }
+
+                return PrfBody.FromFlat(members);
+            }
+            catch (Exception)
+            {
+                return null;
             }
         }
 

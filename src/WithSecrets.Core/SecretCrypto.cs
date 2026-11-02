@@ -15,6 +15,10 @@ internal static class SecretCrypto
 {
     public const string Info = "with-secrets/v1 secrets";
 
+    /// <summary>The HKDF info of the PRF output's transport (not the --set key, so one cannot be opened as the other).</summary>
+    public const string PrfInfo = "with-secrets/v1 prf";
+
+
     private const int PointLength = 65;
     private const int CoordinateLength = 32;
     private const int IvLength = 12;
@@ -57,6 +61,28 @@ internal static class SecretCrypto
     /// </summary>
     public static string Decrypt(byte[] privateState, byte[] bind, string epk, string iv, string ct)
     {
+        byte[] plain = DecryptBytes(privateState, bind, epk, iv, ct, Info);
+        try
+        {
+            return new UTF8Encoding(false, true).GetString(plain);
+        }
+        catch (Exception)
+        {
+            throw Failed();
+        }
+        finally
+        {
+            Clear(plain);
+        }
+    }
+
+    /// <summary>
+    /// The same scheme, returning the plaintext bytes (the caller zeroes them) under the HKDF info <paramref name="info" />
+    /// (<see cref="Info" /> for the --set values, <see cref="PrfInfo" /> for a PRF output). Every failure is a
+    /// <see cref="CryptographicException" /> with the same message.
+    /// </summary>
+    public static byte[] DecryptBytes(byte[] privateState, byte[] bind, string epk, string iv, string ct, string info)
+    {
         byte[]? secret = null;
         byte[]? key = null;
         byte[]? plain = null;
@@ -85,14 +111,16 @@ internal static class SecretCrypto
                 Q = new ECPoint { X = x, Y = y },
             });
             secret = server.DeriveRawSecretAgreement(peer.PublicKey);
-            key = HKDF.DeriveKey(HashAlgorithmName.SHA256, secret, 32, bind, Encoding.UTF8.GetBytes(Info));
+            key = HKDF.DeriveKey(HashAlgorithmName.SHA256, secret, 32, bind, Encoding.UTF8.GetBytes(info));
 
             int length = sealedBytes.Length - TagLength;
-            plain = new byte[length];
+            byte[] opened = new byte[length];
+            plain = opened;
             using AesGcm aes = new(key, TagLength);
-            aes.Decrypt(nonce, sealedBytes.AsSpan(0, length), sealedBytes.AsSpan(length), plain, bind);
+            aes.Decrypt(nonce, sealedBytes.AsSpan(0, length), sealedBytes.AsSpan(length), opened, bind);
+            plain = null;
 
-            return new UTF8Encoding(false, true).GetString(plain);
+            return opened;
         }
         catch (Exception)
         {

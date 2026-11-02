@@ -57,7 +57,25 @@ internal static class PageScriptTests
             check(count == prompts && found.Count == 0, "tap rule: every passkey prompt on the " + name + " page starts in the tap (" + count + " prompts; " + string.Join("; ", found) + ")");
         }
 
-        const string Step2 = "<button id=\"confirm\" type=\"button\" hidden disabled>Step 2 of 2: confirm with your passkey</button>";
+        // PRF: the pages that create a passkey ask for the PRF output at create; the approval page asks for it at get, for the
+        // chosen credential's salt; every page seals it to the page's server key before sending it, and none sends it as it is.
+        string approvalPrf = ApprovalPage.Build(new ApprovalPrompt("h", "t"), new ProofStart("webauthn", "{}"), "n", [1], TimeSpan.Zero, new ReuseOffer(480, 10), null, "k").Body;
+        string approvalPrfScript = Script(approvalPrf);
+        check(TapRule.Violations(approvalPrfScript).Count == 0 && Regex.Count(approvalPrfScript, @"credentials\.(get|create)\s*\(") == 1, "prf: the approval page that releases the key still has one prompt, started in the tap");
+        check(approvalPrfScript.Contains("evalByCredential", StringComparison.Ordinal) && approvalPrfScript.Contains("extensions", StringComparison.Ordinal), "prf: the approval script asks the passkey for its PRF output by credential");
+        check(approvalPrfScript.Contains("function sealPrf(", StringComparison.Ordinal) && approvalPrfScript.Contains("with-secrets/v1 prf", StringComparison.Ordinal) && approvalPrfScript.Contains("additionalData: bind", StringComparison.Ordinal), "prf: the approval script has the sealing function (ECDH, HKDF info with-secrets/v1 prf, AES-GCM bound to the page)");
+        check(approvalPrfScript.IndexOf("sealPrf(output", StringComparison.Ordinal) is > 0 and var sealAt && sealAt < approvalPrfScript.IndexOf("post(\"proof\", body)", StringComparison.Ordinal) && approvalPrfScript.Contains("message.prf = sealed;", StringComparison.Ordinal), "prf: the approval script seals the output before it posts anything, and sends only the sealed form");
+        check(!approvalPrfScript.Contains("message.prf = output", StringComparison.Ordinal) && !approvalPrfScript.Contains("toBase64Url(first)", StringComparison.Ordinal), "prf: the approval script never sends the raw output");
+        check(approvalPrf.Contains(System.Net.WebUtility.HtmlEncode(PrfClient.ApprovalHint), StringComparison.Ordinal) && !approval.Contains(System.Net.WebUtility.HtmlEncode(PrfClient.ApprovalHint), StringComparison.Ordinal) && !approval.Contains("\"prfKey\":", StringComparison.Ordinal) && approvalPrf.Contains("\"prfKey\":\"k\"", StringComparison.Ordinal), "prf: only an approval that releases the key says a PRF passkey is needed and has the page's key");
+        foreach ((string name, string page) in new[] { ("enroll", enroll), ("config", firstRun) })
+        {
+            string script = Script(page);
+            check(script.Contains("extensions: { prf: { eval: { first: fromBase64Url(", StringComparison.Ordinal) && script.Contains("function sealPrf(", StringComparison.Ordinal) && script.Contains("with-secrets/v1 prf", StringComparison.Ordinal), "prf: the " + name + " script asks for the PRF output at create and has the sealing function");
+            check(script.IndexOf("sealPrf(output", StringComparison.Ordinal) > 0 && script.Contains(".prfCt = sealed.ct;", StringComparison.Ordinal) && !script.Contains("prfCt = output", StringComparison.Ordinal), "prf: the " + name + " script sends only the sealed output (prfEpk, prfIv, prfCt)");
+            check(page.Contains(PrfClient.RequiredText, StringComparison.Ordinal), "prf: the " + name + " page says a PRF passkey is required");
+        }
+
+        const string Step2 ="<button id=\"confirm\" type=\"button\" hidden disabled>Step 2 of 2: confirm with your passkey</button>";
         check(enroll.Contains(Step2, StringComparison.Ordinal), "step 2: the enroll page has the hidden second-step button");
         check(firstRun.Contains(Step2, StringComparison.Ordinal) && firstRun.Contains(">Step 1 of 2: save and create passkey</button>", StringComparison.Ordinal), "step 2: the first-run page has both step buttons");
         check(!gated.Contains("id=\"confirm\"", StringComparison.Ordinal), "step 2: the settings page with an admin key has one step");

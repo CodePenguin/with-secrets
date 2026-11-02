@@ -8,7 +8,7 @@ namespace WithSecrets.Tests;
 /// Answers without a page. With <paramref name="signer" /> an approval for a time carries a signed approval as the page would
 /// make it (the request text, the page issued time, an assertion over the reuse challenge), so a grant can be saved.
 /// </summary>
-internal sealed class FakeApprover(bool approve, int reuseMinutes = 0, TestAuthenticator? signer = null) : IApprover
+internal sealed class FakeApprover(bool approve, int reuseMinutes = 0, TestAuthenticator? signer = null, Func<Unlock?>? unlock = null) : IApprover
 {
     private static int _signs = 4_000_000;
 
@@ -30,7 +30,7 @@ internal sealed class FakeApprover(bool approve, int reuseMinutes = 0, TestAuthe
             evidence = new ApprovalEvidence(nonce, text, signer.Assert(ReuseBinding.Challenge(RequestBinding.Compute(nonce, text), reuseMinutes), TestState.Origin, "localhost", (uint)Interlocked.Increment(ref _signs)));
         }
 
-        return ApprovalDecision.Allow("approved", reuseMinutes, evidence);
+        return ApprovalDecision.Allow("approved", reuseMinutes, evidence, unlock?.Invoke());
     }
 }
 
@@ -51,7 +51,7 @@ internal sealed class MemoryStore(Dictionary<string, string> values) : ISecretSo
 
     public IReadOnlyList<string> ListNames() => values.Keys.ToList();
 
-    public SecretValues GetValues(IReadOnlyCollection<string> names)
+    public SecretValues GetValues(IReadOnlyCollection<string> names, Unlock? unlock)
         => new(names.ToDictionary(name => name, name => Encoding.UTF8.GetBytes(values[name]), StringComparer.Ordinal));
 }
 
@@ -291,15 +291,64 @@ internal static class Program
             RunEndToEnd(temp).GetAwaiter().GetResult();
         }
 
-        ManifestTests.Run(Check).GetAwaiter().GetResult();
-        WebApprovalTests.Run(Check).GetAwaiter().GetResult();
-        ReuseTests.Run(Check).GetAwaiter().GetResult();
-        StateDatabaseTests.Run(Check).GetAwaiter().GetResult();
-        ConfigTests.Run(Check).GetAwaiter().GetResult();
-        GrantTests.Run(Check).GetAwaiter().GetResult();
-        PageScriptTests.Run(Check).GetAwaiter().GetResult();
-        AdminKeysTests.Run(Check).GetAwaiter().GetResult();
-        SecretStoreTests.Run(Check).GetAwaiter().GetResult();
+        // WS_ONLY=KeyVault,Manifest runs just those suites (a quick loop); unset runs all of them.
+        string[] only = (Environment.GetEnvironmentVariable("WS_ONLY") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        bool Wants(string suite) => only.Length == 0 || only.Contains(suite, StringComparer.OrdinalIgnoreCase);
+
+        if (Wants("KeyVault"))
+        {
+            KeyVaultTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("Manifest"))
+        {
+            ManifestTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("WebApproval"))
+        {
+            WebApprovalTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("Reuse"))
+        {
+            ReuseTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("StateDatabase"))
+        {
+            StateDatabaseTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("Config"))
+        {
+            ConfigTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("Grant"))
+        {
+            GrantTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("PageScript"))
+        {
+            PageScriptTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("AdminKeys"))
+        {
+            AdminKeysTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("SecretStore"))
+        {
+            SecretStoreTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("Prf"))
+        {
+            PrfFlowTests.Run(Check).GetAwaiter().GetResult();
+        }
 
         Directory.Delete(temp, true);
         Console.WriteLine($"{_passed} passed, {_failed} failed");

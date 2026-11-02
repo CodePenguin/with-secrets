@@ -34,38 +34,6 @@ internal sealed class FixedPairCipher((string PublicKey, string PrivateKey) pair
     public string Decrypt(string privateKey, string ciphertext) => DotenvxCipher.Instance.Decrypt(privateKey, ciphertext);
 }
 
-/// <summary>The store's private keys in memory, as Credential Manager keeps them in the tool.</summary>
-internal sealed class MemoryKeys : IStoreKeys
-{
-    public Dictionary<string, string> Keys { get; } = new(StringComparer.Ordinal);
-
-    public int Reads { get; private set; }
-
-    public List<string> Deleted { get; } = [];
-
-    /// <summary>What <see cref="IStoreKeys.Unavailable" /> says; null means the custody works.</summary>
-    public string? Problem { get; init; }
-
-    public string? Unavailable => Problem;
-
-    public void Save(string publicKey, string privateKey) => Keys[publicKey] = privateKey;
-
-    public bool Exists(string publicKey) => Keys.ContainsKey(publicKey);
-
-    public void Delete(string publicKey)
-    {
-        Deleted.Add(publicKey);
-        Keys.Remove(publicKey);
-    }
-
-    public string PrivateKey(string publicKey)
-    {
-        Reads++;
-
-        return Keys.TryGetValue(publicKey, out string? key) ? key : throw new KeyNotFoundException("no private key for the secret store");
-    }
-}
-
 /// <summary>
 /// The secret store in state.db: one row per secret (the Dotenvx ciphertext), and the signed manifest has the store's public
 /// key and the SHA-256 of every ciphertext. Reads decrypt only the requested rows; a row that does not match its signed hash,
@@ -105,37 +73,52 @@ internal static class SecretStoreTests
     public static string? Put(SecretStore store, IReadOnlyDictionary<string, string> values, IReadOnlyCollection<string>? removes = null)
     {
         Manifest current = TestState.Current(store.Database) ?? throw new InvalidOperationException("no manifest");
-        string publicKey = KeyFor(store, current);
+        (string publicKey, string? vault) = KeyFor(store, current);
         Dictionary<string, string> rows = values.ToDictionary(item => item.Key, item => store.Encrypt(item.Value, publicKey), StringComparer.Ordinal);
-        Manifest next = SecretStore.Next(current, publicKey, rows, removes ?? []);
+        Manifest next = SecretStore.Next(current, publicKey, rows, removes ?? [], vault);
         ManifestKey admin = current.Admins.First(key => TestAuthenticator.ById(key.Id) is not null);
         SignedManifest signed = TestState.Sign(TestAuthenticator.ById(admin.Id)!, next.Canonical(), admin.RpId);
 
         return store.TryApply(current.Version, signed, rows, removes ?? [], AuditLog.ChangeRow("test-put", "test", admin.Name));
     }
 
-    /// <summary>The store public key of <paramref name="manifest" />; before the first secret, a new key pair saved to custody now.</summary>
-    public static string KeyFor(SecretStore store, Manifest manifest)
+    /// <summary>The store public key of <paramref name="manifest" /> (no vault); before the first secret, a new key pair and its vault under the state's master key.</summary>
+    public static (string PublicKey, string? Vault) KeyFor(SecretStore store, Manifest manifest)
     {
         if (manifest.Store.Length > 0)
         {
-            return manifest.Store;
+            return (manifest.Store, null);
         }
 
         (string publicKey, string privateKey) = store.NewKeyPair();
-        store.SaveKey(publicKey, privateKey);
 
-        return publicKey;
+        return (publicKey, TestVault.Vault(store.Database, privateKey, publicKey));
+    }
+
+    /// <summary>What the test admin's passkey releases at an approval for this state (null when it cannot).</summary>
+    public static Unlock? AdminUnlock(StateDatabase db)
+    {
+        Manifest manifest = TestState.Current(db) ?? throw new InvalidOperationException("no manifest");
+        ManifestKey admin = manifest.Admins.First(key => TestAuthenticator.ById(key.Id) is not null);
+
+        return TestVault.Unlock(db, TestAuthenticator.ById(admin.Id)!);
+    }
+
+    /// <summary>Reads the values with what the admin passkey releases.</summary>
+    public static SecretValues Read(SecretStore store, IReadOnlyCollection<string> names, Unlock? with = null)
+    {
+        using Unlock? unlock = with is null ? AdminUnlock(store.Database) : null;
+
+        return store.GetValues(names, with ?? unlock);
     }
 
     /// <summary>A seeded state.db with a store over it.</summary>
-    private static (StateDatabase Db, SecretStore Store, MemoryKeys Keys, CountingCipher Cipher) NewStore(string root, string name)
+    private static (StateDatabase Db, SecretStore Store, CountingCipher Cipher) NewStore(string root, string name)
     {
         StateDatabase db = TestState.Seeded(Path.Combine(root, name, StateDatabase.FileName));
-        MemoryKeys keys = new();
         CountingCipher cipher = new();
 
-        return (db, new SecretStore(db, keys, cipher), keys, cipher);
+        return (db, new SecretStore(db, cipher), cipher);
     }
 
     private static void Sql(StateDatabase db, string sql, params (string Name, object Value)[] parameters)
@@ -184,16 +167,17 @@ internal static class SecretStoreTests
     {
         using TestAuthenticator laptop = TestAuthenticator.ES256();
         Manifest first = Manifest.First(laptop.Record("localhost", "laptop"), ToolSettings.Defaults);
-        check(first.Store == "" && first.Secrets.Count == 0, "store manifest: a new manifest has no store key and no secrets");
-        check(first.Canonical().Contains(",\"store\":\"\",\"secrets\":{},\"settings\":", StringComparison.Ordinal), "store manifest: the text has store and secrets before the settings (" + first.Canonical() + ")");
-        check(first.SettingsPrefix().EndsWith(",\"store\":\"\",\"secrets\":{},\"settings\":", StringComparison.Ordinal), "store manifest: the settings prefix ends with store and secrets");
+        check(first.Store == "" && first.Vault == "" && first.Secrets.Count == 0, "store manifest: a new manifest has no store key, no vault and no secrets");
+        check(first.Canonical().Contains(",\"store\":\"\",\"vault\":\"\",\"secrets\":{},\"settings\":", StringComparison.Ordinal), "store manifest: the text has store, vault and secrets before the settings (" + first.Canonical() + ")");
+        check(first.SettingsPrefix().EndsWith(",\"store\":\"\",\"vault\":\"\",\"secrets\":{},\"settings\":", StringComparison.Ordinal), "store manifest: the settings prefix ends with store and secrets");
 
         (string publicKey, _) = DotenvxCipher.Instance.NewKeyPair();
         string hashB = new('b', 64);
         string hashA = new('a', 64);
-        Manifest withSecrets = first.WithSecrets(publicKey, new Dictionary<string, string> { ["B_NAME"] = hashB, ["A_NAME"] = hashA });
+        string vault = KeyVault.WrapVault(Encoding.UTF8.GetBytes(DotenvxCipher.Instance.NewKeyPair().PrivateKey), KeyVault.NewMasterKey(), publicKey);
+        Manifest withSecrets = first.WithSecrets(publicKey, new Dictionary<string, string> { ["B_NAME"] = hashB, ["A_NAME"] = hashA }, vault);
         string text = withSecrets.Canonical();
-        check(withSecrets.Version == 2 && text.Contains(",\"store\":\"" + publicKey + "\",\"secrets\":{\"A_NAME\":\"" + hashA + "\",\"B_NAME\":\"" + hashB + "\"},\"settings\":", StringComparison.Ordinal), "store manifest: the secrets are sorted by name, with the store key (" + text + ")");
+        check(withSecrets.Version == 2 && text.Contains(",\"store\":\"" + publicKey + "\",\"vault\":\"" + vault + "\",\"secrets\":{\"A_NAME\":\"" + hashA + "\",\"B_NAME\":\"" + hashB + "\"},\"settings\":", StringComparison.Ordinal), "store manifest: the secrets are sorted by name, with the store key (" + text + ")");
         Manifest? parsed = Manifest.Parse(text, out string? error);
         check(parsed is not null && error is null && parsed.Store == publicKey && parsed.Secrets.Count == 2 && parsed.Secrets["A_NAME"] == hashA && parsed.Canonical() == text, "store manifest: round trip (" + error + ")");
         check(withSecrets.WithKey(TestAuthenticator.ES256().Record("localhost", "phone")).Secrets.Count == 2 && withSecrets.WithSettings(ToolSettings.Defaults).Store == publicKey, "store manifest: key and settings changes keep the store key and the hashes");
@@ -222,35 +206,35 @@ internal static class SecretStoreTests
 
     private static void RoundTrip(Action<bool, string> check, string root)
     {
-        (StateDatabase db, SecretStore store, MemoryKeys keys, CountingCipher cipher) = NewStore(root, "round");
+        (StateDatabase db, SecretStore store, CountingCipher cipher) = NewStore(root, "round");
         check(store.Label == "global" && store.ListNames().Count == 0, "store: an empty store lists nothing");
         check(Put(store, new Dictionary<string, string> { ["A_NAME"] = ValueA, ["B_NAME"] = ValueB, ["C_NAME"] = ValueC }) is null, "store: three secrets are stored");
         Manifest manifest = TestState.Current(db)!;
-        check(keys.Keys.Count == 1 && manifest.Store == keys.Keys.Keys.Single() && DotenvxCipher.Instance.Derive(keys.Keys.Values.Single()) == manifest.Store, "store: the first write made one key pair; the manifest has its public key, custody the private key");
+        check(manifest.Store.Length == 66 && manifest.Vault.Length > 0, "store: the first write made one key pair; the manifest has its public key and the vault");
         check(manifest.Version == 2 && manifest.Secrets.Keys.SequenceEqual(["A_NAME", "B_NAME", "C_NAME"]) && manifest.Secrets.All(item => item.Value == SecretStore.Hash(Row(db, item.Key))), "store: the manifest has the hash of every row");
         check(Row(db, "A_NAME").StartsWith("encrypted:", StringComparison.Ordinal) && !File.ReadAllText(db.FilePath).Contains(ValueA, StringComparison.Ordinal), "store: a row is a Dotenvx ciphertext; no value is in state.db");
-        check(store.ListNames().SequenceEqual(["A_NAME", "B_NAME", "C_NAME"]) && cipher.Decrypts == 0 && keys.Reads == 0, "store: --list reads names and decrypts nothing (no private key read)");
+        check(store.ListNames().SequenceEqual(["A_NAME", "B_NAME", "C_NAME"]) && cipher.Decrypts == 0, "store: --list reads names and decrypts nothing (no private key opened)");
 
-        using (SecretValues values = store.GetValues(["B_NAME"]))
+        using (SecretValues values = Read(store, ["B_NAME"]))
         {
             check(values.Names.SequenceEqual(["B_NAME"]) && Encoding.UTF8.GetString(values.Bytes("B_NAME")) == ValueB && values.Text("B_NAME") == ValueB, "store: GetValues returns the requested value");
-            check(cipher.Decrypts == 1 && keys.Reads == 1, "store: only the requested row is decrypted (" + cipher.Decrypts + " decrypts)");
+            check(cipher.Decrypts == 1, "store: only the requested row is decrypted (" + cipher.Decrypts + " decrypts)");
         }
 
-        using (SecretValues two = store.GetValues(["C_NAME", "A_NAME"]))
+        using (SecretValues two = Read(store, ["C_NAME", "A_NAME"]))
         {
             check(two.Names.Count == 2 && two.Text("A_NAME") == ValueA && two.Text("C_NAME") == ValueC && cipher.Decrypts == 3, "store: two requested rows, two decrypts");
         }
 
-        check(Fails(() => store.GetValues(["NOPE_NAME"]), out string missing) && missing.Contains("NOPE_NAME", StringComparison.Ordinal) && cipher.Decrypts == 3, "store: a name that is not stored is an error and decrypts nothing (" + missing + ")");
+        check(Fails(() => Read(store, ["NOPE_NAME"]), out string missing) && missing.Contains("NOPE_NAME", StringComparison.Ordinal) && cipher.Decrypts == 3, "store: a name that is not stored is an error and decrypts nothing (" + missing + ")");
 
         // Set again: one name replaced, one new; the key pair stays.
         string oldRow = Row(db, "B_NAME");
         check(Put(store, new Dictionary<string, string> { ["B_NAME"] = "Bravo-New-Value-9", ["D_NAME"] = "Delta-Store-Value-4" }) is null, "store: a replaced and a new name are stored");
         Manifest after = TestState.Current(db)!;
-        using (SecretValues read = store.GetValues(["B_NAME", "D_NAME"]))
+        using (SecretValues read = Read(store, ["B_NAME", "D_NAME"]))
         {
-            check(after.Version == 3 && keys.Keys.Count == 1 && after.Store == manifest.Store && Row(db, "B_NAME") != oldRow && read.Text("B_NAME") == "Bravo-New-Value-9" && read.Text("D_NAME") == "Delta-Store-Value-4", "store: a replaced value reads back, the new one too, with the same key pair");
+            check(after.Version == 3 && after.Vault == manifest.Vault && after.Store == manifest.Store && Row(db, "B_NAME") != oldRow && read.Text("B_NAME") == "Bravo-New-Value-9" && read.Text("D_NAME") == "Delta-Store-Value-4", "store: a replaced value reads back, the new one too, with the same key pair");
         }
 
         check(after.Secrets.Keys.SequenceEqual(["A_NAME", "B_NAME", "C_NAME", "D_NAME"]) && after.Secrets["A_NAME"] == manifest.Secrets["A_NAME"], "store: untouched hashes stay");
@@ -260,9 +244,19 @@ internal static class SecretStoreTests
         Manifest removed = TestState.Current(db)!;
         check(removed.Version == 4 && !removed.Secrets.ContainsKey("C_NAME") && Row(db, "C_NAME") == "" && store.ListNames().SequenceEqual(["A_NAME", "B_NAME", "D_NAME"]), "store: --remove signs a manifest without the hash and deletes the row");
 
-        // A missing private key is a store error, not a crash.
-        keys.Keys.Clear();
-        check(Fails(() => store.GetValues(["A_NAME"]), out string noKey) && !noKey.Contains(ValueA, StringComparison.Ordinal), "store: no private key is a store error (" + noKey + ")");
+        // No unlock, or an unlock of a credential without a slot, is a store error, not a crash.
+        check(Fails(() => store.GetValues(["A_NAME"], null), out string noKey) && !noKey.Contains(ValueA, StringComparison.Ordinal), "store: no unlock is a store error (" + noKey + ")");
+        using (Unlock stranger = new("c3RyYW5nZXI", new byte[32]))
+        {
+            check(Fails(() => store.GetValues(["A_NAME"], stranger), out string strangerWhy) && !strangerWhy.Contains(ValueA, StringComparison.Ordinal), "store: an unlock without a slot is a store error (" + strangerWhy + ")");
+        }
+
+        int decrypts = cipher.Decrypts;
+        using (Unlock wrong = new(TestAuthenticator.Encode(TestAuthenticator.ById(TestState.Current(db)!.Admins[0].Id)!.CredentialId), RandomNumberGenerator.GetBytes(32)))
+        {
+            check(Fails(() => store.GetValues(["A_NAME"], wrong), out string wrongWhy) && !wrongWhy.Contains(ValueA, StringComparison.Ordinal) && cipher.Decrypts == decrypts, "store: a wrong PRF output opens nothing (" + wrongWhy + ")");
+        }
+
         check(store.ListNames().Count == 3, "store: listing needs no private key");
     }
 
@@ -281,16 +275,16 @@ internal static class SecretStoreTests
         int index = 0;
         foreach ((string name, Action<StateDatabase, string> edit, bool stateFails) in edits)
         {
-            (StateDatabase db, SecretStore store, MemoryKeys keys, CountingCipher cipher) = NewStore(root, "tamper-" + index++);
+            (StateDatabase db, SecretStore store, CountingCipher cipher) = NewStore(root, "tamper-" + index++);
             Put(store, new Dictionary<string, string> { ["A_NAME"] = ValueA, ["B_NAME"] = ValueB });
+            using Unlock? admin = AdminUnlock(db);
             edit(db, TestState.Current(db)!.Store);
             StateDatabase again = new(db.FilePath);
-            // The original key custody: GetValues has the private key, so only the hash check can stop it.
-            SecretStore reopened = new(again, keys, cipher);
-            int reads = keys.Reads;
+            // The admin passkey's unlock is at hand, so only the hash check can stop it.
+            SecretStore reopened = new(again, cipher);
             bool listFails = Fails(() => reopened.ListNames(), out string listWhy);
-            bool getFails = Fails(() => reopened.GetValues(["A_NAME"]), out string getWhy);
-            check(listFails && getFails && cipher.Decrypts == 0 && keys.Reads == reads && getWhy.Contains("failed verification", StringComparison.Ordinal), "store tamper: " + name + ": --list and a run fail verification with the private key at hand; no key read, nothing decrypted (" + listWhy + " | " + getWhy + ")");
+            bool getFails = Fails(() => Read(reopened, ["A_NAME"], admin), out string getWhy);
+            check(listFails && getFails && cipher.Decrypts == 0 && getWhy.Contains("failed verification", StringComparison.Ordinal), "store tamper: " + name + ": --list and a run fail verification with the unlock at hand; nothing decrypted (" + listWhy + " | " + getWhy + ")");
             check(again.TryCheck(out _) != stateFails, "store tamper: " + name + (stateFails ? ": the manifest fails verification for every command" : ": the manifest itself still verifies"));
             check(!listWhy.Contains(ValueA, StringComparison.Ordinal) && !getWhy.Contains(ValueB, StringComparison.Ordinal), "store tamper: " + name + ": the message has no value");
         }
@@ -298,7 +292,7 @@ internal static class SecretStoreTests
         // Without a manifest, a secrets row is a tamper too.
         StateDatabase bare = new(Path.Combine(root, "bare", StateDatabase.FileName));
         bare.Write((connection, transaction) => StateDatabase.Execute(connection, transaction, "INSERT INTO secrets (name, ciphertext) VALUES ('A_NAME', 'encrypted:x')"));
-        check(!new StateDatabase(bare.FilePath).TryCheck(out string? bareWhy) && Fails(() => new SecretStore(new StateDatabase(bare.FilePath), new MemoryKeys()).ListNames(), out _), "store tamper: a secrets row without a manifest fails verification (" + bareWhy + ")");
+        check(!new StateDatabase(bare.FilePath).TryCheck(out string? bareWhy) && Fails(() => new SecretStore(new StateDatabase(bare.FilePath)).ListNames(), out _), "store tamper: a secrets row without a manifest fails verification (" + bareWhy + ")");
     }
 
     /// <summary>A run reads only what it was approved for, and a tampered store stops it with exit 4.</summary>
@@ -318,10 +312,10 @@ internal static class SecretStoreTests
             File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
 
-        (StateDatabase db, SecretStore store, _, CountingCipher cipher) = NewStore(root, "runs-db");
+        (StateDatabase db, SecretStore store, CountingCipher cipher) = NewStore(root, "runs-db");
         Put(store, new Dictionary<string, string> { ["A_NAME"] = ValueA, ["B_NAME"] = ValueB, ["C_NAME"] = ValueC });
         RunArgs args = CliArgs.ParseRun(["--secrets", "A_NAME", "--reason", "store test", "--", "./" + program], out _)!;
-        FakeApprover approver = new(true);
+        FakeApprover approver = new(true, unlock: () => AdminUnlock(db));
         StringWriter stdout = new();
         StringWriter stderr = new();
         int code = await new RunCommand(store, approver, new AuditLog(db), stdout, stderr).ExecuteAsync(args, folder);
@@ -333,23 +327,23 @@ internal static class SecretStoreTests
 
         // A swapped row: the run stops before it asks, with exit 4.
         Sql(db, "UPDATE secrets SET ciphertext = $c WHERE name = 'A_NAME'", ("$c", DotenvxCipher.Instance.Encrypt("Attacker-Value-1", TestState.Current(db)!.Store)));
-        FakeApprover never = new(true);
+        FakeApprover never = new(true, unlock: () => AdminUnlock(db));
         stderr = new StringWriter();
-        code = await new RunCommand(new SecretStore(new StateDatabase(db.FilePath), new MemoryKeys(), cipher), never, new AuditLog(db), new StringWriter(), stderr).ExecuteAsync(args, folder);
+        code = await new RunCommand(new SecretStore(new StateDatabase(db.FilePath), cipher), never, new AuditLog(db), new StringWriter(), stderr).ExecuteAsync(args, folder);
         check(code == RunCommand.StoreError && never.Requests.Count == 0 && cipher.Decrypts == 1 && stderr.ToString().Contains("failed verification", StringComparison.Ordinal), "store run: a swapped ciphertext is exit 4, nobody is asked, nothing is decrypted (" + stderr + ")");
 
         // A swap after the approval (between the check and the read): the read checks again.
-        (StateDatabase late, SecretStore lateStore, MemoryKeys lateKeys, CountingCipher lateCipher) = NewStore(root, "runs-late");
+        (StateDatabase late, SecretStore lateStore, CountingCipher lateCipher) = NewStore(root, "runs-late");
         Put(lateStore, new Dictionary<string, string> { ["A_NAME"] = ValueA });
         SwapApprover swap = new(late, TestState.Current(late)!.Store, false);
         code = await new RunCommand(lateStore, swap, new AuditLog(late), new StringWriter(), new StringWriter()).ExecuteAsync(args, folder);
-        check(code == RunCommand.StoreError && lateCipher.Decrypts == 0 && lateKeys.Reads == 0, "store run: a row swapped while the approval page was open is exit 4, nothing is decrypted");
+        check(code == RunCommand.StoreError && lateCipher.Decrypts == 0, "store run: a row swapped while the approval page was open is exit 4, nothing is decrypted");
 
         // A row added (without a hash) while the approval page was open: the read checks every row, so exit 4 too.
-        (StateDatabase extra, SecretStore extraStore, MemoryKeys extraKeys, CountingCipher extraCipher) = NewStore(root, "runs-extra");
+        (StateDatabase extra, SecretStore extraStore, CountingCipher extraCipher) = NewStore(root, "runs-extra");
         Put(extraStore, new Dictionary<string, string> { ["A_NAME"] = ValueA });
         code = await new RunCommand(extraStore, new SwapApprover(extra, TestState.Current(extra)!.Store, true), new AuditLog(extra), new StringWriter(), new StringWriter()).ExecuteAsync(args, folder);
-        check(code == RunCommand.StoreError && extraCipher.Decrypts == 0 && extraKeys.Reads == 0, "store run: a row added while the approval page was open is exit 4, nothing is decrypted");
+        check(code == RunCommand.StoreError && extraCipher.Decrypts == 0, "store run: a row added while the approval page was open is exit 4, nothing is decrypted");
     }
 
     /// <summary>Approves, and while doing so swaps the A_NAME row for another valid ciphertext, or adds a row without a hash.</summary>
@@ -357,10 +351,11 @@ internal static class SecretStoreTests
     {
         public ApprovalDecision Request(ApprovalRequest request)
         {
+            Unlock? unlock = AdminUnlock(db);
             string ciphertext = DotenvxCipher.Instance.Encrypt("Attacker-Value-1", publicKey);
             Sql(db, addRow ? "INSERT INTO secrets (name, ciphertext) VALUES ('EXTRA_NAME', $c)" : "UPDATE secrets SET ciphertext = $c WHERE name = 'A_NAME'", ("$c", ciphertext));
 
-            return ApprovalDecision.Allow();
+            return ApprovalDecision.Allow("approved", 0, null, unlock);
         }
     }
 
@@ -394,7 +389,7 @@ internal static class SecretStoreTests
 
     private static void Transactions(Action<bool, string> check, string root)
     {
-        (StateDatabase db, SecretStore store, _, _) = NewStore(root, "tx");
+        (StateDatabase db, SecretStore store, _) = NewStore(root, "tx");
         Put(store, new Dictionary<string, string> { ["A_NAME"] = ValueA });
         Manifest current = TestState.Current(db)!;
         string publicKey = current.Store;
@@ -424,6 +419,6 @@ internal static class SecretStoreTests
         check(store.TryApply(current.Version, signed, rows, [], AuditLog.ChangeRow("secrets-set", "test", admin.Name)) is null && Row(db, "B_NAME") == rows["B_NAME"], "store write: the same write succeeds when nothing fails");
         check(new AuditLog(db).TryRead(100, null, out IReadOnlyList<AuditRecord> rowsDone, out _) && rowsDone.Count == before + 1, "store write: the audit row is written with it");
 
-        check(StateDatabase.SchemaVersion == 7, "store: the schema version is 7");
+        check(StateDatabase.SchemaVersion == 8, "store: the schema version is 8");
     }
 }

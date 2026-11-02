@@ -44,7 +44,8 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
 
     public ApprovalDecision Request(ApprovalRequest request)
     {
-        return Ask(new ApprovalPrompt(RequestHeading, ApprovalSummary.BuildMessage(request)), request.Reuse);
+        // A run on a store with a key vault is approved by a passkey that also releases the secret store key (WebAuthn PRF).
+        return Serve(new ApprovalPrompt(RequestHeading, ApprovalSummary.BuildMessage(request)), request.Reuse ?? ReuseOffer.Off, null, null, request.Unlock).Decision;
     }
 
     /// <summary>
@@ -52,9 +53,15 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
     /// line by line so that its line breaks stay. The proof is bound to the cleaned text, which is what the page shows.
     /// <paramref name="reuse" /> is what the page offers besides "Approve once"; null offers only once.
     /// </summary>
-    public ApprovalDecision Ask(ApprovalPrompt prompt, ReuseOffer? reuse = null)
+    /// <remarks>
+    /// With <paramref name="unlock" /> the page also asks the passkey for its PRF output (the key slot's salt) and the
+    /// approval carries what it released (<see cref="ApprovalDecision.Unlock" />, for the caller to use once and dispose): the
+    /// approval that precedes an enrollment or the first secret needs the master key. A method without key slots (not a
+    /// passkey) releases nothing.
+    /// </remarks>
+    public ApprovalDecision Ask(ApprovalPrompt prompt, ReuseOffer? reuse = null, bool unlock = false)
     {
-        return Serve(prompt, reuse ?? ReuseOffer.Off, null).Decision;
+        return Serve(prompt, reuse ?? ReuseOffer.Off, null, null, unlock).Decision;
     }
 
     /// <summary>Asks to approve a new state: the proof signs <paramref name="manifest" /> (see <see cref="Manifest.Challenge" />).</summary>
@@ -66,9 +73,18 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
         return Serve(prompt, ReuseOffer.Off, manifest, signing);
     }
 
-    private ManifestApproval Serve(ApprovalPrompt prompt, ReuseOffer reuse, string? manifest, IProofMethod? signing = null)
+    private ManifestApproval Serve(ApprovalPrompt prompt, ReuseOffer reuse, string? manifest, IProofMethod? signing = null, bool unlock = false)
     {
         IProofMethod method = signing ?? this.method;
+
+        // Only a passkey has key slots. The page's server key for the PRF output lives for this page only.
+        byte[]? prfState = null;
+        string? prfKey = null;
+        if (unlock && method is PasskeyMethod)
+        {
+            (prfState, prfKey) = SecretCrypto.NewServerKey();
+        }
+
         try
         {
             // The text ends with the admin keys' fingerprints and the time the page is made (server UTC). Both are bound with the
@@ -81,7 +97,7 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
 
             lines.Add(ApprovalSummary.IssuedLine(DateTimeOffset.UtcNow));
             prompt = new ApprovalPrompt(ApprovalSummary.Clean(prompt.Heading), string.Join('\n', lines));
-            Session session = new(method, reuse, manifest);
+            Session session = new(method, reuse, manifest, prfState);
             using OneShotServer server = new("a", settings.Port, session.Handle);
             string nonce = Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(16));
             ProofContext context = new(RequestBinding.Compute(nonce, prompt.Text), settings.PageOrigin(server.Port));
@@ -100,19 +116,30 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
             }
 
             TimeSpan delay = approveDelay ?? DefaultApproveDelay;
-            session.Open(context, nonce, prompt.Text, ApprovalPage.Build(prompt, start, nonce, context.Bind, delay, reuse, manifest));
+            session.Open(context, nonce, prompt.Text, ApprovalPage.Build(prompt, start, nonce, context.Bind, delay, reuse, manifest, prfKey));
             announce($"Approval needed. Ask the person to open: {context.Origin}/a/{server.Token}");
 
             return session.Wait(settings.Timeout);
+        }
+        catch (ProofUnavailableException error)
+        {
+            return new ManifestApproval(ApprovalDecision.Deny(error.Message), null);
         }
         catch (Exception error)
         {
             return new ManifestApproval(ApprovalDecision.Deny("the approval page failed: " + error.Message), null);
         }
+        finally
+        {
+            if (prfState is not null)
+            {
+                CryptographicOperations.ZeroMemory(prfState);
+            }
+        }
     }
 
     /// <summary>The state of one request. Requests are handled one at a time; the first decision is final.</summary>
-    private sealed class Session(IProofMethod method, ReuseOffer reuse, string? manifest)
+    private sealed class Session(IProofMethod method, ReuseOffer reuse, string? manifest, byte[]? prfState)
     {
         private static readonly OneShotResponse NotFound = new(404, "text/plain; charset=utf-8", "Not found.");
         private static readonly OneShotResponse Ok = new(200, "application/json", "{\"ok\":true}");
@@ -173,9 +200,18 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
                     case ("POST", "deny"):
                         return _decision.TrySetResult(ApprovalDecision.Deny("denied on the page")) ? Ok : NotFound;
                     case ("POST", "proof"):
-                        if (!TryReadBody(body, out int minutes, out string proof))
+                        if (!TryReadBody(body, out int minutes, out string proof, out PrfBody? released))
                         {
                             _decision.TrySetResult(ApprovalDecision.Deny("the page sent a request that is not valid"));
+
+                            return Invalid;
+                        }
+
+                        // The PRF output comes with the proof exactly when this page asked for it. A page that cannot send it (a
+                        // passkey without PRF) is a denial: nothing else ever stands in for the key.
+                        if (prfState is null != (released is null))
+                        {
+                            _decision.TrySetResult(ApprovalDecision.Deny(prfState is null ? "the page sent a request that is not valid" : "the page did not send the PRF output, so the secret store key cannot be released"));
 
                             return Invalid;
                         }
@@ -202,6 +238,21 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
 
                         if (result is { Ok: true })
                         {
+                            // The assertion verified first. Then the PRF output is opened with the page's server key (the bind is
+                            // the associated data, so output sealed for another page does not open) and kept with the credential
+                            // id that signed. Any doubt denies.
+                            Unlock? unlock = null;
+                            if (released is not null)
+                            {
+                                unlock = OpenRelease(proof, released, _context.Bind);
+                                if (unlock is null)
+                                {
+                                    _decision.TrySetResult(ApprovalDecision.Deny("the PRF output from the page could not be opened, so the secret store key cannot be released; nothing was approved"));
+
+                                    return Invalid;
+                                }
+                            }
+
                             // A run approval keeps what was signed, so a saved approval can be checked again at every use.
                             ApprovalEvidence? evidence = null;
                             if (manifest is not null)
@@ -213,7 +264,14 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
                                 evidence = new ApprovalEvidence(_nonce, _text, proof);
                             }
 
-                            return _decision.TrySetResult(ApprovalDecision.Allow(result.Detail, minutes, evidence)) ? Ok : NotFound;
+                            if (_decision.TrySetResult(ApprovalDecision.Allow(result.Detail, minutes, evidence, unlock)))
+                            {
+                                return Ok;
+                            }
+
+                            unlock?.Dispose();
+
+                            return NotFound;
                         }
 
                         _decision.TrySetResult(ApprovalDecision.Deny("the proof was not accepted: " + (result?.Detail ?? "no result")));
@@ -228,10 +286,11 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
         /// Reads <c>{"reuse":N,"proof":{...}}</c>: exactly these two members, once each; N a whole number written plainly (no
         /// fraction, exponent or quotes); the proof an object, passed on as its JSON text.
         /// </summary>
-        private static bool TryReadBody(string body, out int minutes, out string proof)
+        private static bool TryReadBody(string body, out int minutes, out string proof, out PrfBody? released)
         {
             minutes = 0;
             proof = "";
+            released = null;
             try
             {
                 using JsonDocument document = JsonDocument.Parse(body);
@@ -244,6 +303,7 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
                 int count = 0;
                 JsonElement? time = null;
                 JsonElement? signed = null;
+                JsonElement? sealedPrf = null;
                 foreach (JsonProperty property in root.EnumerateObject())
                 {
                     count++;
@@ -255,14 +315,23 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
                     {
                         signed = property.Value;
                     }
+                    else if (property.Name == "prf" && sealedPrf is null)
+                    {
+                        sealedPrf = property.Value;
+                    }
                     else
                     {
                         return false;
                     }
                 }
 
-                if (count != 2 || time is not { ValueKind: JsonValueKind.Number } number || signed is not { ValueKind: JsonValueKind.Object } value
+                if (count != (sealedPrf is null ? 2 : 3) || time is not { ValueKind: JsonValueKind.Number } number || signed is not { ValueKind: JsonValueKind.Object } value
                     || !number.TryGetInt32(out int read) || number.GetRawText() != read.ToString(CultureInfo.InvariantCulture))
+                {
+                    return false;
+                }
+
+                if (sealedPrf is { } prf && !PrfBody.TryRead(prf, out released))
                 {
                     return false;
                 }
@@ -275,6 +344,45 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
             catch (JsonException)
             {
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// The PRF output the page sealed to this page's server key, opened and bound to the credential id of the proof that
+        /// verified. Null when it does not open (another page's bind, another key, damaged text) or is not 32 bytes.
+        /// </summary>
+        private Unlock? OpenRelease(string proof, PrfBody sealedPrf, byte[] bind)
+        {
+            byte[]? output = null;
+            try
+            {
+                string? id = PasskeyMethod.ResponseId(proof);
+                if (id is null || prfState is null)
+                {
+                    return null;
+                }
+
+                output = SecretCrypto.DecryptBytes(prfState, bind, sealedPrf.Epk, sealedPrf.Iv, sealedPrf.Ct, SecretCrypto.PrfInfo);
+                if (output.Length != KeyVault.KeyBytes)
+                {
+                    return null;
+                }
+
+                Unlock unlock = new(id, output);
+                output = null;
+
+                return unlock;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+            finally
+            {
+                if (output is not null)
+                {
+                    CryptographicOperations.ZeroMemory(output);
+                }
             }
         }
     }
@@ -369,9 +477,15 @@ internal static class ApprovalPage
                 return btoa(raw).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
             }
 
+            //@SEAL_PRF@
+
+            // A page that releases the secret store key asks every listed passkey for its PRF output, each with the salt of its own
+            // slot (the key the page shows in prfKey is the one the output is sealed to).
+            var wantsPrf = typeof start.prfKey === "string";
+
             function options() {
                 var payload = JSON.parse(start.payload);
-                return {
+                var result = {
                     challenge: null,
                     rpId: payload.rpId,
                     allowCredentials: payload.allowCredentials.map(function (item) {
@@ -380,6 +494,14 @@ internal static class ApprovalPage
                     timeout: payload.timeout,
                     userVerification: "required"
                 };
+                if (wantsPrf) {
+                    var byCredential = {};
+                    Object.keys(payload.salts).forEach(function (id) {
+                        byCredential[id] = { first: fromBase64Url(payload.salts[id]) };
+                    });
+                    result.extensions = { prf: { evalByCredential: byCredential } };
+                }
+                return result;
             }
 
             deny.addEventListener("click", function () {
@@ -461,7 +583,7 @@ internal static class ApprovalPage
                 show("Waiting for your passkey...");
                 navigator.credentials.get({ publicKey: publicKey }).then(function (credential) {
                     var response = credential.response;
-                    return JSON.stringify({
+                    var message = {
                         reuse: minutes,
                         proof: {
                             id: toBase64Url(credential.rawId),
@@ -469,6 +591,18 @@ internal static class ApprovalPage
                             clientDataJSON: toBase64Url(response.clientDataJSON),
                             signature: toBase64Url(response.signature)
                         }
+                    };
+                    if (!wantsPrf) {
+                        return JSON.stringify(message);
+                    }
+                    // The PRF output leaves the page only sealed to the program's key for this page.
+                    var output = prfOutput(credential);
+                    if (output === null) {
+                        throw new Error("no prf");
+                    }
+                    return sealPrf(output, fromBase64Url(start.bind), fromBase64Url(start.prfKey)).then(function (sealed) {
+                        message.prf = sealed;
+                        return JSON.stringify(message);
                     });
                 }).then(function (body) {
                     if (finished) {
@@ -491,9 +625,13 @@ internal static class ApprovalPage
                         busy = false;
                         finish("Could not reach the program. With no answer it denies the request at its time limit.");
                     });
-                }, function () {
+                }, function (error) {
                     busy = false;
-                    if (!finished) {
+                    if (error && error.message === "no prf" && !finished) {
+                        // The passkey answered but returned no PRF output: it cannot release the key, so nothing can be approved.
+                        finish("Your passkey did not release its PRF key, which this approval needs to open the secrets. Nothing was approved. Use a passkey from your phone or a security key.");
+                        post("deny", "").then(null, function () { });
+                    } else if (!finished) {
                         controls(true);
                         show("No passkey was used. Nothing was approved. You can try again or deny.");
                     }
@@ -564,19 +702,19 @@ internal static class ApprovalPage
         .hint { margin: 0.4rem 0 0; color: #333; }
         """;
 
-    public static OneShotResponse Build(ApprovalPrompt prompt, ProofStart start, string nonce, byte[] bind, TimeSpan approveDelay, ReuseOffer? reuse = null, string? manifest = null)
+    public static OneShotResponse Build(ApprovalPrompt prompt, ProofStart start, string nonce, byte[] bind, TimeSpan approveDelay, ReuseOffer? reuse = null, string? manifest = null, string? prfKey = null)
     {
-        return Build(prompt, start, nonce, bind, approveDelay, Script, Style, reuse, manifest);
+        return Build(prompt, start, nonce, bind, approveDelay, Script, Style, reuse, manifest, prfKey);
     }
 
     /// <summary>
     /// Builds the page with the given script and style. Their line endings become LF before hashing and output, so the CSP
     /// hashes match what is served even when the source file was checked out with CRLF.
     /// </summary>
-    internal static OneShotResponse Build(ApprovalPrompt prompt, ProofStart start, string nonce, byte[] bind, TimeSpan approveDelay, string script, string style, ReuseOffer? reuse = null, string? manifest = null)
+    internal static OneShotResponse Build(ApprovalPrompt prompt, ProofStart start, string nonce, byte[] bind, TimeSpan approveDelay, string script, string style, ReuseOffer? reuse = null, string? manifest = null, string? prfKey = null)
     {
         reuse ??= ReuseOffer.Off;
-        script = script.ReplaceLineEndings("\n");
+        script = PrfClient.Fill(script.ReplaceLineEndings("\n"));
         style = style.ReplaceLineEndings("\n");
         string policy = Policy(script, style);
 
@@ -591,6 +729,12 @@ internal static class ApprovalPage
         if (manifest is not null)
         {
             data["manifest"] = manifest;
+        }
+
+        if (prfKey is not null)
+        {
+            // This page also asks the passkey for its PRF output and seals it to this key (see PrfClient).
+            data["prfKey"] = prfKey;
         }
 
         string json = JsonSerializer.Serialize(data);
@@ -629,6 +773,11 @@ internal static class ApprovalPage
             page.Append("</select><button id=\"approve-for\" type=\"button\" disabled>Approve for selected time</button></div>\n");
             page.Append("<p class=\"hint\">A saved approval covers the same secrets, program, script and folder, whatever the other arguments, until it ends. "
                 + "Until then the agent can run it again without asking. Approve once saves nothing.</p>\n");
+        }
+
+        if (prfKey is not null)
+        {
+            page.Append("<p class=\"hint\">" + WebUtility.HtmlEncode(PrfClient.ApprovalHint) + "</p>\n");
         }
 
         page.Append("<p class=\"hint\">Ctrl+Enter (Cmd+Enter on a Mac) presses Approve once.</p>\n");

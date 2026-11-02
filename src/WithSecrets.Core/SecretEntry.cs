@@ -229,8 +229,10 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
 
     /// <summary>
     /// Serves the set page at the target until the first outcome or the time limit. The page's server key lives only here.
-    /// Before the first secret the store key pair is made here, in memory; its private key is saved (to the key custody) only
-    /// when the change is stored, so an abandoned page leaves nothing behind.
+    /// Before the first secret the store key pair is made here, in memory: an admin passkey first approves on its own page and
+    /// releases the master key (WebAuthn PRF), the private key is wrapped under it into the vault, and the public key and the
+    /// vault go into the manifest the set page signs. The private key exists nowhere else, so an abandoned page leaves nothing
+    /// behind.
     /// </summary>
     private SecretChange Serve(EnrollmentTarget target, List<string> names, HashSet<string> stored, Manifest manifest)
     {
@@ -242,21 +244,20 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
         PasskeyMethod.RpIdOf(settings.PageOrigin(settings.Port));
 
         string storeKey = manifest.Store;
-        string? newPrivateKey = null;
+        string? vault = null;
         if (storeKey.Length == 0)
         {
-            // The first secret needs a place for the store's private key. Where there is none (not Windows, until the keys are
-            // wrapped by passkey PRF), refuse before any page opens.
-            if (store.KeyCustodyProblem is { } custody)
+            // The first secret makes the store key. Its private key is wrapped under the master key, which only a passkey with
+            // PRF can open, so an approval page that releases it comes before the set page.
+            SecretChange? refusedKey = NewStoreKey(target, manifest, out storeKey, out vault);
+            if (refusedKey is not null)
             {
-                return new SecretChange(RunCommand.StoreError, custody + "; nothing was stored");
+                return refusedKey;
             }
-
-            (storeKey, newPrivateKey) = store.NewKeyPair();
         }
 
         (byte[] serverKey, string publicKey) = SecretCrypto.NewServerKey();
-        Session session = new(method, store, manifest, storeKey, newPrivateKey, names, serverKey);
+        Session session = new(method, store, manifest, storeKey, vault, names, serverKey);
         try
         {
             using OneShotServer server = new("s", settings.Port, session.Handle);
@@ -282,11 +283,64 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
         }
     }
 
+    private const string FirstKeyHeading = "Create the key that protects your secrets.";
+
+    private const string FirstKeyText = "Your passkey will open the key that protects the secret store. Nothing is stored yet: the next page takes the values.";
+
+    /// <summary>
+    /// The first secret: asks the admin passkey on an approval page (which also releases the master key by PRF), then makes the
+    /// store's key pair in memory and wraps its private key under the master key. Null when <paramref name="storeKey" /> (the
+    /// public key) and <paramref name="vault" /> are set; else why not. The master key, the private key bytes and the PRF output
+    /// are zeroed here (the hex text of the private key is a .NET string for a moment and cannot be wiped).
+    /// </summary>
+    private SecretChange? NewStoreKey(EnrollmentTarget target, Manifest manifest, out string storeKey, out string? vault)
+    {
+        storeKey = "";
+        vault = null;
+        ApprovalDecision asked = target.Approver.Ask(new ApprovalPrompt(FirstKeyHeading, FirstKeyText), unlock: true);
+        byte[]? master = null;
+        byte[]? privateKey = null;
+        try
+        {
+            if (!asked.Approved)
+            {
+                return Denied(asked.Detail + "; nothing was stored");
+            }
+
+            if (asked.Unlock is null)
+            {
+                return Denied("the approval did not release the master key (a passkey with PRF must approve), so the secret store key cannot be made; nothing was stored");
+            }
+
+            try
+            {
+                master = KeyVault.OpenMaster(manifest, asked.Unlock);
+            }
+            catch (CryptographicException)
+            {
+                return Denied("the approving passkey's key slot could not be opened, so the secret store key cannot be made; nothing was stored");
+            }
+
+            (string publicKey, string privateText) = store.NewKeyPair();
+            privateKey = Encoding.UTF8.GetBytes(privateText);
+            vault = KeyVault.WrapVault(privateKey, master, publicKey);
+            storeKey = publicKey;
+
+            return null;
+        }
+        finally
+        {
+            SecretValues.Clear(master);
+            SecretValues.Clear(privateKey);
+            asked.Unlock?.Dispose();
+        }
+    }
+
     /// <summary>
     /// The state of one set page. Requests are handled one at a time under one lock; the first outcome is final, and after
     /// it every request is 404. The store is written inside the lock, so the time limit cannot cut a write in half.
     /// </summary>
-    private sealed class Session(IProofMethod method, SecretStore store, Manifest manifest, string storeKey, string? newPrivateKey, List<string> names, byte[] serverKey)
+    private sealed class Session(IProofMethod method, SecretStore store, Manifest manifest, string storeKey, string? vault, List<string> names, byte[] serverKey)
     {
         private static readonly OneShotResponse Ok = new(200, "application/json", "{\"ok\":true}");
         private static readonly OneShotResponse Refused = new(403, "application/json", "{\"ok\":false}");
@@ -434,7 +488,7 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
                 rows[name] = store.Encrypt(values[name], storeKey);
             }
 
-            string text = SecretStore.Next(manifest, storeKey, rows, []).Canonical();
+            string text = SecretStore.Next(manifest, storeKey, rows, [], vault).Canonical();
             _sealed[key] = (text, rows);
             _order.Enqueue(key);
             while (_order.Count > Kept)
@@ -534,40 +588,10 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
                 return Refused;
             }
 
-            // The first secret: the store's private key goes to its custody now, before the state that names its public key.
-            // Only a key this call adds is removed again if the write then fails; one that was already there is never touched.
-            bool addedKey = false;
-            if (newPrivateKey is not null)
-            {
-                try
-                {
-                    addedKey = !store.KeyExists(storeKey);
-                    store.SaveKey(storeKey, newPrivateKey);
-                }
-                catch (Exception failure)
-                {
-                    _decision.TrySetResult(new SecretChange(RunCommand.StoreError, "the store key could not be saved (" + failure.GetType().Name + "); nothing was stored"));
-
-                    return Failed;
-                }
-            }
-
             SignedManifest signed = new(prepared.Manifest, manifestBind, assertion);
             string? problemWriting = store.TryApply(manifest.Version, signed, prepared.Rows, [], AuditLog.SecretsRow("secrets-set", names, result.Detail, AuditLog.KeyName(result.Detail)));
             if (problemWriting is not null)
             {
-                if (addedKey)
-                {
-                    try
-                    {
-                        store.DeleteKey(storeKey);
-                    }
-                    catch (Exception)
-                    {
-                        problemWriting += " (the unused store key could not be removed from the key custody)";
-                    }
-                }
-
                 _decision.TrySetResult(new SecretChange(RunCommand.StoreError, problemWriting));
 
                 return Failed;

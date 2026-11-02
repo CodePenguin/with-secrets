@@ -26,7 +26,7 @@ public sealed record ToolSettings(int ReuseMinutes, int ReuseMaxMinutes, string 
     /// <summary>The settings the approval page uses.</summary>
     public ApprovalSettings Approval => new(Method, BaseUrl, Port, TimeSpan.FromMinutes(TimeoutMinutes));
 
-    /// <summary>What the approval page offers besides "Approve once": the steps up to the ceiling, starting on reuseMinutes.</summary>
+    /// <summary>What the approval page offers besides "Approve once": the steps up to the ceiling, starting on reuseMinutes. Not used while the secret store is protected by a passkey PRF: every run asks.</summary>
     public ReuseOffer Reuse => new(ReuseMaxMinutes, ReuseMinutes);
 
     /// <summary>The limits of a setting, as the page and the README show them.</summary>

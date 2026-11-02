@@ -472,6 +472,7 @@ internal static class ConfigPageHtml
             var ready = null;
             var pending = null;
             var keyName = document.getElementById("f-key-name");
+            var noPrf = false;
 
             function show(text) {
                 status.textContent = text;
@@ -553,6 +554,8 @@ internal static class ConfigPageHtml
                 out.set(second, first.length);
                 return out;
             }
+
+            //@SEAL_PRF@
 
             function field(name) {
                 for (var i = 0; i < fields.length; i++) {
@@ -641,7 +644,9 @@ internal static class ConfigPageHtml
                     excludeCredentials: options.excludeCredentials.map(function (item) {
                         return { id: fromBase64Url(item.id), type: item.type };
                     }),
-                    timeout: options.timeout
+                    timeout: options.timeout,
+                    // The first key's slot: its PRF output for the salt the program chose, returned at create.
+                    extensions: { prf: { eval: { first: fromBase64Url(options.prf.salt) } } }
                 };
             }
 
@@ -849,10 +854,22 @@ internal static class ConfigPageHtml
                     if (register) {
                         body.attestationObject = toBase64Url(response.attestationObject);
                         body.name = named.name;
-                    } else {
-                        body.authenticatorData = toBase64Url(response.authenticatorData);
-                        body.signature = toBase64Url(response.signature);
+                        var output = prfOutput(credential);
+                        if (output === null) {
+                            // No PRF at create: the program refuses this passkey (and says why) before anything is stored.
+                            noPrf = true;
+                            return JSON.stringify(body);
+                        }
+                        // The PRF output leaves the page only sealed to the program's key for this page.
+                        return sealPrf(output, fromBase64Url(start.options.challenge), fromBase64Url(start.options.prf.serverKey)).then(function (sealed) {
+                            body.prfEpk = sealed.epk;
+                            body.prfIv = sealed.iv;
+                            body.prfCt = sealed.ct;
+                            return JSON.stringify(body);
+                        });
                     }
+                    body.authenticatorData = toBase64Url(response.authenticatorData);
+                    body.signature = toBase64Url(response.signature);
                     return JSON.stringify(body);
                 }).then(function (body) {
                     if (finished) {
@@ -863,7 +880,8 @@ internal static class ConfigPageHtml
                     return post(register ? "create" : "save", body).then(function (reply) {
                         if (!reply.ok) {
                             busy = false;
-                            finish((reply.status === 403 ? "Your passkey was not accepted. Nothing was saved." : "Nothing was saved. The terminal says why.")
+                            finish(noPrf ? "This passkey cannot do PRF (it cannot protect the secret store key). Use a passkey from your phone or a security key. Nothing was saved."
+                                : (reply.status === 403 ? "Your passkey was not accepted. Nothing was saved." : "Nothing was saved. The terminal says why.")
                                 + (register ? " If the terminal asks for a code, press Ctrl+C." : ""));
                             return;
                         }
@@ -915,6 +933,9 @@ internal static class ConfigPageHtml
         .hint { margin: 0.3rem 0 0; color: #333; }
         """;
 
+    /// <summary>Shown beside the reuse settings: a store protected by a passkey PRF never uses saved approvals.</summary>
+    internal const string ReuseNote = "Not used with the passkey-protected secret store: every run asks.";
+
     private static readonly IReadOnlyDictionary<string, string> Meaning = new Dictionary<string, string>
     {
         ["reuseMinutes"] = "The time the \"Approve for\" list on the approval page starts on.",
@@ -932,7 +953,7 @@ internal static class ConfigPageHtml
     /// </summary>
     public static OneShotResponse Build(bool firstRun, ToolSettings current, string start, string adminLine)
     {
-        string script = Script.ReplaceLineEndings("\n");
+        string script = PrfClient.Fill(Script.ReplaceLineEndings("\n"));
         string style = (ApprovalPage.Style + PasskeyRegistration.CodeStyle + FormStyle).ReplaceLineEndings("\n");
         string policy = ApprovalPage.Policy(script, style);
 
@@ -946,6 +967,11 @@ internal static class ConfigPageHtml
         page.Append(firstRun
             ? "<p>Nothing is enrolled yet. Choose the settings and a name for the first passkey, then create it. It will work on this page's host and it is the first admin passkey: only admin passkeys can change the settings or the passkeys later (--enroll can add more). There are two steps, each with its own button: step 1 creates it, then step 2 (a second button that appears) confirms the settings with it. Nothing is saved until you type the code this page then shows into your terminal.</p>\n"
             : "<p>Change any value, check the changes, then save. Your admin passkey approves exactly these values.</p>\n");
+        if (firstRun)
+        {
+            page.Append("<p>" + WebUtility.HtmlEncode(PrfClient.RequiredText) + "</p>\n");
+        }
+
         page.Append("<pre id=\"admin\">").Append(Encode(adminLine + (firstRun ? " (the passkey you create here becomes the first admin key)" : ""))).Append("</pre>\n");
         foreach (string name in ToolSettings.Names)
         {
@@ -978,7 +1004,7 @@ internal static class ConfigPageHtml
                     break;
             }
 
-            page.Append("<p class=\"hint\">").Append(Encode(Meaning[name] + " " + ToolSettings.Limits(name) + " Current: " + current.Text(name) + ".")).Append("</p></div>\n");
+            page.Append("<p class=\"hint\">").Append(Encode(Meaning[name] + " " + ToolSettings.Limits(name) + " Current: " + current.Text(name) + "." + (name is "reuseMinutes" or "reuseMaxMinutes" ? " " + ReuseNote : ""))).Append("</p></div>\n");
         }
 
         page.Append("<h2>Changes</h2>\n<pre id=\"changes\">No changes.</pre>\n");

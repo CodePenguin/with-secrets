@@ -2,9 +2,10 @@ namespace WithSecrets;
 
 /// <summary>
 /// A registered passkey. <see cref="Id" /> and <see cref="PublicKey" /> are base64url. The public key is the COSE key bytes.
-/// <see cref="Admin" /> marks a key that may change the state (an admin key; see <see cref="Manifest" />).
+/// <see cref="Admin" /> marks a key that may change the state (an admin key; see <see cref="Manifest" />). <see cref="Slot" /> is the
+/// key's slot of the master key (see <see cref="KeyVault" />); every enrolled key has one.
 /// </summary>
-public sealed record PasskeyRecord(string Id, string PublicKey, int Alg, string RpId, string Name, DateTimeOffset Created, uint SignCount, bool Admin = false);
+public sealed record PasskeyRecord(string Id, string PublicKey, int Alg, string RpId, string Name, DateTimeOffset Created, uint SignCount, bool Admin = false, KeySlot? Slot = null);
 
 /// <summary>
 /// The passkeys that may approve requests: the keys of the verified manifest in <see cref="StateDatabase" />, with their sign

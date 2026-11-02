@@ -16,6 +16,12 @@ public sealed record ApprovalSettings(string Method, string? BaseUrl, int Port, 
     }
 
     /// <summary>
+    /// The same settings with the page listening on <paramref name="port" /> (the --port option) instead of the setting. Null keeps
+    /// the setting. Nothing is stored: the manifest still holds the setting.
+    /// </summary>
+    public ApprovalSettings WithPort(int? port) => port is { } value ? this with { Port = value } : this;
+
+    /// <summary>
     /// The origin the page is served from: the scheme, host and non-default port of baseUrl, or localhost on the bound port.
     /// Built from its parts so that a user name or password in baseUrl never reaches the origin.
     /// </summary>

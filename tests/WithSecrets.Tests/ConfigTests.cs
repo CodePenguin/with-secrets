@@ -13,7 +13,6 @@ internal static class ConfigTests
 {
     public const string ConfigPrefix = "To change the settings, open this link: ";
 
-    private static int _signs;
 
     public static async Task Run(Action<bool, string> check)
     {
@@ -28,6 +27,7 @@ internal static class ConfigTests
             Show(check, folder);
             await Gated(check, folder);
             await FirstRun(check, folder);
+            await PortOption(check, folder);
         }
         finally
         {
@@ -170,7 +170,7 @@ internal static class ConfigTests
         string path = SchemaOne(Path.Combine(root, "old-schema"));
         byte[] before = File.ReadAllBytes(path);
         StateDatabase db = new(path);
-        check(StateDatabase.SchemaVersion == 7, "db schema: the schema version is 7");
+        check(StateDatabase.SchemaVersion == 8, "db schema: the schema version is 8");
         check(!db.TryCheck(out string? error) && error is not null && error.Contains("delete state.db to start over", StringComparison.Ordinal), "db schema: an older database is an error that says to delete state.db (" + error + ")");
         check(!new PasskeyStore(db).TryAll(out _) && new PasskeyStore(db).All().Count == 0, "db schema: its passkeys are not used");
         check(ToolSettings.Load(db, out error) == ToolSettings.Defaults && error is not null && ReuseSettings.Load(db) == ReuseOffer.Off, "db schema: settings from it are an error");
@@ -230,7 +230,7 @@ internal static class ConfigTests
         check(CliArgs.Parse(["--list", "--show"], out _) is null, "cli: --show goes only with --config");
         check(CliArgs.Parse(["--config", "extra"], out _) is null, "cli: --config takes no argument");
         check(CliArgs.Parse(["--config", "--show", "extra"], out _) is null, "cli: --config --show takes no argument");
-        check(CliArgs.Parse(["--config", "--port", "1"], out _) is null, "cli: --config has no setting options");
+        check(CliArgs.Parse(["--config", "--baseUrl", "x"], out _) is null, "cli: --config has no setting options");
         check(CliArgs.Parse(["--config", "--list"], out string two) is null && two.Contains("one command at a time", StringComparison.Ordinal), "cli: --config with another command is refused");
         check(CliArgs.Parse(["--config", "--", "p"], out _) is null, "cli: --config with a run is refused");
         check(CliArgs.Parse(["--config", "--name", "x"], out _) is null, "cli: --name does not go with --config");
@@ -412,7 +412,7 @@ internal static class ConfigTests
             // The admin signs the new manifest: the prefix the page was given, the canonical settings and "}".
             string prefix = start.ValueKind == JsonValueKind.Object && start.TryGetProperty("prefix", out JsonElement given) ? given.GetString() ?? "" : "";
             string origin = run.Link!.GetLeftPart(UriPartial.Authority);
-            Dictionary<string, string> body = JsonSerializer.Deserialize<Dictionary<string, string>>(key.Assert(Challenge(bind, prefix + signed + "}"), origin, run.Link.IdnHost, (uint)Interlocked.Increment(ref _signs)))!;
+            Dictionary<string, string> body = JsonSerializer.Deserialize<Dictionary<string, string>>(key.Assert(Challenge(bind, prefix + signed + "}"), origin, run.Link.IdnHost, TestState.NextCount()))!;
             body["settings"] = sent;
             string json = JsonSerializer.Serialize(body);
             using HttpResponseMessage? reply = twist == Twist.Cancel ? Send(client, HttpMethod.Post, url + "/deny", "") : Send(client, HttpMethod.Post, url + "/save", json);
@@ -581,14 +581,20 @@ internal static class ConfigTests
     }
 
     /// <summary>Gets the first-run page, registers a new passkey over <paramref name="text" />, and returns the code (or "").</summary>
-    private static string Register(HttpClient client, ConfigRun run, string url, TestAuthenticator key, string text, string? sent = null, TestAuthenticator? signer = null, bool skipSign = false, string? keyName = null)
+    private static string Register(HttpClient client, ConfigRun run, string url, TestAuthenticator key, string text, string? sent = null, TestAuthenticator? signer = null, bool skipSign = false, string? keyName = null, PrfMode prf = PrfMode.Normal)
     {
         using HttpResponseMessage? page = Send(client, HttpMethod.Get, url);
         run.Page = Text(page);
         run.Policy = page is not null && page.Headers.TryGetValues("Content-Security-Policy", out IEnumerable<string>? policy) ? string.Join(",", policy) : "";
         JsonElement start = Start(run.Page);
         byte[] seed = start.ValueKind == JsonValueKind.Object && start.TryGetProperty("options", out JsonElement options) ? Base64Url.DecodeFromChars(options.GetProperty("challenge").GetString()!) : [];
-        Dictionary<string, string> body = JsonSerializer.Deserialize<Dictionary<string, string>>(key.Attest(Challenge(seed, text), "http://localhost:" + run.Link!.Port, "localhost", "passkey"))!;
+        string attested = key.Attest(Challenge(seed, text), "http://localhost:" + run.Link!.Port, "localhost", "passkey");
+        if (start.ValueKind == JsonValueKind.Object && start.TryGetProperty("options", out JsonElement pageOptions))
+        {
+            attested = TestState.WithPrf(attested, pageOptions, key, prf);
+        }
+
+        Dictionary<string, string> body = JsonSerializer.Deserialize<Dictionary<string, string>>(attested)!;
         body["settings"] = sent ?? text;
         if (keyName is not null)
         {
@@ -625,12 +631,128 @@ internal static class ConfigTests
 
     private static bool Empty(StateDatabase db) => !File.Exists(db.FilePath) || (Version(db) == 0 && new PasskeyStore(db).All().Count == 0 && new AuditLog(db).Lines().Count == 0);
 
+    private static int FreePort()
+    {
+        System.Net.Sockets.TcpListener probe = new(IPAddress.Loopback, 0);
+        probe.Start();
+        try
+        {
+            return ((IPEndPoint)probe.LocalEndpoint).Port;
+        }
+        finally
+        {
+            probe.Stop();
+        }
+    }
+
+    /// <summary>--port N: parsing, the override over the setting, a port in use, nothing saved, and the first run.</summary>
+    private static async Task PortOption(Action<bool, string> check, string root)
+    {
+        // Parsing: 1..65535 only; the number rides on any command that opens a page.
+        check(CliArgs.Parse(["--config", "--port", "8765"], out _) is CliCommand.Config { Show: false, Port: 8765 }, "port: --config --port 8765");
+        check(CliArgs.Parse(["--port", "1", "--set", "A"], out _) is CliCommand.Set { Port: 1 }, "port: --set with --port 1");
+        check(CliArgs.Parse(["--remove", "A", "--port", "65535"], out _) is CliCommand.Remove { Port: 65535 }, "port: --remove with --port 65535");
+        check(CliArgs.Parse(["--revoke", "--port", "9000"], out _) is CliCommand.Revoke { Port: 9000 }, "port: --revoke with --port");
+        check(CliArgs.Parse(["--enroll", "--local", "--port", "9000"], out _) is CliCommand.Enroll { Local: true, Port: 9000 }, "port: --enroll with --port");
+        check(CliArgs.Parse(["--unenroll", "x", "--port", "9000"], out _) is CliCommand.Unenroll { Port: 9000 }, "port: --unenroll with --port");
+        check(CliArgs.Parse(["--secrets", "A", "--reason", "r", "--port", "9000", "--", "p", "--port", "1"], out _) is CliCommand.Run { Port: 9000, Args.Program: "p" } run1 && run1.Args.Arguments.SequenceEqual(["--port", "1"]), "port: a run with --port; the program keeps its own --port");
+        check(CliArgs.Parse(["--config"], out _) is CliCommand.Config { Port: null }, "port: none given is null");
+        foreach (string bad in new[] { "0", "65536", "-1", "abc", "", "80x", "1.5", "99999999999" })
+        {
+            check(CliArgs.Parse(["--config", "--port", bad], out string message) is null && message.Contains("--port", StringComparison.Ordinal) && message.Contains("65535", StringComparison.Ordinal), "port: '" + bad + "' is refused (" + message + ")");
+        }
+
+        check(CliArgs.Parse(["--list", "--port", "9000"], out _) is null && CliArgs.Parse(["--audit", "--port", "9000"], out _) is null && CliArgs.Parse(["--enrolled", "--port", "9000"], out _) is null
+            && CliArgs.Parse(["--config", "--show", "--port", "9000"], out _) is null, "port: commands that open no page refuse --port");
+        check(CliArgs.Parse(["--help"], out _) is CliCommand.Help { Text: var help } && help.Contains("--port", StringComparison.Ordinal) && help.Contains("ssh -L", StringComparison.Ordinal), "port: --help describes --port");
+
+        // The override replaces the setting; null keeps it.
+        ApprovalSettings set = new("passkey", "https://ws.example.com", 5555, TimeSpan.FromSeconds(20));
+        check(set.WithPort(7777) == set with { Port = 7777 } && set.WithPort(null) == set, "port: WithPort replaces the port and keeps baseUrl");
+
+        using HttpClient client = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false });
+        client.Timeout = TimeSpan.FromSeconds(20);
+        using TestAuthenticator laptop = TestAuthenticator.ES256();
+
+        StateDatabase NewDb()
+        {
+            StateDatabase db = StateDatabase.InFolder(Path.Combine(root, "port-" + Guid.NewGuid().ToString("N")));
+            new PasskeyStore(db).Add(laptop.Record("localhost", "laptop"));
+            Row(db, "port", "5555");
+
+            return db;
+        }
+
+        // The override wins over the stored setting, and the manifest is not touched.
+        {
+            StateDatabase db = NewDb();
+            string before = TestState.Current(db)!.Canonical();
+            int wanted = FreePort();
+            ApprovalSettings stored = ApprovalSettings.Load(db, out _);
+            ConfigRun run = await Drive(db, stored.WithPort(wanted), null, Save(client, laptop, "{}", "{}", Twist.Cancel));
+            check(stored.Port == 5555 && run.Link?.Port == wanted, "port: the override wins over the port setting (" + run.Link + ")");
+            check(TestState.Current(db)!.Canonical() == before && ToolSettings.Load(db, out _).Port == 5555, "port: the override is not stored (the manifest text is unchanged)");
+        }
+
+        // A port in use: one clear line, no link, and no fallback to another port.
+        {
+            StateDatabase db = NewDb();
+            int taken = FreePort();
+            System.Net.Sockets.TcpListener holder = new(IPAddress.Loopback, taken);
+            holder.Start();
+            try
+            {
+                ConfigRun run = await Drive(db, ApprovalSettings.Load(db, out _).WithPort(taken), null, Save(client, laptop, "{}", "{}", Twist.Cancel));
+                string detail = run.Result?.Detail ?? "";
+                check(run.Result is { Code: RunCommand.Denied } && run.Link is null && run.Lines.Count == 0, "port: a port in use fails without a link (" + detail + ")");
+                check(detail.Contains("port " + taken + " is already in use", StringComparison.Ordinal) && !detail.Contains('\n'), "port: the message is one clear line (" + detail + ")");
+            }
+            finally
+            {
+                holder.Stop();
+            }
+        }
+
+        // The same for a run approval.
+        {
+            int taken = FreePort();
+            System.Net.Sockets.TcpListener holder = new(IPAddress.Loopback, taken);
+            holder.Start();
+            try
+            {
+                StateDatabase db = NewDb();
+                ApprovalSettings settings = ApprovalSettings.Load(db, out _).WithPort(taken);
+                List<string> lines = [];
+                WebApprover approver = new(new PasskeyMethod(new PasskeyStore(db), settings, null), settings, lines.Add, TimeSpan.Zero);
+                ApprovalDecision decision = approver.Ask(new ApprovalPrompt("Run", "x"));
+                check(!decision.Approved && decision.Detail.Contains("port " + taken + " is already in use", StringComparison.Ordinal) && lines.Count == 0, "port: a run approval on a port in use is denied with the clear message (" + decision.Detail + ")");
+            }
+            finally
+            {
+                holder.Stop();
+            }
+        }
+
+        // The first run (nothing enrolled) honors --port too, and stores the form's port, not the override.
+        {
+            StateDatabase db = StateDatabase.InFolder(Path.Combine(root, "port-first-" + Guid.NewGuid().ToString("N")));
+            using TestAuthenticator fresh = TestAuthenticator.ES256();
+            Codes codes = new();
+            int wanted = FreePort();
+            string chosen = Canonical(30, "passkey", null, 0, 10);
+            ConfigRun run = await Drive(db, new ApprovalSettings("passkey", null, 0, TimeSpan.FromSeconds(20)).WithPort(wanted), codes.Read, (r, url) => codes.Type(Register(client, r, url, fresh, chosen)));
+            check(run.Result is { Code: 0 } && run.Link?.Port == wanted, "port: the first --config listens on the --port (" + run.Link + ", " + run.Result?.Detail + ")");
+            check(ToolSettings.Load(db, out _).Port == 0, "port: the first run stores the form's port, not the override");
+        }
+    }
+
     private static async Task FirstRun(Action<bool, string> check, string root)
     {
         using HttpClient client = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false });
         client.Timeout = TimeSpan.FromSeconds(20);
         using TestAuthenticator laptop = TestAuthenticator.ES256();
         using TestAuthenticator stranger = TestAuthenticator.ES256();
+        using TestAuthenticator noPrf = TestAuthenticator.ES256(prf: false);
         ApprovalSettings local = new("passkey", null, 0, TimeSpan.FromSeconds(20));
         string wanted = Canonical(30, "passkey", null, 8765, 10);
 
@@ -653,6 +775,27 @@ internal static class ConfigTests
             IReadOnlyList<PasskeyRecord> keys = new PasskeyStore(db).All();
             check(keys.Count == 1 && keys[0].RpId == "localhost" && keys[0].Name == "passkey" && keys[0].Admin && keys[0].Id == TestAuthenticator.Encode(laptop.CredentialId), "config first run: the passkey is stored for localhost, as the admin");
             check(Version(db) == 1 && db.TryCheck(out _), "config first run: the first manifest (version 1) verifies");
+            {
+                // The first key's slot: its salt is the one the page asked the passkey for, and the PRF output opens the master key
+                // that nothing else in the state holds. No vault yet (no store key).
+                Manifest? first = TestState.Current(db);
+                using Unlock? released = TestVault.Unlock(db, laptop);
+                byte[]? master = null;
+                try
+                {
+                    master = first is not null && released is not null ? KeyVault.OpenMaster(first, released) : null;
+                    check(keys[0].Slot is not null && first is { Store: "", Vault: "" } && master is { Length: 32 }, "config first run: the first key has a key slot that its PRF output opens; there is no store key or vault yet");
+                    check(run.Page.Contains("prf", StringComparison.Ordinal) && run.Page.Contains("PRF", StringComparison.Ordinal), "config first run: the page asks for a PRF passkey");
+                }
+                finally
+                {
+                    SecretValues.Clear(master);
+                }
+
+                string everything = StateDatabaseTests.AuditText(db.FilePath) + run.Reply + run.First + string.Join("|", run.Lines) + run.Result!.Detail;
+                check(!everything.Contains(Convert.ToHexStringLower(laptop.PrfSecret), StringComparison.Ordinal) && !File.ReadAllText(db.FilePath, System.Text.Encoding.Latin1).Contains(Convert.ToBase64String(laptop.PrfSecret), StringComparison.Ordinal), "config first run: the PRF secret is in no reply, audit entry or message");
+            }
+
             string fingerprint = "Admins: passkey " + GrantTests.Expected(laptop);
             check(run.Page.Contains(AdminKey.NotSetUp, StringComparison.Ordinal), "config first run: the page says the admin key is not set up yet");
             check(run.Reply.Contains("\"admin\":\"" + fingerprint + "\"", StringComparison.Ordinal), "config first run: the code reply shows the new admin key's fingerprint (" + run.Reply + ")");
@@ -680,6 +823,11 @@ internal static class ConfigTests
             ("three wrong codes", ["000000x", "111111x", "222222x"], (c, r, url) => Register(c, r, url, laptop, wanted)),
             ("no code (Ctrl+C)", [], (c, r, url) => Register(c, r, url, laptop, wanted)),
             ("a value outside its limits", [], (c, r, url) => Register(c, r, url, laptop, Canonical(10, "passkey", null, 0, 0))),
+            ("a passkey without PRF", [], (c, r, url) => Register(c, r, url, noPrf, wanted)),
+            ("a registration without the PRF payload", [], (c, r, url) => Register(c, r, url, laptop, wanted, null, null, false, null, PrfMode.Missing)),
+            ("a garbled PRF payload", [], (c, r, url) => Register(c, r, url, laptop, wanted, null, null, false, null, PrfMode.Garbled)),
+            ("a PRF payload sealed to another page", [], (c, r, url) => Register(c, r, url, laptop, wanted, null, null, false, null, PrfMode.WrongBind)),
+            ("a PRF output of the wrong size", [], (c, r, url) => Register(c, r, url, laptop, wanted, null, null, false, null, PrfMode.ShortOutput)),
             ("a registration over other values", [], (c, r, url) => Register(c, r, url, laptop, Canonical(10, "passkey", null, 1, 5), wanted)),
             ("the manifest signed by another key", [], (c, r, url) => Register(c, r, url, laptop, wanted, null, stranger)),
             ("no manifest signature", [], (c, r, url) => Register(c, r, url, laptop, wanted, null, null, true)),

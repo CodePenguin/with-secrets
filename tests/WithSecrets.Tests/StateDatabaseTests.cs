@@ -73,7 +73,7 @@ internal static class StateDatabaseTests
         check(passkeys.Add(Key("id-1", "laptop")) && passkeys.Add(Key("id-2", "phone", "ws.example.com")), "db passkeys: add two");
         check(passkeys.UpdateSignCount(Id("id-1"), 4000000000u), "db passkeys: a large sign count is saved");
         IReadOnlyList<PasskeyRecord> loaded = new PasskeyStore(StateDatabase.InFolder(folder)).All();
-        check(loaded.Count == 2 && loaded[0] == Key("id-1", "laptop") with { Admin = true, SignCount = 4000000000u } && loaded[1] == Key("id-2", "phone", "ws.example.com") && loaded[0].Created.Offset == TimeSpan.FromHours(2), "db passkeys: records round-trip in order (the admin first), with the offset and a large sign count");
+        check(loaded.Count == 2 && loaded[0] == Key("id-1", "laptop") with { Admin = true, SignCount = 4000000000u, Slot = loaded[0].Slot } && loaded[1] == Key("id-2", "phone", "ws.example.com") with { Slot = loaded[1].Slot } && loaded.All(item => item.Slot is not null) && loaded[0].Created.Offset == TimeSpan.FromHours(2), "db passkeys: records round-trip in order (the admin first), with the offset and a large sign count");
         check(!passkeys.Add(Key("id-1", "again")), "db passkeys: a duplicate Id is refused");
         check(!passkeys.UpdateSignCount(Id("id-1"), 9) && passkeys.All()[0].SignCount == 4000000000u, "db passkeys: a lower sign count does not overwrite a higher one");
         check(!passkeys.UpdateSignCount(Id("id-1"), 4000000000u) && passkeys.All()[0].SignCount == 4000000000u, "db passkeys: an equal sign count changes nothing");

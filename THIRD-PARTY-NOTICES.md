@@ -4,7 +4,7 @@
 
 ## Dotenvx for .NET
 
-Packages: `Dotenvx.Primitives`, `Dotenvx.Providers` (https://github.com/CodePenguin/dotnet-dotenvx), a .NET port of dotenvx (https://github.com/dotenvx/dotenvx). License: BSD-3-Clause.
+Package: `Dotenvx.Primitives` (https://github.com/CodePenguin/dotnet-dotenvx), a .NET port of dotenvx (https://github.com/dotenvx/dotenvx). License: BSD-3-Clause.
 
 ```
 BSD 3-Clause License

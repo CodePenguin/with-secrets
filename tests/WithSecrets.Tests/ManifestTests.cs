@@ -43,10 +43,12 @@ internal static class ManifestTests
     {
         using TestAuthenticator laptop = TestAuthenticator.ES256();
         using TestAuthenticator phone = TestAuthenticator.RS256();
-        Manifest first = Manifest.First(Record(laptop, "laptop"), ToolSettings.Defaults);
+        PasskeyRecord laptopRecord = Record(laptop, "laptop");
+        Manifest first = Manifest.First(laptopRecord, ToolSettings.Defaults);
         string id = TestAuthenticator.Encode(laptop.CredentialId);
         string expected = "{\"v\":1,\"keys\":[{\"id\":\"" + id + "\",\"name\":\"laptop\",\"pub\":\"" + TestAuthenticator.Encode(laptop.CoseKey())
-            + "\",\"alg\":-7,\"rp\":\"localhost\",\"created\":\"2026-11-01T10:00:00.0000000+00:00\",\"admin\":true}],\"store\":\"\",\"secrets\":{},\"settings\":" + ToolSettings.Defaults.Canonical() + "}";
+            + "\",\"alg\":-7,\"rp\":\"localhost\",\"created\":\"2026-11-01T10:00:00.0000000+00:00\",\"admin\":true,\"slot\":{\"salt\":\"" + laptopRecord.Slot!.Salt + "\",\"wrap\":\"" + laptopRecord.Slot.Wrap
+            + "\"}}],\"store\":\"\",\"vault\":\"\",\"secrets\":{},\"settings\":" + ToolSettings.Defaults.Canonical() + "}";
         check(first.Canonical() == expected, "manifest: the canonical text has a fixed key order (" + first.Canonical() + ")");
         check(first.Version == 1 && first.Admins.Single().Id == id && first.Keys.Count == 1, "manifest: the first manifest is version 1 with the first key as admin");
 
@@ -126,7 +128,7 @@ internal static class ManifestTests
         check(ToolSettings.Load(again, out error).Port == 8765 && error is null, "manifest store: settings come from the manifest");
         check(TestState.Current(again)!.Version == 2, "manifest store: the version is 2 after two changes");
         check(Tables(db.FilePath).SequenceEqual(["audit", "grants", "manifest", "schema_version", "secrets", "sign_counts"]), "manifest store: no passkeys or settings table; secrets have their own (" + string.Join(",", Tables(db.FilePath)) + ")");
-        check(StateDatabase.SchemaVersion == 7, "manifest store: the schema version is 7");
+        check(StateDatabase.SchemaVersion == 8, "manifest store: the schema version is 8 (slots and the vault are in the manifest)");
         check(new GrantStore(again).Add("K", 10, "laptop") && new GrantStore(again).TryGet("K", out _, out _), "manifest store: grants work with a valid manifest");
         check(StateDatabase.InFolder(Path.Combine(root, "stored-empty")) is { } empty && !new GrantStore(empty).Add("K", 10) && !File.Exists(empty.FilePath), "manifest store: no grant is saved without a manifest");
     }
@@ -194,6 +196,8 @@ internal static class ManifestTests
         [
             ("edited manifest text", db => Execute(db.FilePath, "UPDATE manifest SET text = replace(text, '\"name\":\"phone\"', '\"name\":\"phone2\"')")),
             ("edited settings", db => Execute(db.FilePath, "UPDATE manifest SET text = replace(text, '\"port\":0', '\"port\":1')")),
+            ("an edited key slot (the wrap: one character of the sealed master key)", db => EditSlotText(db, "\"wrap\":")),
+            ("an edited key slot (the salt)", db => EditSlotText(db, "\"salt\":")),
             ("edited signature", db =>
             {
                 string signature = Scalar(db.FilePath, "SELECT signature FROM manifest");
@@ -265,6 +269,14 @@ internal static class ManifestTests
             bool ok = db.TryCheck(out string? error);
             check(File.Exists(db.FilePath) && ok && error is null && db.Gate(new StringWriter()) is null, "manifest: a database with only audit rows is an empty state (" + error + ")");
         }
+    }
+
+    /// <summary>Changes one character of the first base64url value after <paramref name="field" /> in the stored manifest text (the signature stays).</summary>
+    internal static void EditSlotText(StateDatabase db, string field)
+    {
+        string text = Scalar(db.FilePath, "SELECT text FROM manifest");
+        int at = text.IndexOf(field, StringComparison.Ordinal) + field.Length + 3;
+        Execute(db.FilePath, "UPDATE manifest SET text = $t", ("$t", text[..at] + (text[at] == 'A' ? 'B' : 'A') + text[(at + 1)..]));
     }
 
     /// <summary>A real assertion by <paramref name="signer" /> over the manifest challenge, with flags or type of the caller's choice.</summary>

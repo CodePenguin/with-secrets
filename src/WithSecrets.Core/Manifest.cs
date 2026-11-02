@@ -6,11 +6,11 @@ using System.Text.Json;
 namespace WithSecrets;
 
 /// <summary>One key in the manifest. <see cref="Id" /> and <see cref="PublicKey" /> are base64url, as <see cref="PasskeyRecord" /> keeps them.</summary>
-public sealed record ManifestKey(string Id, string Name, string PublicKey, int Alg, string RpId, DateTimeOffset Created, bool Admin)
+public sealed record ManifestKey(string Id, string Name, string PublicKey, int Alg, string RpId, DateTimeOffset Created, bool Admin, KeySlot? Slot = null)
 {
-    public static ManifestKey From(PasskeyRecord record, bool admin) => new(record.Id, record.Name, record.PublicKey, record.Alg, record.RpId, record.Created, admin);
+    public static ManifestKey From(PasskeyRecord record, bool admin) => new(record.Id, record.Name, record.PublicKey, record.Alg, record.RpId, record.Created, admin, record.Slot);
 
-    public PasskeyRecord Record(uint signCount) => new(Id, PublicKey, Alg, RpId, Name, Created, signCount, Admin);
+    public PasskeyRecord Record(uint signCount) => new(Id, PublicKey, Alg, RpId, Name, Created, signCount, Admin, Slot);
 }
 
 /// <summary>
@@ -20,16 +20,18 @@ public sealed record ManifestKey(string Id, string Name, string PublicKey, int A
 /// <see cref="SignedManifest" />), and keys, the store key, the secret hashes and settings are read only from it.
 /// <para>
 /// The canonical text is exactly
-/// <c>{"v":N,"keys":[{"id":S,"name":S,"pub":S,"alg":N,"rp":S,"created":S,"admin":true|false},...],"store":S,"secrets":{NAME:HASH,...},"settings":SETTINGS}</c>:
+/// <c>{"v":N,"keys":[{"id":S,"name":S,"pub":S,"alg":N,"rp":S,"created":S,"admin":true|false,"slot":{"salt":S,"wrap":S}},...],"store":S,"vault":S,"secrets":{NAME:HASH,...},"settings":SETTINGS}</c>:
 /// this member order, no white space, keys sorted by id (ordinal), secrets sorted by name (ordinal), numbers as plain invariant
 /// integers, strings written as <see cref="ToolSettings.Canonical" /> writes them (only <c>"</c> and <c>\</c> escaped, U+007F
 /// and up as <c>\uXXXX</c>), <c>created</c> in the round-trip ("O") format and SETTINGS the canonical settings JSON. Sign counts
 /// are not in it. <see cref="Store" /> is the store's public key (Dotenvx, 66 lower-case hex digits) or empty before the first
-/// secret; each HASH is <see cref="SecretStore.Hash" /> of that secret's stored ciphertext (64 lower-case hex digits). Anyone
+/// secret, and <see cref="Vault" /> is then the store's private key wrapped under the master key (empty exactly when the store key is); the
+/// slot of a key is its entry of the master key (see <see cref="KeyVault" />), and every key has one; each HASH is <see cref="SecretStore.Hash" />
+/// of that secret's stored ciphertext (64 lower-case hex digits). Anyone
 /// with the public key can make a valid ciphertext, so a row is trusted only when it matches its signed hash.
 /// </para>
 /// </summary>
-public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, ToolSettings Settings, string Store, IReadOnlyDictionary<string, string> Secrets)
+public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, ToolSettings Settings, string Store, IReadOnlyDictionary<string, string> Secrets, string Vault = "")
 {
     private static readonly JsonDocumentOptions Strict = new() { AllowDuplicateProperties = false };
 
@@ -53,19 +55,19 @@ public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, Too
     public IReadOnlyList<ManifestKey> Admins => [.. Keys.Where(key => key.Admin).OrderBy(key => key.Created).ThenBy(key => key.Id, StringComparer.Ordinal)];
 
     /// <summary>The next version with <paramref name="key" /> added: an admin key, or (the default) a key that only approves runs.</summary>
-    public Manifest WithKey(PasskeyRecord key, bool admin = false) => Next([.. Keys, ManifestKey.From(key, admin)], Settings, Store, Secrets);
+    public Manifest WithKey(PasskeyRecord key, bool admin = false) => Next([.. Keys, ManifestKey.From(key, admin)], Settings, Store, Secrets, Vault);
 
     /// <summary>The next version without the key with this Id.</summary>
-    public Manifest WithoutKey(string id) => Next([.. Keys.Where(key => key.Id != id)], Settings, Store, Secrets);
+    public Manifest WithoutKey(string id) => Next([.. Keys.Where(key => key.Id != id)], Settings, Store, Secrets, Vault);
 
     /// <summary>The next version with these settings.</summary>
-    public Manifest WithSettings(ToolSettings settings) => Next(Keys, settings, Store, Secrets);
+    public Manifest WithSettings(ToolSettings settings) => Next(Keys, settings, Store, Secrets, Vault);
 
-    /// <summary>The next version with this store public key and exactly these secret hashes (by name).</summary>
-    public Manifest WithSecrets(string store, IReadOnlyDictionary<string, string> secrets) => Next(Keys, Settings, store, secrets);
+    /// <summary>The next version with this store public key and exactly these secret hashes (by name), and this vault (the same one when null).</summary>
+    public Manifest WithSecrets(string store, IReadOnlyDictionary<string, string> secrets, string? vault = null) => Next(Keys, Settings, store, secrets, vault ?? Vault);
 
-    private Manifest Next(IEnumerable<ManifestKey> keys, ToolSettings settings, string store, IReadOnlyDictionary<string, string> secrets)
-        => new(Version + 1, [.. keys.OrderBy(key => key.Id, StringComparer.Ordinal)], settings, store, new SortedDictionary<string, string>(secrets.ToDictionary(), StringComparer.Ordinal));
+    private Manifest Next(IEnumerable<ManifestKey> keys, ToolSettings settings, string store, IReadOnlyDictionary<string, string> secrets, string vault)
+        => new(Version + 1, [.. keys.OrderBy(key => key.Id, StringComparer.Ordinal)], settings, store, new SortedDictionary<string, string>(secrets.ToDictionary(), StringComparer.Ordinal), vault);
 
     /// <summary>What an admin key signs: SHA-256(bind || SHA-256(UTF-8 of the manifest text)).</summary>
     public static byte[] Challenge(byte[] bind, string text)
@@ -94,11 +96,17 @@ public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, Too
             ToolSettings.Quote(text, key.RpId);
             text.Append(",\"created\":");
             ToolSettings.Quote(text, key.Created.ToString("O", CultureInfo.InvariantCulture));
-            text.Append(",\"admin\":").Append(key.Admin ? "true" : "false").Append('}');
+            text.Append(",\"admin\":").Append(key.Admin ? "true" : "false").Append(",\"slot\":{\"salt\":");
+            ToolSettings.Quote(text, key.Slot?.Salt ?? "");
+            text.Append(",\"wrap\":");
+            ToolSettings.Quote(text, key.Slot?.Wrap ?? "");
+            text.Append("}}");
         }
 
         text.Append("],\"store\":");
         ToolSettings.Quote(text, Store);
+        text.Append(",\"vault\":");
+        ToolSettings.Quote(text, Vault);
         text.Append(",\"secrets\":{");
         first = true;
         foreach (KeyValuePair<string, string> secret in Secrets.OrderBy(item => item.Key, StringComparer.Ordinal))
@@ -147,11 +155,23 @@ public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, Too
             {
                 return "a key is not valid";
             }
+
+            // Every enrolled key is PRF-capable and has a slot of the right shape (this opens nothing).
+            if (key.Slot is null || !KeyVault.IsSalt(key.Slot.Salt) || !KeyVault.IsSlotWrap(key.Slot.Wrap))
+            {
+                return "a key has no valid key slot";
+            }
         }
 
         if (Store.Length > 0 && !IsHex(Store, 66))
         {
             return "the store key is not valid";
+        }
+
+        // The vault holds the store's private key: present exactly when there is a store key.
+        if (Store.Length > 0 ? !KeyVault.IsVault(Vault) : Vault.Length > 0)
+        {
+            return Store.Length > 0 ? "the store key has no valid vault" : "a vault without a store key";
         }
 
         if (Secrets.Count > 0 && Store.Length == 0)
@@ -188,10 +208,10 @@ public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, Too
             if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("v", out JsonElement v) || !v.TryGetInt64(out long version)
                 || !root.TryGetProperty("keys", out JsonElement keys) || keys.ValueKind != JsonValueKind.Array
                 || !root.TryGetProperty("settings", out JsonElement settingsJson) || settingsJson.ValueKind != JsonValueKind.Object
-                || Text(root, "store") is not { } store
+                || Text(root, "store") is not { } store || Text(root, "vault") is not { } vault
                 || !root.TryGetProperty("secrets", out JsonElement secretsJson) || secretsJson.ValueKind != JsonValueKind.Object)
             {
-                error = "the manifest does not have a version, keys, a store key, secrets and settings";
+                error = "the manifest does not have a version, keys, a store key, a vault, secrets and settings";
 
                 return null;
             }
@@ -225,14 +245,16 @@ public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, Too
                     || !item.TryGetProperty("alg", out JsonElement alg) || !alg.TryGetInt32(out int algorithm)
                     || Text(item, "rp") is not { } rp || Text(item, "created") is not { } created
                     || !DateTimeOffset.TryParseExact(created, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTimeOffset when)
-                    || !item.TryGetProperty("admin", out JsonElement admin) || admin.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                    || !item.TryGetProperty("admin", out JsonElement admin) || admin.ValueKind is not (JsonValueKind.True or JsonValueKind.False)
+                    || !item.TryGetProperty("slot", out JsonElement slot) || slot.ValueKind != JsonValueKind.Object
+                    || Text(slot, "salt") is not { } salt || Text(slot, "wrap") is not { } wrap)
                 {
                     error = "a key in the manifest is not valid";
 
                     return null;
                 }
 
-                list.Add(new ManifestKey(id, name, pub, algorithm, rp, when, admin.ValueKind == JsonValueKind.True));
+                list.Add(new ManifestKey(id, name, pub, algorithm, rp, when, admin.ValueKind == JsonValueKind.True, new KeySlot(salt, wrap)));
             }
 
             ToolSettings? settings = ToolSettings.FromCanonical(settingsJson.GetRawText(), out string? settingsError);
@@ -243,7 +265,7 @@ public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, Too
                 return null;
             }
 
-            Manifest manifest = new(version, list, settings, store, new SortedDictionary<string, string>(secrets.ToDictionary(StringComparer.Ordinal), StringComparer.Ordinal));
+            Manifest manifest = new(version, list, settings, store, new SortedDictionary<string, string>(secrets.ToDictionary(StringComparer.Ordinal), StringComparer.Ordinal), vault);
             error = manifest.Problem();
             if (error is not null)
             {

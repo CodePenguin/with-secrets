@@ -25,6 +25,59 @@ internal static class TestState
     /// <summary>A sign count higher than any before in this process.</summary>
     public static uint NextCount() => (uint)Interlocked.Increment(ref _signs);
 
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, JsonElement> Registrations = new(StringComparer.Ordinal);
+
+    /// <summary>Remembers the options of a registration page by challenge, so that <see cref="Register" /> can send its PRF part.</summary>
+    public static void Note(JsonElement options)
+    {
+        if (options.ValueKind == JsonValueKind.Object && options.TryGetProperty("challenge", out JsonElement challenge) && challenge.ValueKind == JsonValueKind.String)
+        {
+            Registrations[challenge.GetString()!] = options.Clone();
+        }
+    }
+
+    /// <summary>
+    /// A registration body as the page posts it: the attestation and, when the page asked for it (its options have prf) and
+    /// the authenticator has PRF, the PRF output for the page's slot salt sealed to the page's key (prfEpk, prfIv, prfCt).
+    /// </summary>
+    public static string Register(TestAuthenticator who, byte[] challenge, string origin, string rpId, string name, PrfMode prf = PrfMode.Normal)
+    {
+        string json = who.Attest(challenge, origin, rpId, name);
+
+        return Registrations.TryGetValue(Base64Url.EncodeToString(challenge), out JsonElement options) ? WithPrf(json, options, who, prf) : json;
+    }
+
+    /// <summary>Adds the sealed PRF output to a registration body (see <see cref="Register" />).</summary>
+    public static string WithPrf(string json, JsonElement options, TestAuthenticator who, PrfMode mode = PrfMode.Normal, TestAuthenticator? other = null)
+    {
+        if (mode == PrfMode.Missing || !options.TryGetProperty("prf", out JsonElement prf))
+        {
+            return json;
+        }
+
+        byte[] bind = Base64Url.DecodeFromChars(options.GetProperty("challenge").GetString()!);
+        byte[]? output = (mode == PrfMode.OtherCredential ? other! : who).Prf(Base64Url.DecodeFromChars(prf.GetProperty("salt").GetString()!));
+        if (output is null)
+        {
+            return json;
+        }
+
+        if (mode == PrfMode.ShortOutput)
+        {
+            output = output[..16];
+        }
+
+        (string epk, string iv, string ct) = PrfBrowser.Seal(prf.GetProperty("serverKey").GetString()!, mode == PrfMode.WrongBind ? SHA256.HashData(bind) : bind, output);
+        if (mode == PrfMode.Garbled)
+        {
+            byte[] bytes = Base64Url.DecodeFromChars(ct);
+            bytes[0] ^= 1;
+            ct = Base64Url.EncodeToString(bytes);
+        }
+
+        return json[..^1] + ",\"prfEpk\":\"" + epk + "\",\"prfIv\":\"" + iv + "\",\"prfCt\":\"" + ct + "\"}";
+    }
+
     /// <summary>
     /// Plays the registration page's second prompt: when <paramref name="reply" /> (from /create) asks for the admin's
     /// assertion over the new manifest, the key it names signs it (or <paramref name="signer" />), and the assertion is posted
@@ -64,9 +117,10 @@ internal static class TestState
 
     /// <summary>
     /// Plays the approval page: reads its data block and posts a proof by <paramref name="signer" />, over the manifest
-    /// challenge when the page signs a new state, else over "approve once".
+    /// challenge when the page signs a new state, else over "approve once". When the page asks for the PRF output (it has a
+    /// prfKey) the proof carries it sealed to the page's key, as the page script does, except as <paramref name="prf" /> says.
     /// </summary>
-    public static (int Status, string Body) Approve(HttpClient client, string pageUrl, string origin, string rpId, TestAuthenticator signer)
+    public static (int Status, string Body) Approve(HttpClient client, string pageUrl, string origin, string rpId, TestAuthenticator signer, PrfMode prf = PrfMode.Normal, TestAuthenticator? other = null)
     {
         (_, string page) = Get(client, pageUrl);
         const string open = "<script type=\"application/json\" id=\"start\">";
@@ -82,8 +136,38 @@ internal static class TestState
         byte[] challenge = start.RootElement.TryGetProperty("manifest", out JsonElement manifest)
             ? Manifest.Challenge(bind, manifest.GetString()!)
             : ReuseBinding.Challenge(bind, 0);
+        string body = ReuseTests.Body(0, signer.Assert(challenge, origin, rpId, NextCount()));
+        if (start.RootElement.TryGetProperty("prfKey", out JsonElement prfKey) && prf != PrfMode.Missing)
+        {
+            body = body[..^1] + ",\"prf\":" + PrfMember(start.RootElement, prfKey.GetString()!, bind, signer, prf, other) + "}";
+        }
 
-        return Post(client, pageUrl + "/proof", ReuseTests.Body(0, signer.Assert(challenge, origin, rpId, NextCount())));
+        return Post(client, pageUrl + "/proof", body);
+    }
+
+    /// <summary>What the page sends as "prf": the output for the key's slot salt sealed to the page's key, or as a twist says.</summary>
+    private static string PrfMember(JsonElement start, string serverKey, byte[] bind, TestAuthenticator signer, PrfMode mode, TestAuthenticator? other)
+    {
+        using JsonDocument payload = JsonDocument.Parse(start.GetProperty("payload").GetString()!);
+        JsonElement salts = payload.RootElement.GetProperty("salts");
+        TestAuthenticator releasing = mode is PrfMode.OtherCredential or PrfMode.OtherOwnSalt ? other! : signer;
+        string id = TestAuthenticator.Encode((mode == PrfMode.OtherOwnSalt ? other! : signer).CredentialId);
+        byte[] salt = salts.TryGetProperty(id, out JsonElement found) ? Base64Url.DecodeFromChars(found.GetString()!) : new byte[32];
+        byte[] output = releasing.Prf(salt) ?? new byte[32];
+        if (mode == PrfMode.ShortOutput)
+        {
+            output = output[..16];
+        }
+
+        (string epk, string iv, string ct) = PrfBrowser.Seal(serverKey, mode == PrfMode.WrongBind ? SHA256.HashData(bind) : bind, output);
+        if (mode == PrfMode.Garbled)
+        {
+            byte[] bytes = Base64Url.DecodeFromChars(ct);
+            bytes[0] ^= 1;
+            ct = Base64Url.EncodeToString(bytes);
+        }
+
+        return JsonSerializer.Serialize(new Dictionary<string, string> { ["epk"] = epk, ["iv"] = iv, ["ct"] = ct });
     }
 
     public static (int Status, string Body) Get(HttpClient client, string url)
@@ -187,6 +271,9 @@ internal static class TestState
             return false;
         }
 
+        // Every key of one test state wraps the same master key, so a vault made for the state opens with any of them.
+        record = TestVault.Reslot(db, record);
+
         return Write(db, current is null ? Manifest.First(record, settings ?? ToolSettings.Defaults) : current.WithKey(record, admin));
     }
 
@@ -233,6 +320,41 @@ internal static class TestState
         };
 
         return Write(db, current.WithSettings(next));
+    }
+}
+
+/// <summary>
+/// The master key of a test state and what opens it. <see cref="TestState.Add" /> gives every key of a state a slot of the same
+/// master key; a test that needs the secret store's vault makes it with <see cref="Master" />, and plays a passkey's PRF
+/// release with <see cref="Unlock" />.
+/// </summary>
+internal static class TestVault
+{
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte[]> Masters = new(StringComparer.Ordinal);
+
+    /// <summary>The master key of the state at this database (made on first use).</summary>
+    public static byte[] Master(StateDatabase db) => Masters.GetOrAdd(Path.GetFullPath(db.FilePath), _ => KeyVault.NewMasterKey());
+
+    /// <summary>The record with a slot of this state's master key, when its authenticator is known and has PRF.</summary>
+    public static PasskeyRecord Reslot(StateDatabase db, PasskeyRecord record)
+    {
+        return TestAuthenticator.ById(record.Id) is { } authenticator && authenticator.Slot(Master(db)) is { } slot ? record with { Slot = slot } : record;
+    }
+
+    /// <summary>What <paramref name="who" /> releases at an approval: the PRF output for its slot salt in the stored manifest. Null when it has no slot or no PRF.</summary>
+    public static Unlock? Unlock(StateDatabase db, TestAuthenticator who)
+    {
+        string id = TestAuthenticator.Encode(who.CredentialId);
+        KeySlot? slot = TestState.Current(db)?.Keys.FirstOrDefault(key => key.Id == id)?.Slot;
+        byte[]? output = slot is null ? null : who.Prf(Base64Url.DecodeFromChars(slot.Salt));
+
+        return output is null ? null : new Unlock(id, output);
+    }
+
+    /// <summary>The vault for a store key made now: the private key wrapped under this state's master key.</summary>
+    public static string Vault(StateDatabase db, string privateKey, string publicKey)
+    {
+        return KeyVault.WrapVault(Encoding.UTF8.GetBytes(privateKey), Master(db), publicKey);
     }
 }
 
@@ -307,4 +429,18 @@ internal static class PasskeyStoreTestExtensions
 
         return current is not null && current.Keys.Any(key => key.Id == id && !key.Admin) && TestState.Write(store.Database, current.WithoutKey(id));
     }
+}
+
+/// <summary>What an approval page's PRF part looks like in a test: right, or one thing wrong.</summary>
+internal enum PrfMode
+{
+    Normal,
+    Missing,
+    Garbled,
+    WrongBind,
+    OtherCredential,
+    ShortOutput,
+
+    /// <summary>Key A signs, but the page sends key B's valid PRF output for B's own salt.</summary>
+    OtherOwnSalt,
 }

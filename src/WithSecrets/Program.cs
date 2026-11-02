@@ -6,7 +6,7 @@ namespace WithSecrets;
 internal static class Program
 {
     // Everything lives in the user profile: %USERPROFILE%\.with-secrets\state.db (passkeys, settings, approvals, audit and the
-    // secrets as Dotenvx ciphertext). The store's private key is in Windows Credential Manager.
+    // secrets as Dotenvx ciphertext). The store key is never stored: it is wrapped under keys that only the passkeys (WebAuthn PRF) can produce.
     private const string StoreFolder = ".with-secrets";
 
     private static async Task<int> Main(string[] args)
@@ -28,7 +28,7 @@ internal static class Program
 
         string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), StoreFolder);
         StateDatabase state = StateDatabase.InFolder(folder);
-        SecretStore store = new(state, new CredentialManagerKeys());
+        SecretStore store = new(state);
 
         // Every command checks state.db first, and its signed manifest. A database that cannot be used (damaged, locked, of
         // another schema version, or failing verification) stops here: nothing is asked, nothing is listed and nothing runs.
@@ -68,19 +68,19 @@ internal static class Program
                 }
 
             case CliCommand.Set or CliCommand.Remove:
-                return HumanCommands.Change(command, store, state);
+                return HumanCommands.Change(command, store, state, command.Port);
 
             case CliCommand.Revoke:
-                return HumanCommands.Revoke(state, grants);
+                return HumanCommands.Revoke(state, grants, command.Port);
 
             case CliCommand.Enroll or CliCommand.Enrolled or CliCommand.Unenroll:
-                return HumanCommands.Passkeys(command, state);
+                return HumanCommands.Passkeys(command, state, command.Port);
 
             case CliCommand.Config { Show: true }:
                 return ConfigShow.Run(state, Console.Out, Console.Error);
 
             case CliCommand.Config:
-                return HumanCommands.Config(state);
+                return HumanCommands.Config(state, command.Port);
         }
 
         RunArgs parsed = ((CliCommand.Run)command).Args;
@@ -88,7 +88,7 @@ internal static class Program
         using Stream stderr = Console.OpenStandardError();
         using StreamWriter outWriter = new(stdout, new UTF8Encoding(false)) { AutoFlush = true };
         using StreamWriter errWriter = new(stderr, new UTF8Encoding(false)) { AutoFlush = true };
-        ApprovalSettings? settings = HumanCommands.LoadSettings(state);
+        ApprovalSettings? settings = HumanCommands.LoadSettings(state, command.Port);
         if (settings is null)
         {
             return RunCommand.StoreError;
@@ -114,9 +114,9 @@ internal static class HumanCommands
     /// --set and --remove. The values are typed on a web page, never here, so these need no terminal of their own. The
     /// terminal shows only the link and the result, which has names only.
     /// </summary>
-    public static int Change(CliCommand command, SecretStore store, StateDatabase state)
+    public static int Change(CliCommand command, SecretStore store, StateDatabase state, int? port)
     {
-        ApprovalSettings? settings = LoadSettings(state);
+        ApprovalSettings? settings = LoadSettings(state, port);
         if (settings is null)
         {
             return RunCommand.StoreError;
@@ -138,9 +138,9 @@ internal static class HumanCommands
     }
 
     /// <summary>--revoke: an admin passkey approves on a web page, then every saved approval ends.</summary>
-    public static int Revoke(StateDatabase state, GrantStore grants)
+    public static int Revoke(StateDatabase state, GrantStore grants, int? port)
     {
-        ApprovalSettings? settings = LoadSettings(state);
+        ApprovalSettings? settings = LoadSettings(state, port);
         if (settings is null)
         {
             return RunCommand.StoreError;
@@ -154,9 +154,9 @@ internal static class HumanCommands
     }
 
     /// <summary>--enroll, --enrolled and --unenroll. The terminal shows only links and results; never key bytes.</summary>
-    public static int Passkeys(CliCommand command, StateDatabase state)
+    public static int Passkeys(CliCommand command, StateDatabase state, int? port)
     {
-        ApprovalSettings? settings = LoadSettings(state);
+        ApprovalSettings? settings = LoadSettings(state, port);
         if (settings is null)
         {
             return RunCommand.StoreError;
@@ -204,12 +204,12 @@ internal static class HumanCommands
     /// --config: the terminal shows only the link and the result. Settings that cannot be read are shown on the page as the
     /// defaults, so saving there repairs them; the page targets are then the default ones.
     /// </summary>
-    public static int Config(StateDatabase state)
+    public static int Config(StateDatabase state, int? port)
     {
         ToolSettings settings = ToolSettings.Load(state, out _);
         Action<string> announce = line => Console.Error.WriteLine(line);
         Func<string?> readCode = CodeReader("If the page says nothing was saved, press Ctrl+C.");
-        (EnrollmentTarget primary, EnrollmentTarget local) = Targets(state, settings.Approval, announce, readCode);
+        (EnrollmentTarget primary, EnrollmentTarget local) = Targets(state, settings.Approval.WithPort(port), announce, readCode);
         ConfigChange change = new SettingsPage(state, primary, local, announce, readCode).Run();
         Console.Error.WriteLine(change.Done ? change.Detail : "with-secrets: " + change.Detail);
 
@@ -217,7 +217,7 @@ internal static class HumanCommands
     }
 
     /// <summary>The approval settings, or null after printing why the settings in state.db cannot be used.</summary>
-    public static ApprovalSettings? LoadSettings(StateDatabase state)
+    public static ApprovalSettings? LoadSettings(StateDatabase state, int? port = null)
     {
         ApprovalSettings settings = ApprovalSettings.Load(state, out string? error);
         if (error is not null)
@@ -227,7 +227,8 @@ internal static class HumanCommands
             return null;
         }
 
-        return settings;
+        // --port changes only where this call's page listens; the stored setting is not touched.
+        return settings.WithPort(port);
     }
 
     /// <summary>
