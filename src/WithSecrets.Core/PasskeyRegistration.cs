@@ -19,6 +19,7 @@ namespace WithSecrets;
 /// <param name="Accept">After the registration is checked and before the manifest step: null to go on, else why not.</param>
 /// <param name="Next">The new manifest that holds the new key, an admin or not (the page's box). An admin of the stored state signs it: the new key itself on the first run.</param>
 /// <param name="Commit">After the signed manifest and the right code: stores it (and anything that goes with it) and says how it went.</param>
+/// <param name="Reencrypt">Only for <c>--recover</c>: from the new store's public key, the old secrets re-encrypted for it (name to ciphertext). They go into the first manifest as hashes, and are stored with it by <paramref name="Commit" />.</param>
 internal sealed record RegistrationPlan(
     string Prefix,
     string AnnouncePrefix,
@@ -26,7 +27,8 @@ internal sealed record RegistrationPlan(
     Func<byte[], string, (byte[] Challenge, string Registration)?> Read,
     Func<string?> Accept,
     Func<PasskeyRecord, bool, Manifest> Next,
-    Func<SignedManifest, PasskeyRecord, ApprovalDecision> Commit);
+    Func<SignedManifest, PasskeyRecord, ApprovalDecision> Commit,
+    Func<string, IReadOnlyDictionary<string, string>>? Reencrypt = null);
 
 /// <summary>An approval of a new manifest: the decision and, when approved, the manifest with the admin assertion over it.</summary>
 public sealed record ManifestApproval(ApprovalDecision Decision, SignedManifest? Signed);
@@ -530,7 +532,7 @@ internal static class PasskeyRegistration
         // admin key released opens that key's slot. Zeroed on every way out.
         byte[]? master = null;
         (byte[] State, string PublicKey)? serverKey = null;
-        (string PublicKey, string Vault)? firstStore = null;
+        FirstStore? firstStore = null;
         try
         {
             if (current is null)
@@ -541,15 +543,24 @@ internal static class PasskeyRegistration
                 // key (the vault) go into the same first manifest the admin signs. The private key is written nowhere else, so a
                 // page that does not finish leaves nothing behind. (Its hex text is a .NET string for a moment and cannot be wiped.)
                 byte[]? privateKey = null;
+                byte[]? recoveryCode = null;
                 try
                 {
                     (string publicKey, string privateText) = DotenvxCipher.Instance.NewKeyPair();
                     privateKey = Encoding.UTF8.GetBytes(privateText);
-                    firstStore = (publicKey, KeyVault.WrapVault(privateKey, master, publicKey));
+
+                    // The recovery code (shown once, on the last page, never to the terminal) with its slot of the master key. The slot
+                    // goes into the same signed first manifest as the vault; only the page ever gets the code.
+                    recoveryCode = KeyVault.NewRecoveryCode();
+                    KeySlot recovery = KeyVault.NewRecoverySlot(master, recoveryCode, publicKey);
+                    IReadOnlyDictionary<string, string> rows = plan.Reencrypt?.Invoke(publicKey) ?? new Dictionary<string, string>();
+                    firstStore = new FirstStore(publicKey, KeyVault.WrapVault(privateKey, master, publicKey), recovery, recoveryCode, rows);
+                    recoveryCode = null;
                 }
                 finally
                 {
                     SecretValues.Clear(privateKey);
+                    SecretValues.Clear(recoveryCode);
                 }
             }
             else
@@ -609,16 +620,24 @@ internal static class PasskeyRegistration
         {
             return ApprovalDecision.Deny(error.Message);
         }
-        catch (Exception error)
+        catch (Exception)
         {
-            return ApprovalDecision.Deny("the enrollment page failed: " + error.Message);
+            return ApprovalDecision.Deny("the enrollment page failed: " + HandleGuard.Reason);
         }
         finally
         {
             SecretValues.Clear(master);
             SecretValues.Clear(serverKey?.State);
+            SecretValues.Clear(firstStore?.RecoveryCode);
         }
     }
+
+    /// <summary>
+    /// What a first setup makes besides the first key: the store's public key and its vault, the recovery slot (and the recovery
+    /// code itself, which only the last page ever shows; zeroed when the page ends) and, for <c>--recover</c>, the old secrets
+    /// re-encrypted for the new store key.
+    /// </summary>
+    private sealed record FirstStore(string PublicKey, string Vault, KeySlot Recovery, byte[] RecoveryCode, IReadOnlyDictionary<string, string> Rows);
 
     /// <summary>
     /// What one registration page needs to give its new key a slot: the page's server key (private state, to open the PRF output
@@ -626,7 +645,7 @@ internal static class PasskeyRegistration
     /// arrays belong to <see cref="Run(PasskeyStore, ApprovalSettings, string, Action{string}, Func{string?}, RegistrationPlan?, Func{string, ManifestApproval}?, Unlock?)" />,
     /// which zeroes them when the page ends.
     /// </summary>
-    private sealed record PrfContext(byte[] ServerState, byte[] Salt, byte[] Master, (string PublicKey, string Vault)? FirstStore);
+    private sealed record PrfContext(byte[] ServerState, byte[] Salt, byte[] Master, FirstStore? FirstStore);
 
     internal const string NothingEnrolled = "Nothing is enrolled. Set up the first passkey with: with-secrets --config (with-secrets --enroll adds more).";
 
@@ -662,6 +681,31 @@ internal static class PasskeyRegistration
 
     internal const string CodeStyle = """
         #code { font-size: 3rem; font-family: ui-monospace, monospace; letter-spacing: 0.3em; }
+        #recovery { font-size: 1.4rem; font-family: ui-monospace, monospace; letter-spacing: 0.1em; overflow-wrap: anywhere; background: #f4f4f4; border: 2px solid #111; padding: 1rem; }
+        """;
+
+    /// <summary>
+    /// The box of the last page that shows the recovery code (hidden until the code arrives). The code is put in with
+    /// <c>textContent</c>, never as HTML.
+    /// </summary>
+    internal const string RecoveryBox = "<div id=\"recovery-box\" hidden><h2>Recovery code</h2>"
+        + "<p>Write this recovery code down now and keep it offline, apart from this computer. It is shown once and cannot be shown again. "
+        + "If every passkey is lost, this code and state.db open all your secrets (with-secrets --recover). Anyone who has the code and state.db can open them, so keep it private.</p>"
+        + "<p id=\"recovery\"></p></div>\n";
+
+    /// <summary>
+    /// The script that shows a recovery code from a reply (<c>data.recovery</c>) in the <see cref="RecoveryBox" />: the page's
+    /// <c>showRecovery(data)</c>. Text only (<c>textContent</c>).
+    /// </summary>
+    internal const string RecoveryScript = """
+        function showRecovery(data) {
+                var box = document.getElementById("recovery-box");
+                var shown = document.getElementById("recovery");
+                if (box && shown && typeof data.recovery === "string") {
+                    shown.textContent = data.recovery;
+                    box.hidden = false;
+                }
+            }
         """;
 
     /// <summary>The style of the name field and the admin box on the enrollment page.</summary>
@@ -854,7 +898,14 @@ internal static class PasskeyRegistration
             return null;
         }
 
+        /// <summary>Every request gets an answer. A bug that throws ends the page with "internal error" and answers 500.</summary>
         public OneShotResponse Handle(string verb, string suffix, string body)
+        {
+            return HandleGuard.Run(verb, suffix, () => HandleRequest(verb, suffix, body),
+                () => _decision.TrySetResult(ApprovalDecision.Deny(HandleGuard.Reason + "; nothing was added")), Failed, NotFound);
+        }
+
+        private OneShotResponse HandleRequest(string verb, string suffix, string body)
         {
             lock (_gate)
             {
@@ -1023,7 +1074,13 @@ internal static class PasskeyRegistration
                 if (first && prf.FirstStore is { } firstStore)
                 {
                     // The first manifest already holds the store key and its vault: the first secret needs only an admin signature.
-                    next = next with { Store = firstStore.PublicKey, Vault = firstStore.Vault };
+                    next = next with
+                    {
+                        Store = firstStore.PublicKey,
+                        Vault = firstStore.Vault,
+                        Recovery = firstStore.Recovery,
+                        Secrets = new SortedDictionary<string, string>(firstStore.Rows.ToDictionary(item => item.Key, item => SecretStore.Hash(item.Value)), StringComparer.Ordinal),
+                    };
                 }
 
                 List<PasskeyRecord> admins = first ? next.IsAdmin(result.Key.Id) ? [result.Key] : []
@@ -1193,8 +1250,14 @@ internal static class PasskeyRegistration
             // The admin keys of the new state, so the person sees their fingerprints (on the first run, for the first time).
             string admin = AdminKey.Line(_next);
 
-            return new OneShotResponse(200, "application/json", later
-                ? JsonSerializer.Serialize(new { ok = true, code = _code, later = true, admin, name = _name, makeAdmin = _next!.IsAdmin(_key!.Id) })
+            if (later)
+            {
+                return new OneShotResponse(200, "application/json", JsonSerializer.Serialize(new { ok = true, code = _code, later = true, admin, name = _name, makeAdmin = _next!.IsAdmin(_key!.Id) }));
+            }
+
+            // A first setup also shows the recovery code, on this last page only (see RecoveryCode): written down by the person, never printed.
+            return new OneShotResponse(200, "application/json", prf.FirstStore is { } first
+                ? JsonSerializer.Serialize(new { ok = true, code = _code, admin, recovery = RecoveryCode.Format(first.RecoveryCode) })
                 : JsonSerializer.Serialize(new { ok = true, code = _code, admin }));
         }
 

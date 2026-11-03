@@ -170,7 +170,7 @@ internal static class ConfigTests
         string path = SchemaOne(Path.Combine(root, "old-schema"));
         byte[] before = File.ReadAllBytes(path);
         StateDatabase db = new(path);
-        check(StateDatabase.SchemaVersion == 8, "db schema: the schema version is 8");
+        check(StateDatabase.SchemaVersion == 9, "db schema: the schema version is 9");
         check(!db.TryCheck(out string? error) && error is not null && error.Contains("delete state.db to start over", StringComparison.Ordinal), "db schema: an older database is an error that says to delete state.db (" + error + ")");
         check(!new PasskeyStore(db).TryAll(out _) && new PasskeyStore(db).All().Count == 0, "db schema: its passkeys are not used");
         check(ToolSettings.Load(db, out error) == ToolSettings.Defaults && error is not null && ReuseSettings.Load(db) == ReuseOffer.Off, "db schema: settings from it are an error");

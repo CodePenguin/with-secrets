@@ -46,6 +46,9 @@ public sealed class SettingsPage(StateDatabase db, EnrollmentTarget primaryTarge
 
     private static readonly OneShotResponse NotFound = new(404, "text/plain; charset=utf-8", "Not found.");
 
+    /// <summary>Only for <c>--recover</c>: the old rows and settings carried into this first setup.</summary>
+    internal RecoveryCarry? Carry { get; set; }
+
     /// <summary>The challenge the passkey signs for these settings: SHA-256(seed || SHA-256(UTF-8 of the canonical JSON)).</summary>
     internal static byte[] Challenge(byte[] seed, string canonical)
     {
@@ -63,7 +66,7 @@ public sealed class SettingsPage(StateDatabase db, EnrollmentTarget primaryTarge
         ConfigChange change;
         try
         {
-            change = manifest is null ? FirstRun(passkeys, ToolSettings.Defaults) : Gated(manifest);
+            change = manifest is null ? FirstRun(passkeys, Carry?.Settings ?? ToolSettings.Defaults) : Gated(manifest);
         }
         catch (ProofUnavailableException failure)
         {
@@ -143,6 +146,7 @@ public sealed class SettingsPage(StateDatabase db, EnrollmentTarget primaryTarge
         string? sent = null;
         ToolSettings? chosen = null;
         int failure = RunCommand.Denied;
+        IReadOnlyDictionary<string, string> carried = new Dictionary<string, string>();
 
         RegistrationPlan plan = new(
             PathPrefix,
@@ -152,7 +156,7 @@ public sealed class SettingsPage(StateDatabase db, EnrollmentTarget primaryTarge
                 ["flow"] = "register",
                 ["options"] = Parse(options),
                 ["current"] = Current(current),
-            }), AdminKey.NotSetUp),
+            }), Carry is null ? AdminKey.NotSetUp : AdminKey.NotSetUp + "\n" + Carry.PageNote),
             (challenge, body) =>
             {
                 Dictionary<string, string>? members = StringMembers(body);
@@ -191,8 +195,25 @@ public sealed class SettingsPage(StateDatabase db, EnrollmentTarget primaryTarge
                     // Version 0 expected: a passkey enrolled elsewhere meanwhile makes this stale, and nothing is saved.
                     ApprovalDecision done = PasskeyRegistration.Commit(db, signed,
                         () => ApprovalDecision.Allow($"Saved the settings and added the passkey named \"{key.Name}\" for {key.RpId}.\n"
-                            + $"Admins: {AdminKey.Entry(key.Name, key.PublicKey)}. Note this fingerprint down: every page shows it, and if it ever changes, the state was replaced."),
-                        (connection, transaction) => AuditLog.Append(connection, transaction, AuditLog.SettingsRow("settings-setup", changes, key.Name, $"first passkey \"{key.Name}\" (admin) added for {key.RpId}")));
+                            + $"Admins: {AdminKey.Entry(key.Name, key.PublicKey)}. Note this fingerprint down: every page shows it, and if it ever changes, the state was replaced.\nThe recovery code is shown on the last page only once. If the page did not show it (lost connection), run --rotate-key to get a new one."),
+                        (connection, transaction) =>
+                        {
+                            foreach ((string name, string ciphertext) in carried)
+                            {
+                                StateDatabase.Execute(connection, transaction, "INSERT INTO secrets (name, ciphertext) VALUES ($name, $ciphertext)", ("$name", name), ("$ciphertext", ciphertext));
+                            }
+
+                            if (SecretStore.Problem(db.CurrentManifest(connection, transaction), SecretStore.AllRows(connection, transaction)) is { } mismatch)
+                            {
+                                throw new InvalidOperationException("the carried secrets do not match the new state (" + mismatch + ")");
+                            }
+
+                            AuditLog.Append(connection, transaction, AuditLog.SettingsRow("settings-setup", changes, key.Name, $"first passkey \"{key.Name}\" (admin) added for {key.RpId}"));
+                            if (Carry is { } carry)
+                            {
+                                AuditLog.Append(connection, transaction, AuditLog.ChangeRow("recovered", $"recovered {carry.Count} secrets from {carry.OldFileName} (renamed to {carry.RecoveredName}); new keys made", key.Name));
+                            }
+                        });
 
                     return done.Approved ? done : ApprovalDecision.Deny("a passkey was enrolled or the state changed while the page was open; nothing was saved");
                 }
@@ -202,7 +223,8 @@ public sealed class SettingsPage(StateDatabase db, EnrollmentTarget primaryTarge
 
                     return ApprovalDecision.Deny("the settings and the passkey could not be saved (" + error.Message + "); nothing was saved");
                 }
-            });
+            },
+            Carry is null ? null : publicKey => carried = Carry.Reencrypt(publicKey));
 
         ApprovalDecision decision = PasskeyRegistration.Run(passkeys, target.Approver.Settings, Enrollment.DefaultName, announce, readCode, plan);
 
@@ -315,7 +337,14 @@ public sealed class SettingsPage(StateDatabase db, EnrollmentTarget primaryTarge
             }
         }
 
+        /// <summary>Every request gets an answer. A bug that throws ends the page with "internal error" and answers 500.</summary>
         public OneShotResponse Handle(string verb, string suffix, string body)
+        {
+            return HandleGuard.Run(verb, suffix, () => HandleRequest(verb, suffix, body),
+                () => _decision.TrySetResult(Denied(HandleGuard.Reason + "; nothing was saved")), Failed, NotFound);
+        }
+
+        private OneShotResponse HandleRequest(string verb, string suffix, string body)
         {
             lock (_gate)
             {
@@ -331,17 +360,7 @@ public sealed class SettingsPage(StateDatabase db, EnrollmentTarget primaryTarge
                     case ("POST", "deny"):
                         return _decision.TrySetResult(Denied("cancelled on the page; nothing was saved")) ? Ok : NotFound;
                     case ("POST", "save"):
-                        try
-                        {
-                            return Save(_origin, _bind, body);
-                        }
-                        catch (Exception)
-                        {
-                            _decision.TrySetResult(Denied("the settings page failed; nothing was saved"));
-
-                            return Failed;
-                        }
-
+                        return Save(_origin, _bind, body);
                     default:
                         return NotFound;
                 }
@@ -570,6 +589,8 @@ internal static class ConfigPageHtml
 
             //@SEAL_PRF@
 
+            //@SHOW_RECOVERY@
+
             function field(name) {
                 for (var i = 0; i < fields.length; i++) {
                     if (fields[i].getAttribute("data-setting") === name) {
@@ -737,6 +758,7 @@ internal static class ConfigPageHtml
                 }
                 finish("Type this code in the terminal to finish. Nothing is saved until you do." + (typeof data.admin === "string" ? " " + data.admin + ". Note this fingerprint down: every page shows it, and if it ever changes, the state was replaced." : ""));
                 code.textContent = data.code;
+                showRecovery(data);
             }
 
             // The browser's own error, for the status line: its name and message (cut to 120 characters). Never any key text.
@@ -1053,7 +1075,7 @@ internal static class ConfigPageHtml
     /// </summary>
     public static OneShotResponse Build(bool firstRun, ToolSettings current, string start, string adminLine)
     {
-        string script = PrfClient.Fill(Script.ReplaceLineEndings("\n"));
+        string script = PrfClient.Fill(Script.Replace("//@SHOW_RECOVERY@", PasskeyRegistration.RecoveryScript, StringComparison.Ordinal).ReplaceLineEndings("\n"));
         string style = (ApprovalPage.Style + PasskeyRegistration.CodeStyle + FormStyle).ReplaceLineEndings("\n");
         string policy = ApprovalPage.Policy(script, style);
 
@@ -1121,7 +1143,13 @@ internal static class ConfigPageHtml
             page.Append(PasskeyRegistration.StepTwoButton);
         }
 
-        page.Append("</div>\n<p id=\"status\" role=\"status\"></p>\n<p id=\"code\"></p>\n</main>\n");
+        page.Append("</div>\n<p id=\"status\" role=\"status\"></p>\n<p id=\"code\"></p>\n");
+        if (firstRun)
+        {
+            page.Append(PasskeyRegistration.RecoveryBox);
+        }
+
+        page.Append("</main>\n");
         page.Append("<script type=\"application/json\" id=\"start\">").Append(start).Append("</script>\n");
         page.Append("<script>").Append(script).Append("</script>\n</body>\n</html>\n");
 

@@ -1,0 +1,702 @@
+using System.Buffers.Text;
+using System.Globalization;
+using System.Net;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+
+namespace WithSecrets;
+
+/// <summary>
+/// What <c>--recover</c> carries from the old state into the new one while the person makes the new passkey: the old store key
+/// (UTF-8 hex text, in memory only; zeroed by <see cref="Dispose" />), the old ciphertext rows (already verified against the old
+/// signed hashes), the old settings (the form starts from them) and the names of the old and the renamed file.
+/// </summary>
+internal sealed class RecoveryCarry(byte[] oldPrivateKey, IReadOnlyDictionary<string, string> oldRows, ToolSettings settings, string oldFileName, string recoveredName) : IDisposable
+{
+    public ToolSettings Settings => settings;
+
+    public string OldFileName => oldFileName;
+
+    /// <summary>The name the old file gets when everything else has worked: <c>state.db.recovered-&lt;UTC yyyyMMddHHmmss&gt;</c>.</summary>
+    public string RecoveredName => recoveredName;
+
+    public int Count => oldRows.Count;
+
+    /// <summary>What the first page of the new passkey says about this setup, where it otherwise says "Admins: not set up yet".</summary>
+    public string PageNote => "Recovery: this replaces the store in " + oldFileName + " and makes new keys. The old admin keys stay only in the renamed old file (" + recoveredName + ").";
+
+    /// <summary>
+    /// Every old row decrypted with the old store key and encrypted again for <paramref name="newPublicKey" />, one row at a
+    /// time (names in order). Only ciphertext is kept. The plain value is a .NET string for the call and cannot be wiped;
+    /// there is no byte copy of it.
+    /// </summary>
+    public IReadOnlyDictionary<string, string> Reencrypt(string newPublicKey)
+    {
+        string privateKey = Encoding.UTF8.GetString(oldPrivateKey);
+        SortedDictionary<string, string> rows = new(StringComparer.Ordinal);
+        foreach ((string name, string ciphertext) in oldRows.OrderBy(item => item.Key, StringComparer.Ordinal))
+        {
+            string value = DotenvxCipher.Instance.Decrypt(privateKey, ciphertext);
+            rows[name] = DotenvxCipher.Instance.Encrypt(value, newPublicKey);
+        }
+
+        return rows;
+    }
+
+    public void Dispose() => SecretValues.Clear(oldPrivateKey);
+}
+
+/// <summary>
+/// <c>--recover</c>: for when every passkey is lost. The old state is read and verified as every command does (public keys
+/// only, no passkey). Page 1 asks for the recovery code (encrypted in the browser to the page's server key, like a
+/// <c>--set</c> value); the server derives the recovery key, opens the master key from the recovery slot and the old store key
+/// from the vault. The same call then continues as a first-run <c>--config</c> on a new, empty state next to the old file
+/// (a new passkey, new master key, new store key, vault and recovery code), holding only the old store key and the old
+/// ciphertext rows in between. The new store key's public key is made first; every old row is decrypted and encrypted again
+/// for it one at a time, and the new first manifest lists their hashes. At the final commit one transaction on the new file
+/// writes the manifest, the rows and the audit rows. Only then is the old file renamed to <c>state.db.recovered-&lt;UTC
+/// yyyyMMddHHmmss&gt;</c> (never deleted) and the new file put in place. Any failure leaves the old state.db as it was
+/// (a refusal adds one audit row to it) and no new file.
+/// </summary>
+public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarget, EnrollmentTarget localTarget, Action<string> announce, Func<string?>? readCode)
+{
+    public const string AnnouncePrefix = "To recover with your recovery code, open this link: ";
+
+    internal const string PathPrefix = "r";
+
+    /// <summary>For tests: the time the renamed file is named after.</summary>
+    internal Func<DateTimeOffset> Clock { get; set; } = () => DateTimeOffset.UtcNow;
+
+    /// <summary>For tests: runs after the new state is committed and before the files are swapped; it may throw.</summary>
+    internal Action? BeforeSwap { get; set; }
+
+    public ConfigChange Run()
+    {
+        ConfigChange change;
+        try
+        {
+            change = RunCore();
+        }
+        catch (ProofUnavailableException failure)
+        {
+            change = Denied(failure.Message);
+        }
+        catch (Exception)
+        {
+            change = Denied("the recovery failed: " + HandleGuard.Reason + "; the old state is unchanged");
+        }
+
+        if (!change.Done)
+        {
+            new AuditLog(db).TryWriteDenied("--recover", [], change.Detail);
+        }
+
+        return change;
+    }
+
+    private static ConfigChange Denied(string detail) => new(RunCommand.Denied, detail);
+
+    private ConfigChange RunCore()
+    {
+        if (!db.TryManifest(out Manifest? manifest, out string? error))
+        {
+            return new ConfigChange(RunCommand.StoreError, error!);
+        }
+
+        if (manifest is null)
+        {
+            return Denied("There is nothing to recover: no state.db is set up. Set up with: with-secrets --config");
+        }
+
+        if (manifest.Recovery is null || manifest.Store.Length == 0)
+        {
+            return Denied("This state has no recovery code, so it cannot be recovered. Delete " + db.FileLabel + " and set up again with: with-secrets --config");
+        }
+
+        Dictionary<string, string> rows;
+        try
+        {
+            (_, rows) = new SecretStore(db).Snapshot();
+        }
+        catch (SecretStoreException failure)
+        {
+            return new ConfigChange(RunCommand.StoreError, "cannot use the secret store: " + failure.Message);
+        }
+
+        // Both pages are served where passkeys can work: the primary page when it can, else localhost.
+        EnrollmentTarget target = Usable(primaryTarget) ? primaryTarget : localTarget;
+        ApprovalSettings settings = target.Approver.Settings;
+        PasskeyMethod.RpIdOf(settings.PageOrigin(settings.Port));
+        if (readCode is null)
+        {
+            return Denied("this recovery has no way to ask for the code from the page; nothing was changed");
+        }
+
+        string stamp = Clock().UtcDateTime.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
+        string recoveredName = Path.GetFileName(db.FilePath) + ".recovered-" + stamp;
+        string recoveredPath = Path.Combine(Path.GetDirectoryName(db.FilePath)!, recoveredName);
+        string newPath = db.FilePath + ".recovering-" + Guid.NewGuid().ToString("N");
+        if (File.Exists(recoveredPath))
+        {
+            return Denied(recoveredName + " exists already; move it away and try again. Nothing was changed.");
+        }
+
+        // Page 1: the recovery code. Nothing is changed by it.
+        byte[]? oldKey = AskCode(settings, manifest, out string? refused);
+        if (oldKey is null)
+        {
+            return Denied(refused ?? "the recovery code was not accepted; nothing was changed");
+        }
+
+        // The carry owns the old key from here: it is zeroed on every path.
+        using RecoveryCarry carry = new(oldKey, rows, manifest.Settings, Path.GetFileName(db.FilePath), recoveredName);
+
+        // The new state is made in a file of its own, next to the old one, and only if the whole first setup works.
+        StateDatabase fresh = new(newPath);
+        ConfigChange made;
+        try
+        {
+            made = new SettingsPage(fresh, primaryTarget, localTarget, announce, readCode) { Carry = carry }.Run();
+            if (!made.Done)
+            {
+                return made;
+            }
+
+            BeforeSwap?.Invoke();
+
+            // The old store must be exactly what page 1 verified (a --set or --remove meanwhile would be lost by the swap).
+            (Manifest? nowManifest, Dictionary<string, string> nowRows) = new SecretStore(db).Snapshot();
+            if (nowManifest is null || nowManifest.Version != manifest.Version || nowRows.Count != rows.Count || rows.Any(row => !nowRows.TryGetValue(row.Key, out string? value) || value != row.Value))
+            {
+                return Denied("the old store changed while you were recovering; run --recover again. Nothing was changed.");
+            }
+
+            if (Swap(db.FilePath, newPath, recoveredPath) is { } problem)
+            {
+                return new ConfigChange(RunCommand.StoreError, problem);
+            }
+        }
+        catch (Exception)
+        {
+            return Denied("the recovery failed after the new state was made: " + HandleGuard.Reason + "; the old state is unchanged");
+        }
+        finally
+        {
+            DeleteFiles(newPath);
+        }
+
+        return new ConfigChange(0, made.Detail + "\nRecovered " + carry.Count.ToString(CultureInfo.InvariantCulture) + (carry.Count == 1 ? " secret" : " secrets")
+            + " into the new store. The old state was renamed to " + recoveredName + " (with-secrets never deletes it; its admin keys are gone from the new state). The new recovery code is shown on the last page only once. If the page did not show it (lost connection), run --rotate-key to get a new one.");
+    }
+
+    private static bool Usable(EnrollmentTarget target)
+    {
+        try
+        {
+            ApprovalSettings settings = target.Approver.Settings;
+            PasskeyMethod.RpIdOf(settings.PageOrigin(settings.Port));
+
+            return true;
+        }
+        catch (ProofUnavailableException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>The files of a database path: the database and its journal files.</summary>
+    private static void DeleteFiles(string path)
+    {
+        foreach (string file in new[] { path, path + "-wal", path + "-shm" })
+        {
+            try
+            {
+                File.Delete(file);
+            }
+            catch (Exception failure) when (failure is IOException or UnauthorizedAccessException)
+            {
+                // A stray temporary file is harmless.
+            }
+        }
+    }
+
+    /// <summary>
+    /// The old file becomes <paramref name="recoveredPath" /> and the new file takes its place. If the second move fails the
+    /// first is undone. Null when both were done, else why not (the old file is then where it was).
+    /// </summary>
+    private static string? Swap(string oldPath, string newPath, string recoveredPath)
+    {
+        if (!File.Exists(newPath))
+        {
+            return "the new state was not made; the old state is unchanged";
+        }
+
+        List<(string From, string To)> moved = [];
+        try
+        {
+            foreach (string suffix in new[] { "", "-wal", "-shm" })
+            {
+                if (File.Exists(oldPath + suffix))
+                {
+                    File.Move(oldPath + suffix, recoveredPath + suffix, false);
+                    moved.Add((oldPath + suffix, recoveredPath + suffix));
+                }
+            }
+
+            foreach (string suffix in new[] { "", "-wal", "-shm" })
+            {
+                if (File.Exists(newPath + suffix))
+                {
+                    File.Move(newPath + suffix, oldPath + suffix, false);
+                    moved.Add((newPath + suffix, oldPath + suffix));
+                }
+            }
+
+            return null;
+        }
+        catch (Exception failure) when (failure is IOException or UnauthorizedAccessException)
+        {
+            // Undo, newest first: the old state is put back where it was.
+            for (int index = moved.Count - 1; index >= 0; index--)
+            {
+                try
+                {
+                    File.Move(moved[index].To, moved[index].From, true);
+                }
+                catch (Exception undo) when (undo is IOException or UnauthorizedAccessException)
+                {
+                    return "the files could not be swapped and could not be put back (" + undo.GetType().Name + "); the old state is in " + Path.GetFileName(recoveredPath);
+                }
+            }
+
+            return "the files could not be swapped (" + failure.GetType().Name + "); the old state is unchanged";
+        }
+    }
+
+    /// <summary>
+    /// Serves page 1 and waits for the code. The old store key bytes (the caller zeroes them), or null and why not. The master
+    /// key is zeroed here.
+    /// </summary>
+    private byte[]? AskCode(ApprovalSettings settings, Manifest manifest, out string? why)
+    {
+        (byte[] serverKey, string publicKey) = SecretCrypto.NewServerKey();
+        CodeSession session = new(manifest, serverKey);
+        try
+        {
+            using OneShotServer server = new(PathPrefix, settings.Port, session.Handle);
+            string origin = settings.PageOrigin(server.Port);
+            byte[] bind = RandomNumberGenerator.GetBytes(32);
+            session.Open(bind, RecoveryPage.Build(AdminKey.Line(manifest), bind, publicKey, manifest.Secrets.Count));
+            announce(AdminKey.Line(manifest) + "\nCompare it with the fingerprint you noted. If it differs, do not type the code.");
+            announce(AnnouncePrefix + origin + "/" + PathPrefix + "/" + server.Token);
+
+            return session.Wait(settings.Timeout, out why);
+        }
+        finally
+        {
+            session.Close();
+        }
+    }
+
+    /// <summary>
+    /// The state of page 1. Requests are handled one at a time under one lock. At most three codes are tried; a code that does
+    /// not open the store, the time limit, Cancel and any error end it without a key.
+    /// </summary>
+    private sealed class CodeSession(Manifest manifest, byte[] serverKey)
+    {
+        private const int Tries = 3;
+
+        private static readonly OneShotResponse NotFound = new(404, "text/plain; charset=utf-8", "Not found.");
+        private static readonly OneShotResponse Ok = new(200, "application/json", "{\"ok\":true}");
+        private static readonly OneShotResponse Failed = new(500, "application/json", "{\"ok\":false}");
+
+        private readonly Lock _gate = new();
+        private readonly TaskCompletionSource<byte[]?> _result = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private string? _why;
+        private byte[]? _bind;
+        private OneShotResponse? _page;
+        private int _wrong;
+
+        public void Open(byte[] bind, OneShotResponse page)
+        {
+            lock (_gate)
+            {
+                _bind = bind;
+                _page = page;
+            }
+        }
+
+        public byte[]? Wait(TimeSpan timeout, out string? why)
+        {
+            if (!_result.Task.Wait(timeout))
+            {
+                Fail("no answer before the time limit; nothing was changed");
+            }
+
+            byte[]? key = _result.Task.Result;
+            lock (_gate)
+            {
+                why = _why;
+            }
+
+            return key;
+        }
+
+        public void Close()
+        {
+            lock (_gate)
+            {
+                _result.TrySetResult(null);
+                SecretValues.Clear(serverKey);
+            }
+        }
+
+        private void Fail(string why)
+        {
+            lock (_gate)
+            {
+                if (_result.TrySetResult(null))
+                {
+                    _why = why;
+                }
+            }
+        }
+
+        public OneShotResponse Handle(string verb, string suffix, string body)
+        {
+            return HandleGuard.Run(verb, suffix, () => HandleRequest(verb, suffix, body),
+                () =>
+                {
+                    _why = HandleGuard.Reason + "; nothing was changed";
+
+                    return _result.TrySetResult(null);
+                }, Failed, NotFound);
+        }
+
+        private OneShotResponse HandleRequest(string verb, string suffix, string body)
+        {
+            lock (_gate)
+            {
+                if (_bind is null || _page is null || _result.Task.IsCompleted)
+                {
+                    return NotFound;
+                }
+
+                switch (verb, suffix)
+                {
+                    case ("GET", ""):
+                        return _page;
+                    case ("POST", "deny"):
+                        if (_result.TrySetResult(null))
+                        {
+                            _why = "cancelled on the page; nothing was changed";
+
+                            return Ok;
+                        }
+
+                        return NotFound;
+                    case ("POST", "code"):
+                        return Code(_bind, body);
+                    default:
+                        return NotFound;
+                }
+            }
+        }
+
+        /// <summary>Called with the lock held.</summary>
+        private OneShotResponse Code(byte[] bind, string body)
+        {
+            Dictionary<string, string>? members = SettingsPage.StringMembers(body);
+            if (members is null || members.Count != 3 || new[] { "epk", "iv", "ct" }.Any(field => !members.ContainsKey(field)))
+            {
+                _why = "the page sent a request that is not valid; nothing was changed";
+                _result.TrySetResult(null);
+
+                return new OneShotResponse(400, "application/json", "{\"ok\":false}");
+            }
+
+            byte[]? typed = null;
+            byte[]? master = null;
+            byte[]? key = null;
+            try
+            {
+                string text = SecretCrypto.Decrypt(serverKey, bind, members["epk"], members["iv"], members["ct"]);
+                Dictionary<string, string>? plain = SettingsPage.StringMembers(text);
+                if (plain is null || plain.Count != 1 || !plain.TryGetValue("code", out string? code) || !RecoveryCode.TryParse(code, out typed))
+                {
+                    return Wrong("That is not a recovery code. It is 32 letters and digits in groups of four.");
+                }
+
+                try
+                {
+                    master = KeyVault.OpenRecovery(manifest, typed);
+                    key = KeyVault.UnwrapVault(manifest.Vault, master, manifest.Store);
+                }
+                catch (CryptographicException)
+                {
+                    return Wrong("That recovery code does not open this store.");
+                }
+
+                // The store key must be the private key of the signed public key.
+                if (DotenvxCipher.Instance.Derive(Encoding.UTF8.GetString(key)) != manifest.Store)
+                {
+                    return Wrong("That recovery code does not open this store.");
+                }
+
+                _result.TrySetResult(key);
+                key = null;
+
+                return Ok;
+            }
+            catch (CryptographicException)
+            {
+                // The sealed payload could not be opened: not this page's, or damaged.
+                return Wrong("The code could not be read. Try again.");
+            }
+            finally
+            {
+                SecretValues.Clear(typed);
+                SecretValues.Clear(master);
+                SecretValues.Clear(key);
+            }
+        }
+
+        private OneShotResponse Wrong(string message)
+        {
+            if (++_wrong >= Tries)
+            {
+                _why = "the recovery code was wrong " + Tries.ToString(CultureInfo.InvariantCulture) + " times; nothing was changed";
+                _result.TrySetResult(null);
+
+                return new OneShotResponse(403, "application/json", JsonSerializer.Serialize(new { ok = false, error = message, final = true }));
+            }
+
+            return new OneShotResponse(400, "application/json", JsonSerializer.Serialize(new { ok = false, error = message }));
+        }
+    }
+}
+
+/// <summary>Page 1 of <c>--recover</c>: one input for the recovery code, Unlock and Cancel. All text is HTML-encoded; the code is never in the page.</summary>
+internal static class RecoveryPage
+{
+    private const string Script = """
+        (function () {
+            "use strict";
+            var start = JSON.parse(document.getElementById("start").textContent);
+            var submit = document.getElementById("unlock");
+            var cancel = document.getElementById("deny");
+            var input = document.getElementById("recovery-code");
+            var status = document.getElementById("status");
+            var base = location.pathname.replace(/\/+$/, "");
+            var encoder = new TextEncoder();
+            var busy = false;
+            var attempt = 0;
+            var finished = false;
+
+            function show(text) {
+                status.textContent = text;
+            }
+
+            function finish(text) {
+                finished = true;
+                submit.disabled = true;
+                cancel.disabled = true;
+                input.value = "";
+                input.disabled = true;
+                show(text);
+            }
+
+            // A post that gets no answer within 20 seconds is aborted (its error is named AbortError), so the page is never stuck.
+            function post(what, body) {
+                var controller = new AbortController();
+                var timer = setTimeout(function () { controller.abort(); }, 20000);
+                return fetch(base + "/" + what, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: body,
+                    cache: "no-store",
+                    credentials: "omit",
+                    redirect: "error",
+                    signal: controller.signal
+                }).then(function (reply) {
+                    clearTimeout(timer);
+                    return reply;
+                }, function (error) {
+                    clearTimeout(timer);
+                    throw error;
+                });
+            }
+
+            function fromBase64Url(text) {
+                var base64 = text.replace(/-/g, "+").replace(/_/g, "/");
+                while (base64.length % 4 !== 0) {
+                    base64 += "=";
+                }
+                var raw = atob(base64);
+                var bytes = new Uint8Array(raw.length);
+                for (var i = 0; i < raw.length; i++) {
+                    bytes[i] = raw.charCodeAt(i);
+                }
+                return bytes;
+            }
+
+            function toBase64Url(buffer) {
+                var bytes = new Uint8Array(buffer);
+                var raw = "";
+                for (var i = 0; i < bytes.length; i++) {
+                    raw += String.fromCharCode(bytes[i]);
+                }
+                return btoa(raw).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+            }
+
+            // The code leaves the page only sealed to the program's key for this page (the scheme of the set page): a fresh ECDH
+            // P-256 key, HKDF-SHA-256 (salt: the bind, info: "with-secrets/v1 secrets") and AES-256-GCM with the bind as associated data.
+            function seal(plain, bind, serverKey) {
+                var subtle = window.crypto.subtle;
+                var curve = { name: "ECDH", namedCurve: "P-256" };
+                var iv = window.crypto.getRandomValues(new Uint8Array(12));
+                var mine;
+                var ct;
+                return subtle.generateKey(curve, false, ["deriveBits"]).then(function (pair) {
+                    mine = pair;
+                    return subtle.importKey("raw", serverKey, curve, false, []);
+                }).then(function (server) {
+                    return subtle.deriveBits({ name: "ECDH", public: server }, mine.privateKey, 256);
+                }).then(function (shared) {
+                    return subtle.importKey("raw", shared, "HKDF", false, ["deriveKey"]);
+                }).then(function (material) {
+                    return subtle.deriveKey(
+                        { name: "HKDF", hash: "SHA-256", salt: bind, info: encoder.encode("with-secrets/v1 secrets") },
+                        material, { name: "AES-GCM", length: 256 }, false, ["encrypt"]);
+                }).then(function (key) {
+                    return subtle.encrypt({ name: "AES-GCM", iv: iv, additionalData: bind, tagLength: 128 }, key, plain);
+                }).then(function (sealed) {
+                    ct = new Uint8Array(sealed);
+                    return subtle.exportKey("raw", mine.publicKey);
+                }).then(function (epk) {
+                    return { epk: toBase64Url(epk), iv: toBase64Url(iv), ct: toBase64Url(ct) };
+                });
+            }
+
+            // The browser's own error, for the status line: its name and message (cut to 120 characters). Never the code.
+            function why(error) {
+                if (!error || typeof error.name !== "string") {
+                    return "";
+                }
+                var text = error.name;
+                if (typeof error.message === "string" && error.message) {
+                    text += ": " + error.message.slice(0, 120);
+                }
+                return " (" + text + ")";
+            }
+
+            cancel.addEventListener("click", function () {
+                if (finished) {
+                    return;
+                }
+                finish("Sending cancel...");
+                post("deny", "").then(function (reply) {
+                    show(reply.ok ? "Cancelled. Nothing was changed. You can close this page." : "This request had already ended.");
+                }, function () {
+                    show("Could not reach the program. With no answer it changes nothing at its time limit.");
+                });
+            });
+
+            submit.addEventListener("click", function () {
+                if (finished || busy) {
+                    return;
+                }
+                if (!window.isSecureContext || !window.crypto || !window.crypto.subtle) {
+                    show("This page needs an https address or localhost. Nothing was changed.");
+                    return;
+                }
+                var text = input.value.trim();
+                if (text.length === 0 || text.length > 100) {
+                    show("Type the recovery code. Nothing was changed.");
+                    return;
+                }
+                var mine = ++attempt;
+                busy = true;
+                submit.disabled = true;
+                show("Checking the recovery code...");
+                var plain = encoder.encode(JSON.stringify({ code: text }));
+                seal(plain, fromBase64Url(start.bind), fromBase64Url(start.serverKey)).then(function (sealed) {
+                    if (mine !== attempt || finished) {
+                        throw new Error("newer");
+                    }
+                    return post("code", JSON.stringify(sealed));
+                }).then(function (reply) {
+                    busy = false;
+                    return reply.json().then(function (data) {
+                        if (reply.ok && data && data.ok === true) {
+                            finish("The recovery code was accepted. Nothing has changed yet. Go back to the terminal: it shows the link for the next step, where you make a new passkey.");
+                            return;
+                        }
+                        if (data && data.final === true) {
+                            finish("That recovery code was wrong too many times. Nothing was changed.");
+                            return;
+                        }
+                        submit.disabled = false;
+                        show((data && typeof data.error === "string" ? data.error : "The program refused what this page sent.") + " Nothing was changed. You can try again or cancel.");
+                    });
+                }).then(null, function (error) {
+                    busy = false;
+                    if (finished) {
+                        return;
+                    }
+                    submit.disabled = false;
+                    if (error && error.name === "AbortError") {
+                        show("The program did not answer within 20 seconds. Check the terminal. Tap again to retry.");
+                    } else {
+                        show("The code could not be sent" + why(error) + ". Nothing was changed. You can try again or cancel.");
+                    }
+                });
+            });
+            input.focus();
+        })();
+        """;
+
+    private const string Style = """
+        .field { margin: 1rem 0; }
+        .field label { display: block; font-weight: bold; margin-bottom: 0.3rem; }
+        .field input { font-size: 1.2rem; font-family: ui-monospace, monospace; padding: 0.5rem; width: 100%; max-width: 34rem; box-sizing: border-box; }
+        """;
+
+    /// <summary>Builds the page. Script and style line endings become LF before hashing and output, so the CSP hashes match what is served.</summary>
+    public static OneShotResponse Build(string adminLine, byte[] bind, string serverKey, int secretCount)
+    {
+        string script = Script.ReplaceLineEndings("\n");
+        string style = (ApprovalPage.Style + Style).ReplaceLineEndings("\n");
+        string policy = ApprovalPage.Policy(script, style);
+        string json = JsonSerializer.Serialize(new Dictionary<string, string>
+        {
+            ["bind"] = Base64Url.EncodeToString(bind),
+            ["serverKey"] = serverKey,
+        });
+
+        StringBuilder page = new();
+        page.Append("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
+        page.Append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
+        page.Append("<meta name=\"referrer\" content=\"no-referrer\">\n");
+        page.Append("<title>Recover with-secrets</title>\n");
+        page.Append("<style>").Append(style).Append("</style>\n</head>\n<body>\n<main>\n");
+        page.Append("<h1>Recover the with-secrets store</h1>\n");
+        page.Append("<pre id=\"request\">").Append(WebUtility.HtmlEncode(ApprovalSummary.Clean(adminLine) + "\nSecrets in the store: " + secretCount.ToString(CultureInfo.InvariantCulture))).Append("</pre>\n");
+        page.Append("<p>Use this when every passkey is lost. Type the recovery code that was shown when the store was set up (lower case, spaces and dashes are fine). "
+            + "The code is encrypted in this page before it is sent.</p>\n");
+        page.Append("<p><strong>This replaces the store.</strong> After the code, you make a new passkey and the new keys: a new store key, a new master key and a new recovery code. "
+            + "Your secrets are carried over. The old admin keys are gone: they stay only in the old file, which is renamed (never deleted). "
+            + "Nothing changes until the last step is done.</p>\n");
+        page.Append("<div class=\"field\"><label for=\"recovery-code\">Recovery code</label>"
+            + "<input id=\"recovery-code\" type=\"text\" autocomplete=\"off\" autocapitalize=\"characters\" autocorrect=\"off\" spellcheck=\"false\" maxlength=\"100\"></div>\n");
+        page.Append("<div class=\"buttons\">");
+        page.Append("<button id=\"deny\" type=\"button\">Cancel</button>");
+        page.Append("<button id=\"unlock\" type=\"button\">Check the recovery code</button>");
+        page.Append("</div>\n<p id=\"status\" role=\"status\"></p>\n</main>\n");
+        page.Append("<script type=\"application/json\" id=\"start\">").Append(json).Append("</script>\n");
+        page.Append("<script>").Append(script).Append("</script>\n</body>\n</html>\n");
+
+        return new OneShotResponse(200, "text/html; charset=utf-8", page.ToString(), policy);
+    }
+}

@@ -94,7 +94,7 @@ internal static class ReuseTests
         }
 
         check(!grants.TryGet("K", 480, out _, out _), "reuse grants: a row whose minutes do not match its times is not honoured");
-        check(StateDatabase.SchemaVersion == 8, "reuse grants: the schema version is 8");
+        check(StateDatabase.SchemaVersion == 9, "reuse grants: the schema version is 9");
     }
 
     private static ApprovalRequest Request(ReuseOffer? offer) => new("tool", "/bin/tool", ["--x"], "/work", "testing", ["API_KEY"], offer);

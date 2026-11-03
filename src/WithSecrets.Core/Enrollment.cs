@@ -124,9 +124,9 @@ public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget 
             // For example, the method's store exists but cannot be read: that is never "nothing enrolled".
             return ApprovalDecision.Deny(failure.Message);
         }
-        catch (Exception failure)
+        catch (Exception)
         {
-            return ApprovalDecision.Deny("the enrollment failed: " + failure.Message);
+            return ApprovalDecision.Deny("the enrollment failed: " + HandleGuard.Reason);
         }
     }
 
@@ -228,9 +228,9 @@ public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget 
             // For example, the method's store exists but cannot be read: that is never "nothing enrolled".
             return ApprovalDecision.Deny(failure.Message);
         }
-        catch (Exception failure)
+        catch (Exception)
         {
-            return ApprovalDecision.Deny("the removal failed: " + failure.Message);
+            return ApprovalDecision.Deny("the removal failed: " + HandleGuard.Reason);
         }
     }
 

@@ -44,6 +44,10 @@ internal static class KeyVault
 {
     public const string SlotInfo = "with-secrets/v1 slot";
     public const string VaultContext = "with-secrets/v1 vault";
+    public const string RecoveryContext = "with-secrets/v1 recovery";
+
+    /// <summary>The recovery code is 20 random bytes: 160 bits, 32 base32 characters.</summary>
+    public const int RecoveryCodeBytes = 20;
 
     public const int KeyBytes = 32;
     public const int SaltBytes = 32;
@@ -113,6 +117,77 @@ internal static class KeyVault
         return Open(vault, masterKey, VaultAad(storePublicKey), NonceBytes + 1 + TagBytes, NonceBytes + MaxVaultKeyBytes + TagBytes);
     }
 
+    /// <summary>A new recovery code: 20 random bytes (shown to the person as 8 groups of 4 base32 characters, see <see cref="RecoveryCode" />).</summary>
+    public static byte[] NewRecoveryCode() => RandomNumberGenerator.GetBytes(RecoveryCodeBytes);
+
+    /// <summary>
+    /// The recovery slot of the master key: a new random salt, and the master key sealed under
+    /// <c>RK = HKDF-SHA256(ikm: code bytes, salt: recovery salt, info: "with-secrets/v1 recovery")</c> with AES-256-GCM, a random
+    /// 12-byte nonce and the associated data <c>"with-secrets/v1 recovery" || store public key</c>. Stored like a slot wrap.
+    /// </summary>
+    public static KeySlot NewRecoverySlot(byte[] masterKey, byte[] code, string storePublicKey)
+    {
+        byte[] salt = NewSalt();
+
+        return new KeySlot(Base64Url.EncodeToString(salt), WrapRecovery(masterKey, code, salt, storePublicKey));
+    }
+
+    /// <summary>Seals <paramref name="masterKey" /> for the recovery code (see <see cref="NewRecoverySlot" />).</summary>
+    public static string WrapRecovery(byte[] masterKey, byte[] code, byte[] salt, string storePublicKey)
+    {
+        Require(masterKey.Length == KeyBytes && code.Length == RecoveryCodeBytes && salt.Length == SaltBytes);
+        byte[] recoveryKey = RecoveryKey(code, salt);
+        try
+        {
+            return Seal(masterKey, recoveryKey, RecoveryAad(storePublicKey));
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(recoveryKey);
+        }
+    }
+
+    /// <summary>The master key in <paramref name="wrap" />. Throws <see cref="CryptographicException" /> when anything is wrong.</summary>
+    public static byte[] UnwrapRecovery(string wrap, byte[] code, byte[] salt, string storePublicKey)
+    {
+        Require(code.Length == RecoveryCodeBytes && salt.Length == SaltBytes);
+        byte[] recoveryKey = RecoveryKey(code, salt);
+        try
+        {
+            byte[] master = Open(wrap, recoveryKey, RecoveryAad(storePublicKey), SlotWrapBytes, SlotWrapBytes);
+            if (master.Length != KeyBytes)
+            {
+                CryptographicOperations.ZeroMemory(master);
+
+                throw Failed();
+            }
+
+            return master;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(recoveryKey);
+        }
+    }
+
+    /// <summary>The master key of <paramref name="manifest" />, opened with the recovery code. Throws <see cref="CryptographicException" /> when there is no recovery slot or the code is wrong.</summary>
+    public static byte[] OpenRecovery(Manifest manifest, byte[] code)
+    {
+        if (manifest.Recovery is not { } slot || manifest.Store.Length == 0)
+        {
+            throw Failed();
+        }
+
+        try
+        {
+            return UnwrapRecovery(slot.Wrap, code, Base64Url.DecodeFromChars(slot.Salt), manifest.Store);
+        }
+        catch (FormatException)
+        {
+            throw Failed();
+        }
+    }
+
     /// <summary>
     /// The master key, opened with what a passkey released at an approval: the slot of the key with that credential id in
     /// <paramref name="manifest" />. The caller zeroes the result. Throws <see cref="CryptographicException" /> when the key has
@@ -146,6 +221,11 @@ internal static class KeyVault
 
     /// <summary>KEK = HKDF-SHA256(ikm: PRF output, salt: slot salt, info: "with-secrets/v1 slot"), 32 bytes.</summary>
     private static byte[] Kek(byte[] prfOutput, byte[] salt) => HKDF.DeriveKey(HashAlgorithmName.SHA256, prfOutput, KeyBytes, salt, Encoding.UTF8.GetBytes(SlotInfo));
+
+    /// <summary>RK = HKDF-SHA256(ikm: recovery code bytes, salt: recovery salt, info: "with-secrets/v1 recovery"), 32 bytes.</summary>
+    private static byte[] RecoveryKey(byte[] code, byte[] salt) => HKDF.DeriveKey(HashAlgorithmName.SHA256, code, KeyBytes, salt, Encoding.UTF8.GetBytes(RecoveryContext));
+
+    private static byte[] RecoveryAad(string storePublicKey) => [.. Encoding.UTF8.GetBytes(RecoveryContext), .. Encoding.UTF8.GetBytes(storePublicKey)];
 
     private static byte[] VaultAad(string storePublicKey) => [.. Encoding.UTF8.GetBytes(VaultContext), .. Encoding.UTF8.GetBytes(storePublicKey)];
 

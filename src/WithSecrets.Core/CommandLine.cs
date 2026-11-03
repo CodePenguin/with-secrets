@@ -36,6 +36,12 @@ public abstract record CliCommand
     /// <summary>--config: a person changes the settings on a web page (first run: and adds the first passkey). --show prints them.</summary>
     public sealed record Config(bool Show) : CliCommand;
 
+    /// <summary>--recover: for when every passkey is lost. The recovery code opens the old store; a new passkey and new keys are made and the secrets carried over.</summary>
+    public sealed record Recover : CliCommand;
+
+    /// <summary>--rotate-key: an admin makes a new store key and master key, keeps only the tapped key and gets a new recovery code.</summary>
+    public sealed record RotateKey : CliCommand;
+
     /// <summary>--secrets ... --reason ... -- PROGRAM [ARGS...]: run a program with secrets.</summary>
     public sealed record Run(RunArgs Args) : CliCommand;
 
@@ -85,6 +91,13 @@ public static class CliArgs
         passkey, stored only after the person types the code from the page in the terminal. --config --show prints the
         settings.
 
+        First-time --config also shows a recovery code on its last page, once. Write it down and keep it offline: anyone with the
+        code and state.db can open all secrets. If every passkey is lost, --recover asks for the code on a web page, makes a new
+        passkey and new keys, and carries the secrets over; the old file is renamed (state.db.recovered-<time>), never deleted.
+        --rotate-key (admin) makes a new secret store key and master key and encrypts every secret again; only the key you tap
+        stays (enroll the others again with --enroll) and a new recovery code is shown. It does not recall values already seen:
+        change those secrets at their source.
+
         A person adds a passkey with --enroll (its name, and whether it is also an admin, are chosen on the page), sees
         them with --enrolled, and removes one with --unenroll NAME (any key but the last admin key). Admin keys change the
         state; two admin keys (laptop and phone) mean a lost device does not lock you out.
@@ -95,7 +108,7 @@ public static class CliArgs
         A person stores secrets with --set NAME[,NAME...] and deletes them with --remove NAME[,NAME...]. Both open a web
         page and need a passkey; the terminal shows only the link and the names. Values are never typed in a terminal.
 
-        --port N (1 to 65535) with --set, --remove, --revoke, --enroll, --unenroll, --config or a run makes that call's web page listen
+        --port N (1 to 65535) with --set, --remove, --revoke, --enroll, --unenroll, --config, --recover, --rotate-key or a run makes that call's web page listen
         on port N instead of the port setting (random free port if the setting is 0). It is not saved. If N is in use the call fails.
         Use it to forward the page over ssh: ssh -L N:localhost:N host.
 
@@ -114,7 +127,7 @@ public static class CliArgs
 
         if (command is CliCommand.List or CliCommand.Enrolled or CliCommand.Audit or CliCommand.Config { Show: true })
         {
-            error = "--port goes only with a command that opens a web page: --set, --remove, --revoke, --enroll, --unenroll, --config, or a run.";
+            error = "--port goes only with a command that opens a web page: --set, --remove, --revoke, --enroll, --unenroll, --config, --recover, --rotate-key, or a run.";
 
             return null;
         }
@@ -142,6 +155,8 @@ public static class CliArgs
         Option<string?> secret = new("--secret") { Description = "With --audit: only entries that name this secret.", HelpName = "NAME" };
         Option<bool> verify = new("--verify") { Description = "With --audit: check the audit hash chain and report the first broken entry (exit 4)." };
         Option<bool> config = new("--config") { Description = "A person changes the settings on a web page with a passkey; with nothing enrolled, sets up the first passkey (real terminal)." };
+        Option<bool> recover = new("--recover") { Description = "When every passkey is lost: type the recovery code on a web page, make a new passkey and new keys, and carry the secrets over. The old file is renamed, never deleted (real terminal)." };
+        Option<bool> rotateKey = new("--rotate-key") { Description = "An admin makes a new store key and master key, keeps only the key tapped and shows a new recovery code. Removes the other keys (real terminal)." };
         Option<bool> show = new("--show") { Description = "With --config: print the settings and their values (anywhere)." };
         Option<string?> port = new("--port") { Description = "Where the one-use web page listens for this call, 1 to 65535, in place of the port setting (nothing is saved). If it is in use, the call fails. For ssh -L.", HelpName = "N" };
         Option<string[]> secrets = new("--secrets")
@@ -167,6 +182,8 @@ public static class CliArgs
         root.Options.Add(secret);
         root.Options.Add(verify);
         root.Options.Add(config);
+        root.Options.Add(recover);
+        root.Options.Add(rotateKey);
         root.Options.Add(show);
         root.Options.Add(port);
         root.Options.Add(secrets);
@@ -238,14 +255,28 @@ public static class CliArgs
         }
 
         int modes = (auditRequested ? 1 : 0) + (result.GetValue(list) ? 1 : 0) + (setName is not null ? 1 : 0) + (removeName is not null ? 1 : 0) + (result.GetValue(revoke) ? 1 : 0)
-            + (enrollRequested ? 1 : 0) + (result.GetValue(enrolled) ? 1 : 0) + (unenrollName is not null ? 1 : 0) + (configRequested ? 1 : 0) + (runRequested ? 1 : 0);
+            + (enrollRequested ? 1 : 0) + (result.GetValue(enrolled) ? 1 : 0) + (unenrollName is not null ? 1 : 0) + (configRequested ? 1 : 0) + (result.GetValue(recover) ? 1 : 0) + (result.GetValue(rotateKey) ? 1 : 0) + (runRequested ? 1 : 0);
         if (modes != 1)
         {
             error = modes == 0
-                ? "Nothing to do. Use --list, --audit, --config, --enroll, --enrolled, --unenroll NAME, or --secrets NAME[,NAME...] --reason TEXT -- PROGRAM [ARGS...]. Try --help."
-                : "Use one command at a time: --list, --set, --remove, --revoke, --enroll, --enrolled, --unenroll, --audit, --config, or a run with --secrets.";
+                ? "Nothing to do. Use --list, --audit, --config, --enroll, --enrolled, --unenroll NAME, --recover, --rotate-key, or --secrets NAME[,NAME...] --reason TEXT -- PROGRAM [ARGS...]. Try --help."
+                : "Use one command at a time: --list, --set, --remove, --revoke, --enroll, --enrolled, --unenroll, --audit, --config, --recover, --rotate-key, or a run with --secrets.";
 
             return null;
+        }
+
+        if (result.GetValue(recover))
+        {
+            error = "";
+
+            return new CliCommand.Recover();
+        }
+
+        if (result.GetValue(rotateKey))
+        {
+            error = "";
+
+            return new CliCommand.RotateKey();
         }
 
         if (configRequested)
@@ -312,7 +343,7 @@ public static class CliArgs
     /// </summary>
     public static bool NeedsTerminal(CliCommand command)
     {
-        return command is CliCommand.Revoke or CliCommand.Enroll or CliCommand.Enrolled or CliCommand.Unenroll or CliCommand.Config { Show: false };
+        return command is CliCommand.Revoke or CliCommand.Enroll or CliCommand.Enrolled or CliCommand.Unenroll or CliCommand.Config { Show: false } or CliCommand.Recover or CliCommand.RotateKey;
     }
 
     /// <summary>What a command that needs a terminal says when it has none.</summary>

@@ -345,6 +345,14 @@ internal static class TestVault
 
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte[]> Salts = new(StringComparer.Ordinal);
 
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte[]> RecoveryCodes = new(StringComparer.Ordinal);
+
+    /// <summary>The recovery code (raw bytes) of the state at this database, made on first use: a test state's store gets a recovery slot for it.</summary>
+    public static byte[] RecoveryCode(StateDatabase db) => RecoveryCodes.GetOrAdd(Path.GetFullPath(db.FilePath), _ => KeyVault.NewRecoveryCode());
+
+    /// <summary>The recovery slot of this state's master key and recovery code, for the store with this public key.</summary>
+    public static KeySlot RecoverySlot(StateDatabase db, string storePublicKey) => KeyVault.NewRecoverySlot(Master(db), RecoveryCode(db), storePublicKey);
+
     /// <summary>The one slot salt of the state at this database: every key's slot shares it.</summary>
     public static byte[] Salt(StateDatabase db) => Salts.GetOrAdd(Path.GetFullPath(db.FilePath), _ => KeyVault.NewSalt());
 

@@ -307,6 +307,11 @@ internal static class Program
             ProofReplyTests.Run(Check).GetAwaiter().GetResult();
         }
 
+        if (Wants("HandleFault"))
+        {
+            HandleFaultTests.Run(Check).GetAwaiter().GetResult();
+        }
+
         if (Wants("KeyVault"))
         {
             KeyVaultTests.Run(Check).GetAwaiter().GetResult();
@@ -360,6 +365,11 @@ internal static class Program
         if (Wants("Prf"))
         {
             PrfFlowTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("Recovery"))
+        {
+            RecoveryTests.Run(Check).GetAwaiter().GetResult();
         }
 
         Directory.Delete(temp, true);

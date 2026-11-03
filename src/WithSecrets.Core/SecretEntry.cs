@@ -334,7 +334,14 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
             }
         }
 
+        /// <summary>Every request gets an answer. A bug that throws ends the page with "internal error" and answers 500.</summary>
         public OneShotResponse Handle(string verb, string suffix, string body)
+        {
+            return HandleGuard.Run(verb, suffix, () => HandleRequest(verb, suffix, body),
+                () => _decision.TrySetResult(Denied(HandleGuard.Reason + "; nothing was stored")), Failed, NotFound);
+        }
+
+        private OneShotResponse HandleRequest(string verb, string suffix, string body)
         {
             lock (_gate)
             {
@@ -350,29 +357,9 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
                     case ("POST", "deny"):
                         return _decision.TrySetResult(Denied("cancelled on the page; nothing was stored")) ? Ok : NotFound;
                     case ("POST", "seal"):
-                        try
-                        {
-                            return Seal(_bind, body);
-                        }
-                        catch (Exception)
-                        {
-                            _decision.TrySetResult(Denied("the set page failed; nothing was stored"));
-
-                            return Failed;
-                        }
-
+                        return Seal(_bind, body);
                     case ("POST", "save"):
-                        try
-                        {
-                            return Save(_origin, _bind, body);
-                        }
-                        catch (Exception)
-                        {
-                            _decision.TrySetResult(Denied("the set page failed; nothing was stored"));
-
-                            return Failed;
-                        }
-
+                        return Save(_origin, _bind, body);
                     default:
                         return NotFound;
                 }

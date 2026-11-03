@@ -32,6 +32,34 @@ internal static class ProofLog
 }
 
 /// <summary>
+/// The guard every one-shot session wraps its handler in. A bug that throws while a request is handled ends the session at
+/// once with a denial that says only "internal error" (never exception text) and answers 500, so nothing waits for the time
+/// limit. When the session has already ended, the request gets the "already ended" answer instead.
+/// </summary>
+internal static class HandleGuard
+{
+    public const string Reason = "internal error";
+
+    /// <summary>For tests only: called with the verb and suffix before the session handles a request; it may throw.</summary>
+    internal static Action<string, string>? Fault { get; set; }
+
+    /// <param name="deny">Records the denial; false when an outcome was already set.</param>
+    public static OneShotResponse Run(string verb, string suffix, Func<OneShotResponse> handle, Func<bool> deny, OneShotResponse failed, OneShotResponse notFound)
+    {
+        try
+        {
+            Fault?.Invoke(verb, suffix);
+
+            return handle();
+        }
+        catch (Exception)
+        {
+            return deny() ? failed : notFound;
+        }
+    }
+}
+
+/// <summary>
 /// A small web server on loopback for one approval. It serves only /{prefix}/{token} and paths under it; every other path
 /// and every other token is 404. The token is 16 random bytes, so only someone given the link can reach the handler.
 /// </summary>

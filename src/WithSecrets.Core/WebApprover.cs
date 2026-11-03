@@ -66,14 +66,17 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
 
     /// <summary>Asks to approve a new state: the proof signs <paramref name="manifest" /> (see <see cref="Manifest.Challenge" />).</summary>
     /// <remarks>An admin-only passkey method then offers (and accepts) only the admin keys that are admins in the new state too.</remarks>
-    public ManifestApproval AskManifest(ApprovalPrompt prompt, string manifest)
+    public ManifestApproval AskManifest(ApprovalPrompt prompt, string manifest) => AskManifest(prompt, manifest, null);
+
+    /// <summary>As above; <paramref name="rows" /> is only for a change that also writes secret rows (key rotation), see <see cref="RowsCommit" />.</summary>
+    internal ManifestApproval AskManifest(ApprovalPrompt prompt, string manifest, RowsCommit? rows)
     {
         IProofMethod signing = method is PasskeyMethod passkey && Manifest.Parse(manifest, out _) is { } next ? passkey.Signing(next) : method;
 
-        return Serve(prompt, ReuseOffer.Off, manifest, signing);
+        return Serve(prompt, ReuseOffer.Off, manifest, signing, false, rows);
     }
 
-    private ManifestApproval Serve(ApprovalPrompt prompt, ReuseOffer reuse, string? manifest, IProofMethod? signing = null, bool unlock = false)
+    private ManifestApproval Serve(ApprovalPrompt prompt, ReuseOffer reuse, string? manifest, IProofMethod? signing = null, bool unlock = false, RowsCommit? rows = null)
     {
         IProofMethod method = signing ?? this.method;
 
@@ -97,7 +100,7 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
 
             lines.Add(ApprovalSummary.IssuedLine(DateTimeOffset.UtcNow));
             prompt = new ApprovalPrompt(ApprovalSummary.Clean(prompt.Heading), string.Join('\n', lines));
-            Session session = new(method, reuse, manifest, prfState);
+            Session session = new(method, reuse, manifest, prfState, rows);
             using OneShotServer server = new("a", settings.Port, session.Handle);
             string nonce = Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(16));
             ProofContext context = new(RequestBinding.Compute(nonce, prompt.Text), settings.PageOrigin(server.Port));
@@ -110,13 +113,13 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
             {
                 return new ManifestApproval(ApprovalDecision.Deny(error.Message), null);
             }
-            catch (Exception error)
+            catch (Exception)
             {
-                return new ManifestApproval(ApprovalDecision.Deny("the proof could not start: " + error.Message), null);
+                return new ManifestApproval(ApprovalDecision.Deny("the proof could not start: " + HandleGuard.Reason), null);
             }
 
             TimeSpan delay = approveDelay ?? DefaultApproveDelay;
-            session.Open(context, nonce, prompt.Text, ApprovalPage.Build(prompt, start, nonce, context.Bind, delay, reuse, manifest, prfKey));
+            session.Open(context, nonce, prompt.Text, ApprovalPage.Build(prompt, start, nonce, rows is null ? context.Bind : SecretCrypto.ManifestBind(context.Bind, rows.Digest()), delay, reuse, manifest, prfKey, rows?.Recovery is not null));
             announce($"Approval needed. Ask the person to open: {context.Origin}/a/{server.Token}");
 
             return session.Wait(settings.Timeout);
@@ -125,9 +128,9 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
         {
             return new ManifestApproval(ApprovalDecision.Deny(error.Message), null);
         }
-        catch (Exception error)
+        catch (Exception)
         {
-            return new ManifestApproval(ApprovalDecision.Deny("the approval page failed: " + error.Message), null);
+            return new ManifestApproval(ApprovalDecision.Deny("the approval page failed: " + HandleGuard.Reason), null);
         }
         finally
         {
@@ -139,7 +142,7 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
     }
 
     /// <summary>The state of one request. Requests are handled one at a time; the first decision is final.</summary>
-    private sealed class Session(IProofMethod method, ReuseOffer reuse, string? manifest, byte[]? prfState)
+    private sealed class Session(IProofMethod method, ReuseOffer reuse, string? manifest, byte[]? prfState, RowsCommit? rows = null)
     {
         private static readonly OneShotResponse NotFound = new(404, "text/plain; charset=utf-8", "Not found.");
         private static readonly OneShotResponse Ok = new(200, "application/json", "{\"ok\":true}");
@@ -192,16 +195,7 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
         /// </summary>
         public OneShotResponse Handle(string verb, string suffix, string body)
         {
-            try
-            {
-                return HandleRequest(verb, suffix, body);
-            }
-            catch (Exception)
-            {
-                _decision.TrySetResult(ApprovalDecision.Deny("the request could not be handled"));
-
-                return Failed;
-            }
+            return HandleGuard.Run(verb, suffix, () => HandleRequest(verb, suffix, body), () => _decision.TrySetResult(ApprovalDecision.Deny(HandleGuard.Reason)), Failed, NotFound);
         }
 
         private OneShotResponse HandleRequest(string verb, string suffix, string body)
@@ -246,9 +240,11 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
                         // The person signed this time with the request: SHA-256(bind || "reuse=" || minutes); or the new state:
                         // SHA-256(bind || SHA-256(manifest)).
                         ProofResult? result;
+                        byte[] signedBind = _context.Bind;
                         try
                         {
-                            byte[] challenge = manifest is null ? ReuseBinding.Challenge(_context.Bind, minutes) : Manifest.Challenge(_context.Bind, manifest);
+                            signedBind = rows is null ? _context.Bind : SecretCrypto.ManifestBind(_context.Bind, rows.Digest());
+                            byte[] challenge = manifest is null ? ReuseBinding.Challenge(_context.Bind, minutes) : Manifest.Challenge(signedBind, manifest);
                             result = method.Verify(_context with { Bind = challenge }, proof);
                         }
                         catch (Exception)
@@ -277,16 +273,31 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
                             ApprovalEvidence? evidence = null;
                             if (manifest is not null)
                             {
-                                _signed = new SignedManifest(manifest, _context.Bind, proof);
+                                _signed = new SignedManifest(manifest, signedBind, proof);
                             }
                             else
                             {
                                 evidence = new ApprovalEvidence(_nonce, _text, proof);
                             }
 
+                            // A change that writes rows is committed here, under the lock, before the page is told: the recovery
+                            // code goes to the page only when the write happened.
+                            if (rows is not null && _signed is not null)
+                            {
+                                string? why = rows.Apply(_signed, result.Detail);
+                                if (why is not null)
+                                {
+                                    _decision.TrySetResult(ApprovalDecision.Deny(why));
+
+                                    return Failed;
+                                }
+                            }
+
                             if (_decision.TrySetResult(ApprovalDecision.Allow(result.Detail, minutes, evidence, unlock)))
                             {
-                                return Ok;
+                                return rows?.Recovery is { } recovery
+                                    ? new OneShotResponse(200, "application/json", JsonSerializer.Serialize(new { ok = true, recovery }))
+                                    : Ok;
                             }
 
                             unlock?.Dispose();
@@ -576,6 +587,8 @@ internal static class ApprovalPage
             }
 
             // The browser's own error, for the status line: its name and message (cut to 120 characters). Never any proof or key text.
+            //@SHOW_RECOVERY@
+
             function why(error) {
                 if (!error || typeof error.name !== "string") {
                     return "";
@@ -690,6 +703,10 @@ internal static class ApprovalPage
                         busy = false;
                         if (reply.ok) {
                             finish(minutes > 0 ? "Approved for " + minutes + " minutes. You can close this page." : "Approved once. You can close this page.");
+                            if (start.recovery === "1") {
+                                finish("Done. The keys were changed. Write down the recovery code below before you close this page.");
+                                reply.json().then(function (data) { showRecovery(data); }, function () { });
+                            }
                         } else if (reply.status === 403) {
                             finish("Your passkey was not accepted. The request is denied.");
                         } else if (reply.status === 400) {
@@ -792,20 +809,20 @@ internal static class ApprovalPage
         .hint { margin: 0.4rem 0 0; color: #333; }
         """;
 
-    public static OneShotResponse Build(ApprovalPrompt prompt, ProofStart start, string nonce, byte[] bind, TimeSpan approveDelay, ReuseOffer? reuse = null, string? manifest = null, string? prfKey = null)
+    public static OneShotResponse Build(ApprovalPrompt prompt, ProofStart start, string nonce, byte[] bind, TimeSpan approveDelay, ReuseOffer? reuse = null, string? manifest = null, string? prfKey = null, bool recovery = false)
     {
-        return Build(prompt, start, nonce, bind, approveDelay, Script, Style, reuse, manifest, prfKey);
+        return Build(prompt, start, nonce, bind, approveDelay, Script, Style, reuse, manifest, prfKey, recovery);
     }
 
     /// <summary>
     /// Builds the page with the given script and style. Their line endings become LF before hashing and output, so the CSP
     /// hashes match what is served even when the source file was checked out with CRLF.
     /// </summary>
-    internal static OneShotResponse Build(ApprovalPrompt prompt, ProofStart start, string nonce, byte[] bind, TimeSpan approveDelay, string script, string style, ReuseOffer? reuse = null, string? manifest = null, string? prfKey = null)
+    internal static OneShotResponse Build(ApprovalPrompt prompt, ProofStart start, string nonce, byte[] bind, TimeSpan approveDelay, string script, string style, ReuseOffer? reuse = null, string? manifest = null, string? prfKey = null, bool recovery = false)
     {
         reuse ??= ReuseOffer.Off;
-        script = PrfClient.Fill(script.ReplaceLineEndings("\n"));
-        style = style.ReplaceLineEndings("\n");
+        script = PrfClient.Fill(script.ReplaceLineEndings("\n")).Replace("//@SHOW_RECOVERY@", recovery ? PasskeyRegistration.RecoveryScript.ReplaceLineEndings("\n") : "", StringComparison.Ordinal);
+        style = (recovery ? style + "\n" + PasskeyRegistration.CodeStyle : style).ReplaceLineEndings("\n");
         string policy = Policy(script, style);
 
         // The default encoder escapes < > & ' and non-ASCII, so the JSON cannot end the data block.
@@ -819,6 +836,12 @@ internal static class ApprovalPage
         if (manifest is not null)
         {
             data["manifest"] = manifest;
+        }
+
+        if (recovery)
+        {
+            // The final page shows the new recovery code (it arrives in the answer to the proof, after the write).
+            data["recovery"] = "1";
         }
 
         if (prfKey is not null)
@@ -871,7 +894,13 @@ internal static class ApprovalPage
         }
 
         page.Append("<p class=\"hint\">Ctrl+Enter (Cmd+Enter on a Mac) presses Approve once.</p>\n");
-        page.Append("<p id=\"status\" role=\"status\"></p>\n</main>\n");
+        page.Append("<p id=\"status\" role=\"status\"></p>\n");
+        if (recovery)
+        {
+            page.Append(PasskeyRegistration.RecoveryBox);
+        }
+
+        page.Append("</main>\n");
         page.Append("<script type=\"application/json\" id=\"start\">").Append(json).Append("</script>\n");
         page.Append("<script>").Append(script).Append("</script>\n</body>\n</html>\n");
 
@@ -894,3 +923,13 @@ internal static class ApprovalPage
         return "'sha256-" + Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(text))) + "'";
     }
 }
+
+/// <summary>
+/// What a manifest approval that also writes secret rows (<c>--rotate-key</c>) adds. <see cref="Digest" /> is the digest of
+/// exactly those rows, read when the page is made and again when the proof is checked: the signed bind is
+/// <see cref="SecretCrypto.ManifestBind" /> of the request bind and it, so a row changed in between fails the check.
+/// <see cref="Apply" /> runs under the page's lock right after the proof verified, with the signed manifest and who signed
+/// (null when committed, else why not). <see cref="Recovery" /> is the new recovery code the final page shows once, only when
+/// <see cref="Apply" /> committed; the page puts it in with textContent.
+/// </summary>
+internal sealed record RowsCommit(Func<byte[]> Digest, Func<SignedManifest, string, string?> Apply, string? Recovery);

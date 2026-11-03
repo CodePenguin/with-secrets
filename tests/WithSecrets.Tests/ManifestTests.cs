@@ -128,7 +128,7 @@ internal static class ManifestTests
         check(ToolSettings.Load(again, out error).Port == 8765 && error is null, "manifest store: settings come from the manifest");
         check(TestState.Current(again)!.Version == 2, "manifest store: the version is 2 after two changes");
         check(Tables(db.FilePath).SequenceEqual(["audit", "grants", "manifest", "schema_version", "secrets", "sign_counts"]), "manifest store: no passkeys or settings table; secrets have their own (" + string.Join(",", Tables(db.FilePath)) + ")");
-        check(StateDatabase.SchemaVersion == 8, "manifest store: the schema version is 8 (slots and the vault are in the manifest)");
+        check(StateDatabase.SchemaVersion == 9, "manifest store: the schema version is 9 (slots, the vault and the recovery slot are in the manifest)");
         check(new GrantStore(again).Add("K", 10, "laptop") && new GrantStore(again).TryGet("K", out _, out _), "manifest store: grants work with a valid manifest");
         check(StateDatabase.InFolder(Path.Combine(root, "stored-empty")) is { } empty && !new GrantStore(empty).Add("K", 10) && !File.Exists(empty.FilePath), "manifest store: no grant is saved without a manifest");
     }

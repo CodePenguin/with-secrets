@@ -23,7 +23,7 @@ public sealed class StateDatabaseException(string message, Exception? inner = nu
 public sealed class StateDatabase
 {
     public const string FileName = "state.db";
-    public const int SchemaVersion = 8;
+    public const int SchemaVersion = 9;
 
     public static readonly TimeSpan DefaultBusyTimeout = TimeSpan.FromSeconds(5);
 

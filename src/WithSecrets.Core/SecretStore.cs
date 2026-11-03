@@ -238,6 +238,13 @@ public sealed class SecretStore(StateDatabase db, ISecretCipher? cipher = null) 
     internal (Manifest? Manifest, IReadOnlyList<string> Names) Current() => Verified((manifest, _, _) => (manifest, (IReadOnlyList<string>)[.. manifest?.Secrets.Keys ?? []]));
 
     /// <summary>
+    /// The verified manifest (null for an empty state) and every stored ciphertext by name, read in one snapshot after each row
+    /// matched its signed hash. Throws <see cref="SecretStoreException" /> when the state or the store fails.
+    /// </summary>
+    internal (Manifest? Manifest, Dictionary<string, string> Rows) Snapshot() => Verified((manifest, connection, transaction) =>
+        (manifest, connection is null ? new Dictionary<string, string>(StringComparer.Ordinal) : AllRows(connection, transaction)));
+
+    /// <summary>
     /// The next manifest: <paramref name="current" /> with <paramref name="publicKey" />, without <paramref name="removes" />,
     /// and with the hash of every ciphertext in <paramref name="rows" /> (new or replaced).
     /// </summary>
@@ -334,7 +341,7 @@ public sealed class SecretStore(StateDatabase db, ISecretCipher? cipher = null) 
         }
     }
 
-    private static Dictionary<string, string> AllRows(SqliteConnection connection, SqliteTransaction? transaction)
+    internal static Dictionary<string, string> AllRows(SqliteConnection connection, SqliteTransaction? transaction)
     {
         Dictionary<string, string> rows = new(StringComparer.Ordinal);
         using SqliteCommand command = StateDatabase.Command(connection, transaction, "SELECT name, ciphertext FROM secrets");
@@ -348,7 +355,7 @@ public sealed class SecretStore(StateDatabase db, ISecretCipher? cipher = null) 
     }
 
     /// <summary>Null when the rows are exactly the manifest's secrets, each matching its hash; else why not (names only).</summary>
-    private static string? Problem(Manifest? manifest, Dictionary<string, string> rows)
+    internal static string? Problem(Manifest? manifest, Dictionary<string, string> rows)
     {
         IReadOnlyDictionary<string, string> hashes = manifest?.Secrets ?? new Dictionary<string, string>();
         if (rows.Keys.FirstOrDefault(name => !hashes.ContainsKey(name)) is { } extra)

@@ -103,7 +103,7 @@ internal static class GrantTests
         TestState.Add(db, admin.Record("localhost", "laptop"));
         GrantStore grants = new(db, () => clock);
 
-        check(StateDatabase.SchemaVersion == 8, "grant store: the schema version is 8");
+        check(StateDatabase.SchemaVersion == 9, "grant store: the schema version is 9");
         check(grants.Add("K", 10, Evidence(admin, Text("K", issued), 10)), "grant store: a grant with the assertion over its request and time is saved");
         GrantLookup found = grants.Find("K", 480);
         check(found.Grant is { Minutes: 10, KeyName: "laptop" } grant && grant.Approved == clock && grant.Expires == clock.AddMinutes(10) && found.Rejected is null, "grant store: it is honoured, names the key from the manifest, and lasts exactly 10 minutes");

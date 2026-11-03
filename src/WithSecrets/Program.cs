@@ -79,6 +79,12 @@ internal static class Program
             case CliCommand.Config { Show: true }:
                 return ConfigShow.Run(state, Console.Out, Console.Error);
 
+            case CliCommand.Recover:
+                return HumanCommands.Recover(state, command.Port);
+
+            case CliCommand.RotateKey:
+                return HumanCommands.RotateKey(state, store, command.Port);
+
             case CliCommand.Config:
                 return HumanCommands.Config(state, command.Port);
         }
@@ -211,6 +217,38 @@ internal static class HumanCommands
         Func<string?> readCode = CodeReader("If the page says nothing was saved, press Ctrl+C.");
         (EnrollmentTarget primary, EnrollmentTarget local) = Targets(state, settings.Approval.WithPort(port), announce, readCode);
         ConfigChange change = new SettingsPage(state, primary, local, announce, readCode).Run();
+        Console.Error.WriteLine(change.Done ? change.Detail : "with-secrets: " + change.Detail);
+
+        return change.Code;
+    }
+
+    /// <summary>
+    /// --recover: the terminal shows the links (page 1 for the recovery code, page 2 for the new passkey) and the result. The
+    /// recovery code is typed only into the page. The code that the new setup shows is read back in the terminal like --config.
+    /// </summary>
+    public static int Recover(StateDatabase state, int? port)
+    {
+        ToolSettings settings = ToolSettings.Load(state, out _);
+        Action<string> announce = line => Console.Error.WriteLine(line);
+        Func<string?> readCode = CodeReader("If the page says nothing was saved, press Ctrl+C.");
+        (EnrollmentTarget primary, EnrollmentTarget local) = Targets(state, settings.Approval.WithPort(port), announce, readCode);
+        ConfigChange change = new StoreRecovery(state, primary, local, announce, readCode).Run();
+        Console.Error.WriteLine(change.Done ? change.Detail : "with-secrets: " + change.Detail);
+
+        return change.Code;
+    }
+
+    /// <summary>--rotate-key: two taps of an admin key; the terminal shows the links and the result, never a key or the recovery code.</summary>
+    public static int RotateKey(StateDatabase state, SecretStore store, int? port)
+    {
+        ApprovalSettings? settings = LoadSettings(state, port);
+        if (settings is null)
+        {
+            return RunCommand.StoreError;
+        }
+
+        (EnrollmentTarget primary, EnrollmentTarget local) = Targets(state, settings, line => Console.Error.WriteLine(line), null);
+        ConfigChange change = new KeyRotation(state, store, primary, local, line => Console.Error.WriteLine(line)).Run();
         Console.Error.WriteLine(change.Done ? change.Detail : "with-secrets: " + change.Detail);
 
         return change.Code;

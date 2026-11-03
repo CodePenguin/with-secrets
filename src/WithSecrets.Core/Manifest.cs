@@ -20,7 +20,7 @@ public sealed record ManifestKey(string Id, string Name, string PublicKey, int A
 /// <see cref="SignedManifest" />), and keys, the store key, the secret hashes and settings are read only from it.
 /// <para>
 /// The canonical text is exactly
-/// <c>{"v":N,"keys":[{"id":S,"name":S,"pub":S,"alg":N,"rp":S,"created":S,"admin":true|false,"slot":{"salt":S,"wrap":S}},...],"store":S,"vault":S,"secrets":{NAME:HASH,...},"settings":SETTINGS}</c>:
+/// <c>{"v":N,"keys":[{"id":S,"name":S,"pub":S,"alg":N,"rp":S,"created":S,"admin":true|false,"slot":{"salt":S,"wrap":S}},...],"store":S,"vault":S[,"recovery":{"salt":S,"wrap":S}],"secrets":{NAME:HASH,...},"settings":SETTINGS}</c>:
 /// this member order, no white space, keys sorted by id (ordinal), secrets sorted by name (ordinal), numbers as plain invariant
 /// integers, strings written as <see cref="ToolSettings.Canonical" /> writes them (only <c>"</c> and <c>\</c> escaped, U+007F
 /// and up as <c>\uXXXX</c>), <c>created</c> in the round-trip ("O") format and SETTINGS the canonical settings JSON. Sign counts
@@ -31,7 +31,7 @@ public sealed record ManifestKey(string Id, string Name, string PublicKey, int A
 /// with the public key can make a valid ciphertext, so a row is trusted only when it matches its signed hash.
 /// </para>
 /// </summary>
-public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, ToolSettings Settings, string Store, IReadOnlyDictionary<string, string> Secrets, string Vault = "")
+public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, ToolSettings Settings, string Store, IReadOnlyDictionary<string, string> Secrets, string Vault = "", KeySlot? Recovery = null)
 {
     private static readonly JsonDocumentOptions Strict = new() { AllowDuplicateProperties = false };
 
@@ -55,19 +55,26 @@ public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, Too
     public IReadOnlyList<ManifestKey> Admins => [.. Keys.Where(key => key.Admin).OrderBy(key => key.Created).ThenBy(key => key.Id, StringComparer.Ordinal)];
 
     /// <summary>The next version with <paramref name="key" /> added: an admin key, or (the default) a key that only approves runs.</summary>
-    public Manifest WithKey(PasskeyRecord key, bool admin = false) => Next([.. Keys, ManifestKey.From(key, admin)], Settings, Store, Secrets, Vault);
+    public Manifest WithKey(PasskeyRecord key, bool admin = false) => Next([.. Keys, ManifestKey.From(key, admin)], Settings, Store, Secrets, Vault, Recovery);
 
     /// <summary>The next version without the key with this Id.</summary>
-    public Manifest WithoutKey(string id) => Next([.. Keys.Where(key => key.Id != id)], Settings, Store, Secrets, Vault);
+    public Manifest WithoutKey(string id) => Next([.. Keys.Where(key => key.Id != id)], Settings, Store, Secrets, Vault, Recovery);
 
     /// <summary>The next version with these settings.</summary>
-    public Manifest WithSettings(ToolSettings settings) => Next(Keys, settings, Store, Secrets, Vault);
+    public Manifest WithSettings(ToolSettings settings) => Next(Keys, settings, Store, Secrets, Vault, Recovery);
 
     /// <summary>The next version with this store public key and exactly these secret hashes (by name), and this vault (the same one when null).</summary>
-    public Manifest WithSecrets(string store, IReadOnlyDictionary<string, string> secrets, string? vault = null) => Next(Keys, Settings, store, secrets, vault ?? Vault);
+    public Manifest WithSecrets(string store, IReadOnlyDictionary<string, string> secrets, string? vault = null) => Next(Keys, Settings, store, secrets, vault ?? Vault, Recovery);
 
-    private Manifest Next(IEnumerable<ManifestKey> keys, ToolSettings settings, string store, IReadOnlyDictionary<string, string> secrets, string vault)
-        => new(Version + 1, [.. keys.OrderBy(key => key.Id, StringComparer.Ordinal)], settings, store, new SortedDictionary<string, string>(secrets.ToDictionary(), StringComparer.Ordinal), vault);
+    /// <summary>
+    /// The next version after a key rotation: only <paramref name="key" /> (the admin who rotates, with its slot of the new master
+    /// key), the new store key, its vault and recovery slot, and the hash of every re-encrypted secret. The settings stay.
+    /// </summary>
+    public Manifest Rotated(ManifestKey key, string store, string vault, KeySlot recovery, IReadOnlyDictionary<string, string> secrets)
+        => Next([key], Settings, store, secrets, vault, recovery);
+
+    private Manifest Next(IEnumerable<ManifestKey> keys, ToolSettings settings, string store, IReadOnlyDictionary<string, string> secrets, string vault, KeySlot? recovery)
+        => new(Version + 1, [.. keys.OrderBy(key => key.Id, StringComparer.Ordinal)], settings, store, new SortedDictionary<string, string>(secrets.ToDictionary(), StringComparer.Ordinal), vault, recovery);
 
     /// <summary>What an admin key signs: SHA-256(bind || SHA-256(UTF-8 of the manifest text)).</summary>
     public static byte[] Challenge(byte[] bind, string text)
@@ -107,6 +114,16 @@ public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, Too
         ToolSettings.Quote(text, Store);
         text.Append(",\"vault\":");
         ToolSettings.Quote(text, Vault);
+        if (Recovery is not null)
+        {
+            // The recovery slot of the master key (see KeyVault.NewRecoverySlot): present from the first setup on, left out only by states built without one.
+            text.Append(",\"recovery\":{\"salt\":");
+            ToolSettings.Quote(text, Recovery.Salt);
+            text.Append(",\"wrap\":");
+            ToolSettings.Quote(text, Recovery.Wrap);
+            text.Append('}');
+        }
+
         text.Append(",\"secrets\":{");
         first = true;
         foreach (KeyValuePair<string, string> secret in Secrets.OrderBy(item => item.Key, StringComparer.Ordinal))
@@ -172,6 +189,11 @@ public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, Too
         if (Store.Length > 0 ? !KeyVault.IsVault(Vault) : Vault.Length > 0)
         {
             return Store.Length > 0 ? "the store key has no valid vault" : "a vault without a store key";
+        }
+
+        if (Recovery is not null && (Store.Length == 0 || !KeyVault.IsSalt(Recovery.Salt) || !KeyVault.IsSlotWrap(Recovery.Wrap)))
+        {
+            return Store.Length == 0 ? "a recovery slot without a store key" : "the recovery slot is not valid";
         }
 
         if (Secrets.Count > 0 && Store.Length == 0)
@@ -265,7 +287,20 @@ public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, Too
                 return null;
             }
 
-            Manifest manifest = new(version, list, settings, store, new SortedDictionary<string, string>(secrets.ToDictionary(StringComparer.Ordinal), StringComparer.Ordinal), vault);
+            KeySlot? recovery = null;
+            if (root.TryGetProperty("recovery", out JsonElement recoveryJson))
+            {
+                if (recoveryJson.ValueKind != JsonValueKind.Object || Text(recoveryJson, "salt") is not { } recoverySalt || Text(recoveryJson, "wrap") is not { } recoveryWrap)
+                {
+                    error = "the recovery slot in the manifest is not valid";
+
+                    return null;
+                }
+
+                recovery = new KeySlot(recoverySalt, recoveryWrap);
+            }
+
+            Manifest manifest = new(version, list, settings, store, new SortedDictionary<string, string>(secrets.ToDictionary(StringComparer.Ordinal), StringComparer.Ordinal), vault, recovery);
             error = manifest.Problem();
             if (error is not null)
             {

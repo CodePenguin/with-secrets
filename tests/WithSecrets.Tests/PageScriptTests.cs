@@ -12,6 +12,7 @@ internal static class PageScriptTests
     {
         Rule(check);
         Pages(check);
+        RecoveryTests.PageScripts(check);
 
         return Task.CompletedTask;
     }

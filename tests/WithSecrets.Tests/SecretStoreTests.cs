@@ -66,6 +66,9 @@ internal static class SecretStoreTests
         (string publicKey, string? vault) = KeyFor(store, current);
         Dictionary<string, string> rows = values.ToDictionary(item => item.Key, item => store.Encrypt(item.Value, publicKey), StringComparer.Ordinal);
         Manifest next = SecretStore.Next(current, publicKey, rows, removes ?? [], vault);
+
+        // Like a first setup, the store has a recovery slot; a test knows its code (TestVault.RecoveryCode).
+        next = next.Recovery is null && next.Store.Length > 0 ? next with { Recovery = TestVault.RecoverySlot(store.Database, next.Store) } : next;
         ManifestKey admin = current.Admins.First(key => TestAuthenticator.ById(key.Id) is not null);
         SignedManifest signed = TestState.Sign(TestAuthenticator.ById(admin.Id)!, next.Canonical(), admin.RpId);
 
@@ -409,6 +412,6 @@ internal static class SecretStoreTests
         check(store.TryApply(current.Version, signed, rows, [], AuditLog.ChangeRow("secrets-set", "test", admin.Name)) is null && Row(db, "B_NAME") == rows["B_NAME"], "store write: the same write succeeds when nothing fails");
         check(new AuditLog(db).TryRead(100, null, out IReadOnlyList<AuditRecord> rowsDone, out _) && rowsDone.Count == before + 1, "store write: the audit row is written with it");
 
-        check(StateDatabase.SchemaVersion == 8, "store: the schema version is 8");
+        check(StateDatabase.SchemaVersion == 9, "store: the schema version is 9");
     }
 }
