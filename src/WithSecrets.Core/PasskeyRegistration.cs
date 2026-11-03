@@ -62,6 +62,9 @@ internal static class PasskeyRegistration
             var base = location.pathname.replace(/\/+$/, "");
             var encoder = new TextEncoder();
             var busy = false;
+            var attempt = 0;
+            var waiting = null;
+            var waitingLabel = "";
             var finished = false;
             var pending = null;
             var chosen = null;
@@ -107,14 +110,24 @@ internal static class PasskeyRegistration
                 return { name: text };
             }
 
+            // A post that gets no answer within 20 seconds is aborted (its error is named AbortError), so the page is never stuck.
             function post(what, body) {
+                var controller = new AbortController();
+                var timer = setTimeout(function () { controller.abort(); }, 20000);
                 return fetch(base + "/" + what, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: body,
                     cache: "no-store",
                     credentials: "omit",
-                    redirect: "error"
+                    redirect: "error",
+                    signal: controller.signal
+                }).then(function (reply) {
+                    clearTimeout(timer);
+                    return reply;
+                }, function (error) {
+                    clearTimeout(timer);
+                    throw error;
                 });
             }
 
@@ -163,9 +176,6 @@ internal static class PasskeyRegistration
                     pending = {
                         challenge: new Uint8Array(challenge),
                         rpId: step.rpId,
-                        allowCredentials: step.allowCredentials.map(function (item) {
-                            return { id: fromBase64Url(item.id), type: item.type };
-                        }),
                         timeout: step.timeout,
                         userVerification: "required"
                     };
@@ -211,8 +221,8 @@ internal static class PasskeyRegistration
                     rp: { id: options.rp.id, name: options.rp.name },
                     user: {
                         id: fromBase64Url(options.user.id),
-                        name: options.user.name,
-                        displayName: name
+                        name: passkeyLabel(options.user.name, name),
+                        displayName: passkeyLabel(options.user.displayName, name)
                     },
                     pubKeyCredParams: options.pubKeyCredParams,
                     authenticatorSelection: options.authenticatorSelection,
@@ -224,6 +234,33 @@ internal static class PasskeyRegistration
                     // The new key's slot: its PRF output for the salt the program chose, returned at create.
                     extensions: { prf: { eval: { first: fromBase64Url(options.prf.salt) } } }
                 };
+            }
+
+            // While a passkey prompt is open the tapped button stays on and reads "Cancel": a prompt that closes without ever
+            // settling must not leave the page stuck. The cancel starts no prompt; it only abandons the attempt.
+            function startWait(button) {
+                waiting = button;
+                waitingLabel = button.textContent;
+                button.textContent = "Cancel";
+                button.disabled = false;
+            }
+
+            function endWait() {
+                if (waiting !== null) {
+                    waiting.textContent = waitingLabel;
+                    waiting = null;
+                }
+            }
+
+            function cancelAttempt() {
+                attempt++;
+                var button = waiting;
+                endWait();
+                busy = false;
+                if (button === create) {
+                    inputs(true);
+                }
+                show("Cancelled. Tap again to try.");
             }
 
             cancel.addEventListener("click", function () {
@@ -239,7 +276,14 @@ internal static class PasskeyRegistration
             });
 
             create.addEventListener("click", function () {
-                if (finished || busy) {
+                if (finished) {
+                    return;
+                }
+                if (waiting === create) {
+                    cancelAttempt();
+                    return;
+                }
+                if (busy) {
                     return;
                 }
                 if (!window.PublicKeyCredential || !navigator.credentials) {
@@ -263,11 +307,15 @@ internal static class PasskeyRegistration
                     keyName.focus();
                     return;
                 }
+                var mine = ++attempt;
                 busy = true;
-                create.disabled = true;
+                startWait(create);
                 inputs(false);
                 show("Waiting for your passkey...");
                 navigator.credentials.create({ publicKey: request }).then(function (credential) {
+                    if (mine !== attempt) {
+                        return null;
+                    }
                     var response = credential.response;
                     var message = {
                         id: toBase64Url(credential.rawId),
@@ -290,43 +338,94 @@ internal static class PasskeyRegistration
                         return JSON.stringify(message);
                     });
                 }).then(function (body) {
+                    if (mine !== attempt) {
+                        return;
+                    }
                     if (finished) {
                         busy = false;
                         return;
                     }
+                    endWait();
+                    create.disabled = true;
                     show("Checking your passkey...");
                     return post("create", body).then(answer).then(null, failed);
-                }, function () {
+                }, function (error) {
+                    if (mine !== attempt) {
+                        return;
+                    }
                     busy = false;
+                    endWait();
                     if (!finished) {
                         create.disabled = false;
                         inputs(true);
-                        show("No passkey was made. Nothing was added. You can try again or cancel.");
+                        show("No passkey was made" + why(error) + ". Nothing was added. You can try again or cancel.");
                     }
                 });
             });
 
+            // The browser's own error, for the status line: its name and message (cut to 120 characters). Never any key text.
+            function why(error) {
+                if (!error || typeof error.name !== "string") {
+                    return "";
+                }
+                var text = error.name;
+                if (typeof error.message === "string" && error.message) {
+                    text += ": " + error.message.slice(0, 120);
+                }
+                return " (" + text + ")";
+            }
+
+            // No answer from the program within 20 seconds: the action button is on again, the page is not finished.
+            function timedOut() {
+                if (pending === null) {
+                    create.disabled = false;
+                    inputs(true);
+                } else {
+                    second.disabled = false;
+                }
+                show("The program did not answer within 20 seconds. Check the terminal. Tap again to retry.");
+            }
+
             // A step that failed after the server took part: tell the program, so it stops waiting.
-            function failed() {
+            function failed(error) {
                 busy = false;
+                if (error && error.name === "AbortError") {
+                    if (!finished) {
+                        timedOut();
+                    }
+                    return;
+                }
                 finish("Nothing was added. If the terminal asks for a code, press Ctrl+C.");
                 post("deny", "").then(null, function () { });
             }
 
             // Step 2 runs in its own tap: the prompt starts at once, with the challenge made before.
             second.addEventListener("click", function () {
-                if (finished || busy || pending === null) {
+                if (finished) {
                     return;
                 }
+                if (waiting === second) {
+                    cancelAttempt();
+                    return;
+                }
+                if (busy || pending === null) {
+                    return;
+                }
+                var mine = ++attempt;
                 busy = true;
-                second.disabled = true;
+                startWait(second);
                 show("Waiting for your passkey...");
                 navigator.credentials.get({ publicKey: pending }).then(function (credential) {
+                    if (mine !== attempt) {
+                        return;
+                    }
                     var response = credential.response;
                     if (finished) {
                         busy = false;
                         return;
                     }
+                    endWait();
+                    second.disabled = true;
                     show("Checking...");
                     return post("sign", JSON.stringify({
                         id: toBase64Url(credential.rawId),
@@ -334,11 +433,15 @@ internal static class PasskeyRegistration
                         clientDataJSON: toBase64Url(response.clientDataJSON),
                         signature: toBase64Url(response.signature)
                     })).then(answer).then(null, failed);
-                }, function () {
+                }, function (error) {
+                    if (mine !== attempt) {
+                        return;
+                    }
                     busy = false;
+                    endWait();
                     if (!finished) {
                         second.disabled = false;
-                        show("No passkey was used. Nothing was added yet. Tap \"" + second.textContent + "\" again, or cancel.");
+                        show("No passkey was used" + why(error) + ". Nothing was added yet. Tap \"" + second.textContent + "\" again, or cancel.");
                     }
                 });
             });
@@ -427,11 +530,27 @@ internal static class PasskeyRegistration
         // admin key released opens that key's slot. Zeroed on every way out.
         byte[]? master = null;
         (byte[] State, string PublicKey)? serverKey = null;
+        (string PublicKey, string Vault)? firstStore = null;
         try
         {
             if (current is null)
             {
                 master = KeyVault.NewMasterKey();
+
+                // First setup also makes the store's key pair, in memory: the public key and the private key wrapped under the master
+                // key (the vault) go into the same first manifest the admin signs. The private key is written nowhere else, so a
+                // page that does not finish leaves nothing behind. (Its hex text is a .NET string for a moment and cannot be wiped.)
+                byte[]? privateKey = null;
+                try
+                {
+                    (string publicKey, string privateText) = DotenvxCipher.Instance.NewKeyPair();
+                    privateKey = Encoding.UTF8.GetBytes(privateText);
+                    firstStore = (publicKey, KeyVault.WrapVault(privateKey, master, publicKey));
+                }
+                finally
+                {
+                    SecretValues.Clear(privateKey);
+                }
             }
             else
             {
@@ -451,9 +570,12 @@ internal static class PasskeyRegistration
             }
 
             byte[] challenge = RandomNumberGenerator.GetBytes(32);
-            byte[] slotSalt = KeyVault.NewSalt();
+            // Every key's slot in a store shares one salt (the first key's): a sign-in page can only pass one `eval` salt. A later key
+            // reuses the salt of the existing slots; PRF outputs still differ per credential, so the KEKs do too.
+            string? sharedSalt = current?.Keys.Select(item => item.Slot?.Salt).FirstOrDefault(item => item is not null);
+            byte[] slotSalt = sharedSalt is null ? KeyVault.NewSalt() : Base64Url.DecodeFromChars(sharedSalt);
             serverKey = SecretCrypto.NewServerKey();
-            Session session = new(store, name, challenge, [.. snapshot.Select(item => item.Id)], plan, settings, askAdmin, new PrfContext(serverKey.Value.State, slotSalt, master));
+            Session session = new(store, name, challenge, [.. snapshot.Select(item => item.Id)], plan, settings, askAdmin, new PrfContext(serverKey.Value.State, slotSalt, master, firstStore));
             using OneShotServer server = new(plan.Prefix, settings.Port, session.Handle);
             string origin = settings.PageOrigin(server.Port);
             if (PasskeyMethod.RpIdOf(origin) != rpId)
@@ -461,14 +583,15 @@ internal static class PasskeyRegistration
                 return ApprovalDecision.Deny("the enrollment page address changed");
             }
 
+            string label = PasskeyLabel.NewId();
             string options = JsonSerializer.Serialize(new
             {
                 challenge = Base64Url.EncodeToString(challenge),
                 rp = new { id = rpId, name = "with-secrets" },
-                // The page puts the name the person chose in place of this one.
-                user = new { id = Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(16)), name = "with-secrets", displayName = name },
+                // A random id; the page makes the display label "with-secrets <chosen name> <id>" (see PasskeyLabel).
+                user = new { id = Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(16)), name = label, displayName = label },
                 pubKeyCredParams = new[] { new { type = "public-key", alg = WebAuthn.ES256 }, new { type = "public-key", alg = WebAuthn.RS256 } },
-                authenticatorSelection = new { residentKey = "preferred", userVerification = "required" },
+                authenticatorSelection = new { residentKey = "required", requireResidentKey = true, userVerification = "required" },
                 attestation = "none",
                 excludeCredentials = snapshot.Where(item => item.RpId == rpId).Select(item => new { id = item.Id, type = "public-key" }).ToArray(),
                 timeout = (long)settings.Timeout.TotalMilliseconds,
@@ -503,7 +626,7 @@ internal static class PasskeyRegistration
     /// arrays belong to <see cref="Run(PasskeyStore, ApprovalSettings, string, Action{string}, Func{string?}, RegistrationPlan?, Func{string, ManifestApproval}?, Unlock?)" />,
     /// which zeroes them when the page ends.
     /// </summary>
-    private sealed record PrfContext(byte[] ServerState, byte[] Salt, byte[] Master);
+    private sealed record PrfContext(byte[] ServerState, byte[] Salt, byte[] Master, (string PublicKey, string Vault)? FirstStore);
 
     internal const string NothingEnrolled = "Nothing is enrolled. Set up the first passkey with: with-secrets --config (with-secrets --enroll adds more).";
 
@@ -897,6 +1020,12 @@ internal static class PasskeyRegistration
                 // key of the stored state that stays an admin. Those that work at this host may sign here.
                 Manifest next = plan.Next(result.Key, _admin);
                 bool first = next.Version == 1;
+                if (first && prf.FirstStore is { } firstStore)
+                {
+                    // The first manifest already holds the store key and its vault: the first secret needs only an admin signature.
+                    next = next with { Store = firstStore.PublicKey, Vault = firstStore.Vault };
+                }
+
                 List<PasskeyRecord> admins = first ? next.IsAdmin(result.Key.Id) ? [result.Key] : []
                     : store.TryAll(out IReadOnlyList<PasskeyRecord> keys) ? [.. keys.Where(item => item.Admin && next.IsAdmin(item.Id))] : [];
                 if (admins.Count == 0)
@@ -925,7 +1054,6 @@ internal static class PasskeyRegistration
                         manifest = next.Canonical(),
                         bind = Base64Url.EncodeToString(_bind),
                         rpId,
-                        allowCredentials = _signers.Select(item => new { id = item.Id, type = "public-key" }).ToArray(),
                         timeout = (long)settings.Timeout.TotalMilliseconds,
                         first,
                         name = _name,

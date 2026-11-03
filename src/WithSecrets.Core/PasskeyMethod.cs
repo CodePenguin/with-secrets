@@ -50,11 +50,10 @@ public sealed class PasskeyMethod(PasskeyStore store, ApprovalSettings settings,
         {
             bind = Base64Url.EncodeToString(context.Bind),
             rpId,
-            allowCredentials = keys.Select(item => new { id = item.Id, type = "public-key" }).ToArray(),
             timeout = (long)settings.Timeout.TotalMilliseconds,
 
-            // The salt of every key's slot (public): a page that asks the passkey for its PRF output uses these, one per credential.
-            salts = keys.Where(item => item.Slot is not null).ToDictionary(item => item.Id, item => item.Slot!.Salt),
+            // The salt of the store's slots (public; every key's slot has this same one): a page that asks the passkey for its PRF output passes it as `eval`.
+            salt = keys.Select(item => item.Slot?.Salt).FirstOrDefault(item => item is not null),
         });
 
         return new ProofStart("webauthn", payload);

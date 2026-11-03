@@ -1,8 +1,11 @@
 namespace WithSecrets;
 
 /// <summary>
-/// Refuses commands that cannot be reviewed from the prompt. The prompt shows the whole command line, however long, but never
-/// the contents of a script file, so approve commands you recognize.
+/// Refuses commands that cannot be reviewed from the prompt. The prompt shows the whole command line, however long, the inline
+/// code of a shell (<see cref="InlineCode" />, first 4000 characters) and the start of a script file (first 200 lines, at most
+/// 16 KB, see <see cref="ApprovalSummary" />). Limits: a long or obfuscated script can still be hard to judge, and only the
+/// script file named in the command is shown, not the files it runs in turn. Base64 code (-EncodedCommand) and code read from
+/// standard input cannot be read on the page and are refused.
 /// </summary>
 public static class Policy
 {
@@ -25,23 +28,82 @@ public static class Policy
             return $"'{name}' prints the environment. Run a program that needs the secrets instead.";
         }
 
-        if (PosixShells.Contains(name) && arguments.Any(IsShortFlagWithC))
+        if (name is "powershell" or "pwsh")
         {
-            return "Inline shell commands are refused. Put the logic in a script file and run that.";
-        }
+            if (arguments.Any(IsEncodedFlag))
+            {
+                return "-EncodedCommand is refused: the code is base64 and not readable on the approval page. Use -Command with the code itself, or -File.";
+            }
 
-        if (name == "cmd" && arguments.Any(argument => argument.Equals("/c", StringComparison.OrdinalIgnoreCase)
-                                                      || argument.Equals("/k", StringComparison.OrdinalIgnoreCase)))
-        {
-            return "Inline cmd commands are refused. Put the logic in a script file and run that.";
-        }
+            if (arguments.Any(argument => argument == "-"))
+            {
+                return "PowerShell reading its code from standard input is refused: the approval page cannot show it. Use -Command or -File.";
+            }
 
-        if (name is "powershell" or "pwsh" && !arguments.Any(IsFileFlag))
-        {
-            return "PowerShell is allowed only with -File. Put the logic in a script file and run that.";
+            if (InlineCode(program, arguments) is null && !arguments.Any(IsFileFlag))
+            {
+                return "PowerShell needs -File or code (-Command). Without either there is nothing for the approval page to show.";
+            }
         }
 
         return CheckLength(program, arguments);
+    }
+
+    /// <summary>
+    /// The code a shell would run that is written in the arguments themselves: the argument after <c>-c</c> for a POSIX shell,
+    /// the rest of the line after <c>/c</c>, <c>/k</c> or <c>/r</c> for cmd, and the rest of the line after <c>-Command</c> (or,
+    /// without <c>-File</c>, from the first argument that is not a flag) for PowerShell. Null when the command runs no inline
+    /// code. The approval page shows this text, so what it returns must cover everything the shell will read as code.
+    /// </summary>
+    public static string? InlineCode(string program, IReadOnlyList<string> arguments)
+    {
+        string name = Path.GetFileNameWithoutExtension(program).ToLowerInvariant();
+        string? code = null;
+        if (PosixShells.Contains(name))
+        {
+            int flag = arguments.ToList().FindIndex(IsShortFlagWithC);
+            code = flag >= 0 && flag + 1 < arguments.Count ? arguments[flag + 1] : null;
+        }
+        else if (name == "cmd")
+        {
+            for (int index = 0; index < arguments.Count && code is null; index++)
+            {
+                string argument = arguments[index];
+                if (argument.Length >= 2 && argument[0] == '/' && "ckr".Contains(char.ToLowerInvariant(argument[1]), StringComparison.Ordinal))
+                {
+                    code = string.Join(' ', new[] { argument[2..] }.Concat(arguments.Skip(index + 1)).Where(part => part.Length > 0));
+                }
+            }
+        }
+        else if (name is "powershell" or "pwsh")
+        {
+            // The first of -File and -Command decides; a flag's own value (-ExecutionPolicy Bypass) must not look like code.
+            int file = arguments.ToList().FindIndex(IsFileFlag);
+            int command = arguments.ToList().FindIndex(argument => FlagName(argument) is { Length: > 0 } flag
+                && ("command".StartsWith(flag, StringComparison.Ordinal) || flag is "commandwithargs" or "cwa"));
+            if (file >= 0 && (command < 0 || file < command))
+            {
+                return null;
+            }
+
+            int start = command >= 0 ? command + 1 : arguments.ToList().FindIndex(argument => argument.Length > 0 && argument[0] is not ('-' or '/'));
+            code = start >= 0 ? string.Join(' ', arguments.Skip(start)) : null;
+        }
+
+        return string.IsNullOrEmpty(code) ? null : code;
+    }
+
+    private static string FlagName(string argument)
+    {
+        return argument.Length > 1 && argument[0] is '-' or '/' ? argument.TrimStart('-', '/').ToLowerInvariant() : "";
+    }
+
+    // -e, -ec, -enc ... -encodedcommand, and the encoded arguments that go with it.
+    private static bool IsEncodedFlag(string argument)
+    {
+        string flag = FlagName(argument);
+
+        return flag.Length > 0 && (flag == "ec" || "encodedcommand".StartsWith(flag, StringComparison.Ordinal) || (flag.Length >= 2 && "encodedarguments".StartsWith(flag, StringComparison.Ordinal)));
     }
 
     private static readonly char[] BatchUnsafe = ['"', '%', '^', '&', '|', '<', '>', '!', '\r', '\n', '\0'];
@@ -77,6 +139,8 @@ public static class Policy
 
     private static bool IsFileFlag(string argument)
     {
-        return argument.Equals("-File", StringComparison.OrdinalIgnoreCase) || argument.Equals("-f", StringComparison.OrdinalIgnoreCase);
+        string flag = FlagName(argument);
+
+        return flag.Length > 0 && "file".StartsWith(flag, StringComparison.Ordinal);
     }
 }

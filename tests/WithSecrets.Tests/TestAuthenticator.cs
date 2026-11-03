@@ -22,11 +22,17 @@ internal sealed class TestAuthenticator : IDisposable
         _rsa = rsa;
         Alg = alg;
         CredentialId = RandomNumberGenerator.GetBytes(16);
+        Sequence = Interlocked.Increment(ref _made);
         Known[Encode(CredentialId)] = this;
     }
 
     /// <summary>Every authenticator made in this process, by credential id, so test helpers can sign as the admin key.</summary>
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, TestAuthenticator> Known = new(StringComparer.Ordinal);
+
+    private static long _made;
+
+    /// <summary>The order the authenticators were made in (an existing admin key is older than a key being enrolled).</summary>
+    public long Sequence { get; }
 
     public static TestAuthenticator? ById(string id) => Known.TryGetValue(id, out TestAuthenticator? found) ? found : null;
 
@@ -130,9 +136,9 @@ internal sealed class TestAuthenticator : IDisposable
     }
 
     /// <summary>A slot of <paramref name="masterKey" /> for this credential, as enrollment makes it; null for an authenticator without PRF.</summary>
-    public KeySlot? Slot(byte[] masterKey)
+    public KeySlot? Slot(byte[] masterKey, byte[]? sharedSalt = null)
     {
-        byte[] salt = KeyVault.NewSalt();
+        byte[] salt = sharedSalt ?? KeyVault.NewSalt();
         byte[]? output = Prf(salt);
 
         return output is null ? null : new KeySlot(Encode(salt), KeyVault.WrapSlot(masterKey, output, CredentialId, salt));

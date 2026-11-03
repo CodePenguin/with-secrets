@@ -229,8 +229,6 @@ public sealed class SecretStore(StateDatabase db, ISecretCipher? cipher = null) 
         }
     }
 
-    internal (string PublicKey, string PrivateKey) NewKeyPair() => _cipher.NewKeyPair();
-
     internal string Encrypt(string value, string publicKey) => _cipher.Encrypt(value, publicKey);
 
     /// <summary>

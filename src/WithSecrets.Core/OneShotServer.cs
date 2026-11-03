@@ -17,7 +17,19 @@ using Microsoft.Extensions.Logging;
 namespace WithSecrets;
 
 /// <summary>What the handler of a <see cref="OneShotServer" /> sends back. A null policy means the strict default.</summary>
-internal sealed record OneShotResponse(int Status, string ContentType, string Body, string? ContentSecurityPolicy = null);
+internal sealed record OneShotResponse(int Status, string ContentType, string Body, string? ContentSecurityPolicy = null, string? Outcome = null);
+
+/// <summary>
+/// The one line the terminal gets when a proof (or other signed step) arrives and one when it is finished, so a person can tell
+/// "the page never sent it" from "the program is checking it". The lines hold a size and a verdict word only: never a key, a
+/// PRF output, a code or a value. Tests replace <see cref="Sink" />.
+/// </summary>
+internal static class ProofLog
+{
+    public static Action<string> Sink { get; set; } = line => Console.Error.WriteLine(line);
+
+    public static void Line(string text) => Sink("with-secrets: " + text);
+}
 
 /// <summary>
 /// A small web server on loopback for one approval. It serves only /{prefix}/{token} and paths under it; every other path
@@ -30,6 +42,9 @@ internal sealed record OneShotResponse(int Status, string ContentType, string Bo
 internal sealed class OneShotServer : IDisposable
 {
     public const int MaxBodyBytes = 1024 * 1024;
+
+    /// <summary>A request whose body has not fully arrived by then is answered 408, so no request waits for ever.</summary>
+    public static TimeSpan BodyTimeout { get; set; } = TimeSpan.FromSeconds(15);
 
     private const string StrictPolicy = "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
@@ -249,24 +264,51 @@ internal sealed class OneShotServer : IDisposable
         }
         else
         {
-            string? body;
+            // A POST to a step other than deny is a proof (or another signed step): it is logged when it arrives and when it ends.
+            bool tracked = context.Request.Method == "POST" && suffix is not ("" or "deny");
+            string label = suffix == "proof" ? "proof" : "step " + new string(suffix.Where(char.IsAsciiLetterOrDigit).Take(12).ToArray());
+            string? body = null;
+            bool timedOut = false;
+            using CancellationTokenSource limit = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
+            limit.CancelAfter(BodyTimeout);
             try
             {
                 using StreamReader reader = new(context.Request.Body, new UTF8Encoding(false, true));
-                body = await reader.ReadToEndAsync(context.RequestAborted);
+                body = await reader.ReadToEndAsync(limit.Token);
             }
             catch (Exception error) when (error is BadHttpRequestException or DecoderFallbackException or IOException or OperationCanceledException)
             {
                 body = null;
+                timedOut = error is OperationCanceledException && !context.RequestAborted.IsCancellationRequested;
+            }
+
+            if (tracked)
+            {
+                ProofLog.Line(body is null ? $"{label} received (body not read)" : $"{label} received ({Encoding.UTF8.GetByteCount(body)} bytes)");
             }
 
             try
             {
-                response = body is null ? new OneShotResponse(400, "text/plain; charset=utf-8", "The request body is over 1 MB or not UTF-8.") : _handle(context.Request.Method, suffix, body);
+                response = timedOut ? new OneShotResponse(408, "text/plain; charset=utf-8", "The request body did not arrive in time.")
+                    : body is null ? new OneShotResponse(400, "text/plain; charset=utf-8", "The request body is over 1 MB or not UTF-8.", Outcome: "invalid body")
+                    : _handle(context.Request.Method, suffix, body);
             }
             catch (Exception)
             {
                 response = new OneShotResponse(500, "text/plain; charset=utf-8", "Something went wrong.");
+            }
+
+            if (tracked)
+            {
+                ProofLog.Line($"{label} checked: " + (response.Outcome ?? response.Status switch
+                {
+                    200 => "accepted",
+                    403 => "refused",
+                    400 => "invalid body",
+                    404 => "already ended",
+                    408 => "body timed out",
+                    _ => "error " + response.Status.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                }));
             }
         }
 

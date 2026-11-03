@@ -23,7 +23,8 @@ public static class SecretNames
 /// offers only "Approve once". <see cref="RequestId" /> is the request's fingerprint key (see <see cref="RequestFingerprint" />),
 /// shown in the text the person signs so that a saved approval names the request it covers. <see cref="Sources" /> is where
 /// each secret comes from (see <see cref="ISecretSource.Label" />), shown after each name. <see cref="Unlock" /> is true when the
-/// approving passkey must also release the secret store key (WebAuthn PRF, see <see cref="KeyVault" />).
+/// approving passkey must also release the secret store key (WebAuthn PRF, see <see cref="KeyVault" />). <see cref="Script" />
+/// is the script file the run executes, read once for the approval text (see <see cref="ApprovalSummary" />); null when there is none.
 /// </summary>
 public sealed record ApprovalRequest(
     string Program,
@@ -37,7 +38,8 @@ public sealed record ApprovalRequest(
     IReadOnlyList<string>? Links = null,
     string? RequestId = null,
     IReadOnlyDictionary<string, string>? Sources = null,
-    bool Unlock = false);
+    bool Unlock = false,
+    ScriptView? Script = null);
 
 /// <summary>
 /// What a person signed on an approval page: the page nonce, the exact text that was bound (see <see cref="RequestBinding" />)
@@ -50,7 +52,7 @@ public sealed record ApprovalEvidence(string Nonce, string Text, string Proof);
 /// The person's answer. <see cref="ReuseMinutes" /> is the reuse time they approved and signed; 0 is "once".
 /// <see cref="Evidence" /> is what they signed, when the proof method has one to keep (a passkey on a run approval page).
 /// <see cref="Unlock" /> is what the approving passkey released by WebAuthn PRF when the page asked for it (a run, or the approval
-/// that precedes an enrollment or the first secret): the caller uses it once and disposes it, which zeroes it.
+/// that precedes an enrollment): the caller uses it once and disposes it, which zeroes it.
 /// </summary>
 public sealed record ApprovalDecision(bool Approved, string Detail, int ReuseMinutes = 0, ApprovalEvidence? Evidence = null, Unlock? Unlock = null)
 {

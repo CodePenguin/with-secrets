@@ -86,6 +86,16 @@ internal static class KeyVaultTests
         check(Manifest.Parse(vaultEdit.Text, out _) is not null && vaultEdit.Verify(out error) is null && error is not null && error.Contains("signature", StringComparison.Ordinal), "slot manifest: an edited vault passes the shape check but fails the signature (" + error + ")");
         SignedManifest swapped = withVault with { Text = storeText.Replace(vault, KeyVault.WrapVault(Encoding.UTF8.GetBytes(privateKey), mk, publicKey), StringComparison.Ordinal) };
         check(swapped.Verify(out _) is null, "slot manifest: another valid vault for the same key (a replay swap) fails the signature too");
+
+        // The first manifest of a first setup has the store key and the vault and no secrets: editing the vault there fails too.
+        Manifest firstWithStore = first with { Store = publicKey, Vault = vault };
+        string firstText = firstWithStore.Canonical();
+        SignedManifest firstSigned = TestState.Sign(laptop, firstText);
+        check(firstWithStore.Problem() is null && Manifest.Parse(firstText, out _) is { Version: 1 } && firstSigned.Verify(out error) is not null, "slot manifest: a first manifest with the store key and vault (no secrets) is valid and verifies (" + error + ")");
+        SignedManifest firstVaultEdit = firstSigned with { Text = Alter(firstText, "\"vault\":") };
+        check(Manifest.Parse(firstVaultEdit.Text, out _) is not null && firstVaultEdit.Verify(out error) is null && error is not null && error.Contains("signature", StringComparison.Ordinal), "slot manifest: an edited vault in the first manifest passes the shape check but fails the signature (" + error + ")");
+        SignedManifest firstSwap = firstSigned with { Text = firstText.Replace(vault, KeyVault.WrapVault(Encoding.UTF8.GetBytes(privateKey), mk, publicKey), StringComparison.Ordinal) };
+        check(firstSwap.Verify(out _) is null, "slot manifest: another valid vault in the first manifest fails the signature too");
     }
 
     /// <summary>True when the call fails with a CryptographicException (the only failure the vault code may show).</summary>

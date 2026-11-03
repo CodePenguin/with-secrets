@@ -56,7 +56,7 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
     /// <remarks>
     /// With <paramref name="unlock" /> the page also asks the passkey for its PRF output (the key slot's salt) and the
     /// approval carries what it released (<see cref="ApprovalDecision.Unlock" />, for the caller to use once and dispose): the
-    /// approval that precedes an enrollment or the first secret needs the master key. A method without key slots (not a
+    /// approval that precedes an enrollment needs the master key. A method without key slots (not a
     /// passkey) releases nothing.
     /// </remarks>
     public ApprovalDecision Ask(ApprovalPrompt prompt, ReuseOffer? reuse = null, bool unlock = false)
@@ -145,6 +145,8 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
         private static readonly OneShotResponse Ok = new(200, "application/json", "{\"ok\":true}");
         private static readonly OneShotResponse Refused = new(403, "application/json", "{\"ok\":false}");
         private static readonly OneShotResponse Invalid = new(400, "application/json", "{\"ok\":false}");
+        private static readonly OneShotResponse PrfNotOpened = new(400, "application/json", "{\"ok\":false}", Outcome: "PRF not opened");
+        private static readonly OneShotResponse Failed = new(500, "application/json", "{\"ok\":false}", Outcome: "error");
 
         private readonly Lock _gate = new();
         private readonly TaskCompletionSource<ApprovalDecision> _decision = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -184,7 +186,25 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
             }
         }
 
+        /// <summary>
+        /// Every request gets an answer. A bug that throws while a request is handled denies the request (the first outcome is
+        /// final) and answers 500, so the page never waits and the program never waits for a decision nobody will make.
+        /// </summary>
         public OneShotResponse Handle(string verb, string suffix, string body)
+        {
+            try
+            {
+                return HandleRequest(verb, suffix, body);
+            }
+            catch (Exception)
+            {
+                _decision.TrySetResult(ApprovalDecision.Deny("the request could not be handled"));
+
+                return Failed;
+            }
+        }
+
+        private OneShotResponse HandleRequest(string verb, string suffix, string body)
         {
             lock (_gate)
             {
@@ -213,7 +233,7 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
                         {
                             _decision.TrySetResult(ApprovalDecision.Deny(prfState is null ? "the page sent a request that is not valid" : "the page did not send the PRF output, so the secret store key cannot be released"));
 
-                            return Invalid;
+                            return prfState is null ? Invalid : PrfNotOpened;
                         }
 
                         if (!reuse.Allows(minutes))
@@ -249,7 +269,7 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
                                 {
                                     _decision.TrySetResult(ApprovalDecision.Deny("the PRF output from the page could not be opened, so the secret store key cannot be released; nothing was approved"));
 
-                                    return Invalid;
+                                    return PrfNotOpened;
                                 }
                             }
 
@@ -411,6 +431,9 @@ internal static class ApprovalPage
             var base = location.pathname.replace(/\/+$/, "");
             var encoder = new TextEncoder();
             var busy = false;
+            var attempt = 0;
+            var waiting = null;
+            var waitingLabel = "";
             var finished = false;
             var ready = {};
             var prepared = false;
@@ -444,14 +467,24 @@ internal static class ApprovalPage
                 return out;
             }
 
+            // A post that gets no answer within 20 seconds is aborted (its error is named AbortError), so the page is never stuck.
             function post(what, body) {
+                var controller = new AbortController();
+                var timer = setTimeout(function () { controller.abort(); }, 20000);
                 return fetch(base + "/" + what, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: body,
                     cache: "no-store",
                     credentials: "omit",
-                    redirect: "error"
+                    redirect: "error",
+                    signal: controller.signal
+                }).then(function (reply) {
+                    clearTimeout(timer);
+                    return reply;
+                }, function (error) {
+                    clearTimeout(timer);
+                    throw error;
                 });
             }
 
@@ -479,8 +512,8 @@ internal static class ApprovalPage
 
             //@SEAL_PRF@
 
-            // A page that releases the secret store key asks every listed passkey for its PRF output, each with the salt of its own
-            // slot (the key the page shows in prfKey is the one the output is sealed to).
+            // A page that releases the secret store key asks the chosen passkey for its PRF output with the one salt all slots share
+            // (the key the page shows in prfKey is the one the output is sealed to).
             var wantsPrf = typeof start.prfKey === "string";
 
             function options() {
@@ -488,18 +521,11 @@ internal static class ApprovalPage
                 var result = {
                     challenge: null,
                     rpId: payload.rpId,
-                    allowCredentials: payload.allowCredentials.map(function (item) {
-                        return { id: fromBase64Url(item.id), type: item.type };
-                    }),
                     timeout: payload.timeout,
                     userVerification: "required"
                 };
                 if (wantsPrf) {
-                    var byCredential = {};
-                    Object.keys(payload.salts).forEach(function (id) {
-                        byCredential[id] = { first: fromBase64Url(payload.salts[id]) };
-                    });
-                    result.extensions = { prf: { evalByCredential: byCredential } };
+                    result.extensions = { prf: { eval: { first: fromBase64Url(payload.salt) } } };
                 }
                 return result;
             }
@@ -549,9 +575,45 @@ internal static class ApprovalPage
                 }
             }
 
+            // The browser's own error, for the status line: its name and message (cut to 120 characters). Never any proof or key text.
+            function why(error) {
+                if (!error || typeof error.name !== "string") {
+                    return "";
+                }
+                var text = error.name;
+                if (typeof error.message === "string" && error.message) {
+                    text += ": " + error.message.slice(0, 120);
+                }
+                return " (" + text + ")";
+            }
+
+            // While the passkey prompt is open the tapped button stays on and reads "Cancel": a prompt that closes
+            // without ever settling must not leave the page stuck. The cancel starts no prompt; it only abandons the attempt.
+            function endWait() {
+                if (waiting !== null) {
+                    waiting.textContent = waitingLabel;
+                    waiting = null;
+                }
+            }
+
+            function cancelAttempt() {
+                attempt++;
+                endWait();
+                busy = false;
+                controls(true);
+                show("Cancelled. Tap again to try.");
+            }
+
             // Runs in the tap: nothing is awaited before the passkey prompt.
-            function approveWith(minutes) {
-                if (finished || busy || approve.disabled) {
+            function approveWith(minutes, button) {
+                if (finished) {
+                    return;
+                }
+                if (waiting !== null) {
+                    cancelAttempt();
+                    return;
+                }
+                if (busy || approve.disabled) {
                     return;
                 }
                 if (start.mode !== "webauthn") {
@@ -571,17 +633,26 @@ internal static class ApprovalPage
                 try {
                     publicKey = options();
                 } catch (error) {
-                    challenge = null;
+                    show("The proof data is not valid (" + (error && typeof error.name === "string" ? error.name : "Error") + "). Nothing was approved.");
+                    return;
                 }
                 if (!challenge) {
                     show("The proof data is not valid. Nothing was approved.");
                     return;
                 }
                 publicKey.challenge = challenge;
+                var mine = ++attempt;
                 busy = true;
                 controls(false);
+                waiting = button;
+                waitingLabel = button.textContent;
+                button.textContent = "Cancel";
+                button.disabled = false;
                 show("Waiting for your passkey...");
                 navigator.credentials.get({ publicKey: publicKey }).then(function (credential) {
+                    if (mine !== attempt) {
+                        return null;
+                    }
                     var response = credential.response;
                     var message = {
                         reuse: minutes,
@@ -605,10 +676,15 @@ internal static class ApprovalPage
                         return JSON.stringify(message);
                     });
                 }).then(function (body) {
+                    if (mine !== attempt) {
+                        return;
+                    }
                     if (finished) {
                         busy = false;
                         return;
                     }
+                    endWait();
+                    controls(false);
                     show("Checking your passkey...");
                     return post("proof", body).then(function (reply) {
                         busy = false;
@@ -621,25 +697,39 @@ internal static class ApprovalPage
                         } else {
                             finish("This request had already ended. Nothing was approved.");
                         }
-                    }, function () {
+                    }, function (error) {
+                        if (mine !== attempt) {
+                            return;
+                        }
                         busy = false;
+                        if (error && error.name === "AbortError") {
+                            if (!finished) {
+                                controls(true);
+                                show("The program did not answer within 20 seconds. Check the terminal. Tap again to retry.");
+                            }
+                            return;
+                        }
                         finish("Could not reach the program. With no answer it denies the request at its time limit.");
                     });
                 }, function (error) {
+                    if (mine !== attempt) {
+                        return;
+                    }
                     busy = false;
+                    endWait();
                     if (error && error.message === "no prf" && !finished) {
                         // The passkey answered but returned no PRF output: it cannot release the key, so nothing can be approved.
                         finish("Your passkey did not release its PRF key, which this approval needs to open the secrets. Nothing was approved. Use a passkey from your phone or a security key.");
                         post("deny", "").then(null, function () { });
                     } else if (!finished) {
                         controls(true);
-                        show("No passkey was used. Nothing was approved. You can try again or deny.");
+                        show("No passkey was used" + why(error) + ". Nothing was approved. You can try again or deny.");
                     }
                 });
             }
 
             approve.addEventListener("click", function () {
-                approveWith(0);
+                approveWith(0, approve);
             });
 
             if (approveFor && reuse) {
@@ -649,7 +739,7 @@ internal static class ApprovalPage
                         show("Choose a time first, or use Approve once.");
                         return;
                     }
-                    approveWith(Number(value));
+                    approveWith(Number(value), approveFor);
                 });
             }
 
@@ -659,7 +749,7 @@ internal static class ApprovalPage
                     event.preventDefault();
                     event.stopPropagation();
                     if (!approve.disabled) {
-                        approveWith(0);
+                        approveWith(0, approve);
                     }
                 }
             }, true);

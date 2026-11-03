@@ -73,8 +73,7 @@ internal static class AdminKeysTests
             JsonElement sign = step.RootElement.GetProperty("sign");
             Manifest? signed = Manifest.Parse(sign.GetProperty("manifest").GetString()!, out _);
             check(signed is not null && signed.Keys.Single(key => key.Id == phoneId).Admin && sign.GetProperty("makeAdmin").GetBoolean(), "admin box: the manifest to sign makes the new key an admin, and the page is told so");
-            string allow = sign.GetProperty("allowCredentials").GetRawText();
-            check(allow.Contains(TestAuthenticator.Encode(laptop.CredentialId), StringComparison.Ordinal) && !allow.Contains(TestAuthenticator.Encode(tablet.CredentialId), StringComparison.Ordinal), "admin box: only an admin key may sign the new manifest (" + allow + ")");
+            check(!sign.TryGetProperty("allowCredentials", out _), "admin box: the sign step names no credential (the server checks the signer is an admin)");
             string expected = "Admins: laptop " + GrantTests.Expected(laptop) + ", phone " + GrantTests.Expected(phone);
             check(replies[2].Contains(JsonSerializer.Serialize(expected)[1..^1], StringComparison.Ordinal), "admin box: the code reply lists both admins (" + replies[2] + ")");
             check(AdminKey.Line(db) == expected, "admin box: the fingerprint line lists both admins (" + AdminKey.Line(db) + ")");
@@ -93,8 +92,7 @@ internal static class AdminKeysTests
         if (replies.Count == 3)
         {
             using JsonDocument step = JsonDocument.Parse(replies[1]);
-            string allow = step.RootElement.GetProperty("sign").GetProperty("allowCredentials").GetRawText();
-            check(allow.Contains(TestAuthenticator.Encode(laptop.CredentialId), StringComparison.Ordinal) && allow.Contains(phoneId, StringComparison.Ordinal) && !allow.Contains(TestAuthenticator.Encode(tablet.CredentialId), StringComparison.Ordinal), "admin box: the sign step offers every admin key and no other (" + allow + ")");
+            check(!step.RootElement.GetProperty("sign").TryGetProperty("allowCredentials", out _), "admin box: the sign step with two admins names no credential");
         }
 
         check(decision is { Approved: true } && Rows(db).Single(row => row.Event == "key-enrolled" && row.Detail.Contains("\"watch\"", StringComparison.Ordinal)) is { KeyName: "phone" } row
@@ -126,10 +124,10 @@ internal static class AdminKeysTests
         decision = await GrantTests.Enroll(client, db, phone, spare, "spare", false);
         check(decision is { Approved: true } && new PasskeyStore(db).All().Count == 4, "second admin: the second admin enrolls a key (" + decision?.Detail + ")");
 
-        // The removal page for an admin offers only the admins that stay; the second admin removes the first.
+        // The removal page names no credential (the server accepts only the admins that stay); the second admin removes the first.
         List<string> pages = await GrantTests.Served(client, Unenroll(db, "laptop"), phone, 1);
         string payload = pages.Count == 1 ? Between(pages[0], "\"payload\":", ",\"bind\"") : "";
-        check(payload.Contains(phoneId, StringComparison.Ordinal) && !payload.Contains(laptopId, StringComparison.Ordinal), "second admin: the removal of an admin offers only the admins that stay (" + payload + ")");
+        check(!payload.Contains(phoneId, StringComparison.Ordinal) && !payload.Contains(laptopId, StringComparison.Ordinal) && !payload.Contains("allowCredentials", StringComparison.Ordinal), "second admin: the removal page names no credential; the server accepts only an admin that stays (" + payload + ")");
         Manifest current = TestState.Current(db)!;
         check(current.Keys.All(key => key.Id != laptopId) && current.Admins.Select(key => key.Name).SequenceEqual(["phone"]) && db.TryCheck(out _), "second admin: the second admin removes the first admin");
         check(AdminKey.Line(db) == "Admins: phone " + GrantTests.Expected(phone), "second admin: the fingerprint line shows the change (" + AdminKey.Line(db) + ")");

@@ -468,6 +468,9 @@ internal static class ConfigPageHtml
             var base = location.pathname.replace(/\/+$/, "");
             var encoder = new TextEncoder();
             var busy = false;
+            var attempt = 0;
+            var waiting = null;
+            var waitingLabel = "";
             var finished = false;
             var ready = null;
             var pending = null;
@@ -515,14 +518,24 @@ internal static class ConfigPageHtml
                 return { name: text };
             }
 
+            // A post that gets no answer within 20 seconds is aborted (its error is named AbortError), so the page is never stuck.
             function post(what, body) {
+                var controller = new AbortController();
+                var timer = setTimeout(function () { controller.abort(); }, 20000);
                 return fetch(base + "/" + what, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: body,
                     cache: "no-store",
                     credentials: "omit",
-                    redirect: "error"
+                    redirect: "error",
+                    signal: controller.signal
+                }).then(function (reply) {
+                    clearTimeout(timer);
+                    return reply;
+                }, function (error) {
+                    clearTimeout(timer);
+                    throw error;
                 });
             }
 
@@ -635,8 +648,8 @@ internal static class ConfigPageHtml
                     rp: { id: options.rp.id, name: options.rp.name },
                     user: {
                         id: fromBase64Url(options.user.id),
-                        name: options.user.name,
-                        displayName: name
+                        name: passkeyLabel(options.user.name, name),
+                        displayName: passkeyLabel(options.user.displayName, name)
                     },
                     pubKeyCredParams: options.pubKeyCredParams,
                     authenticatorSelection: options.authenticatorSelection,
@@ -655,9 +668,6 @@ internal static class ConfigPageHtml
                 return {
                     challenge: challenge,
                     rpId: payload.rpId,
-                    allowCredentials: payload.allowCredentials.map(function (item) {
-                        return { id: fromBase64Url(item.id), type: item.type };
-                    }),
                     timeout: payload.timeout,
                     userVerification: "required"
                 };
@@ -709,9 +719,6 @@ internal static class ConfigPageHtml
                     pending = {
                         challenge: new Uint8Array(challenge),
                         rpId: step.rpId,
-                        allowCredentials: step.allowCredentials.map(function (item) {
-                            return { id: fromBase64Url(item.id), type: item.type };
-                        }),
                         timeout: step.timeout,
                         userVerification: "required"
                     };
@@ -732,9 +739,65 @@ internal static class ConfigPageHtml
                 code.textContent = data.code;
             }
 
-            // A first-run step that failed after the server took part: tell the program, so it stops waiting.
-            function failed() {
+            // The browser's own error, for the status line: its name and message (cut to 120 characters). Never any key text.
+            function why(error) {
+                if (!error || typeof error.name !== "string") {
+                    return "";
+                }
+                var text = error.name;
+                if (typeof error.message === "string" && error.message) {
+                    text += ": " + error.message.slice(0, 120);
+                }
+                return " (" + text + ")";
+            }
+
+            // While a passkey prompt is open the tapped button stays on and reads "Cancel": a prompt that closes without ever
+            // settling must not leave the page stuck. The cancel starts no prompt; it only abandons the attempt.
+            function startWait(button) {
+                waiting = button;
+                waitingLabel = button.textContent;
+                button.textContent = "Cancel";
+                button.disabled = false;
+            }
+
+            function endWait() {
+                if (waiting !== null) {
+                    waiting.textContent = waitingLabel;
+                    waiting = null;
+                }
+            }
+
+            function cancelAttempt() {
+                attempt++;
+                var button = waiting;
+                endWait();
                 busy = false;
+                if (button === save) {
+                    inputs(true);
+                }
+                show("Cancelled. Tap again to try.");
+            }
+
+            // A first-run step that failed after the server took part: tell the program, so it stops waiting.
+            // No answer from the program within 20 seconds: the action button is on again, the page is not finished.
+            function timedOut() {
+                if (register && pending !== null) {
+                    second.disabled = false;
+                } else {
+                    save.disabled = false;
+                    inputs(true);
+                }
+                show("The program did not answer within 20 seconds. Check the terminal. Tap again to retry.");
+            }
+
+            function failed(error) {
+                busy = false;
+                if (error && error.name === "AbortError") {
+                    if (!finished) {
+                        timedOut();
+                    }
+                    return;
+                }
                 finish("Nothing was saved, or the answer could not be read. The terminal says what was saved.");
                 if (register) {
                     post("deny", "").then(null, function () { });
@@ -744,18 +807,31 @@ internal static class ConfigPageHtml
             if (second) {
                 // Step 2 runs in its own tap: the prompt starts at once, with the challenge made before.
                 second.addEventListener("click", function () {
-                    if (finished || busy || pending === null) {
+                    if (finished) {
                         return;
                     }
+                    if (waiting === second) {
+                        cancelAttempt();
+                        return;
+                    }
+                    if (busy || pending === null) {
+                        return;
+                    }
+                    var mine = ++attempt;
                     busy = true;
-                    second.disabled = true;
+                    startWait(second);
                     show("Waiting for your passkey...");
                     navigator.credentials.get({ publicKey: pending }).then(function (credential) {
+                        if (mine !== attempt) {
+                            return;
+                        }
                         var response = credential.response;
                         if (finished) {
                             busy = false;
                             return;
                         }
+                        endWait();
+                        second.disabled = true;
                         show("Checking...");
                         return post("sign", JSON.stringify({
                             id: toBase64Url(credential.rawId),
@@ -771,11 +847,15 @@ internal static class ConfigPageHtml
                             busy = false;
                             coded(data);
                         }).then(null, failed);
-                    }, function () {
+                    }, function (error) {
+                        if (mine !== attempt) {
+                            return;
+                        }
                         busy = false;
+                        endWait();
                         if (!finished) {
                             second.disabled = false;
-                            show("No passkey was used. Nothing was saved yet. Tap \"" + second.textContent + "\" again, or cancel.");
+                            show("No passkey was used" + why(error) + ". Nothing was saved yet. Tap \"" + second.textContent + "\" again, or cancel.");
                         }
                     });
                 });
@@ -794,7 +874,14 @@ internal static class ConfigPageHtml
             });
 
             save.addEventListener("click", function () {
-                if (finished || busy) {
+                if (finished) {
+                    return;
+                }
+                if (waiting === save) {
+                    cancelAttempt();
+                    return;
+                }
+                if (busy) {
                     return;
                 }
                 if (!window.isSecureContext || !window.crypto || !window.crypto.subtle) {
@@ -838,13 +925,17 @@ internal static class ConfigPageHtml
                     return;
                 }
                 request.challenge = ready.challenge;
+                var mine = ++attempt;
                 busy = true;
-                save.disabled = true;
+                startWait(save);
                 // Nothing can be edited while the prompt is open: what is signed is what the form shows.
                 inputs(false);
                 show("Waiting for your passkey...");
                 // Runs in the tap: nothing is awaited before the passkey prompt.
                 (register ? navigator.credentials.create({ publicKey: request }) : navigator.credentials.get({ publicKey: request })).then(function (credential) {
+                    if (mine !== attempt) {
+                        return null;
+                    }
                     var response = credential.response;
                     var body = {
                         settings: text,
@@ -872,10 +963,15 @@ internal static class ConfigPageHtml
                     body.signature = toBase64Url(response.signature);
                     return JSON.stringify(body);
                 }).then(function (body) {
+                    if (mine !== attempt) {
+                        return;
+                    }
                     if (finished) {
                         busy = false;
                         return;
                     }
+                    endWait();
+                    save.disabled = true;
                     show(register ? "Checking your passkey..." : "Saving...");
                     return post(register ? "create" : "save", body).then(function (reply) {
                         if (!reply.ok) {
@@ -901,12 +997,16 @@ internal static class ConfigPageHtml
                             }
                         });
                     }).then(null, failed);
-                }, function () {
+                }, function (error) {
+                    if (mine !== attempt) {
+                        return;
+                    }
                     busy = false;
+                    endWait();
                     if (!finished) {
                         save.disabled = false;
                         inputs(true);
-                        show("No passkey was used. Nothing was saved. You can try again or cancel.");
+                        show("No passkey was used" + why(error) + ". Nothing was saved. You can try again or cancel.");
                     }
                 });
             });

@@ -8,7 +8,7 @@ using Microsoft.Data.Sqlite;
 namespace WithSecrets.Tests;
 
 /// <summary>
-/// Flows over real HTTP with PRF key slots (the Dotenvx private key never rests on the machine): the first <c>--set</c>, a run
+/// Flows over real HTTP with PRF key slots (the Dotenvx private key never rests on the machine): the first <c>--set</c> after the first setup, a run
 /// approved by the first key and by an enrolled second key, every wrong PRF payload, an enrollment of a key without PRF, and
 /// a scan of everything the tool writes or says for the private key, the master key and the PRF output.
 /// </summary>
@@ -17,23 +17,6 @@ internal static class PrfFlowTests
     public static Task Run(Action<bool, string> check) => WebApprovalTests.PrfFlows(check);
 }
 
-/// <summary>Remembers the key pair it made, so a test can look for the private key everywhere.</summary>
-internal sealed class RecordingCipher : ISecretCipher
-{
-    public string? LastPrivate { get; private set; }
-
-    public (string PublicKey, string PrivateKey) NewKeyPair()
-    {
-        (string publicKey, string privateKey) = DotenvxCipher.Instance.NewKeyPair();
-        LastPrivate = privateKey;
-
-        return (publicKey, privateKey);
-    }
-
-    public string Encrypt(string value, string publicKey) => DotenvxCipher.Instance.Encrypt(value, publicKey);
-
-    public string Decrypt(string privateKey, string ciphertext) => DotenvxCipher.Instance.Decrypt(privateKey, ciphertext);
-}
 
 internal static partial class WebApprovalTests
 {
@@ -41,7 +24,7 @@ internal static partial class WebApprovalTests
     private const string PrfB = "Prf-Bravo-Secret-2";
 
     /// <summary>True when any file under <paramref name="folder" /> (the database, its WAL and its shared memory) holds <paramref name="needle" />.</summary>
-    private static bool FolderHolds(string folder, byte[] needle)
+    internal static bool FolderHolds(string folder, byte[] needle)
     {
         foreach (string file in Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories))
         {
@@ -58,7 +41,7 @@ internal static partial class WebApprovalTests
     }
 
     /// <summary>The forms in which a secret byte string could show up in text: lower and upper hex, base64 and base64url.</summary>
-    private static string[] Forms(byte[] secret) =>
+    internal static string[] Forms(byte[] secret) =>
         [Convert.ToHexStringLower(secret), Convert.ToHexString(secret), Convert.ToBase64String(secret), Base64Url.EncodeToString(secret)];
 
     private static bool Shows(IEnumerable<string> texts, params byte[][] secrets)
@@ -169,21 +152,21 @@ internal static partial class WebApprovalTests
                 return (master, hex);
             }
 
-            // (1) The first --set: the master key opens by PRF, the key pair is made in memory, and the public key and the vault are in
-            // the one manifest. The private key (and the master key) are in no file, row, reply, message or audit entry.
+            // (1) The first --set after --config: the store key and vault were made by the first setup, so the set is one page and one
+            // admin assertion (no approval page, no PRF). The private key (and the master key) are in no file, row, reply, message or
+            // audit entry before or after.
             {
                 StateDatabase db = StateDatabase.InFolder(Path.Combine(folder, "first-set"));
                 PasskeyStore passkeys = new(db);
-                passkeys.Add(laptop.Record("localhost", "laptop"));
-                RecordingCipher recording = new();
-                SecretStore store = new(db, recording);
-                check(TestState.Current(db) is { Store: "", Vault: "" }, "prf first set: before the first --set the manifest has no store key and no vault");
+                TestState.Add(db, laptop.Record("localhost", "laptop"), withStore: true);
+                SecretStore store = new(db);
+                Manifest before = TestState.Current(db)!;
+                check(before.Store.Length == 66 && KeyVault.IsVault(before.Vault), "prf first set: the state from the first setup already has the store key and the vault");
+                (byte[] master, string privateHex) = Open(db, laptop);
                 EntryRun run = await SetRun(client, passkeys, local, local, store, ["A_NAME"], laptop, Values(("A_NAME", PrfA)));
                 Manifest? after = TestState.Current(db);
-                check(run.Result is { Code: 0 } && run.Approvals == 1 && after is { Version: 2 } && after.Store.Length == 66 && KeyVault.IsVault(after.Vault) && after.Secrets.ContainsKey("A_NAME"), "prf first set: one manifest has the public key, the vault and the hash of the first secret (" + run.Result?.Detail + ")");
-                string privateHex = recording.LastPrivate ?? "-";
-                (byte[] master, string recovered) = Open(db, laptop);
-                check(privateHex.Length == 64 && recovered == privateHex && DotenvxCipher.Instance.Derive(recovered) == after!.Store, "prf first set: the vault holds the private key of the stored public key, and the passkey's PRF output opens it");
+                check(run.Result is { Code: 0 } && run.Approvals == 0 && run.Link is not null && after is { Version: 2 } && after.Store == before.Store && after.Vault == before.Vault && after.Secrets.ContainsKey("A_NAME"), "prf first set: one page, no PRF, no approval page; the manifest keeps the store key and vault and adds the hash of the first secret (" + run.Result?.Detail + ")");
+                check(privateHex.Length == 64 && DotenvxCipher.Instance.Derive(privateHex) == after!.Store, "prf first set: the vault holds the private key of the stored public key, and the passkey's PRF output opens it");
                 byte[] privateAscii = Encoding.ASCII.GetBytes(privateHex);
                 SqliteConnection.ClearAllPools();
                 check(!FolderHolds(Path.GetDirectoryName(db.FilePath)!, privateAscii) && !FolderHolds(Path.GetDirectoryName(db.FilePath)!, Encoding.UTF8.GetBytes(privateHex.ToUpperInvariant())), "prf first set: the private key (hex) is in no file of the store folder: not in state.db, its WAL or anything else");
@@ -194,30 +177,25 @@ internal static partial class WebApprovalTests
                 SecretValues.Clear(master);
             }
 
-            // (2) A first --set that is cancelled or fails leaves no key anywhere; one whose approval gives no PRF stores nothing.
+            // (2) A first --set that is cancelled or fails changes nothing: the manifest stays as the first setup left it.
             {
-                foreach ((string label, Func<StateDatabase, PasskeyStore, RecordingCipher, Task<EntryRun>> act) in new (string, Func<StateDatabase, PasskeyStore, RecordingCipher, Task<EntryRun>>)[]
+                foreach ((string label, Func<StateDatabase, PasskeyStore, Task<EntryRun>> act) in new (string, Func<StateDatabase, PasskeyStore, Task<EntryRun>>)[]
                 {
-                    ("the write fails", async (db, passkeys, cipher) =>
+                    ("the write fails", async (db, passkeys) =>
                     {
-                        SecretStore store = new(db, cipher) { BeforeCommit = () => throw new IOException("the test write failed") };
+                        SecretStore store = new(db) { BeforeCommit = () => throw new IOException("the test write failed") };
 
                         return await SetRun(client, passkeys, local, local, store, ["A_NAME"], laptop, Values(("A_NAME", PrfA)));
                     }),
-                    ("the set page is cancelled", async (db, passkeys, cipher) => await SetRun(client, passkeys, local, local, new SecretStore(db, cipher), ["A_NAME"], laptop, Values(("A_NAME", PrfA)), Twist.Cancel)),
-                    ("the approval has no PRF output", async (db, passkeys, cipher) => await SetRun(client, passkeys, local, local, new SecretStore(db, cipher), ["A_NAME"], laptop, Values(("A_NAME", PrfA)), Twist.None, PrfMode.Missing)),
-                    ("the approval has a garbled PRF output", async (db, passkeys, cipher) => await SetRun(client, passkeys, local, local, new SecretStore(db, cipher), ["A_NAME"], laptop, Values(("A_NAME", PrfA)), Twist.None, PrfMode.Garbled)),
+                    ("the set page is cancelled", async (db, passkeys) => await SetRun(client, passkeys, local, local, new SecretStore(db), ["A_NAME"], laptop, Values(("A_NAME", PrfA)), Twist.Cancel)),
                 })
                 {
                     StateDatabase db = StateDatabase.InFolder(Path.Combine(folder, "first-fail-" + Interlocked.Increment(ref states)));
                     PasskeyStore passkeys = new(db);
-                    passkeys.Add(laptop.Record("localhost", "laptop"));
-                    RecordingCipher recording = new();
-                    EntryRun run = await act(db, passkeys, recording);
-                    SqliteConnection.ClearAllPools();
-                    bool keyless = recording.LastPrivate is null || !FolderHolds(Path.GetDirectoryName(db.FilePath)!, Encoding.ASCII.GetBytes(recording.LastPrivate));
-                    check(run.Result is { Code: not 0 } && TestState.Current(db) is { Version: 1, Store: "", Vault: "" } && keyless, "prf first set: " + label + ": nothing is stored and the private key is nowhere (" + run.Result?.Detail + ")");
-                    check(!Shows([.. run.Seen, run.Result?.Detail ?? ""], recording.LastPrivate is null ? new byte[] { 1, 2, 3 } : Encoding.ASCII.GetBytes(recording.LastPrivate)), "prf first set: " + label + ": no message has the private key");
+                    TestState.Add(db, laptop.Record("localhost", "laptop"), withStore: true);
+                    Manifest before = TestState.Current(db)!;
+                    EntryRun run = await act(db, passkeys);
+                    check(run.Result is { Code: not 0 } && TestState.Current(db) == before && new SecretStore(db).ListNames().Count == 0, "prf first set: " + label + ": nothing is stored and the manifest is unchanged (" + run.Result?.Detail + ")");
                 }
             }
 
@@ -245,6 +223,21 @@ internal static partial class WebApprovalTests
                 check(result.Code == 0 && result.Out.Contains("a=[REDACTED]", StringComparison.Ordinal) && cipher.Decrypts == 2, "prf run: approved by the second key, it decrypts too (" + result.Code + " " + result.Err + ")");
                 SecretValues.Clear(master);
                 SecretValues.Clear(master2);
+            }
+
+            // (3b) The sign-in names no credential, so the authenticator picks one of the passkeys: a credential that is not in the manifest is
+            // denied; and with two keys enrolled, whichever one is chosen opens its own slot (the same master key).
+            {
+                (StateDatabase db, PasskeyStore passkeys, SecretStore store, CountingCipher cipher) = NewState(phone);
+                using TestAuthenticator stranger = TestAuthenticator.ES256();
+                var denied = await RunWith(db, passkeys, store, (url, origin, rp) => TestState.Approve(client, url, origin, rp, stranger));
+                check(denied.Code == RunCommand.Denied && !denied.Ran && cipher.Decrypts == 0 && !denied.Out.Contains(PrfA, StringComparison.Ordinal), "prf run: an assertion from a credential that is not in the manifest is denied (" + denied.Code + " " + denied.Err + ")");
+                foreach ((TestAuthenticator chosen, string label) in new[] { (phone, "phone"), (laptop, "laptop") })
+                {
+                    int before = cipher.Decrypts;
+                    var result = await RunWith(db, passkeys, store, (url, origin, rp) => TestState.Approve(client, url, origin, rp, chosen));
+                    check(result.Code == 0 && result.Ran && cipher.Decrypts == before + 1, "prf run: the passkey chosen from several (" + label + ") opens its own slot and the run decrypts (" + result.Code + " " + result.Err + ")");
+                }
             }
 
             // (4) A wrong PRF payload denies (exit 3), decrypts nothing and never starts the child; there is no fallback.
@@ -301,9 +294,11 @@ internal static partial class WebApprovalTests
                 (byte[] masterLaptop, _) = Open(db, laptop);
                 (byte[] masterPhone, string hexPhone) = Open(db, phone);
                 check(masterLaptop.AsSpan().SequenceEqual(masterPhone) && DotenvxCipher.Instance.Derive(hexPhone) == TestState.Current(db)!.Store, "prf enroll: the new key's slot opens the same master key and the vault");
-                check(TestState.Current(db)!.Keys.Select(key => key.Slot!.Salt).Distinct().Count() == 2, "prf enroll: every key has its own salt");
+                check(TestState.Current(db)!.Keys.Select(key => key.Slot!.Salt).Distinct().Count() == 1, "prf enroll: every key's slot has the same salt (the store's)");
                 var result = await RunWith(db, passkeys, store, (url, origin, rp) => TestState.Approve(client, url, origin, rp, phone));
                 check(result.Code == 0 && cipher.Decrypts == 1, "prf enroll: the new key approves a run and it decrypts (" + result.Code + " " + result.Err + ")");
+                var firstResult = await RunWith(db, passkeys, store, (url, origin, rp) => TestState.Approve(client, url, origin, rp, laptop));
+                check(firstResult.Code == 0 && cipher.Decrypts == 2, "prf enroll: both keys open the vault through the one eval salt (" + firstResult.Code + " " + firstResult.Err + ")");
                 string everything = string.Join("\n", lines) + (decision?.Detail ?? "") + StateDatabaseTests.AuditText(db.FilePath);
                 check(!Shows([everything], masterLaptop, laptop.Prf(Base64Url.DecodeFromChars(TestState.Current(db)!.Keys[0].Slot!.Salt))!, phone.Prf(Base64Url.DecodeFromChars(TestState.Current(db)!.Keys[1].Slot!.Salt))!), "prf enroll: the master key and the PRF outputs are in no message or audit entry");
                 SecretValues.Clear(masterLaptop);

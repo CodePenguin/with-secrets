@@ -104,7 +104,9 @@ internal static class TestState
         string manifest = sign.GetProperty("manifest").GetString()!;
         byte[] bind = Base64Url.DecodeFromChars(sign.GetProperty("bind").GetString()!);
         string rpId = sign.GetProperty("rpId").GetString()!;
-        TestAuthenticator? who = signer ?? TestAuthenticator.ById(sign.GetProperty("allowCredentials")[0].GetProperty("id").GetString()!);
+        // The page no longer names the keys (the authenticator chooses among its passkeys), so the oldest admin key of the manifest signs.
+        Manifest? offered = Manifest.Parse(manifest, out _);
+        TestAuthenticator? who = signer ?? offered?.Admins.Select(item => TestAuthenticator.ById(item.Id)).OfType<TestAuthenticator>().OrderBy(item => item.Sequence).FirstOrDefault();
         if (who is null)
         {
             return "";
@@ -149,10 +151,8 @@ internal static class TestState
     private static string PrfMember(JsonElement start, string serverKey, byte[] bind, TestAuthenticator signer, PrfMode mode, TestAuthenticator? other)
     {
         using JsonDocument payload = JsonDocument.Parse(start.GetProperty("payload").GetString()!);
-        JsonElement salts = payload.RootElement.GetProperty("salts");
         TestAuthenticator releasing = mode is PrfMode.OtherCredential or PrfMode.OtherOwnSalt ? other! : signer;
-        string id = TestAuthenticator.Encode((mode == PrfMode.OtherOwnSalt ? other! : signer).CredentialId);
-        byte[] salt = salts.TryGetProperty(id, out JsonElement found) ? Base64Url.DecodeFromChars(found.GetString()!) : new byte[32];
+        byte[] salt = payload.RootElement.TryGetProperty("salt", out JsonElement found) && found.ValueKind == JsonValueKind.String ? Base64Url.DecodeFromChars(found.GetString()!) : new byte[32];
         byte[] output = releasing.Prf(salt) ?? new byte[32];
         if (mode == PrfMode.ShortOutput)
         {
@@ -254,7 +254,7 @@ internal static class TestState
     /// Adds a key: the first one is an admin (with <paramref name="settings" />); the rest are signed by an admin and are
     /// admins too when <paramref name="admin" /> says so.
     /// </summary>
-    public static bool Add(StateDatabase db, PasskeyRecord record, ToolSettings? settings = null, bool admin = false)
+    public static bool Add(StateDatabase db, PasskeyRecord record, ToolSettings? settings = null, bool admin = false, bool withStore = false)
     {
         Manifest? current;
         try
@@ -274,7 +274,15 @@ internal static class TestState
         // Every key of one test state wraps the same master key, so a vault made for the state opens with any of them.
         record = TestVault.Reslot(db, record);
 
-        return Write(db, current is null ? Manifest.First(record, settings ?? ToolSettings.Defaults) : current.WithKey(record, admin));
+        Manifest first = Manifest.First(record, settings ?? ToolSettings.Defaults);
+        if (withStore && current is null)
+        {
+            // Like a first setup: the store public key and its vault are in the first manifest.
+            (string publicKey, string privateKey) = DotenvxCipher.Instance.NewKeyPair();
+            first = first with { Store = publicKey, Vault = TestVault.Vault(db, privateKey, publicKey) };
+        }
+
+        return Write(db, current is null ? first : current.WithKey(record, admin));
     }
 
     /// <summary>A state at <paramref name="path" /> with one admin key (localhost) and these settings, for tests that need a manifest.</summary>
@@ -335,10 +343,15 @@ internal static class TestVault
     /// <summary>The master key of the state at this database (made on first use).</summary>
     public static byte[] Master(StateDatabase db) => Masters.GetOrAdd(Path.GetFullPath(db.FilePath), _ => KeyVault.NewMasterKey());
 
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte[]> Salts = new(StringComparer.Ordinal);
+
+    /// <summary>The one slot salt of the state at this database: every key's slot shares it.</summary>
+    public static byte[] Salt(StateDatabase db) => Salts.GetOrAdd(Path.GetFullPath(db.FilePath), _ => KeyVault.NewSalt());
+
     /// <summary>The record with a slot of this state's master key, when its authenticator is known and has PRF.</summary>
     public static PasskeyRecord Reslot(StateDatabase db, PasskeyRecord record)
     {
-        return TestAuthenticator.ById(record.Id) is { } authenticator && authenticator.Slot(Master(db)) is { } slot ? record with { Slot = slot } : record;
+        return TestAuthenticator.ById(record.Id) is { } authenticator && authenticator.Slot(Master(db), Salt(db)) is { } slot ? record with { Slot = slot } : record;
     }
 
     /// <summary>What <paramref name="who" /> releases at an approval: the PRF output for its slot salt in the stored manifest. Null when it has no slot or no PRF.</summary>

@@ -24,16 +24,6 @@ internal sealed class CountingCipher : ISecretCipher
     }
 }
 
-/// <summary>Always makes the same key pair, so a test can put that key in custody before a first --set.</summary>
-internal sealed class FixedPairCipher((string PublicKey, string PrivateKey) pair) : ISecretCipher
-{
-    public (string PublicKey, string PrivateKey) NewKeyPair() => pair;
-
-    public string Encrypt(string value, string publicKey) => DotenvxCipher.Instance.Encrypt(value, publicKey);
-
-    public string Decrypt(string privateKey, string ciphertext) => DotenvxCipher.Instance.Decrypt(privateKey, ciphertext);
-}
-
 /// <summary>
 /// The secret store in state.db: one row per secret (the Dotenvx ciphertext), and the signed manifest has the store's public
 /// key and the SHA-256 of every ciphertext. Reads decrypt only the requested rows; a row that does not match its signed hash,
@@ -90,7 +80,7 @@ internal static class SecretStoreTests
             return (manifest.Store, null);
         }
 
-        (string publicKey, string privateKey) = store.NewKeyPair();
+        (string publicKey, string privateKey) = DotenvxCipher.Instance.NewKeyPair();
 
         return (publicKey, TestVault.Vault(store.Database, privateKey, publicKey));
     }

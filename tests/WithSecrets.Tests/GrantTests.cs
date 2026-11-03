@@ -461,9 +461,8 @@ internal static class GrantTests
                 // Pages that change the state offer every admin key and no other; a run approval offers every key.
                 int at = page.IndexOf("\"payload\":\"", StringComparison.Ordinal);
                 string payload = at < 0 ? "" : page[at..page.IndexOf("\",\"", at, StringComparison.Ordinal)];
-                bool admins = payload.Contains(TestAuthenticator.Encode(admin.CredentialId), StringComparison.Ordinal) && payload.Contains(TestAuthenticator.Encode(second.CredentialId), StringComparison.Ordinal);
-                bool other = payload.Contains(TestAuthenticator.Encode(phone.CredentialId), StringComparison.Ordinal);
-                check(admins && other == (name == "run approval"), "fingerprint page: " + name + ": allowCredentials lists " + (name == "run approval" ? "every key" : "every admin key and no other"));
+                bool ids = payload.Contains("allowCredentials", StringComparison.Ordinal) || payload.Contains(TestAuthenticator.Encode(admin.CredentialId), StringComparison.Ordinal) || payload.Contains(TestAuthenticator.Encode(phone.CredentialId), StringComparison.Ordinal);
+                check(!ids, "fingerprint page: " + name + ": the payload names no credential");
             }
         }
 

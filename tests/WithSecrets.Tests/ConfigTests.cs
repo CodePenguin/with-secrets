@@ -483,7 +483,7 @@ internal static class ConfigTests
             JsonElement start = Start(run.Page);
             check(start.ValueKind == JsonValueKind.Object && start.GetProperty("flow").GetString() == "assert" && start.GetProperty("current").GetRawText() == current, "config page: the start data has the flow and the current values (" + (start.ValueKind == JsonValueKind.Object ? start.GetRawText() : "") + ")");
             string payload = start.ValueKind == JsonValueKind.Object ? start.GetProperty("payload").GetString() ?? "" : "";
-            check(payload.Contains(TestAuthenticator.Encode(laptop.CredentialId), StringComparison.Ordinal) && !payload.Contains(TestAuthenticator.Encode(phone.CredentialId), StringComparison.Ordinal), "config page: only the admin key may sign (allowCredentials)");
+            check(!payload.Contains("allowCredentials", StringComparison.Ordinal) && !payload.Contains(TestAuthenticator.Encode(laptop.CredentialId), StringComparison.Ordinal), "config page: the payload names no credential (the server checks the signer is an admin)");
             check(start.ValueKind == JsonValueKind.Object && start.GetProperty("prefix").GetString() is { } prefix && prefix.StartsWith("{\"v\":4,\"keys\":[", StringComparison.Ordinal) && prefix.EndsWith(",\"settings\":", StringComparison.Ordinal), "config page: the page gets the next manifest's text up to the settings");
             check(run.Page.Contains("start.prefix + text + \"}\"", StringComparison.Ordinal), "config page: the script signs the prefix, the settings and the closing brace");
         }
@@ -521,8 +521,7 @@ internal static class ConfigTests
             TestState.Add(db, stranger.Record("localhost", "runs-only"));
             ConfigRun run = await Drive(db, local, null, Save(client, phone, wanted, wanted));
             string payload = Start(run.Page) is { ValueKind: JsonValueKind.Object } start ? start.GetProperty("payload").GetString() ?? "" : "";
-            check(payload.Contains(TestAuthenticator.Encode(laptop.CredentialId), StringComparison.Ordinal) && payload.Contains(TestAuthenticator.Encode(phone.CredentialId), StringComparison.Ordinal)
-                && !payload.Contains(TestAuthenticator.Encode(stranger.CredentialId), StringComparison.Ordinal), "config: with two admins, allowCredentials lists both and no other key");
+            check(!payload.Contains("allowCredentials", StringComparison.Ordinal) && !payload.Contains(TestAuthenticator.Encode(stranger.CredentialId), StringComparison.Ordinal), "config: with two admins, the payload names no credential");
             check(run.Result is { Code: 0 } && ToolSettings.Load(db, out _).Port == 8765 && db.TryCheck(out _), "config: the second admin key saves the settings (" + run.Result?.Detail + ")");
             check(new AuditLog(db).TryRead(5, null, out IReadOnlyList<AuditRecord> rows, out _) && rows.Count == 1 && rows[0].KeyName == "phone", "config: the audit row names the second admin");
             run = await Drive(db, local, null, Save(client, stranger, Canonical(10, "passkey", null, 0, 5), Canonical(10, "passkey", null, 0, 5)));
@@ -777,19 +776,35 @@ internal static class ConfigTests
             check(Version(db) == 1 && db.TryCheck(out _), "config first run: the first manifest (version 1) verifies");
             {
                 // The first key's slot: its salt is the one the page asked the passkey for, and the PRF output opens the master key
-                // that nothing else in the state holds. No vault yet (no store key).
+                // that nothing else in the state holds. The same first manifest has the store public key and the vault (the store's
+                // private key under that master key), so the first --set needs no PRF.
                 Manifest? first = TestState.Current(db);
                 using Unlock? released = TestVault.Unlock(db, laptop);
                 byte[]? master = null;
+                byte[]? privateKey = null;
                 try
                 {
                     master = first is not null && released is not null ? KeyVault.OpenMaster(first, released) : null;
-                    check(keys[0].Slot is not null && first is { Store: "", Vault: "" } && master is { Length: 32 }, "config first run: the first key has a key slot that its PRF output opens; there is no store key or vault yet");
+                    check(keys[0].Slot is not null && master is { Length: 32 }, "config first run: the first key has a key slot that its PRF output opens");
+                    check(first is { Version: 1, Secrets.Count: 0 } && first.Store.Length == 66 && KeyVault.IsVault(first.Vault), "config first run: the first manifest has the store public key and the vault (and no secrets)");
+                    privateKey = first is not null && master is not null ? KeyVault.UnwrapVault(first.Vault, master, first.Store) : null;
+                    string privateHex = privateKey is null ? "" : Encoding.UTF8.GetString(privateKey);
+                    check(privateHex.Length == 64 && DotenvxCipher.Instance.Derive(privateHex) == first!.Store, "config first run: the vault holds the private key of the stored public key, and the passkey's PRF output opens it");
+                    SqliteConnection.ClearAllPools();
+                    string stateFolder = Path.GetDirectoryName(db.FilePath)!;
+                    bool leaked = privateKey is null || WebApprovalTests.FolderHolds(stateFolder, privateKey) || WebApprovalTests.FolderHolds(stateFolder, Encoding.UTF8.GetBytes(privateHex.ToUpperInvariant()))
+                        || WebApprovalTests.FolderHolds(stateFolder, Convert.FromHexString(privateHex)) || WebApprovalTests.FolderHolds(stateFolder, Encoding.ASCII.GetBytes(Convert.ToBase64String(Convert.FromHexString(privateHex))));
+                    check(!leaked, "config first run: the store private key (hex, upper hex, raw, base64) is in no file of the store folder: not state.db, its WAL or anything else");
+                    check(!WebApprovalTests.FolderHolds(stateFolder, master!), "config first run: the master key is in no file either");
+                    check(!Directory.EnumerateFiles(stateFolder, ".env*", SearchOption.AllDirectories).Any(), "config first run: no .env.keys or other key file");
+                    string seen = StateDatabaseTests.AuditText(db.FilePath) + run.Reply + run.First + string.Join("|", run.Lines) + run.Result!.Detail + run.Page;
+                    check(!seen.Contains(privateHex, StringComparison.OrdinalIgnoreCase), "config first run: the store private key is in no reply, page, audit entry or message");
                     check(run.Page.Contains("prf", StringComparison.Ordinal) && run.Page.Contains("PRF", StringComparison.Ordinal), "config first run: the page asks for a PRF passkey");
                 }
                 finally
                 {
                     SecretValues.Clear(master);
+                    SecretValues.Clear(privateKey);
                 }
 
                 string everything = StateDatabaseTests.AuditText(db.FilePath) + run.Reply + run.First + string.Join("|", run.Lines) + run.Result!.Detail;
@@ -804,8 +819,8 @@ internal static class ConfigTests
             {
                 JsonElement sign = step.RootElement.GetProperty("sign");
                 Manifest? first = Manifest.Parse(sign.GetProperty("manifest").GetString()!, out _);
-                check(first is { Version: 1 } && first.Settings == new ToolSettings(30, 480, "passkey", null, 8765, 10) && first.Admins.Single().Id == TestAuthenticator.Encode(laptop.CredentialId) && sign.GetProperty("first").GetBoolean()
-                    && sign.GetProperty("allowCredentials").GetRawText() == "[{\"id\":\"" + TestAuthenticator.Encode(laptop.CredentialId) + "\",\"type\":\"public-key\"}]", "config first run: after the registration the new key is asked to sign the first manifest, with it as admin (" + run.First + ")");
+                check(first is { Version: 1 } && first.Store.Length == 66 && KeyVault.IsVault(first.Vault) && first.Settings == new ToolSettings(30, 480, "passkey", null, 8765, 10) && first.Admins.Single().Id == TestAuthenticator.Encode(laptop.CredentialId) && sign.GetProperty("first").GetBoolean()
+                    && !sign.TryGetProperty("allowCredentials", out _), "config first run: after the registration the new key is asked to sign the first manifest, with it as admin (" + run.First + ")");
             }
 
             string script = run.Page[(run.Page.LastIndexOf("<script>", StringComparison.Ordinal) + 8)..];
@@ -858,6 +873,9 @@ internal static class ConfigTests
             });
             check(run.Result is { Code: RunCommand.Denied }, $"config first run: {name}: denied ({run.Result?.Code} {run.Result?.Detail})");
             check(Empty(db), $"config first run: {name}: nothing stored");
+            SqliteConnection.ClearAllPools();
+            check(!Directory.Exists(Path.GetDirectoryName(db.FilePath)!) || !Directory.EnumerateFiles(Path.GetDirectoryName(db.FilePath)!, "*", SearchOption.AllDirectories).Any(file => !Path.GetFileName(file).StartsWith(StateDatabase.FileName, StringComparison.Ordinal))
+                && (!File.Exists(db.FilePath) || TestState.Current(db) is null), $"config first run: {name}: no store key, vault or key file is left");
         }
 
         // The name for the first passkey: a field on the page (default "passkey"), checked like the name field on the enroll page, in the signed

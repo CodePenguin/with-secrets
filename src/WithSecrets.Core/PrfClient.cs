@@ -44,6 +44,16 @@ internal static class PrfClient
                 });
             }
 
+            function passkeyLabel(guid, name) {
+                var room = 64 - 13 - 1 - guid.length;
+                var part = room > 0 ? name.slice(0, room) : "";
+                if (part.length > 0 && /[\uD800-\uDBFF]/.test(part.charAt(part.length - 1))) {
+                    part = part.slice(0, -1);
+                }
+                part = part.replace(/\s+$/, "");
+                return "with-secrets " + (part.length > 0 ? part + " " : "") + guid;
+            }
+
             function prfOutput(credential) {
                 var extensions = credential.getClientExtensionResults ? credential.getClientExtensionResults() : null;
                 var first = extensions && extensions.prf && extensions.prf.results ? extensions.prf.results.first : null;
@@ -71,6 +81,34 @@ internal static class PrfClient
 
     /// <summary>The PRF refusal the person reads: the passkey cannot protect the secret store key.</summary>
     public const string CannotPrf = "This passkey cannot do PRF (it cannot protect the secret store key). Use a passkey from your phone or a security key.";
+}
+
+/// <summary>
+/// The label a password manager shows for a new passkey (WebAuthn <c>user.name</c> and <c>displayName</c>):
+/// <c>with-secrets &lt;key name&gt; &lt;guid&gt;</c>, within 64 characters; the name is cut first, never the prefix or the GUID.
+/// Display only: nothing signed or stored depends on it. The page builds the same text with <c>passkeyLabel</c>.
+/// </summary>
+internal static class PasskeyLabel
+{
+    public const int MaxLength = 64;
+    private const string Prefix = "with-secrets ";
+
+    /// <summary>A fresh random id, one per create() call (the server sends it to the page).</summary>
+    public static string NewId() => Guid.NewGuid().ToString();
+
+    public static string Compose(string guid, string name)
+    {
+        int room = MaxLength - Prefix.Length - 1 - guid.Length;
+        string part = room > 0 ? name[..Math.Min(name.Length, room)] : "";
+        if (part.Length > 0 && char.IsHighSurrogate(part[^1]))
+        {
+            part = part[..^1];
+        }
+
+        part = part.TrimEnd();
+
+        return Prefix + (part.Length > 0 ? part + " " : "") + guid;
+    }
 }
 
 /// <summary>The sealed PRF output a page sends: base64url <c>epk</c>, <c>iv</c> and <c>ct</c> (see <see cref="PrfClient" />).</summary>

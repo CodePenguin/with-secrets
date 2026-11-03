@@ -133,7 +133,7 @@ internal static class ReuseTests
         // The script: Ctrl+Enter (Cmd+Enter) is Approve once, the challenge is SHA-256(bind || "reuse=" || minutes).
         string script = Between(page, "<script>", "</script>");
         check(script.Contains("event.key === \"Enter\"", StringComparison.Ordinal) && script.Contains("event.ctrlKey || event.metaKey", StringComparison.Ordinal), "reuse page: the script handles Ctrl+Enter and Cmd+Enter");
-        check(script.Contains("approveWith(0)", StringComparison.Ordinal), "reuse page: the shortcut approves once (0 minutes)");
+        check(script.Contains("approveWith(0, approve)", StringComparison.Ordinal), "reuse page: the shortcut approves once (0 minutes)");
         check(script.Contains("\"reuse=\" + minutes", StringComparison.Ordinal) && script.Contains("crypto.subtle.digest(\"SHA-256\"", StringComparison.Ordinal), "reuse page: the script binds the minutes into the challenge");
         check(!Regex.IsMatch(page, "\\son[a-z]+=", RegexOptions.IgnoreCase), "reuse page: no inline event attributes");
         OneShotResponse response = ApprovalPage.Build(new ApprovalPrompt("h", "t"), new ProofStart("webauthn", "{}"), "n", [1], TimeSpan.Zero, new ReuseOffer(480, 10));

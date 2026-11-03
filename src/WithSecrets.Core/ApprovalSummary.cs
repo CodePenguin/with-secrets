@@ -4,6 +4,39 @@ using System.Text;
 namespace WithSecrets;
 
 /// <summary>
+/// A script file as the approval text shows it: the SHA-256 (upper-case hex) and the size of its bytes, and its text when the
+/// bytes are valid UTF-8 without NUL; null <see cref="Text" /> means "binary file". Read once, from the same bytes that are hashed.
+/// </summary>
+public sealed record ScriptView(string Sha256, long Length, string? Text)
+{
+    /// <summary>Reads the file. Throws <see cref="IOException" /> or <see cref="UnauthorizedAccessException" /> when it cannot be read.</summary>
+    public static ScriptView Read(string path)
+    {
+        byte[] bytes = File.ReadAllBytes(path);
+        string hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes));
+        if (Array.IndexOf(bytes, (byte)0) >= 0)
+        {
+            return new ScriptView(hash, bytes.Length, null);
+        }
+
+        try
+        {
+            ReadOnlySpan<byte> content = bytes.AsSpan();
+            if (content.StartsWith(Encoding.UTF8.Preamble))
+            {
+                content = content[Encoding.UTF8.Preamble.Length..];
+            }
+
+            return new ScriptView(hash, bytes.Length, new UTF8Encoding(false, true).GetString(content));
+        }
+        catch (DecoderFallbackException)
+        {
+            return new ScriptView(hash, bytes.Length, null);
+        }
+    }
+}
+
+/// <summary>
 /// Builds the text the person reads before approving. The agent controls the command, the directory and the reason, so
 /// every one of them is stripped of line breaks and control characters. Otherwise an agent could fake a line such as
 /// "Secrets: none".
@@ -40,6 +73,16 @@ public static class ApprovalSummary
 
         text.Append("In: ").Append(Clean(request.WorkingDirectory)).Append('\n');
         text.Append("Agent says: ").Append(Truncate(Clean(request.Reason), MaxReasonLength));
+        if (Policy.InlineCode(request.Program, request.Arguments) is { } inline)
+        {
+            text.Append('\n').Append(InlineBlock(inline));
+        }
+
+        if (request.Script is { } script)
+        {
+            text.Append('\n').Append(ScriptBlock(script));
+        }
+
         if (request.Reuse is { IsOn: true } reuse)
         {
             text.Append('\n').Append($"Approve for a time (up to {reuse.Choices[^1]} min) also covers the same program, script, folder, and secrets until it ends, whatever the other arguments. Approve once covers only this run.");
@@ -51,6 +94,128 @@ public static class ApprovalSummary
         }
 
         return text.ToString();
+    }
+
+    /// <summary>The most inline code characters the text shows.</summary>
+    public const int MaxInlineCharacters = 4000;
+
+    /// <summary>The most script lines the text shows.</summary>
+    public const int MaxScriptLines = 200;
+
+    /// <summary>The most script bytes (UTF-8) the text shows.</summary>
+    public const int MaxScriptBytes = 16 * 1024;
+
+    /// <summary>
+    /// Starts every line of agent-written code in the text. No line the agent writes can start a page line (such as
+    /// "Request id: ") because each one starts with this. The notices of this program never do.
+    /// </summary>
+    public const string CodeMarker = "  | ";
+
+    internal static string InlineBlock(string code)
+    {
+        StringBuilder text = new("Inline code:");
+        string shown = code;
+        int more = 0;
+        if (code.Length > MaxInlineCharacters)
+        {
+            int length = char.IsHighSurrogate(code[MaxInlineCharacters - 1]) ? MaxInlineCharacters - 1 : MaxInlineCharacters;
+            shown = code[..length];
+            more = code.Length - length;
+        }
+
+        foreach (string line in Lines(shown))
+        {
+            text.Append('\n').Append(CodeMarker).Append(Clean(line));
+        }
+
+        if (more > 0)
+        {
+            text.Append('\n').Append($"...cut ({more} more characters)");
+        }
+
+        return text.ToString();
+    }
+
+    internal static string ScriptBlock(ScriptView script)
+    {
+        StringBuilder text = new("Script SHA-256: ");
+        text.Append(script.Sha256).Append('\n');
+        if (script.Text is null)
+        {
+            return text.Append($"Script contents: binary file, {script.Length} bytes (not shown)").ToString();
+        }
+
+        List<string> lines = Lines(script.Text);
+        if (lines.Count == 0)
+        {
+            return text.Append("Script contents: empty file").ToString();
+        }
+
+        text.Append("Script contents:");
+        int bytes = 0;
+        int shown = 0;
+        bool partial = false;
+        foreach (string line in lines.Take(MaxScriptLines))
+        {
+            int size = Encoding.UTF8.GetByteCount(line) + 1;
+            string piece = line;
+            if (bytes + size > MaxScriptBytes)
+            {
+                piece = FitBytes(line, MaxScriptBytes - bytes - 1);
+                partial = true;
+            }
+
+            if (piece.Length > 0 || !partial)
+            {
+                text.Append('\n').Append(CodeMarker).Append(Clean(piece));
+                shown++;
+            }
+
+            if (partial)
+            {
+                break;
+            }
+
+            bytes += size;
+        }
+
+        if (partial || shown < lines.Count)
+        {
+            text.Append('\n').Append($"...cut: showing {shown} of {lines.Count} lines").Append(partial && shown > 0 ? " (last line cut)" : "");
+        }
+
+        return text.ToString();
+    }
+
+    /// <summary>The longest start of the line that is at most <paramref name="bytes" /> in UTF-8, never splitting a character.</summary>
+    private static string FitBytes(string line, int bytes)
+    {
+        int used = 0;
+        int end = 0;
+        foreach (System.Text.Rune rune in line.EnumerateRunes())
+        {
+            used += rune.Utf8SequenceLength;
+            if (used > bytes)
+            {
+                break;
+            }
+
+            end += rune.Utf16SequenceLength;
+        }
+
+        return line[..end];
+    }
+
+    /// <summary>Tabs become 4 spaces; line breaks (LF, CRLF, CR) split lines; one final line break does not add an empty line.</summary>
+    private static List<string> Lines(string value)
+    {
+        List<string> lines = [.. value.Replace("\t", "    ", StringComparison.Ordinal).Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n').Split('\n')];
+        if (lines.Count > 0 && lines[^1].Length == 0)
+        {
+            lines.RemoveAt(lines.Count - 1);
+        }
+
+        return lines;
     }
 
     /// <summary>The command line with quotes around any argument that needs them.</summary>

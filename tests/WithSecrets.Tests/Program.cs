@@ -87,6 +87,7 @@ internal static class Program
 
     private static int Main()
     {
+        ProofLog.Sink = _ => { };
         const string Secret = "S3cr3t-Value/with+chars==";
 
         // --- redaction: forms
@@ -119,11 +120,12 @@ internal static class Program
         Check(ApprovalSummary.Clean("dotnet test --x=1 é ü 日本") == "dotnet test --x=1 é ü 日本", "clean: ordinary text, accents and CJK are unchanged");
         Check(Policy.Check("env", []) is not null, "env dump refused");
         Check(Policy.Check("/usr/bin/printenv", ["A"]) is not null, "printenv refused");
-        Check(Policy.Check("bash", ["-c", "echo $A"]) is not null, "bash -c refused");
-        Check(Policy.Check("bash", ["-lc", "echo $A"]) is not null, "bash -lc refused");
+        Check(Policy.Check("bash", ["-c", "echo $A"]) is null, "bash -c allowed (the page shows the code)");
+        Check(Policy.Check("bash", ["-lc", "echo $A"]) is null, "bash -lc allowed (the page shows the code)");
         Check(Policy.Check("bash", ["script.sh"]) is null, "bash script.sh allowed");
-        Check(Policy.Check("cmd.exe", ["/c", "echo"]) is not null, "cmd /c refused");
-        Check(Policy.Check("pwsh", ["-Command", "x"]) is not null, "pwsh -Command refused");
+        Check(Policy.Check("cmd.exe", ["/c", "echo"]) is null, "cmd /c allowed (the page shows the code)");
+        Check(Policy.Check("pwsh", ["-Command", "x"]) is null, "pwsh -Command allowed (the page shows the code)");
+        Check(Policy.Check("pwsh", ["-EncodedCommand", "ZQBjAGgAbwA="]) is not null, "pwsh -EncodedCommand refused");
         Check(Policy.Check("pwsh.exe", ["-NoProfile", "-File", "run.ps1"]) is null, "pwsh -File allowed");
         Check(Policy.Check("dotnet", ["test"]) is null, "dotnet test allowed");
         Check(Policy.CheckBatchFile(@"C:\x\npm.CMD", ["run", "build", "--", "--flag=1"]) is null, "batch file: plain arguments allowed");
@@ -295,6 +297,16 @@ internal static class Program
         string[] only = (Environment.GetEnvironmentVariable("WS_ONLY") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         bool Wants(string suite) => only.Length == 0 || only.Contains(suite, StringComparer.OrdinalIgnoreCase);
 
+        if (Wants("ApprovalSummary"))
+        {
+            ApprovalSummaryTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("ProofReply"))
+        {
+            ProofReplyTests.Run(Check).GetAwaiter().GetResult();
+        }
+
         if (Wants("KeyVault"))
         {
             KeyVaultTests.Run(Check).GetAwaiter().GetResult();
@@ -420,8 +432,9 @@ internal static class Program
         // refusals happen before the person is asked
         FakeApprover untouched = new(true);
         RunArgs inline = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", "sh", "-c", "echo $DB_URL"], out _)!;
-        code = await new RunCommand(new MemoryStore(values), untouched, new AuditLog(new StateDatabase(auditPath)), new StringWriter(), new StringWriter()).ExecuteAsync(inline, temp);
-        Check(code == RunCommand.Usage && untouched.Requests.Count == 0, "e2e: inline shell is refused without a prompt");
+        FakeApprover inlineApprover = new(true);
+        code = await new RunCommand(new MemoryStore(values), inlineApprover, new AuditLog(new StateDatabase(auditPath)), new StringWriter(), new StringWriter()).ExecuteAsync(inline, temp);
+        Check(code == 0 && inlineApprover.Requests.Count == 1 && ApprovalSummary.BuildMessage(inlineApprover.Requests[0]).Contains("  | echo $DB_URL", StringComparison.Ordinal), "e2e: inline shell now gets a prompt that shows the code");
         RunArgs unknown = CliArgs.ParseRun(["--secrets", "NOPE_NAME", "--reason", "x", "--", "./script.sh"], out _)!;
         code = await new RunCommand(new MemoryStore(values), untouched, new AuditLog(new StateDatabase(auditPath)), new StringWriter(), new StringWriter()).ExecuteAsync(unknown, temp);
         Check(code == RunCommand.Usage && untouched.Requests.Count == 0, "e2e: unknown secret is refused without a prompt");

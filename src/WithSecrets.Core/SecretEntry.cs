@@ -229,10 +229,8 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
 
     /// <summary>
     /// Serves the set page at the target until the first outcome or the time limit. The page's server key lives only here.
-    /// Before the first secret the store key pair is made here, in memory: an admin passkey first approves on its own page and
-    /// releases the master key (WebAuthn PRF), the private key is wrapped under it into the vault, and the public key and the
-    /// vault go into the manifest the set page signs. The private key exists nowhere else, so an abandoned page leaves nothing
-    /// behind.
+    /// The store key pair was made by the first setup (--config), so this page needs only an admin assertion over the ciphertexts
+    /// and the next manifest: no PRF, no second page.
     /// </summary>
     private SecretChange Serve(EnrollmentTarget target, List<string> names, HashSet<string> stored, Manifest manifest)
     {
@@ -243,21 +241,15 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
         // depend on the port. The passkey method checks this again in Start.
         PasskeyMethod.RpIdOf(settings.PageOrigin(settings.Port));
 
+        // First setup (--config) made the store key, so a state without one is not usable.
         string storeKey = manifest.Store;
-        string? vault = null;
         if (storeKey.Length == 0)
         {
-            // The first secret makes the store key. Its private key is wrapped under the master key, which only a passkey with
-            // PRF can open, so an approval page that releases it comes before the set page.
-            SecretChange? refusedKey = NewStoreKey(target, manifest, out storeKey, out vault);
-            if (refusedKey is not null)
-            {
-                return refusedKey;
-            }
+            return Denied("the state has no secret store key; set up again with: with-secrets --config");
         }
 
         (byte[] serverKey, string publicKey) = SecretCrypto.NewServerKey();
-        Session session = new(method, store, manifest, storeKey, vault, names, serverKey);
+        Session session = new(method, store, manifest, storeKey, names, serverKey);
         try
         {
             using OneShotServer server = new("s", settings.Port, session.Handle);
@@ -283,64 +275,11 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
         }
     }
 
-    private const string FirstKeyHeading = "Create the key that protects your secrets.";
-
-    private const string FirstKeyText = "Your passkey will open the key that protects the secret store. Nothing is stored yet: the next page takes the values.";
-
-    /// <summary>
-    /// The first secret: asks the admin passkey on an approval page (which also releases the master key by PRF), then makes the
-    /// store's key pair in memory and wraps its private key under the master key. Null when <paramref name="storeKey" /> (the
-    /// public key) and <paramref name="vault" /> are set; else why not. The master key, the private key bytes and the PRF output
-    /// are zeroed here (the hex text of the private key is a .NET string for a moment and cannot be wiped).
-    /// </summary>
-    private SecretChange? NewStoreKey(EnrollmentTarget target, Manifest manifest, out string storeKey, out string? vault)
-    {
-        storeKey = "";
-        vault = null;
-        ApprovalDecision asked = target.Approver.Ask(new ApprovalPrompt(FirstKeyHeading, FirstKeyText), unlock: true);
-        byte[]? master = null;
-        byte[]? privateKey = null;
-        try
-        {
-            if (!asked.Approved)
-            {
-                return Denied(asked.Detail + "; nothing was stored");
-            }
-
-            if (asked.Unlock is null)
-            {
-                return Denied("the approval did not release the master key (a passkey with PRF must approve), so the secret store key cannot be made; nothing was stored");
-            }
-
-            try
-            {
-                master = KeyVault.OpenMaster(manifest, asked.Unlock);
-            }
-            catch (CryptographicException)
-            {
-                return Denied("the approving passkey's key slot could not be opened, so the secret store key cannot be made; nothing was stored");
-            }
-
-            (string publicKey, string privateText) = store.NewKeyPair();
-            privateKey = Encoding.UTF8.GetBytes(privateText);
-            vault = KeyVault.WrapVault(privateKey, master, publicKey);
-            storeKey = publicKey;
-
-            return null;
-        }
-        finally
-        {
-            SecretValues.Clear(master);
-            SecretValues.Clear(privateKey);
-            asked.Unlock?.Dispose();
-        }
-    }
-
     /// <summary>
     /// The state of one set page. Requests are handled one at a time under one lock; the first outcome is final, and after
     /// it every request is 404. The store is written inside the lock, so the time limit cannot cut a write in half.
     /// </summary>
-    private sealed class Session(IProofMethod method, SecretStore store, Manifest manifest, string storeKey, string? vault, List<string> names, byte[] serverKey)
+    private sealed class Session(IProofMethod method, SecretStore store, Manifest manifest, string storeKey, List<string> names, byte[] serverKey)
     {
         private static readonly OneShotResponse Ok = new(200, "application/json", "{\"ok\":true}");
         private static readonly OneShotResponse Refused = new(403, "application/json", "{\"ok\":false}");
@@ -488,7 +427,7 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
                 rows[name] = store.Encrypt(values[name], storeKey);
             }
 
-            string text = SecretStore.Next(manifest, storeKey, rows, [], vault).Canonical();
+            string text = SecretStore.Next(manifest, storeKey, rows, []).Canonical();
             _sealed[key] = (text, rows);
             _order.Enqueue(key);
             while (_order.Count > Kept)
@@ -692,6 +631,9 @@ internal static class SetPage
             var base = location.pathname.replace(/\/+$/, "");
             var encoder = new TextEncoder();
             var busy = false;
+            var attempt = 0;
+            var promptButton = null;
+            var promptLabel = "";
             var finished = false;
             var ready = null;
 
@@ -711,14 +653,24 @@ internal static class SetPage
                 show(text);
             }
 
+            // A post that gets no answer within 20 seconds is aborted (its error is named AbortError), so the page is never stuck.
             function post(what, body) {
+                var controller = new AbortController();
+                var timer = setTimeout(function () { controller.abort(); }, 20000);
                 return fetch(base + "/" + what, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: body,
                     cache: "no-store",
                     credentials: "omit",
-                    redirect: "error"
+                    redirect: "error",
+                    signal: controller.signal
+                }).then(function (reply) {
+                    clearTimeout(timer);
+                    return reply;
+                }, function (error) {
+                    clearTimeout(timer);
+                    throw error;
                 });
             }
 
@@ -868,7 +820,11 @@ internal static class SetPage
                             show("Ready. Tap Save.");
                         }
                     }
-                }, function () { });
+                }, function (error) {
+                    if (error && error.name === "AbortError" && mine === sealing && !finished) {
+                        show("The program did not answer within 20 seconds. Check the terminal. Tap again to retry.");
+                    }
+                });
             }
 
             // Typing waits a moment before sending, so that not every key press is a request.
@@ -891,8 +847,32 @@ internal static class SetPage
                 });
             });
 
+            // While the passkey prompt is open Save stays on and reads "Cancel": a prompt that closes without ever settling must
+            // not leave the page stuck. The cancel starts no prompt; it only abandons the attempt.
+            function endWait() {
+                if (promptButton !== null) {
+                    promptButton.textContent = promptLabel;
+                    promptButton = null;
+                }
+            }
+
+            function cancelAttempt() {
+                attempt++;
+                endWait();
+                busy = false;
+                save.disabled = false;
+                show("Cancelled. Tap again to try.");
+            }
+
             save.addEventListener("click", function () {
-                if (finished || busy) {
+                if (finished) {
+                    return;
+                }
+                if (promptButton !== null) {
+                    cancelAttempt();
+                    return;
+                }
+                if (busy) {
                     return;
                 }
                 if (start.mode !== "webauthn") {
@@ -930,21 +910,30 @@ internal static class SetPage
                     return;
                 }
                 var sent = ready.sent;
-                busy = true;
-                save.disabled = true;
-                show("Waiting for your passkey...");
-                // Runs in the tap: nothing is awaited before the passkey prompt.
-                navigator.credentials.get({
-                    publicKey: {
+                var request;
+                try {
+                    request = {
                         challenge: ready.challenge,
                         rpId: payload.rpId,
-                        allowCredentials: payload.allowCredentials.map(function (item) {
-                            return { id: fromBase64Url(item.id), type: item.type };
-                        }),
                         timeout: payload.timeout,
                         userVerification: "required"
+                    };
+                } catch (error) {
+                    show("The proof data is not valid (" + (error && typeof error.name === "string" ? error.name : "Error") + "). Nothing was stored.");
+                    return;
+                }
+                var attemptNumber = ++attempt;
+                busy = true;
+                promptButton = save;
+                promptLabel = save.textContent;
+                save.textContent = "Cancel";
+                save.disabled = false;
+                show("Waiting for your passkey...");
+                // Runs in the tap: nothing is awaited before the passkey prompt.
+                navigator.credentials.get({ publicKey: request }).then(function (credential) {
+                    if (attemptNumber !== attempt) {
+                        return null;
                     }
-                }).then(function (credential) {
                     var response = credential.response;
                     return JSON.stringify({
                         epk: toBase64Url(sent.epk),
@@ -956,10 +945,15 @@ internal static class SetPage
                         signature: toBase64Url(response.signature)
                     });
                 }).then(function (body) {
+                    if (attemptNumber !== attempt) {
+                        return;
+                    }
                     if (finished) {
                         busy = false;
                         return;
                     }
+                    endWait();
+                    save.disabled = true;
                     show("Saving...");
                     return post("save", body).then(function (reply) {
                         if (!reply.ok) {
@@ -976,18 +970,41 @@ internal static class SetPage
                             }
                             finish("Stored " + data.stored.join(", ") + ". You can close this page.");
                         });
-                    }).then(null, function () {
+                    }).then(null, function (error) {
                         busy = false;
+                        if (error && error.name === "AbortError") {
+                            if (!finished) {
+                                save.disabled = false;
+                                show("The program did not answer within 20 seconds. Check the terminal. Tap again to retry.");
+                            }
+                            return;
+                        }
                         finish("Could not read the answer. The terminal says what was stored.");
                     });
-                }, function () {
+                }, function (error) {
+                    if (attemptNumber !== attempt) {
+                        return;
+                    }
                     busy = false;
+                    endWait();
                     if (!finished) {
                         save.disabled = false;
-                        show("No passkey was used. Nothing was stored. You can try again or cancel.");
+                        show("No passkey was used" + why(error) + ". Nothing was stored. You can try again or cancel.");
                     }
                 });
             });
+
+            // The browser's own error, for the status line: its name and message (cut to 120 characters). Never any value text.
+            function why(error) {
+                if (!error || typeof error.name !== "string") {
+                    return "";
+                }
+                var text = error.name;
+                if (typeof error.message === "string" && error.message) {
+                    text += ": " + error.message.slice(0, 120);
+                }
+                return " (" + text + ")";
+            }
             inputs.forEach(function (input) {
                 input.addEventListener("input", later);
                 input.addEventListener("change", prepare);

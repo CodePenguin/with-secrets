@@ -72,6 +72,22 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         }
 
         int scriptIndex = PathExpander.ScriptArgumentIndex(arguments, workingDirectory);
+        // The script file the run executes (the script argument, else the program itself when it is a file that is hashed) is shown
+        // on the approval page. If it cannot be read, the person would approve unseen content: refuse.
+        string? scriptPath = scriptIndex >= 0 ? arguments[scriptIndex] : HashedFileOrNull(resolved);
+        ScriptView? script = null;
+        if (scriptPath is not null)
+        {
+            try
+            {
+                script = ScriptView.Read(scriptPath);
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                return await Fail(Usage, $"Cannot read the script {ApprovalSummary.Clean(scriptPath)} ({error.Message}), so the approval page could not show it. Nothing was run.");
+            }
+        }
+
         List<string> links = [];
         foreach (string? note in new[] { PathExpander.LinkNote(resolved), scriptIndex >= 0 ? PathExpander.LinkNote(arguments[scriptIndex]) : null })
         {
@@ -85,8 +101,14 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         // such a store never offers or uses saved approvals.
         ReuseOffer offer = !store.NeedsUnlock && grants is not null && reuse is { IsOn: true } ? reuse : ReuseOffer.Off;
         Dictionary<string, string> sources = names.ToDictionary(name => name, _ => store.Label, StringComparer.Ordinal);
-        ApprovalRequest request = new(args.Program, resolved, arguments, workingDirectory, args.Reason, names, offer.IsOn ? offer : null, args.Arguments, links, Sources: sources, Unlock: store.NeedsUnlock);
+        ApprovalRequest request = new(args.Program, resolved, arguments, workingDirectory, args.Reason, names, offer.IsOn ? offer : null, args.Arguments, links, Sources: sources, Unlock: store.NeedsUnlock, Script: script);
         Fingerprint fingerprint = RequestFingerprint.Compute(request);
+
+        // What the page shows must be the file the fingerprint covers; a file that changed in between is not approved unseen.
+        if (script is not null && fingerprint.Files.TryGetValue(Path.GetFullPath(scriptPath!, workingDirectory), out string? hashed) && hashed != script.Sha256)
+        {
+            return await Fail(Usage, "The script changed while the request was being made, so nothing was run. Ask again.");
+        }
 
         // The request id goes into the text the person signs, so a saved approval names the request it covers.
         request = request with { RequestId = fingerprint.Key };
@@ -180,6 +202,21 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         finally
         {
             unlock?.Dispose();
+        }
+    }
+
+    /// <summary>The path when it is an existing file small enough to be hashed (the same rule as the approval fingerprint), else null.</summary>
+    private static string? HashedFileOrNull(string path)
+    {
+        try
+        {
+            FileInfo info = new(path);
+
+            return info.Exists && info.Length <= RequestFingerprint.MaxHashedFileBytes ? path : null;
+        }
+        catch (Exception error) when (error is ArgumentException or IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            return null;
         }
     }
 

@@ -58,6 +58,11 @@ public static class CliArgs
         The user approves the request. Then PROGRAM runs with only those secrets as environment variables, and its output is
         redacted. Write -- before the program. Use --list to see the names.
 
+        The approval page shows what will run: the whole command line; the code of sh -c, cmd /c and pwsh -Command ("Inline
+        code:", first 4000 characters); and for a script file its SHA-256 and its contents ("Script contents:", first 200
+        lines, at most 16 KB). Every shown line starts with "  | ". The passkey signs this text. -EncodedCommand is refused,
+        and so is a script that cannot be read. A long or obfuscated script can still be hard to judge.
+
         Saved approvals do not apply while the secret store is protected by a passkey PRF (the only kind of store): every run
         asks, and the approval page offers only Approve once. The rest of this paragraph applies only to a store without that
         protection (none exists today).

@@ -57,12 +57,33 @@ internal static class PageScriptTests
             check(count == prompts && found.Count == 0, "tap rule: every passkey prompt on the " + name + " page starts in the tap (" + count + " prompts; " + string.Join("; ", found) + ")");
         }
 
+        // No sign-in names credentials: the sheet then lists every passkey for the host, password managers' too (iOS looks only in its own store when ids are given).
+        foreach ((string name, string page) in new[] { ("approval", approval), ("enroll", enroll), ("config (first run)", firstRun), ("config", gated), ("set", set) })
+        {
+            check(!Script(page).Contains("allowCredentials", StringComparison.Ordinal) && !page.Contains("allowCredentials", StringComparison.Ordinal), "no allowCredentials: the " + name + " page does not name credentials");
+        }
+
+        // Diagnostics: when a prompt is rejected, the status line carries the browser's error name and (cut) message, and
+        // every "No passkey was ..." line is built with it; the script never reads that text from a PRF output.
+        foreach ((string name, string page) in new[] { ("approval", approval), ("enroll", enroll), ("config", firstRun), ("set", set) })
+        {
+            string script = Script(page);
+            MatchCollection lines = Regex.Matches(script, @"show\(""No passkey was [^\r\n]*");
+            check(lines.Count > 0 && lines.All(m => m.Value.Contains("why(error)", StringComparison.Ordinal)), "diagnostics: every rejected-prompt line on the " + name + " page shows the error (" + lines.Count + " lines)");
+            check(script.Contains("function why(error)", StringComparison.Ordinal) && script.Contains("text = error.name;", StringComparison.Ordinal) && script.Contains("error.message.slice(0, 120)", StringComparison.Ordinal) && Regex.Count(script, @"\}, function \(error\) \{") >= lines.Count, "diagnostics: the " + name + " page has the error name and a message cut to 120 characters, and each rejection handler takes the error");
+        }
+        check(Script(approval).Contains("The proof data is not valid (\" + (error && typeof error.name", StringComparison.Ordinal) && Script(set).Contains("The proof data is not valid (\" + (error && typeof error.name", StringComparison.Ordinal), "diagnostics: a failed options build says so with the error name (approval and set pages)");
+
         // PRF: the pages that create a passkey ask for the PRF output at create; the approval page asks for it at get, for the
         // chosen credential's salt; every page seals it to the page's server key before sending it, and none sends it as it is.
         string approvalPrf = ApprovalPage.Build(new ApprovalPrompt("h", "t"), new ProofStart("webauthn", "{}"), "n", [1], TimeSpan.Zero, new ReuseOffer(480, 10), null, "k").Body;
         string approvalPrfScript = Script(approvalPrf);
         check(TapRule.Violations(approvalPrfScript).Count == 0 && Regex.Count(approvalPrfScript, @"credentials\.(get|create)\s*\(") == 1, "prf: the approval page that releases the key still has one prompt, started in the tap");
-        check(approvalPrfScript.Contains("evalByCredential", StringComparison.Ordinal) && approvalPrfScript.Contains("extensions", StringComparison.Ordinal), "prf: the approval script asks the passkey for its PRF output by credential");
+        check(approvalPrfScript.Contains("extensions = { prf: { eval: { first: fromBase64Url(payload.salt) } } }", StringComparison.Ordinal) || approvalPrfScript.Contains("prf: { eval: {", StringComparison.Ordinal), "prf: the approval script asks the passkey for its PRF output with one eval salt");
+        foreach ((string name, string page) in new[] { ("approval", approval), ("approval+prf", approvalPrf), ("enroll", enroll), ("config", firstRun), ("set", set) })
+        {
+            check(!page.Contains("evalByCredential", StringComparison.Ordinal), "prf: no script on the " + name + " page uses evalByCredential (iOS refuses it before any prompt)");
+        }
         check(approvalPrfScript.Contains("function sealPrf(", StringComparison.Ordinal) && approvalPrfScript.Contains("with-secrets/v1 prf", StringComparison.Ordinal) && approvalPrfScript.Contains("additionalData: bind", StringComparison.Ordinal), "prf: the approval script has the sealing function (ECDH, HKDF info with-secrets/v1 prf, AES-GCM bound to the page)");
         check(approvalPrfScript.IndexOf("sealPrf(output", StringComparison.Ordinal) is > 0 and var sealAt && sealAt < approvalPrfScript.IndexOf("post(\"proof\", body)", StringComparison.Ordinal) && approvalPrfScript.Contains("message.prf = sealed;", StringComparison.Ordinal), "prf: the approval script seals the output before it posts anything, and sends only the sealed form");
         check(!approvalPrfScript.Contains("message.prf = output", StringComparison.Ordinal) && !approvalPrfScript.Contains("toBase64Url(first)", StringComparison.Ordinal), "prf: the approval script never sends the raw output");
@@ -73,6 +94,20 @@ internal static class PageScriptTests
             check(script.Contains("extensions: { prf: { eval: { first: fromBase64Url(", StringComparison.Ordinal) && script.Contains("function sealPrf(", StringComparison.Ordinal) && script.Contains("with-secrets/v1 prf", StringComparison.Ordinal), "prf: the " + name + " script asks for the PRF output at create and has the sealing function");
             check(script.IndexOf("sealPrf(output", StringComparison.Ordinal) > 0 && script.Contains(".prfCt = sealed.ct;", StringComparison.Ordinal) && !script.Contains("prfCt = output", StringComparison.Ordinal), "prf: the " + name + " script sends only the sealed output (prfEpk, prfIv, prfCt)");
             check(page.Contains(PrfClient.RequiredText, StringComparison.Ordinal), "prf: the " + name + " page says a PRF passkey is required");
+        }
+
+        // A prompt that closes without settling must not strand the page: while it is open the tapped button reads "Cancel" and
+        // stays on; tapping it abandons the attempt (a counter every continuation checks) and starts no prompt; once the proof
+        // is posted the button is off again.
+        foreach ((string name, string page, int prompts) in new[] { ("approval", approval, 1), ("enroll", enroll, 2), ("config", firstRun, 3), ("set", set, 1) })
+        {
+            string script = Script(page);
+            int cancelAt = script.IndexOf("function cancelAttempt()", StringComparison.Ordinal);
+            string cancelBody = cancelAt < 0 ? "" : script[cancelAt..(cancelAt + Regex.Match(script[cancelAt..], "\\n    \\}\\n").Index)];
+            check(script.Contains("= \"Cancel\";", StringComparison.Ordinal) && !script.Contains("Cancel and try again", StringComparison.Ordinal), "cancel: the " + name + " page labels the waiting button Cancel");
+            check(cancelBody.Contains("attempt++;", StringComparison.Ordinal) && cancelBody.Contains("Cancelled. Tap again to try.", StringComparison.Ordinal) && cancelBody.Contains("busy = false;", StringComparison.Ordinal) && !cancelBody.Contains("credentials", StringComparison.Ordinal) && !cancelBody.Contains("post(", StringComparison.Ordinal), "cancel: on the " + name + " page the cancel branch resets, says so, and starts no prompt and posts nothing");
+            check(Regex.Count(script, @"= \+\+attempt;") >= (name == "enroll" ? 2 : name == "config" ? 2 : 1) && Regex.Count(script, @"!== attempt\)") >= Regex.Count(script, @"= \+\+attempt;") * 2, "cancel: every prompt on the " + name + " page takes an attempt number and its continuations check it");
+            check(Regex.IsMatch(script, @"endWait\(\);\s+\w+\.disabled = true;\s+show\(""(Checking|Saving)") || Regex.IsMatch(script, @"endWait\(\);\s+controls\(false\);\s+show\(""Checking"), "cancel: the " + name + " page turns the button off again when the proof is posted");
         }
 
         const string Step2 ="<button id=\"confirm\" type=\"button\" hidden disabled>Step 2 of 2: confirm with your passkey</button>";
