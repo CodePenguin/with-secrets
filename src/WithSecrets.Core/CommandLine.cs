@@ -58,10 +58,17 @@ public static class CliArgs
         The user approves the request. Then PROGRAM runs with only those secrets as environment variables, and its output is
         redacted. Write -- before the program. Use --list to see the names.
 
-        The approval page shows what will run: the whole command line; the code of sh -c, cmd /c and pwsh -Command ("Inline
-        code:", first 4000 characters); and for a script file its SHA-256 and its contents ("Script contents:", first 200
-        lines, at most 16 KB). Every shown line starts with "  | ". The passkey signs this text. -EncodedCommand is refused,
-        and so is a script that cannot be read. A long or obfuscated script can still be hard to judge.
+        The approval page shows what will run: the whole command line; inline code ("Inline code:", first 4000 characters);
+        and every file read as code (the script an interpreter runs, and a program that is a text file) with its SHA-256 and
+        contents ("Script contents:", first 200 lines, at most 16 KB). Every shown line starts with "  | ". The passkey
+        signs this text. Interpreters are allowed in one strict form only, and anything else is refused ("put options inside
+        the script file"): sh, bash, zsh, dash, ksh, fish, python: "PROG script [args]" or "PROG -c CODE"; node, perl, ruby:
+        "PROG script [args]" or "PROG -e CODE"; powershell, pwsh: -NoProfile (required), -NonInteractive, -NoLogo, -ExecutionPolicy
+        VALUE, then exactly -File path or -Command CODE; cmd: "cmd /d /c" with plain words starting with a .cmd/.bat file
+        or echo, dir, type, ver. An interpreter with nothing to run, a script that cannot be read or is over 1 MB, and encoded
+        commands are refused. The program gets no standard input and loses code-loading variables such as NODE_OPTIONS and
+        BASH_ENV. On Windows the shown files are held open against changes until the program ends; elsewhere that is not
+        enforced. A long or obfuscated script can still be hard to judge, and files a script loads are not shown.
 
         Saved approvals do not apply while the secret store is protected by a passkey PRF (the only kind of store): every run
         asks, and the approval page offers only Approve once. The rest of this paragraph applies only to a store without that

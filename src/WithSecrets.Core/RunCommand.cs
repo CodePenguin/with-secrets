@@ -56,37 +56,82 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             return await Fail(NotFound, $"Program not found on PATH: {ApprovalSummary.Clean(args.Program)}. The working directory is not searched. Use ./name to run a file there.");
         }
 
-        string? batchRefusal = Policy.CheckBatchFile(resolved, args.Arguments);
-        if (batchRefusal is not null)
+        string? alias = AppExecutionAlias(args.Program, resolved);
+        if (alias is not null)
         {
-            return await Fail(Usage, batchRefusal);
+            return await Fail(Usage, alias);
         }
 
-        // Write the program and the script as full paths. The prompt shows them, and they are what runs.
+        // Write the program and the script as full paths. The prompt shows them, and they are what runs. What is checked and shown
+        // is the expanded command, and it must read the same as the typed one.
         resolved = PathExpander.Full(resolved, workingDirectory);
-        IReadOnlyList<string> arguments = PathExpander.ExpandScript(args.Arguments, workingDirectory);
+        IReadOnlyList<string> arguments = PathExpander.ExpandScript(args.Program, args.Arguments, workingDirectory);
+        string? expandedRefusal = Policy.CheckExpanded(args.Program, args.Arguments, arguments) ?? Policy.CheckBatchFile(resolved, arguments);
+        if (expandedRefusal is not null)
+        {
+            return await Fail(Usage, expandedRefusal);
+        }
+
         string? tooLong = Policy.CheckLength(resolved, arguments);
         if (tooLong is not null)
         {
             return await Fail(Usage, tooLong);
         }
 
-        int scriptIndex = PathExpander.ScriptArgumentIndex(arguments, workingDirectory);
-        // The script file the run executes (the script argument, else the program itself when it is a file that is hashed) is shown
-        // on the approval page. If it cannot be read, the person would approve unseen content: refuse.
-        string? scriptPath = scriptIndex >= 0 ? arguments[scriptIndex] : HashedFileOrNull(resolved);
-        ScriptView? script = null;
-        if (scriptPath is not null)
+        // The index is the same in the typed and the expanded arguments (checked above).
+        int scriptIndex = PathExpander.ScriptArgumentIndex(args.Program, args.Arguments, workingDirectory);
+
+        // A script that is too big to be hashed and shown is never run unseen.
+        string? oversized = OversizedScript(args.Program, resolved, args.Arguments, workingDirectory);
+        if (oversized is not null)
         {
-            try
+            return await Fail(Usage, $"The script {ApprovalSummary.Clean(oversized)} is larger than 1 MB, which is more than the approval page can show. Split it into smaller files, or run a program that loads it. Nothing was run.");
+        }
+
+        // The script an interpreter is told to run must exist, so that the page can show it.
+        if (Policy.ScriptIndex(args.Program, args.Arguments) is { } named && named >= 0 && scriptIndex < 0)
+        {
+            return await Fail(Usage, $"The script {ApprovalSummary.Clean(arguments[named])} does not exist, so the approval page cannot show it. Nothing was run.");
+        }
+
+        // Every file that will be read as code is shown on the approval page: the script argument, and the program itself when it
+        // is a text file (evil.cmd, check.sh). If one cannot be read, the person would approve unseen content: refuse.
+        string? scriptPath = scriptIndex >= 0 ? arguments[scriptIndex] : null;
+        foreach (string? batch in new[] { resolved, scriptPath })
+        {
+            if (batch is not null && NonAsciiBatch(batch))
             {
-                script = ScriptView.Read(scriptPath);
-            }
-            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
-            {
-                return await Fail(Usage, $"Cannot read the script {ApprovalSummary.Clean(scriptPath)} ({error.Message}), so the approval page could not show it. Nothing was run.");
+                return await Fail(Usage, $"The batch file {ApprovalSummary.Clean(batch)} has characters outside ASCII: batch files must be ASCII, because cmd reads them in another code page than the page shows. Nothing was run.");
             }
         }
+
+        string? programPath = HashedFileOrNull(resolved);
+        ScriptView? script = null;
+        ScriptView? programFile = null;
+        try
+        {
+            script = scriptPath is null ? null : ScriptView.Read(scriptPath) with { Guessed = PathExpander.IsGuess(args.Program, args.Arguments) };
+            programFile = programPath is null ? null : ScriptView.Read(programPath) is { Text: not null } text ? text : null;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            return await Fail(Usage, $"Cannot read the script {ApprovalSummary.Clean(scriptPath ?? resolved)} ({error.Message}), so the approval page could not show it. Nothing was run.");
+        }
+
+        if (script is not null && !script.Guessed)
+        {
+            if (script.Text is null)
+            {
+                return await Fail(Usage, $"The script {ApprovalSummary.Clean(script.Path)} is not text, so the approval page cannot show it. Binary scripts, zipapps and .pyc files are not allowed.");
+            }
+
+            if (Path.GetFileNameWithoutExtension(args.Program).Equals("powershell", StringComparison.OrdinalIgnoreCase) && script.NonAscii && !script.Bom)
+            {
+                return await Fail(Usage, $"Windows PowerShell 5.1 reads the script {ApprovalSummary.Clean(script.Path)} in the ANSI code page when it has no byte order mark, so it would run other characters than the page shows. Save the script with a UTF-8 BOM or use only ASCII.");
+            }
+        }
+
+        AfterScriptRead?.Invoke();
 
         List<string> links = [];
         foreach (string? note in new[] { PathExpander.LinkNote(resolved), scriptIndex >= 0 ? PathExpander.LinkNote(arguments[scriptIndex]) : null })
@@ -101,13 +146,16 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         // such a store never offers or uses saved approvals.
         ReuseOffer offer = !store.NeedsUnlock && grants is not null && reuse is { IsOn: true } ? reuse : ReuseOffer.Off;
         Dictionary<string, string> sources = names.ToDictionary(name => name, _ => store.Label, StringComparer.Ordinal);
-        ApprovalRequest request = new(args.Program, resolved, arguments, workingDirectory, args.Reason, names, offer.IsOn ? offer : null, args.Arguments, links, Sources: sources, Unlock: store.NeedsUnlock, Script: script);
+        ApprovalRequest request = new(args.Program, resolved, arguments, workingDirectory, args.Reason, names, offer.IsOn ? offer : null, args.Arguments, links, Sources: sources, Unlock: store.NeedsUnlock, Script: script, ProgramFile: programFile);
         Fingerprint fingerprint = RequestFingerprint.Compute(request);
 
         // What the page shows must be the file the fingerprint covers; a file that changed in between is not approved unseen.
-        if (script is not null && fingerprint.Files.TryGetValue(Path.GetFullPath(scriptPath!, workingDirectory), out string? hashed) && hashed != script.Sha256)
+        foreach (ScriptView shown in new[] { script, programFile }.OfType<ScriptView>())
         {
-            return await Fail(Usage, "The script changed while the request was being made, so nothing was run. Ask again.");
+            if (!fingerprint.Files.TryGetValue(shown.Path, out string? hashed) || hashed != shown.Sha256)
+            {
+                return await Fail(Usage, "The script changed while the request was being made, so nothing was run. Ask again.");
+            }
         }
 
         // The request id goes into the text the person signs, so a saved approval names the request it covers.
@@ -172,6 +220,15 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                 }
             }
 
+            // The files the person saw are held open (on Windows: nobody can write or delete them) from now until the program ends,
+            // and checked once more against what was shown. If that cannot be done, nothing runs.
+            using HeldFiles held = new();
+            string? holdFailure = held.Hold(new[] { script, programFile }.OfType<ScriptView>().ToList());
+            if (holdFailure is not null)
+            {
+                return await Fail(Denied, holdFailure);
+            }
+
             // Only the approved names are decrypted. The bytes are zeroed when the program ends; the strings the redactor and the
             // child's environment need cannot be wiped (see SecretValues). The store key itself is opened inside, from what the
             // passkey released, and zeroed there.
@@ -205,6 +262,62 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         }
     }
 
+    /// <summary>
+    /// A Windows App Execution Alias (python3.exe in WindowsApps) is a stub with no content: it opens the Store, not Python.
+    /// Returns the message, or null.
+    /// </summary>
+    private static string? AppExecutionAlias(string typedProgram, string resolved)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return null;
+        }
+
+        try
+        {
+            FileInfo info = new(resolved);
+
+            return info.Exists && IsAlias(resolved, info.Attributes, info.Length) ? AliasMessage(typedProgram) : null;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>An App Execution Alias: a zero-length reparse point in a WindowsApps folder.</summary>
+    internal static bool IsAlias(string path, FileAttributes attributes, long length)
+    {
+        return length == 0 && attributes.HasFlag(FileAttributes.ReparsePoint) && path.Contains(@"\WindowsApps\", StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static string AliasMessage(string typedProgram)
+    {
+        string name = Path.GetFileNameWithoutExtension(typedProgram);
+        string real = name.StartsWith("python", StringComparison.OrdinalIgnoreCase) || name.StartsWith("py", StringComparison.OrdinalIgnoreCase) ? " (for Python, the real python.exe)" : "";
+
+        return $"{ApprovalSummary.Clean(name)} resolves to an App Execution Alias: use the full path to the real program{real}. Nothing was run.";
+    }
+
+    /// <summary>A batch file is read in the console code page, so a byte above 127 can be read as another character than the page shows.</summary>
+    private static bool NonAsciiBatch(string path)
+    {
+        string extension = Path.GetExtension(path);
+        if (!extension.Equals(".cmd", StringComparison.OrdinalIgnoreCase) && !extension.Equals(".bat", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        try
+        {
+            return File.ReadAllBytes(path).Any(value => value > 127);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
     /// <summary>The path when it is an existing file small enough to be hashed (the same rule as the approval fingerprint), else null.</summary>
     private static string? HashedFileOrNull(string path)
     {
@@ -220,10 +333,115 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         }
     }
 
+    /// <summary>Test hook: runs after the shown files were read and before the fingerprint is made.</summary>
+    internal static Action? AfterScriptRead { get; set; }
+
+    private static readonly string[] ScriptExtensions = [".sh", ".bash", ".cmd", ".bat", ".ps1", ".py", ".js", ".mjs", ".pl", ".rb", ".vbs"];
+
+    /// <summary>
+    /// The path of a script too big to hash and show (over 1 MB), or null: the program itself when it has a script extension, or,
+    /// for an interpreter, an argument that names an existing file that big.
+    /// </summary>
+    private static string? OversizedScript(string typedProgram, string resolved, IReadOnlyList<string> arguments, string workingDirectory)
+    {
+        if (IsBig(resolved) && ScriptExtensions.Contains(Path.GetExtension(resolved), StringComparer.OrdinalIgnoreCase))
+        {
+            return resolved;
+        }
+
+        // The exact script operand of a known interpreter, whatever it is called; for other programs, a big file with a script extension.
+        if (Policy.ScriptIndex(typedProgram, arguments) is { } operand)
+        {
+            string named = operand >= 0 ? SafeFull(arguments[operand], workingDirectory) : "";
+
+            return named.Length > 0 && IsBig(named) ? named : null;
+        }
+
+        foreach (string argument in arguments)
+        {
+            string full = SafeFull(argument, workingDirectory);
+            if (full.Length > 0 && ScriptExtensions.Contains(Path.GetExtension(full), StringComparer.OrdinalIgnoreCase) && IsBig(full))
+            {
+                return full;
+            }
+        }
+
+        return null;
+    }
+
+    private static string SafeFull(string argument, string workingDirectory)
+    {
+        try
+        {
+            return Path.GetFullPath(argument, workingDirectory);
+        }
+        catch (Exception error) when (error is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return "";
+        }
+    }
+
+    private static bool IsBig(string path)
+    {
+        try
+        {
+            FileInfo info = new(path);
+
+            return info.Exists && info.Length > RequestFingerprint.MaxHashedFileBytes;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            return false;
+        }
+    }
+
     private async Task<int> Fail(int code, string message)
     {
         await stderr.WriteLineAsync("with-secrets: " + message);
 
         return code;
+    }
+}
+
+/// <summary>
+/// The shown script files, open for reading until disposed. On Windows they are opened so that nobody can write or delete them
+/// meanwhile (FileShare.Read); elsewhere the operating system gives no such lock, so the check is only a last comparison before
+/// launch and an interpreter may read the file again later. Each file's bytes must still hash to what was shown.
+/// </summary>
+internal sealed class HeldFiles : IDisposable
+{
+    private readonly List<FileStream> _streams = [];
+
+    /// <summary>Opens and checks every file. Returns why not, or null.</summary>
+    public string? Hold(IReadOnlyList<ScriptView> files)
+    {
+        foreach (ScriptView file in files)
+        {
+            try
+            {
+                FileStream stream = new(file.Path, FileMode.Open, FileAccess.Read, FileShare.Read);
+                _streams.Add(stream);
+                using MemoryStream copy = new();
+                stream.CopyTo(copy);
+                if (Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(copy.ToArray())) != file.Sha256)
+                {
+                    return "A file named in the command changed after it was shown, so nothing was run. Ask again.";
+                }
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                return $"Cannot hold {ApprovalSummary.Clean(file.Path)} against changes ({error.Message}), so nothing was run.";
+            }
+        }
+
+        return null;
+    }
+
+    public void Dispose()
+    {
+        foreach (FileStream stream in _streams)
+        {
+            stream.Dispose();
+        }
     }
 }

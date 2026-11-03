@@ -172,6 +172,14 @@ internal static class ProofReplyTests
             check(seen.Length == 4 && seen[3] == "with-secrets: proof checked: already ended", "server log: a repeat says already ended");
         }
 
+        // The --set page's seal posts are not final signed steps: no terminal line for them.
+        using (OneShotServer sealing = new("a", 0, (verb, suffix, body) => new OneShotResponse(200, "application/json", "{\"ok\":true}")))
+        {
+            Snapshot(lines);
+            (int status, _) = await Post(client, $"http://127.0.0.1:{sealing.Port}/a/{sealing.Token}/seal", "{}");
+            check(status == 200 && Snapshot(lines).Length == 0, "server log: a seal post prints no line");
+        }
+
         // A body that stops after its headers: answered 408 after the body time limit.
         TimeSpan saved = OneShotServer.BodyTimeout;
         OneShotServer.BodyTimeout = TimeSpan.FromSeconds(1);

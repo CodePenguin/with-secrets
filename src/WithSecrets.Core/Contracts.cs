@@ -24,7 +24,7 @@ public static class SecretNames
 /// shown in the text the person signs so that a saved approval names the request it covers. <see cref="Sources" /> is where
 /// each secret comes from (see <see cref="ISecretSource.Label" />), shown after each name. <see cref="Unlock" /> is true when the
 /// approving passkey must also release the secret store key (WebAuthn PRF, see <see cref="KeyVault" />). <see cref="Script" />
-/// is the script file the run executes, read once for the approval text (see <see cref="ApprovalSummary" />); null when there is none.
+/// is the script file the run executes and <see cref="ProgramFile" /> the program itself when it is a text file, each read once for the approval text (see <see cref="ApprovalSummary" />); null when there is none.
 /// </summary>
 public sealed record ApprovalRequest(
     string Program,
@@ -39,7 +39,8 @@ public sealed record ApprovalRequest(
     string? RequestId = null,
     IReadOnlyDictionary<string, string>? Sources = null,
     bool Unlock = false,
-    ScriptView? Script = null);
+    ScriptView? Script = null,
+    ScriptView? ProgramFile = null);
 
 /// <summary>
 /// What a person signed on an approval page: the page nonce, the exact text that was bound (see <see cref="RequestBinding" />)

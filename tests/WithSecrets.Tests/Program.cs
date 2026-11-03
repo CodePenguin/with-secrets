@@ -121,10 +121,10 @@ internal static class Program
         Check(Policy.Check("env", []) is not null, "env dump refused");
         Check(Policy.Check("/usr/bin/printenv", ["A"]) is not null, "printenv refused");
         Check(Policy.Check("bash", ["-c", "echo $A"]) is null, "bash -c allowed (the page shows the code)");
-        Check(Policy.Check("bash", ["-lc", "echo $A"]) is null, "bash -lc allowed (the page shows the code)");
+        Check(Policy.Check("bash", ["-lc", "echo $A"]) is not null, "bash -lc refused (put options inside the script file)");
         Check(Policy.Check("bash", ["script.sh"]) is null, "bash script.sh allowed");
-        Check(Policy.Check("cmd.exe", ["/c", "echo"]) is null, "cmd /c allowed (the page shows the code)");
-        Check(Policy.Check("pwsh", ["-Command", "x"]) is null, "pwsh -Command allowed (the page shows the code)");
+        Check(Policy.Check("cmd.exe", ["/d", "/c", "echo"]) is null, "cmd /c allowed (the page shows the code)");
+        Check(Policy.Check("pwsh", ["-NoProfile", "-Command", "x"]) is null, "pwsh -Command allowed (the page shows the code)");
         Check(Policy.Check("pwsh", ["-EncodedCommand", "ZQBjAGgAbwA="]) is not null, "pwsh -EncodedCommand refused");
         Check(Policy.Check("pwsh.exe", ["-NoProfile", "-File", "run.ps1"]) is null, "pwsh -File allowed");
         Check(Policy.Check("dotnet", ["test"]) is null, "dotnet test allowed");

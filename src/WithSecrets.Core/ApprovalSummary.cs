@@ -7,16 +7,18 @@ namespace WithSecrets;
 /// A script file as the approval text shows it: the SHA-256 (upper-case hex) and the size of its bytes, and its text when the
 /// bytes are valid UTF-8 without NUL; null <see cref="Text" /> means "binary file". Read once, from the same bytes that are hashed.
 /// </summary>
-public sealed record ScriptView(string Sha256, long Length, string? Text)
+public sealed record ScriptView(string Sha256, long Length, string? Text, string Path = "", bool Guessed = false, bool Bom = false, bool NonAscii = false)
 {
     /// <summary>Reads the file. Throws <see cref="IOException" /> or <see cref="UnauthorizedAccessException" /> when it cannot be read.</summary>
-    public static ScriptView Read(string path)
+    public static ScriptView Read(string path) => FromBytes(File.ReadAllBytes(path), path);
+
+    /// <summary>The view of these bytes (the contents of the file at <paramref name="path" />).</summary>
+    public static ScriptView FromBytes(byte[] bytes, string path)
     {
-        byte[] bytes = File.ReadAllBytes(path);
         string hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes));
         if (Array.IndexOf(bytes, (byte)0) >= 0)
         {
-            return new ScriptView(hash, bytes.Length, null);
+            return new ScriptView(hash, bytes.Length, null, path);
         }
 
         try
@@ -27,11 +29,11 @@ public sealed record ScriptView(string Sha256, long Length, string? Text)
                 content = content[Encoding.UTF8.Preamble.Length..];
             }
 
-            return new ScriptView(hash, bytes.Length, new UTF8Encoding(false, true).GetString(content));
+            return new ScriptView(hash, bytes.Length, new UTF8Encoding(false, true).GetString(content), path, Bom: content.Length != bytes.Length, NonAscii: content.IndexOfAnyExceptInRange((byte)0, (byte)127) >= 0);
         }
         catch (DecoderFallbackException)
         {
-            return new ScriptView(hash, bytes.Length, null);
+            return new ScriptView(hash, bytes.Length, null, path);
         }
     }
 }
@@ -76,6 +78,12 @@ public static class ApprovalSummary
         if (Policy.InlineCode(request.Program, request.Arguments) is { } inline)
         {
             text.Append('\n').Append(InlineBlock(inline));
+        }
+
+        // Every file that will be read as code: a program that is itself a text file, then the script it is given.
+        if (request.ProgramFile is { } programFile)
+        {
+            text.Append('\n').Append(ScriptBlock(programFile));
         }
 
         if (request.Script is { } script)
@@ -138,8 +146,13 @@ public static class ApprovalSummary
 
     internal static string ScriptBlock(ScriptView script)
     {
-        StringBuilder text = new("Script SHA-256: ");
-        text.Append(script.Sha256).Append('\n');
+        StringBuilder text = new();
+        if (script.Path.Length > 0)
+        {
+            text.Append("Script file: ").Append(Clean(script.Path)).Append(script.Guessed ? " (guessed from the arguments, not verified)" : "").Append('\n');
+        }
+
+        text.Append("Script SHA-256: ").Append(script.Sha256).Append('\n');
         if (script.Text is null)
         {
             return text.Append($"Script contents: binary file, {script.Length} bytes (not shown)").ToString();
@@ -224,14 +237,29 @@ public static class ApprovalSummary
         return string.Join(' ', new[] { Quote(program) }.Concat(arguments.Select(Quote)));
     }
 
-    private static string Quote(string argument)
+    internal static string Quote(string argument)
     {
         if (argument.Length > 0 && argument.All(character => !char.IsWhiteSpace(character) && character != '"'))
         {
             return argument;
         }
 
-        return "\"" + argument.Replace("\"", "\\\"", StringComparison.Ordinal) + "\"";
+        // The rules of CommandLineToArgvW: backslashes are doubled when a quote (or the closing quote) follows them.
+        StringBuilder quoted = new("\"");
+        int slashes = 0;
+        foreach (char character in argument)
+        {
+            if (character == '\\')
+            {
+                slashes++;
+                continue;
+            }
+
+            quoted.Append('\\', character == '"' ? slashes * 2 + 1 : slashes).Append(character);
+            slashes = 0;
+        }
+
+        return quoted.Append('\\', slashes * 2).Append('"').ToString();
     }
 
     /// <summary>

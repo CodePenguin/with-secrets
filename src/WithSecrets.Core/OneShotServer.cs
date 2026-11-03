@@ -265,7 +265,7 @@ internal sealed class OneShotServer : IDisposable
         else
         {
             // A POST to a step other than deny is a proof (or another signed step): it is logged when it arrives and when it ends.
-            bool tracked = context.Request.Method == "POST" && suffix is not ("" or "deny");
+            bool tracked = context.Request.Method == "POST" && suffix is not ("" or "deny" or "seal");
             string label = suffix == "proof" ? "proof" : "step " + new string(suffix.Where(char.IsAsciiLetterOrDigit).Take(12).ToArray());
             string? body = null;
             bool timedOut = false;

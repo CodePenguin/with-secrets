@@ -26,7 +26,7 @@ public static class RequestFingerprint
     {
         SortedDictionary<string, string> files = new(StringComparer.Ordinal);
         AddHash(files, request.ResolvedProgram, request.WorkingDirectory);
-        int script = PathExpander.ScriptArgumentIndex(request.Arguments, request.WorkingDirectory);
+        int script = PathExpander.ScriptArgumentIndex(request.Program, request.Arguments, request.WorkingDirectory);
         if (script >= 0)
         {
             AddHash(files, request.Arguments[script], request.WorkingDirectory);

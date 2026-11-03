@@ -38,7 +38,55 @@ public static class PathExpander
         return -1;
     }
 
-    /// <summary>The arguments with the script (if there is one) written as a full path. Other arguments are left as typed.</summary>
+    /// <summary>
+    /// The one index of the script: for a known interpreter the exact operand it will run as its script (see
+    /// <see cref="Policy.ScriptIndex" />), when that names an existing file of a size that is hashed, else -1; for any other
+    /// program only the guess of <see cref="ScriptArgumentIndex(IReadOnlyList{string}, string)" /> (see <see cref="IsGuess" />).
+    /// The page, the fingerprint and the file lock all use this index.
+    /// </summary>
+    public static int ScriptArgumentIndex(string program, IReadOnlyList<string> arguments, string workingDirectory)
+    {
+        if (Policy.ScriptIndex(program, arguments) is not { } operand)
+        {
+            return ScriptArgumentIndex(arguments, workingDirectory);
+        }
+
+        if (operand < 0)
+        {
+            return -1;
+        }
+
+        try
+        {
+            FileInfo info = new(Full(arguments[operand], workingDirectory));
+
+            return info.Exists && info.Length <= RequestFingerprint.MaxHashedFileBytes ? operand : -1;
+        }
+        catch (Exception error) when (error is ArgumentException or IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            return -1;
+        }
+    }
+
+    /// <summary>True when the script of this program is only guessed from the arguments (the program has no analyzer).</summary>
+    public static bool IsGuess(string program, IReadOnlyList<string> arguments) => Policy.ScriptIndex(program, arguments) is null;
+
+    /// <summary>The arguments with the script of <see cref="ScriptArgumentIndex(string, IReadOnlyList{string}, string)" /> written as a full path.</summary>
+    public static IReadOnlyList<string> ExpandScript(string program, IReadOnlyList<string> arguments, string workingDirectory)
+    {
+        int index = ScriptArgumentIndex(program, arguments, workingDirectory);
+        if (index < 0)
+        {
+            return arguments;
+        }
+
+        List<string> expanded = [.. arguments];
+        expanded[index] = Full(arguments[index], workingDirectory);
+
+        return expanded;
+    }
+
+    /// <summary>The arguments with the guessed script (if there is one) written as a full path. Other arguments are left as typed.</summary>
     public static IReadOnlyList<string> ExpandScript(IReadOnlyList<string> arguments, string workingDirectory)
     {
         int index = ScriptArgumentIndex(arguments, workingDirectory);
