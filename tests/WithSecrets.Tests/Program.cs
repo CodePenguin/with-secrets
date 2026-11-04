@@ -383,6 +383,11 @@ internal static class Program
             RecoveryTests.Run(Check).GetAwaiter().GetResult();
         }
 
+        if (Wants("OneFlow"))
+        {
+            OneFlowTests.Run(Check).GetAwaiter().GetResult();
+        }
+
         Directory.Delete(temp, true);
         Console.WriteLine($"{_passed} passed, {_failed} failed");
 

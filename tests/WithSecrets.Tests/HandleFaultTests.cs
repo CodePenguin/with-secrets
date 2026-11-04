@@ -109,11 +109,25 @@ internal static class HandleFaultTests
 
             Uri link = new(match.Value);
             string url = "http://127.0.0.1:" + link.Port + link.AbsolutePath;
-            if (link.AbsolutePath.StartsWith("/a/", StringComparison.Ordinal) && approved < kind.Approvals)
+            bool moved = false;
+            while (link.AbsolutePath.StartsWith("/a/", StringComparison.Ordinal) && approved < kind.Approvals)
             {
                 approved++;
-                TestState.Approve(client, url, link.GetLeftPart(UriPartial.Authority), link.IdnHost, admin);
+                (_, string reply) = TestState.Approve(client, url, link.GetLeftPart(UriPartial.Authority), link.IdnHost, admin);
+                moved = true;
 
+                // The approval leads to the next page by itself (no second link in the terminal).
+                if (RecoveryTests.Member(reply, "next") is not { } next)
+                {
+                    break;
+                }
+
+                link = new Uri(next);
+                url = "http://127.0.0.1:" + link.Port + link.AbsolutePath;
+            }
+
+            if (moved && !link.AbsolutePath.StartsWith("/e/", StringComparison.Ordinal))
+            {
                 continue;
             }
 

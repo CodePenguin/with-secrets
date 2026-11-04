@@ -36,7 +36,7 @@ internal static class RetryPostTests
             check(script.Contains("cache: \"no-store\"", StringComparison.Ordinal) && script.Contains("keepalive: false", StringComparison.Ordinal), label + "does not cache and does not keep the request alive");
             check(script.Contains("Still waiting for the program... (retry \" + (number + 2) + \" of 3)", StringComparison.Ordinal), label + "shows the retry counter");
             check(script.Contains("number + 1 >= limits.length || finished", StringComparison.Ordinal), label + "stops resending after the third attempt and when the page is finished (Cancel)");
-            check(script.Contains("The program already finished this request. Check the terminal.", StringComparison.Ordinal) && script.Contains("resent && (reply.status === 404 || reply.status === 409)", StringComparison.Ordinal), label + "says the program already finished when a resend gets 404 or 409");
+            check(script.Contains("The program already finished this request. If this page did not move on, press Ctrl+C in the terminal and run the command again.", StringComparison.Ordinal) && script.Contains("resent && (reply.status === 404 || reply.status === 409)", StringComparison.Ordinal), label + "says the program already finished when a resend gets 404 or 409");
             check(script.Contains("what === \"deny\" ? [20000]", StringComparison.Ordinal), label + "sends Cancel only once");
             check(script.Contains("The program did not answer within 20 seconds. Check the terminal. Tap again to retry.", StringComparison.Ordinal), label + "still ends with the old message after the third failure");
         }

@@ -101,6 +101,9 @@ public sealed class KeyRotation(StateDatabase db, SecretStore store, EnrollmentT
             + "A new recovery code is shown on the last page, and the old recovery code stops working.\n"
             + "Nothing changes until you confirm on the next page.";
         announce?.Invoke(AdminKey.Line(manifest) + "\nCompare it with the fingerprint you noted. If it differs, do not approve.");
+        // One link: tap 1 leads to the Step 2 page.
+        using IDisposable flow = PageFlow.Enter();
+        PageFlow.Plan("a", target.Approver.Settings);
         ApprovalDecision asked = target.Approver.Ask(new ApprovalPrompt(Heading, text), unlock: true);
         try
         {

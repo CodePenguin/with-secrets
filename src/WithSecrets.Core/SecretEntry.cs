@@ -711,7 +711,7 @@ internal static class SetPage
                         clearTimeout(timer);
                         diagLine = "";
                         if (resent && (reply.status === 404 || reply.status === 409)) {
-                            finish("The program already finished this request. Check the terminal.");
+                            finish("The program already finished this request. If this page did not move on, press Ctrl+C in the terminal and run the command again.");
                             return new Promise(function () { });
                         }
                         return reply;

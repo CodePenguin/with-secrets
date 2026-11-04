@@ -342,7 +342,7 @@ internal static partial class WebApprovalTests
             client.Timeout = TimeSpan.FromSeconds(20);
             int port = FreePort();
             ApprovalSettings remote = new("passkey", "https://ws.example.com:" + port, port, TimeSpan.FromSeconds(20));
-            ApprovalSettings localOnly = remote with { BaseUrl = null, Port = 0 };
+            ApprovalSettings localOnly = remote with { BaseUrl = null };
 
             // Keys only for localhost, baseUrl set. --enroll: approved at localhost, enrolled at the baseUrl host.
             {
@@ -351,8 +351,7 @@ internal static partial class WebApprovalTests
                 using TestAuthenticator phone = TestAuthenticator.RS256();
                 check(store.Add(laptop.Record("localhost", "laptop")), "targets passkey: localhost key stored (the admin)");
                 (ApprovalDecision? decision, List<string> lines) = await PasskeyTargetRun(client, store, remote, localOnly, false, item => item.Enroll(), laptop, phone);
-                check(decision is { Approved: true } && lines.Count == 3 && lines[0].StartsWith(AnnouncePrefix + "http://localhost:", StringComparison.Ordinal) && lines[1].StartsWith(EnrollPrefix + "https://ws.example.com:" + port + "/e/", StringComparison.Ordinal)
-                    && lines[2].StartsWith(AnnouncePrefix + "http://localhost:", StringComparison.Ordinal), "targets passkey: --enroll is approved at localhost, enrolled at the baseUrl host, and the admin signs the new state at localhost (" + decision?.Detail + "; " + string.Join(" | ", lines) + ")");
+                check(decision is { Approved: true } && lines.Count == 1 && lines[0].StartsWith(AnnouncePrefix + "http://localhost:", StringComparison.Ordinal), "targets passkey: --enroll prints one link (approved at localhost); the page leads on to the baseUrl host, then to the admin signature at localhost (" + decision?.Detail + "; " + string.Join(" | ", lines) + ")");
                 check(store.All().Select(item => (item.Name, item.RpId, item.Admin)).SequenceEqual([("laptop", "localhost", true), ("phone", "ws.example.com", false)]), "targets passkey: the new key is for the baseUrl host and not admin");
 
                 // The admin key does not work at the baseUrl host, so the phone key cannot approve its removal there.
@@ -375,8 +374,8 @@ internal static partial class WebApprovalTests
                 List<string> pages = [];
                 (ApprovalDecision? decision, List<string> lines) = await PasskeyTargetRun(client, store, remote, localOnly, false, item => item.Enroll(), laptop, phone, true, pages);
                 string third = pages.Count == 4 ? pages[3] : "";
-                check(decision is { Approved: true } && lines.Count == 3 && store.All().Select(item => (item.Name, item.Admin)).SequenceEqual([("laptop", true), ("phone", true)]), "targets passkey admin: ticked on the enroll page, the new key is an admin after the third link (" + decision?.Detail + "; " + pages.Count + " pages)");
-                check(pages.Count == 4 && pages[2].Contains("\"later\":true", StringComparison.Ordinal) && pages[2].Contains("\"makeAdmin\":true", StringComparison.Ordinal), "targets passkey admin: the code reply says the choice (" + (pages.Count > 2 ? pages[2] : "") + ")");
+                check(decision is { Approved: true } && lines.Count == 1 && store.All().Select(item => (item.Name, item.Admin)).SequenceEqual([("laptop", true), ("phone", true)]), "targets passkey admin: ticked on the enroll page, the new key is an admin after the third link (" + decision?.Detail + "; " + pages.Count + " pages)");
+                check(pages.Count == 4 && pages[2].Contains("\"next\":\"http", StringComparison.Ordinal) && !pages[2].Contains("\"code\"", StringComparison.Ordinal), "targets passkey admin: the code reply says the choice (" + (pages.Count > 2 ? pages[2] : "") + ")");
                 check(third.Contains("The new passkey will be an admin", StringComparison.Ordinal) && third.Contains("\\u0022admin\\u0022:true", StringComparison.Ordinal) && third.Split("\\u0022admin\\u0022:true").Length == 3,
                     "targets passkey admin: the third link's text says the new key will be an admin, and the manifest it signs has two admins");
                 (decision, lines) = await PasskeyTargetRun(client, store, remote, localOnly, false, item => item.Unenroll("laptop"), phone, null);
@@ -402,8 +401,7 @@ internal static partial class WebApprovalTests
                 using TestAuthenticator localKey = TestAuthenticator.RS256();
                 check(store.Add(remoteKey.Record("ws.example.com", "remote")), "targets passkey: baseUrl key stored");
                 (ApprovalDecision? decision, List<string> lines) = await PasskeyTargetRun(client, store, remote, localOnly, true, item => item.Enroll(), remoteKey, localKey, newName: "here");
-                check(decision is { Approved: true } && lines.Count == 3 && lines[0].StartsWith(AnnouncePrefix + "https://ws.example.com:" + port + "/a/", StringComparison.Ordinal) && lines[1].StartsWith(EnrollPrefix + "http://localhost:", StringComparison.Ordinal)
-                    && lines[2].StartsWith(AnnouncePrefix + "https://ws.example.com:" + port + "/a/", StringComparison.Ordinal), "targets passkey: --enroll --local is approved at the baseUrl host, enrolled at localhost, signed at the baseUrl host (" + decision?.Detail + "; " + string.Join(" | ", lines) + ")");
+                check(decision is { Approved: true } && lines.Count == 1 && lines[0].StartsWith(AnnouncePrefix + "https://ws.example.com:" + port + "/a/", StringComparison.Ordinal), "targets passkey: --enroll --local is approved at the baseUrl host, enrolled at localhost, signed at the baseUrl host (" + decision?.Detail + "; " + string.Join(" | ", lines) + ")");
                 check(store.All().Select(item => (item.Name, item.RpId)).SequenceEqual([("remote", "ws.example.com"), ("here", "localhost")]), "targets passkey: the new key is for localhost");
             }
 
@@ -467,28 +465,47 @@ internal static partial class WebApprovalTests
             }
 
             lines.Add(text);
-            if (text.StartsWith(AnnouncePrefix, StringComparison.Ordinal))
+            if (!text.StartsWith(AnnouncePrefix, StringComparison.Ordinal))
             {
-                // An approval page: a run approval (once) or a new state the admin signs.
-                Uri link = new(text[AnnouncePrefix.Length..]);
-                pages?.Add(Text(Send(client, HttpMethod.Get, "http://127.0.0.1:" + link.Port + link.AbsolutePath)));
-                TestState.Approve(client, "http://127.0.0.1:" + link.Port + link.AbsolutePath, link.GetLeftPart(UriPartial.Authority), link.IdnHost, approver, approval);
+                continue;
             }
-            else if (text.StartsWith(EnrollPrefix, StringComparison.Ordinal) && creator is not null)
-            {
-                // The registration (with the "Also make this key an admin" box), the admin's assertion when the page asks for it, then the code.
-                Uri link = new(text[EnrollPrefix.Length..]);
-                string baseUrl = "http://127.0.0.1:" + link.Port + link.AbsolutePath;
-                string page = Text(Send(client, HttpMethod.Get, baseUrl));
-                pages?.Add(page);
-                byte[] challenge = Bytes(Options(page), "challenge");
-                string registration = TestState.Register(creator, challenge, link.GetLeftPart(UriPartial.Authority), link.IdnHost, "key");
-                // The name typed on the page, and the box.
-                registration = registration[..^1] + ",\"name\":" + JsonSerializer.Serialize(newName) + (makeAdmin ? ",\"admin\":true}" : "}");
 
-                string reply = Text(Send(client, HttpMethod.Post, baseUrl + "/create", registration));
-                pages?.Add(reply);
-                codes.Type(CodeOf(TestState.SignStep(client, baseUrl, link.GetLeftPart(UriPartial.Authority), reply)));
+            // One link: every later page is reached from the reply of the step before (its next).
+            string? current = text[AnnouncePrefix.Length..];
+            while (current is not null)
+            {
+                Uri link = new(current);
+                string baseUrl = "http://127.0.0.1:" + link.Port + link.AbsolutePath;
+                string origin = link.GetLeftPart(UriPartial.Authority);
+                current = null;
+                if (link.AbsolutePath.StartsWith("/a/", StringComparison.Ordinal))
+                {
+                    // An approval page: a run approval (once) or a new state the admin signs (which shows the code last).
+                    pages?.Add(Text(Send(client, HttpMethod.Get, baseUrl)));
+                    (_, string answer) = TestState.Approve(client, baseUrl, origin, link.IdnHost, approver, approval);
+                    current = RecoveryTests.Member(answer, "next");
+                    if (RecoveryTests.Member(answer, "code") is { } shown)
+                    {
+                        codes.Type(shown);
+                    }
+                }
+                else if (link.AbsolutePath.StartsWith("/e/", StringComparison.Ordinal) && creator is not null)
+                {
+                    // The registration (with the "Also make this key an admin" box), the admin's assertion when the page asks for it, then the code.
+                    string page = Text(Send(client, HttpMethod.Get, baseUrl));
+                    pages?.Add(page);
+                    byte[] challenge = Bytes(Options(page), "challenge");
+                    string registration = TestState.Register(creator, challenge, origin, link.IdnHost, "key");
+                    registration = registration[..^1] + ",\"name\":" + JsonSerializer.Serialize(newName) + (makeAdmin ? ",\"admin\":true}" : "}");
+
+                    string reply = Text(Send(client, HttpMethod.Post, baseUrl + "/create", registration));
+                    pages?.Add(reply);
+                    current = RecoveryTests.Member(reply, "next");
+                    if (current is null)
+                    {
+                        codes.Type(CodeOf(TestState.SignStep(client, baseUrl, origin, reply)));
+                    }
+                }
             }
         }
 

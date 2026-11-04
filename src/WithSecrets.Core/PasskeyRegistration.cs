@@ -76,6 +76,8 @@ internal static class PasskeyRegistration
                 status.textContent = text + (diagLine ? " " + diagLine : "");
             }
 
+            //@FOLLOW@
+
             function inputs(on) {
                 keyName.disabled = !on;
                 makeAdmin.disabled = !on;
@@ -183,7 +185,7 @@ internal static class PasskeyRegistration
                         clearTimeout(timer);
                         diagLine = "";
                         if (resent && (reply.status === 404 || reply.status === 409)) {
-                            finish("The program already finished this request. Check the terminal.");
+                            finish("The program already finished this request. If this page did not move on, press Ctrl+C in the terminal and run the command again.");
                             return new Promise(function () { });
                         }
                         return reply;
@@ -275,12 +277,18 @@ internal static class PasskeyRegistration
                         return prepare(data.sign);
                     }
                     busy = false;
+                    if (typeof data.next === "string") {
+                        follow(data.next);
+                        return;
+                    }
+                    if (data.later === true) {
+                        finish("Your passkey was made. An admin passkey confirms next, on the page the program opens.");
+                        return;
+                    }
                     if (typeof data.code !== "string") {
                         throw new Error("no code");
                     }
-                    finish((data.later ? "Type this code in the terminal. The terminal then shows a link where an admin passkey confirms the change"
-                        + (data.makeAdmin ? " (the new passkey will be an admin)." : " (the new passkey will only approve runs).")
-                        : "Type this code in the terminal to finish.")
+                    finish("Type this code in the terminal to finish."
                         + (typeof data.admin === "string" ? " " + data.admin + ". Pages and --enrolled show this; if it ever changes, the state was replaced." : ""));
                     code.textContent = data.code;
                 });
@@ -540,6 +548,7 @@ internal static class PasskeyRegistration
     /// </summary>
     internal static ApprovalDecision Run(PasskeyStore store, ApprovalSettings settings, string name, Action<string> announce, Func<string?> readCode, RegistrationPlan? plan, Func<string, ManifestApproval>? askAdmin = null, Unlock? approval = null)
     {
+        using IDisposable flowScope = PageFlow.Enter();
         string? nameError = Enrollment.NameError(name);
         if (nameError is not null)
         {
@@ -655,8 +664,10 @@ internal static class PasskeyRegistration
             string? sharedSalt = current?.Keys.Select(item => item.Slot?.Salt).FirstOrDefault(item => item is not null);
             byte[] slotSalt = sharedSalt is null ? KeyVault.NewSalt() : Base64Url.DecodeFromChars(sharedSalt);
             serverKey = SecretCrypto.NewServerKey();
-            Session session = new(store, name, challenge, [.. snapshot.Select(item => item.Id)], plan, settings, askAdmin, new PrfContext(serverKey.Value.State, slotSalt, master, firstStore));
-            using OneShotServer server = new(plan.Prefix, settings.Port, session.Handle);
+            PageFlow? flow = PageFlow.Current;
+            Session session = new(store, name, challenge, [.. snapshot.Select(item => item.Id)], plan, settings, askAdmin, new PrfContext(serverKey.Value.State, slotSalt, master, firstStore), flow is null ? null : flow.TakeNext);
+            using PageSlot server = PageFlow.Open(plan.Prefix, settings.Port, session.Handle).Keep();
+            PageFlow.OnEnd(session.Forget);
             string origin = settings.PageOrigin(server.Port);
             if (PasskeyMethod.RpIdOf(origin) != rpId)
             {
@@ -681,9 +692,14 @@ internal static class PasskeyRegistration
             });
 
             session.Open(origin, rpId, plan.Page(rpId, options));
-            announce(plan.AnnouncePrefix + origin + "/" + plan.Prefix + "/" + server.Token);
+            server.Ready();
+            // A page reached from the step before is already open in the person's browser: no second link.
+            if (!server.Reserved)
+            {
+                announce(plan.AnnouncePrefix + origin + "/" + plan.Prefix + "/" + server.Token);
+            }
 
-            return session.Wait(settings.Timeout, readCode);
+            return session.Wait(PageFlow.Left(settings.Timeout), readCode);
         }
         catch (ProofUnavailableException error)
         {
@@ -806,7 +822,7 @@ internal static class PasskeyRegistration
     /// </summary>
     internal static OneShotResponse Build(string name, string rpId, string options, string script, string style, string adminLine, IEnumerable<string>? taken = null)
     {
-        script = PrfClient.Fill(script.ReplaceLineEndings("\n"));
+        script = PrfClient.Fill(PageContinue.Fill(script.ReplaceLineEndings("\n")));
         style = (style + FieldStyle).ReplaceLineEndings("\n");
         string policy = ApprovalPage.Policy(script, style);
         string text = "Works on: " + ApprovalSummary.Clean(rpId) + "\n" + ApprovalSummary.Clean(adminLine);
@@ -825,12 +841,12 @@ internal static class PasskeyRegistration
         page.Append("<div class=\"field check\"><input id=\"make-admin\" type=\"checkbox\"> <label for=\"make-admin\">Also make this key an admin</label>"
             + "<p class=\"hint\">An admin key can change the settings, the secrets and the passkeys, and remove other admin keys. Leave it off for a key that only approves runs. "
             + "Two admin keys (for example a laptop and a phone) mean a lost device does not lock you out.</p></div>\n");
-        page.Append("<p>Choose the name, then tap Create passkey. When an admin passkey works on this page, a second button then appears: tap it to confirm with your admin passkey (Step 2 of 2). Otherwise the terminal shows a link for that after the code.</p>\n");
+        page.Append("<p>Choose the name, then tap Create passkey. When an admin passkey works on this page, a second button then appears: tap it to confirm with your admin passkey (Step 2 of 2). Otherwise the next step opens by itself on the page of an admin passkey. The terminal asks for the code last.</p>\n");
         page.Append("<div class=\"buttons\">");
         page.Append("<button id=\"deny\" type=\"button\" autofocus>Cancel</button>");
         page.Append("<button id=\"create\" type=\"button\">Create passkey</button>");
         page.Append(StepTwoButton);
-        page.Append("</div>\n<p id=\"status\" role=\"status\"></p>\n<p id=\"code\"></p>\n</main>\n");
+        page.Append("</div>\n<p id=\"status\" role=\"status\"></p>\n" + PageContinue.Box + "<p id=\"code\"></p>\n</main>\n");
         page.Append("<script type=\"application/json\" id=\"options\">").Append(options).Append("</script>\n");
         page.Append("<script>").Append(script).Append("</script>\n</body>\n</html>\n");
 
@@ -842,7 +858,7 @@ internal static class PasskeyRegistration
     /// on: to the admin's assertion over the new manifest (when it can be made on this page), then the code. After that the
     /// page answers only Cancel. The first final outcome wins.
     /// </summary>
-    private sealed class Session(PasskeyStore store, string name, byte[] challenge, HashSet<string> snapshot, RegistrationPlan plan, ApprovalSettings settings, Func<string, ManifestApproval>? askAdmin, PrfContext prf)
+    private sealed class Session(PasskeyStore store, string name, byte[] challenge, HashSet<string> snapshot, RegistrationPlan plan, ApprovalSettings settings, Func<string, ManifestApproval>? askAdmin, PrfContext prf, Func<string?>? takeNext = null)
     {
         private const int CodeTries = 3;
 
@@ -859,6 +875,9 @@ internal static class PasskeyRegistration
         private string? _rpId;
         private OneShotResponse? _page;
         private string _code = "";
+        private OneShotResponse? _reply;
+        private byte[]? _replyFor;
+        private string _replyStep = "";
 
         // The name the person chose on the page (the suggestion until a registration comes), and whether the key becomes an admin.
         private readonly string _suggestion = name;
@@ -894,6 +913,14 @@ internal static class PasskeyRegistration
             }
 
             PasskeyRecord key = _verified.Task.Result;
+
+            // No admin key works at this page's host: the admin signs on the page the registration reply led to, and that last page shows the
+            // code. So the terminal asks for the code only after every tap.
+            if (SignElsewhere() is { } ended)
+            {
+                return ended;
+            }
+
             for (int attempt = 0; attempt < CodeTries; attempt++)
             {
                 Task<string?> read = Task.Run(readCode);
@@ -910,7 +937,7 @@ internal static class PasskeyRegistration
 
                 if (CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(typed.Trim()), Encoding.UTF8.GetBytes(_code)))
                 {
-                    return SignElsewhere() ?? Store(key);
+                    return Store(key);
                 }
             }
 
@@ -937,6 +964,7 @@ internal static class PasskeyRegistration
                 }
 
                 next = _next!;
+                PageFlow.OfferCode(_code);
             }
 
             if (askAdmin is null)
@@ -978,7 +1006,20 @@ internal static class PasskeyRegistration
         {
             lock (_gate)
             {
-                if (_origin is null || _rpId is null || _page is null || _decision.Task.IsCompleted)
+                if (_origin is null || _rpId is null || _page is null)
+                {
+                    return NotFound;
+                }
+
+                // The verified step's reply is kept for the body that earned it: sent again byte for byte (the reply was lost), it gets the
+                // same reply, which makes no second page and no second code. Any other request after the decision gets 404.
+                if (_reply is not null && _replyFor is not null && verb == "POST" && suffix == _replyStep
+                    && CryptographicOperations.FixedTimeEquals(SHA256.HashData(Encoding.UTF8.GetBytes(body)), _replyFor))
+                {
+                    return _reply;
+                }
+
+                if (_decision.Task.IsCompleted)
                 {
                     return NotFound;
                 }
@@ -996,7 +1037,7 @@ internal static class PasskeyRegistration
 
                 if (_key is not null)
                 {
-                    return verb == "POST" && suffix == "sign" ? Sign(_origin, _rpId, body) : NotFound;
+                    return verb == "POST" && suffix == "sign" ? Kept(suffix, body, Sign(_origin, _rpId, body)) : NotFound;
                 }
 
                 switch (verb, suffix)
@@ -1004,10 +1045,32 @@ internal static class PasskeyRegistration
                     case ("GET", ""):
                         return _page;
                     case ("POST", "create"):
-                        return Register(_origin, _rpId, body);
+                        return Kept(suffix, body, Register(_origin, _rpId, body));
                     default:
                         return NotFound;
                 }
+            }
+        }
+
+        /// <summary>Called with the lock held. When the step just verified (its reply was made by <see cref="Code" />), keeps the reply for this body.</summary>
+        private OneShotResponse Kept(string step, string body, OneShotResponse reply)
+        {
+            if (_reply is not null && _replyFor is null && ReferenceEquals(reply, _reply))
+            {
+                _replyStep = step;
+                _replyFor = SHA256.HashData(Encoding.UTF8.GetBytes(body));
+            }
+
+            return reply;
+        }
+
+        /// <summary>Drops the kept reply (the flow ended).</summary>
+        public void Forget()
+        {
+            lock (_gate)
+            {
+                _reply = null;
+                _replyFor = null;
             }
         }
 
@@ -1314,20 +1377,32 @@ internal static class PasskeyRegistration
         private OneShotResponse Code(bool later)
         {
             _code = RandomNumberGenerator.GetInt32(0, 1_000_000).ToString("D6", CultureInfo.InvariantCulture);
-            _verified.TrySetResult(_key!);
 
             // The admin keys of the new state, so the person sees their fingerprints (on the first run, for the first time).
             string admin = AdminKey.Line(_next);
 
             if (later)
             {
-                return new OneShotResponse(200, "application/json", JsonSerializer.Serialize(new { ok = true, code = _code, later = true, admin, name = _name, makeAdmin = _next!.IsAdmin(_key!.Id) }));
+                // An admin signs on another page, which the reply leads to (made now, before the command goes on). That page shows
+                // the code after the signature verified; this reply holds none.
+                string? next = takeNext?.Invoke();
+                _verified.TrySetResult(_key!);
+
+                _reply = new OneShotResponse(200, "application/json", next is null
+                    ? JsonSerializer.Serialize(new { ok = true, later = true, name = _name })
+                    : JsonSerializer.Serialize(new { ok = true, next }));
+
+                return _reply;
             }
 
+            _verified.TrySetResult(_key!);
+
             // A first setup also shows the recovery code, on this last page only (see RecoveryCode): written down by the person, never printed.
-            return new OneShotResponse(200, "application/json", prf.FirstStore is { } first
+            _reply = new OneShotResponse(200, "application/json", prf.FirstStore is { } first
                 ? JsonSerializer.Serialize(new { ok = true, code = _code, admin, recovery = RecoveryCode.Format(first.RecoveryCode) })
                 : JsonSerializer.Serialize(new { ok = true, code = _code, admin }));
+
+            return _reply;
         }
 
         /// <summary>Stores the signed manifest after the right code, unless the enrollment has ended or the store changed since it started.</summary>

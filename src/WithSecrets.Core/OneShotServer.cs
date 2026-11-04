@@ -26,7 +26,7 @@ internal sealed record OneShotResponse(int Status, string ContentType, string Bo
 /// </summary>
 internal static class ProofLog
 {
-    public static Action<string> Sink { get; set; } = line => Console.Error.WriteLine(line);
+    public static Action<string> Sink { get; set; } = TerminalPrompt.Noise;
 
     public static void Line(string text) => Sink("with-secrets: " + text);
 }
@@ -38,7 +38,7 @@ internal static class ProofLog
 /// </summary>
 internal static class NetLog
 {
-    public static Action<string> Sink { get; set; } = line => Console.Error.WriteLine(line);
+    public static Action<string> Sink { get; set; } = TerminalPrompt.Noise;
 
     public static void Line(string text) => Sink("with-secrets: " + text);
 
@@ -81,6 +81,42 @@ internal static class HandleGuard
 }
 
 /// <summary>
+/// One page of a <see cref="OneShotServer" />: a path prefix, a random token and the handler. A page made by
+/// <see cref="OneShotServer.Reserve" /> has no handler until <see cref="Bind" />; its requests wait for it.
+/// </summary>
+internal sealed class PageRoute(string prefix, string token, Func<string, string, string, OneShotResponse>? handler)
+{
+    private readonly TaskCompletionSource<Func<string, string, string, OneShotResponse>?> _bound = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public string Prefix => prefix;
+
+    public string Token => token;
+
+    /// <summary>Sets the handler of a reserved page. False when it was bound or taken away already.</summary>
+    public bool Bind(Func<string, string, string, OneShotResponse> handle) => _bound.TrySetResult(handle);
+
+    /// <summary>Called when the page is taken away: whoever waits for the handler gets none.</summary>
+    public void End() => _bound.TrySetResult(null);
+
+    public async Task<Func<string, string, string, OneShotResponse>?> HandlerAsync(TimeSpan wait, CancellationToken cancellation)
+    {
+        if (handler is not null)
+        {
+            return _bound.Task.IsCompleted && _bound.Task.Result is null ? null : handler;
+        }
+
+        try
+        {
+            return await _bound.Task.WaitAsync(wait, cancellation);
+        }
+        catch (TimeoutException)
+        {
+            return null;
+        }
+    }
+}
+
+/// <summary>
 /// A small web server on loopback for one approval. It serves only /{prefix}/{token} and paths under it; every other path
 /// and every other token is 404. The token is 16 random bytes, so only someone given the link can reach the handler.
 /// </summary>
@@ -98,17 +134,22 @@ internal sealed class OneShotServer : IDisposable
     /// <summary>A body still being read after this long is logged once ("body slow").</summary>
     public static TimeSpan SlowBody { get; set; } = TimeSpan.FromSeconds(5);
 
+    /// <summary>A request for a reserved page whose step is not set up yet waits this long, then gets 404.</summary>
+    public static TimeSpan BoundWait { get; set; } = TimeSpan.FromSeconds(60);
+
     private readonly System.Diagnostics.Stopwatch _issued = System.Diagnostics.Stopwatch.StartNew();
 
     private const string StrictPolicy = "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
     private static readonly OneShotResponse NotFound = new(404, "text/plain; charset=utf-8", "Not found.");
 
+    /// <summary>A reserved page whose step never came up or was taken away: readable, nothing of the flow in it.</summary>
+    private static readonly OneShotResponse Gone = new(404, "text/html; charset=utf-8", "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Step ended</title></head><body><p>This step is no longer available. Check the terminal for the reason.</p></body></html>");
+
     private static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds(2);
 
     private readonly WebApplication _app;
-    private readonly string _prefix;
-    private readonly Func<string, string, string, OneShotResponse> _handle;
+    private readonly List<PageRoute> _routes = [];
     private readonly Socket _ipv4;
     private readonly Socket? _ipv6;
     private int _disposed;
@@ -119,9 +160,7 @@ internal sealed class OneShotServer : IDisposable
     /// </summary>
     public OneShotServer(string prefix, int port, Func<string, string, string, OneShotResponse> handle)
     {
-        _prefix = "/" + prefix + "/";
-        _handle = handle;
-        Token = Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(16));
+        First = Add(prefix, handle);
 
         // IPv4 first, which picks the port when it is 0; then IPv6 on that same port.
         try
@@ -232,13 +271,57 @@ internal sealed class OneShotServer : IDisposable
 
     public int Port { get; }
 
-    public string Token { get; }
+    /// <summary>The token of the first page (the one the server was made for).</summary>
+    public string Token => First.Token;
+
+    private PageRoute First { get; }
+
+    /// <summary>Another page on this server, with a new random token. The pages already there are not touched.</summary>
+    public PageRoute Add(string prefix, Func<string, string, string, OneShotResponse>? handle)
+    {
+        PageRoute route = new(prefix, Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(16)), handle);
+        lock (_routes)
+        {
+            _routes.Add(route);
+        }
+
+        return route;
+    }
+
+    /// <summary>A page whose token exists but whose handler is not set yet: a request for it waits for <see cref="PageRoute.Bind" />.</summary>
+    public PageRoute Reserve(string prefix) => Add(prefix, null);
+
+    /// <summary>Takes the first page away (see <see cref="Remove" />).</summary>
+    public void RemoveFirst() => Remove(First);
+
+    /// <summary>Takes the page away: its token then finds nothing (404), and a request still waiting for it is answered 404.</summary>
+    public void Remove(PageRoute route)
+    {
+        lock (_routes)
+        {
+            _routes.Remove(route);
+        }
+
+        route.End();
+    }
 
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 1)
         {
             return;
+        }
+
+        PageRoute[] routes;
+        lock (_routes)
+        {
+            routes = [.. _routes];
+            _routes.Clear();
+        }
+
+        foreach (PageRoute route in routes)
+        {
+            route.End();
         }
 
         try
@@ -322,18 +405,18 @@ internal sealed class OneShotServer : IDisposable
     private async Task Serve(HttpContext context)
     {
         OneShotResponse response;
-        string? suffix = Suffix(context.Request.Path.Value ?? "");
-        if (suffix is null)
+        (PageRoute? route, string? suffix) = Resolve(context.Request.Path.Value ?? "");
+        if (route is null || suffix is null)
         {
             response = NotFound;
         }
         else
         {
-            string route = NetLog.Route(suffix);
-            NetLog.Line($"request {NetLog.Method(context.Request.Method)} /{route} (headers read, {NetLog.Seconds(_issued)})");
+            string word = NetLog.Route(suffix);
+            NetLog.Line($"request {NetLog.Method(context.Request.Method)} /{word} (headers read, {NetLog.Seconds(_issued)})");
             using CancellationTokenSource slowEnd = new();
             _ = Task.Delay(SlowBody, slowEnd.Token).ContinueWith(
-                finished => NetLog.Line($"request {NetLog.Method(context.Request.Method)} /{route} body slow ({NetLog.Seconds(_issued)})"),
+                finished => NetLog.Line($"request {NetLog.Method(context.Request.Method)} /{word} body slow ({NetLog.Seconds(_issued)})"),
                 CancellationToken.None,
                 TaskContinuationOptions.OnlyOnRanToCompletion,
                 TaskScheduler.Default);
@@ -364,9 +447,12 @@ internal sealed class OneShotServer : IDisposable
 
             try
             {
+                // A page reserved for the next step waits here until its step is set up (or the page is taken away).
+                Func<string, string, string, OneShotResponse>? handle = timedOut || body is null ? null : await route.HandlerAsync(BoundWait, context.RequestAborted);
                 response = timedOut ? new OneShotResponse(408, "text/plain; charset=utf-8", "The request body did not arrive in time.")
                     : body is null ? new OneShotResponse(400, "text/plain; charset=utf-8", "The request body is over 1 MB or not UTF-8.", Outcome: "invalid body")
-                    : _handle(context.Request.Method, suffix, body);
+                    : handle is null ? Gone
+                    : handle(context.Request.Method, suffix, body);
             }
             catch (Exception)
             {
@@ -406,22 +492,32 @@ internal sealed class OneShotServer : IDisposable
     }
 
     /// <summary>"" for /{prefix}/{token} or /{prefix}/{token}/, the rest for /{prefix}/{token}/rest, null for anything else.</summary>
-    private string? Suffix(string path)
+    private (PageRoute? Route, string? Suffix) Resolve(string path)
     {
-        if (!path.StartsWith(_prefix, StringComparison.Ordinal))
+        PageRoute[] routes;
+        lock (_routes)
         {
-            return null;
+            routes = [.. _routes];
         }
 
-        string rest = path[_prefix.Length..];
-        int slash = rest.IndexOf('/', StringComparison.Ordinal);
-        string token = slash < 0 ? rest : rest[..slash];
-        if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(token), Encoding.UTF8.GetBytes(Token)))
+        foreach (PageRoute route in routes)
         {
-            return null;
+            string start = "/" + route.Prefix + "/";
+            if (!path.StartsWith(start, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            string rest = path[start.Length..];
+            int slash = rest.IndexOf('/', StringComparison.Ordinal);
+            string token = slash < 0 ? rest : rest[..slash];
+            if (CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(token), Encoding.UTF8.GetBytes(route.Token)))
+            {
+                return (route, slash < 0 ? "" : rest[(slash + 1)..]);
+            }
         }
 
-        return slash < 0 ? "" : rest[(slash + 1)..];
+        return (null, null);
     }
 
     private sealed class QuietLifetime : IHostLifetime

@@ -401,7 +401,16 @@ internal static class GrantTests
             pages.Add(page);
             if (approve-- > 0)
             {
-                TestState.Approve(client, url, link.GetLeftPart(UriPartial.Authority), link.IdnHost, admin);
+                (_, string reply) = TestState.Approve(client, url, link.GetLeftPart(UriPartial.Authority), link.IdnHost, admin);
+
+                // The approval leads to the next page by itself: read it, then end it.
+                if (RecoveryTests.Member(reply, "next") is { } next)
+                {
+                    Uri following = new(next);
+                    string followUrl = "http://127.0.0.1:" + following.Port + following.AbsolutePath;
+                    pages.Add(TestState.Get(client, followUrl).Body);
+                    TestState.Post(client, followUrl + "/deny", "");
+                }
             }
             else
             {
@@ -507,13 +516,20 @@ internal static class GrantTests
                 {
                     TestState.Get(client, url);
                     TestState.Post(client, url + "/deny", "");
-                }
-                else
-                {
-                    TestState.Approve(client, url, origin, link.IdnHost, admin);
+
+                    continue;
                 }
 
-                continue;
+                // The approval answers with the address of the enrollment page: the page moves on by itself.
+                (_, string approved) = TestState.Approve(client, url, origin, link.IdnHost, admin);
+                if (RecoveryTests.Member(approved, "next") is not { } next)
+                {
+                    continue;
+                }
+
+                link = new Uri(next);
+                url = "http://127.0.0.1:" + link.Port + link.AbsolutePath;
+                origin = link.GetLeftPart(UriPartial.Authority);
             }
 
             (_, string page) = TestState.Get(client, url);

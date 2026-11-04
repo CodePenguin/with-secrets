@@ -16,18 +16,18 @@ namespace WithSecrets.Tests;
 /// </summary>
 internal static class RecoveryTests
 {
-    private static readonly string[] Names = ["A_NAME", "B_NAME", "C_NAME"];
+    internal static readonly string[] Names = ["A_NAME", "B_NAME", "C_NAME"];
 
-    private static readonly Dictionary<string, string> Values = new(StringComparer.Ordinal)
+    internal static readonly Dictionary<string, string> Values = new(StringComparer.Ordinal)
     {
         ["A_NAME"] = "Recov-Alpha-Secret-1",
         ["B_NAME"] = "Recov-Bravo-Secret-2",
         ["C_NAME"] = "Recov-Charlie-Secret-3",
     };
 
-    private static readonly ApprovalSettings Local = new("passkey", null, 0, TimeSpan.FromSeconds(20));
+    internal static readonly ApprovalSettings Local = new("passkey", null, 0, TimeSpan.FromSeconds(20));
 
-    private static readonly Regex CodePattern = new("[A-Z2-7]{4}(-[A-Z2-7]{4}){7}", RegexOptions.CultureInvariant);
+    internal static readonly Regex CodePattern = new("[A-Z2-7]{4}(-[A-Z2-7]{4}){7}", RegexOptions.CultureInvariant);
 
     public static async Task Run(Action<bool, string> check)
     {
@@ -172,7 +172,7 @@ internal static class RecoveryTests
     // Rig
     // ---------------------------------------------------------------------------------------------------------------
 
-    private sealed class Flow
+    internal sealed class Flow
     {
         private readonly BlockingCollection<string> _links = [];
         private readonly BlockingCollection<string?> _codes = [];
@@ -234,7 +234,7 @@ internal static class RecoveryTests
         }
     }
 
-    private static (EnrollmentTarget Primary, EnrollmentTarget Local) Targets(StateDatabase db, Action<string> announce, Func<string?>? readCode, ApprovalSettings? settings = null)
+    internal static (EnrollmentTarget Primary, EnrollmentTarget Local) Targets(StateDatabase db, Action<string> announce, Func<string?>? readCode, ApprovalSettings? settings = null)
     {
         settings ??= Local;
         PasskeyMethod method = new(new PasskeyStore(db), settings, readCode);
@@ -243,10 +243,10 @@ internal static class RecoveryTests
         return (target, target);
     }
 
-    private sealed record World(StateDatabase Db, SecretStore Store, string Folder, TestAuthenticator Laptop, TestAuthenticator? Phone, string Code);
+    internal sealed record World(StateDatabase Db, SecretStore Store, string Folder, TestAuthenticator Laptop, TestAuthenticator? Phone, string Code);
 
     /// <summary>A state with a laptop admin, optionally a phone admin and a viewer (not an admin), and three secrets with a known recovery code.</summary>
-    private static World NewWorld(string root, TestAuthenticator laptop, TestAuthenticator? phone = null, TestAuthenticator? viewer = null)
+    internal static World NewWorld(string root, TestAuthenticator laptop, TestAuthenticator? phone = null, TestAuthenticator? viewer = null)
     {
         string folder = Path.Combine(root, "w-" + Guid.NewGuid().ToString("N"));
         StateDatabase db = StateDatabase.InFolder(folder);
@@ -271,7 +271,7 @@ internal static class RecoveryTests
     }
 
     /// <summary>The secrets as an approved run by <paramref name="who" /> reads them (null when the store does not open for it).</summary>
-    private static Dictionary<string, string>? ReadAll(StateDatabase db, TestAuthenticator who)
+    internal static Dictionary<string, string>? ReadAll(StateDatabase db, TestAuthenticator who)
     {
         try
         {
@@ -287,7 +287,7 @@ internal static class RecoveryTests
     }
 
     /// <summary>The state as the tests compare it: manifest text, every row, in order. Sign counts and audit rows are not in it (they move on a refusal).</summary>
-    private static string Snapshot(StateDatabase db)
+    internal static string Snapshot(StateDatabase db)
     {
         SqliteConnection.ClearAllPools();
         (Manifest? manifest, Dictionary<string, string> rows) = new SecretStore(db).Snapshot();
@@ -305,7 +305,7 @@ internal static class RecoveryTests
         return Encoding.UTF8.GetString(key);
     }
 
-    private static HttpClient NewClient()
+    internal static HttpClient NewClient()
     {
         HttpClient client = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false });
         client.Timeout = TimeSpan.FromSeconds(20);
@@ -313,7 +313,7 @@ internal static class RecoveryTests
         return client;
     }
 
-    private static JsonElement StartOf(string page)
+    internal static JsonElement StartOf(string page)
     {
         const string open = "<script type=\"application/json\" id=\"start\">";
         int from = page.IndexOf(open, StringComparison.Ordinal);
@@ -329,7 +329,7 @@ internal static class RecoveryTests
     }
 
     /// <summary>The first-run page: registers <paramref name="key" /> over <paramref name="text" />, signs the first manifest, returns (page, reply to /create, reply to /sign).</summary>
-    private static (string Page, string Create, string Sign) RegisterFirst(HttpClient client, (string Url, string Origin) link, TestAuthenticator key, string text)
+    internal static (string Page, string Create, string Sign) RegisterFirst(HttpClient client, (string Url, string Origin) link, TestAuthenticator key, string text)
     {
         (_, string page) = TestState.Get(client, link.Url);
         JsonElement start = StartOf(page);
@@ -344,7 +344,24 @@ internal static class RecoveryTests
         return (page, create, sign);
     }
 
-    private static string? Member(string json, string name)
+    /// <summary>The next step's link from a step's reply (<c>next</c>), mapped to the loopback address the test client uses.</summary>
+    internal static (string Url, string Origin)? NextLink(string reply)
+    {
+        string? next = Member(reply, "next");
+        if (next is null)
+        {
+            return null;
+        }
+
+        Uri uri = new(next);
+
+        return ("http://127.0.0.1:" + uri.Port + uri.AbsolutePath, uri.GetLeftPart(UriPartial.Authority));
+    }
+
+    /// <summary>How many lines of the terminal output carry a link.</summary>
+    internal static int LinkLines(IEnumerable<string> lines) => lines.Count(line => line.Contains("http://", StringComparison.Ordinal) || line.Contains("https://", StringComparison.Ordinal));
+
+    internal static string? Member(string json, string name)
     {
         try
         {
@@ -359,7 +376,7 @@ internal static class RecoveryTests
     }
 
     /// <summary>Every form of the code a leak could take: text with and without dashes, lower case, hex, base64 and base64url of the bytes.</summary>
-    private static string[] CodeForms(string codeText)
+    internal static string[] CodeForms(string codeText)
     {
         RecoveryCode.TryParse(codeText, out byte[] bytes);
         string plain = codeText.Replace("-", "", StringComparison.Ordinal);
@@ -367,7 +384,7 @@ internal static class RecoveryTests
         return [codeText, plain, codeText.ToLowerInvariant(), plain.ToLowerInvariant(), .. WebApprovalTests.Forms(bytes)];
     }
 
-    private static bool Holds(IEnumerable<string> texts, string[] forms) => texts.Any(text => forms.Any(form => text.Contains(form, StringComparison.Ordinal)));
+    internal static bool Holds(IEnumerable<string> texts, string[] forms) => texts.Any(text => forms.Any(form => text.Contains(form, StringComparison.Ordinal)));
 
     /// <summary>True when any file of the folder (and its sub folders) holds the code in any form or as raw bytes.</summary>
     private static bool FolderHoldsCode(string folder, string codeText)
@@ -383,9 +400,9 @@ internal static class RecoveryTests
         return CodeForms(codeText).Any(form => WebApprovalTests.FolderHolds(folder, Encoding.UTF8.GetBytes(form))) || WebApprovalTests.FolderHolds(folder, bytes);
     }
 
-    private static string Audit(StateDatabase db) => StateDatabaseTests.AuditText(db.FilePath);
+    internal static string Audit(StateDatabase db) => StateDatabaseTests.AuditText(db.FilePath);
 
-    private static IReadOnlyList<AuditRecord> AuditRows(StateDatabase db)
+    internal static IReadOnlyList<AuditRecord> AuditRows(StateDatabase db)
     {
         return new AuditLog(db).TryRead(50, null, out IReadOnlyList<AuditRecord> rows, out _) ? rows : [];
     }
@@ -485,7 +502,7 @@ internal static class RecoveryTests
     // ---------------------------------------------------------------------------------------------------------------
 
     /// <summary>The page-1 body that sends <paramref name="code" /> sealed to the page's key (the scheme of the set page).</summary>
-    private static string SealedCode(JsonElement start, string code)
+    internal static string SealedCode(JsonElement start, string code)
     {
         byte[] bind = Base64Url.DecodeFromChars(start.GetProperty("bind").GetString()!);
         byte[] point = Base64Url.DecodeFromChars(start.GetProperty("serverKey").GetString()!);
@@ -509,9 +526,9 @@ internal static class RecoveryTests
         });
     }
 
-    private static readonly DateTimeOffset Stamp = new(2026, 11, 3, 12, 0, 0, TimeSpan.Zero);
+    internal static readonly DateTimeOffset Stamp = new(2026, 11, 3, 12, 0, 0, TimeSpan.Zero);
 
-    private static Flow StartRecover(StateDatabase db, Action? beforeSwap = null)
+    internal static Flow StartRecover(StateDatabase db, Action? beforeSwap = null)
     {
         return new Flow((announce, read) =>
         {
@@ -521,14 +538,14 @@ internal static class RecoveryTests
         });
     }
 
-    private static (int Status, string Body) SendCode(HttpClient client, (string Url, string Origin) link, string code)
+    internal static (int Status, string Body) SendCode(HttpClient client, (string Url, string Origin) link, string code)
     {
         (_, string page) = TestState.Get(client, link.Url);
 
         return TestState.Post(client, link.Url + "/code", SealedCode(StartOf(page), code));
     }
 
-    private static string[] Files(string folder) => [.. Directory.EnumerateFiles(folder).Select(Path.GetFileName).OfType<string>().Order(StringComparer.Ordinal)];
+    internal static string[] Files(string folder) => [.. Directory.EnumerateFiles(folder).Select(Path.GetFileName).OfType<string>().Order(StringComparer.Ordinal)];
 
     private static async Task Recover(Action<bool, string> check, string root)
     {
@@ -550,7 +567,8 @@ internal static class RecoveryTests
             (string Url, string Origin)? one = flow.Next();
             string pageOne = one is null ? "" : TestState.Get(client, one.Value.Url).Body;
             (int codeStatus, string codeBody) = one is null ? (0, "") : SendCode(client, one.Value, w.Code.ToLowerInvariant().Replace('-', ' '));
-            (string Url, string Origin)? two = flow.Next();
+            (string Url, string Origin)? two = NextLink(codeBody);
+            int replayOne = one is null ? 0 : TestState.Post(client, one.Value.Url + "/code", SealedCode(StartOf(pageOne), w.Code)).Status;
             (string page, string create, string sign) = two is null ? ("", "", "") : RegisterFirst(client, two.Value, fresh, text);
             string newCode = Member(sign, "recovery") ?? "";
             flow.Type(Member(sign, "code"));
@@ -558,6 +576,9 @@ internal static class RecoveryTests
             SqliteConnection.ClearAllPools();
 
             check(result.Code == 0, "recover: done (" + result.Detail + ")");
+            check(LinkLines(flow.Lines) == 1 && !Holds([.. flow.Lines, pageOne, codeBody, page, create, sign, result.Detail], ["Go back to the terminal", "go back to the terminal"]), "recover one flow: the terminal gets exactly one link line and never says go back to the terminal (" + LinkLines(flow.Lines) + ")");
+            check(one is not null && two is not null && new Uri(one.Value.Url).Port == new Uri(two.Value.Url).Port && one.Value.Url != two.Value.Url && Member(codeBody, "next") is { } nextUrl && nextUrl.Contains("/c/", StringComparison.Ordinal), "recover one flow: page 1 answers the right code with next, the new-store page on the same port with a new token (" + codeBody + ")");
+            check(replayOne == 404, "recover one flow: replaying step 1 after step 2 started changes nothing (" + replayOne + ")");
             check(flow.Lines.Count >= 2 && flow.Lines[0] == AdminKey.Line(before) + "\nCompare it with the fingerprint you noted. If it differs, do not type the code." && flow.Lines[1].StartsWith(StoreRecovery.AnnouncePrefix, StringComparison.Ordinal), "recover: the old admin fingerprint line and the compare warning are printed before the page-1 link");
             check(codeStatus == 200 && codeBody.Contains("\"ok\":true", StringComparison.Ordinal) && two is not null, "recover: the right code (typed in lower case with spaces) is accepted on page 1 and the new passkey page follows (" + codeStatus + ")");
             Manifest? after = TestState.Current(w.Db);
@@ -625,8 +646,8 @@ internal static class RecoveryTests
             (string Url, string Origin)? one = flow.Next();
             if (one is not null)
             {
-                SendCode(client, one.Value, w.Code);
-                (string Url, string Origin)? two = flow.Next();
+                (_, string codeReply) = SendCode(client, one.Value, w.Code);
+                (string Url, string Origin)? two = NextLink(codeReply);
                 if (two is not null)
                 {
                     (_, _, string sign) = RegisterFirst(client, two.Value, fresh, text);
@@ -656,8 +677,8 @@ internal static class RecoveryTests
             }
             else if (one is not null)
             {
-                SendCode(client, one.Value, w.Code);
-                (string Url, string Origin)? two = flow.Next();
+                (_, string codeReply) = SendCode(client, one.Value, w.Code);
+                (string Url, string Origin)? two = NextLink(codeReply);
                 if (two is not null && how == 0)
                 {
                     TestState.Get(client, two.Value.Url);
@@ -710,7 +731,7 @@ internal static class RecoveryTests
     // --rotate-key
     // ---------------------------------------------------------------------------------------------------------------
 
-    private static Flow StartRotate(World w, Action<Dictionary<string, string>>? tamper = null, ApprovalSettings? settings = null)
+    internal static Flow StartRotate(World w, Action<Dictionary<string, string>>? tamper = null, ApprovalSettings? settings = null)
     {
         return new Flow((announce, read) =>
         {
@@ -740,7 +761,9 @@ internal static class RecoveryTests
             (string Url, string Origin)? one = flow.Next();
             string pageOne = one is null ? "" : TestState.Get(client, one.Value.Url).Body;
             (int status1, string body1) = one is null ? (0, "") : TestState.Approve(client, one.Value.Url, one.Value.Origin, "localhost", laptop);
-            (string Url, string Origin)? two = flow.Next();
+            string proofOne = TestState.LastProofBody;
+            (string Url, string Origin)? two = NextLink(body1);
+            (int replayTap1, string replayReply1) = one is null ? (0, "") : TestState.Post(client, one.Value.Url + "/proof", proofOne);
             string pageTwo = two is null ? "" : TestState.Get(client, two.Value.Url).Body;
             (int status2, string body2) = two is null ? (0, "") : TestState.Approve(client, two.Value.Url, two.Value.Origin, "localhost", laptop);
             string resentBody = TestState.LastProofBody;
@@ -748,11 +771,14 @@ internal static class RecoveryTests
             ConfigChange result = flow.Result();
             SqliteConnection.ClearAllPools();
             string? newCode = Member(body2, "recovery");
-            check(resentStatus is 404 or 409 or 0 && Member(resentReply, "recovery") is null && !CodePattern.IsMatch(resentReply), "rotate: the same proof sent again (a page resend) gets 404 and no second code (" + resentStatus + ")");
+            check(resentStatus is 404 or 409 or 0 || (resentStatus == 200 && resentReply == body2), "rotate: the same proof sent again (a page resend) gets nothing new: the very same reply, never a second code (" + resentStatus + ")");
 
             check(result.Code == 0 && status1 == 200 && status2 == 200, $"rotate: done after two taps ({result.Code} {result.Detail}; {status1}, {status2})");
+            check(LinkLines(flow.Lines) == 1 && !Holds([.. flow.Lines, pageOne, pageTwo, body1, body2, result.Detail], ["Go back to the terminal", "go back to the terminal"]), "rotate one flow: the terminal gets exactly one link line and never says go back to the terminal (" + LinkLines(flow.Lines) + ")");
+            check(one is not null && two is not null && new Uri(one.Value.Url).Port == new Uri(two.Value.Url).Port && one.Value.Url != two.Value.Url && Member(body1, "next") is not null, "rotate one flow: tap 1 answers with next, the Step 2 page on the same port with a new token (" + body1 + ")");
+            check(replayTap1 == 200 && replayReply1 == body1, "rotate one flow: replaying tap 1 after step 2 started gets the very same reply (the same next), nothing new (" + replayTap1 + ")");
             check(pageOne.Contains("These keys will be removed and must be enrolled again with --enroll: ", StringComparison.Ordinal) && pageOne.Contains("phone", StringComparison.Ordinal), "rotate: page 1 lists the keys that will be removed");
-            check(flow.Lines.Count >= 3 && flow.Lines[0] == AdminKey.Line(before) + "\nCompare it with the fingerprint you noted. If it differs, do not approve." && flow.Lines[1].StartsWith("Approval needed", StringComparison.Ordinal), "rotate: the old admin fingerprint line and the compare warning are printed before the page-1 link");
+            check(flow.Lines.Count >= 2 && flow.Lines[0] == AdminKey.Line(before) + "\nCompare it with the fingerprint you noted. If it differs, do not approve." && flow.Lines[1].StartsWith("Approval needed", StringComparison.Ordinal), "rotate: the old admin fingerprint line and the compare warning are printed before the page-1 link");
             check(result.Detail.Contains("shown on the last page only once. If the page did not show it (lost connection), the old code is already dead: run --rotate-key again.", StringComparison.Ordinal), "rotate: the terminal text says the code is shown once and what to do if it was missed");
             check(pageTwo.Contains("Step 2 of 2", StringComparison.Ordinal) && pageTwo.Contains("id=\"approve\"", StringComparison.Ordinal), "rotate: page 2 is Step 2 of 2 with its own explicit button");
             Manifest? after = TestState.Current(w.Db);
@@ -791,12 +817,8 @@ internal static class RecoveryTests
             {
                 Flow flow = StartRotate(w);
                 (string Url, string Origin)? one = flow.Next();
-                if (one is not null)
-                {
-                    TestState.Approve(client, one.Value.Url, one.Value.Origin, "localhost", laptop);
-                }
-
-                (string Url, string Origin)? two = flow.Next();
+                string reply1 = one is null ? "" : TestState.Approve(client, one.Value.Url, one.Value.Origin, "localhost", laptop).Body;
+                (string Url, string Origin)? two = NextLink(reply1);
                 if (two is not null)
                 {
                     TestState.Approve(client, two.Value.Url, two.Value.Origin, "localhost", laptop);
@@ -841,13 +863,14 @@ internal static class RecoveryTests
             (string Url, string Origin)? one = flow.Next();
             int status1 = 0;
             int status2 = 0;
+            string body1 = "";
             string body2 = "";
             if (one is not null)
             {
-                (status1, _) = TestState.Approve(client, one.Value.Url, one.Value.Origin, "localhost", which == 2 ? viewer : laptop, which == 6 ? PrfMode.OtherOwnSalt : PrfMode.Normal, which == 6 ? phone : null);
+                (status1, body1) = TestState.Approve(client, one.Value.Url, one.Value.Origin, "localhost", which == 2 ? viewer : laptop, which == 6 ? PrfMode.OtherOwnSalt : PrfMode.Normal, which == 6 ? phone : null);
             }
 
-            (string Url, string Origin)? two = status1 == 200 ? flow.Next() : null;
+            (string Url, string Origin)? two = status1 == 200 ? NextLink(body1) : null;
             if (two is not null)
             {
                 if (which == 0)

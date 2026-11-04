@@ -73,6 +73,8 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
 
     public ConfigChange Run()
     {
+        // One link for the whole command: the code page and the page of the new passkey share one server (see PageFlow).
+        using IDisposable flow = PageFlow.Enter();
         ConfigChange change;
         try
         {
@@ -281,17 +283,21 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
     private byte[]? AskCode(ApprovalSettings settings, Manifest manifest, out string? why)
     {
         (byte[] serverKey, string publicKey) = SecretCrypto.NewServerKey();
-        CodeSession session = new(manifest, serverKey);
+        // The page after this one is the new store's first setup, served at the same place; this page's reply to the right code leads to it.
+        PageFlow.Plan(SettingsPage.PathPrefix, settings);
+        CodeSession session = new(manifest, serverKey, PageFlow.Current is { } flow ? flow.TakeNext : null);
         try
         {
-            using OneShotServer server = new(PathPrefix, settings.Port, session.Handle);
+            using PageSlot server = PageFlow.Open(PathPrefix, settings.Port, session.Handle).Keep();
+            PageFlow.OnEnd(session.Forget);
             string origin = settings.PageOrigin(server.Port);
             byte[] bind = RandomNumberGenerator.GetBytes(32);
             session.Open(bind, RecoveryPage.Build(AdminKey.Line(manifest), bind, publicKey, manifest.Secrets.Count));
+            server.Ready();
             announce(AdminKey.Line(manifest) + "\nCompare it with the fingerprint you noted. If it differs, do not type the code.");
             announce(AnnouncePrefix + origin + "/" + PathPrefix + "/" + server.Token);
 
-            return session.Wait(settings.Timeout, out why);
+            return session.Wait(PageFlow.Left(settings.Timeout), out why);
         }
         finally
         {
@@ -303,7 +309,7 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
     /// The state of page 1. Requests are handled one at a time under one lock. At most three codes are tried; a code that does
     /// not open the store, the time limit, Cancel and any error end it without a key.
     /// </summary>
-    private sealed class CodeSession(Manifest manifest, byte[] serverKey)
+    private sealed class CodeSession(Manifest manifest, byte[] serverKey, Func<string?>? takeNext)
     {
         private const int Tries = 3;
 
@@ -317,6 +323,8 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
         private byte[]? _bind;
         private OneShotResponse? _page;
         private int _wrong;
+        private OneShotResponse? _reply;
+        private byte[]? _replyFor;
 
         public void Open(byte[] bind, OneShotResponse page)
         {
@@ -378,9 +386,14 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
         {
             lock (_gate)
             {
-                if (_bind is null || _page is null || _result.Task.IsCompleted)
+                if (_bind is null || _page is null)
                 {
                     return NotFound;
+                }
+
+                if (_result.Task.IsCompleted)
+                {
+                    return Again(verb, suffix, body);
                 }
 
                 switch (verb, suffix)
@@ -444,10 +457,17 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
                     return Wrong("That recovery code does not open this store.");
                 }
 
+                // The next step's page is made now, after the code opened the store and before the command goes on.
+                string? next = takeNext?.Invoke();
                 _result.TrySetResult(key);
                 key = null;
+                OneShotResponse reply = next is null ? Ok : new OneShotResponse(200, "application/json", JsonSerializer.Serialize(new { ok = true, next }));
 
-                return Ok;
+                // Kept for this one body: if the reply is lost, the same sealed code sent again gets it again (and opens nothing a second time).
+                _reply = reply;
+                _replyFor = SHA256.HashData(Encoding.UTF8.GetBytes(body));
+
+                return reply;
             }
             catch (CryptographicException)
             {
@@ -459,6 +479,27 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
                 SecretValues.Clear(typed);
                 SecretValues.Clear(master);
                 SecretValues.Clear(key);
+            }
+        }
+
+        private OneShotResponse Again(string verb, string suffix, string body)
+        {
+            if (verb == "POST" && suffix == "code" && _reply is not null && _replyFor is not null
+                && CryptographicOperations.FixedTimeEquals(SHA256.HashData(Encoding.UTF8.GetBytes(body)), _replyFor))
+            {
+                return _reply;
+            }
+
+            return NotFound;
+        }
+
+        /// <summary>Drops the kept reply (the flow ended).</summary>
+        public void Forget()
+        {
+            lock (_gate)
+            {
+                _reply = null;
+                _replyFor = null;
             }
         }
 
@@ -497,6 +538,8 @@ internal static class RecoveryPage
             function show(text) {
                 status.textContent = text + (diagLine ? " " + diagLine : "");
             }
+
+            //@FOLLOW@
 
             function finish(text) {
                 finished = true;
@@ -578,7 +621,7 @@ internal static class RecoveryPage
                         clearTimeout(timer);
                         diagLine = "";
                         if (resent && (reply.status === 404 || reply.status === 409)) {
-                            finish("The program already finished this request. Check the terminal.");
+                            finish("The program already finished this request. If this page did not move on, press Ctrl+C in the terminal and run the command again.");
                             return new Promise(function () { });
                         }
                         return reply;
@@ -699,7 +742,11 @@ internal static class RecoveryPage
                     busy = false;
                     return reply.json().then(function (data) {
                         if (reply.ok && data && data.ok === true) {
-                            finish("The recovery code was accepted. Nothing has changed yet. Go back to the terminal: it shows the link for the next step, where you make a new passkey.");
+                            if (typeof data.next === "string") {
+                                follow(data.next);
+                                return;
+                            }
+                            finish("The recovery code was accepted, but the program gave no next step to open. Nothing was changed.");
                             return;
                         }
                         if (data && data.final === true) {
@@ -735,7 +782,7 @@ internal static class RecoveryPage
     /// <summary>Builds the page. Script and style line endings become LF before hashing and output, so the CSP hashes match what is served.</summary>
     public static OneShotResponse Build(string adminLine, byte[] bind, string serverKey, int secretCount)
     {
-        string script = Script.ReplaceLineEndings("\n");
+        string script = PageContinue.Fill(Script).ReplaceLineEndings("\n");
         string style = (ApprovalPage.Style + Style).ReplaceLineEndings("\n");
         string policy = ApprovalPage.Policy(script, style);
         string json = JsonSerializer.Serialize(new Dictionary<string, string>
@@ -762,7 +809,7 @@ internal static class RecoveryPage
         page.Append("<div class=\"buttons\">");
         page.Append("<button id=\"deny\" type=\"button\">Cancel</button>");
         page.Append("<button id=\"unlock\" type=\"button\">Check the recovery code</button>");
-        page.Append("</div>\n<p id=\"status\" role=\"status\"></p>\n</main>\n");
+        page.Append("</div>\n<p id=\"status\" role=\"status\"></p>\n" + PageContinue.Box + "</main>\n");
         page.Append("<script type=\"application/json\" id=\"start\">").Append(json).Append("</script>\n");
         page.Append("<script>").Append(script).Append("</script>\n</body>\n</html>\n");
 

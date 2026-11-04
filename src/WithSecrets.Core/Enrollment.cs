@@ -101,6 +101,9 @@ public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget 
                 return NoTarget();
             }
 
+            // One link: the approval page leads to the page of the new passkey, and that page to the admin's signature when it is on another host.
+            using IDisposable flow = PageFlow.Enter();
+            PageFlow.Plan("e", command.Approver.Settings);
             string text = $"Add a {Method.Id} for {command.Approver.Origin}. Its name is chosen on the next page.";
             // The admin passkey that approves also releases the master key (WebAuthn PRF), so that the new key can get its slot.
             ApprovalDecision asked = approval.Approver.Ask(new ApprovalPrompt(Heading, text), unlock: true);
@@ -110,6 +113,8 @@ public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget 
                 {
                     return asked;
                 }
+
+                PageFlow.Plan("a", approval.Approver.Settings);
 
                 return Method.Enroll(Suggest(entries.Select(item => item.Name)), announce,
                     manifest => approval.Approver.AskManifest(new ApprovalPrompt(Heading, SignText(manifest, entries)), manifest), asked.Unlock);

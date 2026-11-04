@@ -57,6 +57,7 @@ public sealed class SettingsPage(StateDatabase db, EnrollmentTarget primaryTarge
 
     public ConfigChange Run()
     {
+        using IDisposable flow = PageFlow.Enter();
         if (!db.TryManifest(out Manifest? manifest, out string? error))
         {
             return new ConfigChange(RunCommand.StoreError, error!);
@@ -608,7 +609,7 @@ internal static class ConfigPageHtml
                         clearTimeout(timer);
                         diagLine = "";
                         if (resent && (reply.status === 404 || reply.status === 409)) {
-                            finish("The program already finished this request. Check the terminal.");
+                            finish("The program already finished this request. If this page did not move on, press Ctrl+C in the terminal and run the command again.");
                             return new Promise(function () { });
                         }
                         return reply;

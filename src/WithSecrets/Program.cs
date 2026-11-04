@@ -14,7 +14,7 @@ internal static class Program
         CliCommand? command = CliArgs.Parse(args, out string error);
         if (command is null)
         {
-            Console.Error.WriteLine("with-secrets: " + error);
+            TerminalPrompt.Final("with-secrets: " + error);
 
             return RunCommand.Usage;
         }
@@ -62,31 +62,31 @@ internal static class Program
                 }
                 catch (Exception failure)
                 {
-                    Console.Error.WriteLine("with-secrets: cannot read the secret store: " + failure.Message);
+                    TerminalPrompt.Final("with-secrets: cannot read the secret store: " + failure.Message);
 
                     return RunCommand.StoreError;
                 }
 
             case CliCommand.Set or CliCommand.Remove:
-                return HumanCommands.Change(command, store, state, command.Port);
+                return CommandWiring.Change(command, store, state, command.Port);
 
             case CliCommand.Revoke:
-                return HumanCommands.Revoke(state, grants, command.Port);
+                return CommandWiring.Revoke(state, grants, command.Port);
 
             case CliCommand.Enroll or CliCommand.Enrolled or CliCommand.Unenroll:
-                return HumanCommands.Passkeys(command, state, command.Port);
+                return CommandWiring.Passkeys(command, state, command.Port);
 
             case CliCommand.Config { Show: true }:
                 return ConfigShow.Run(state, Console.Out, Console.Error);
 
             case CliCommand.Recover:
-                return HumanCommands.Recover(state, command.Port);
+                return CommandWiring.Recover(state, command.Port);
 
             case CliCommand.RotateKey:
-                return HumanCommands.RotateKey(state, store, command.Port);
+                return CommandWiring.RotateKey(state, store, command.Port);
 
             case CliCommand.Config:
-                return HumanCommands.Config(state, command.Port);
+                return CommandWiring.Config(state, command.Port);
         }
 
         RunArgs parsed = ((CliCommand.Run)command).Args;
@@ -94,19 +94,7 @@ internal static class Program
         using Stream stderr = Console.OpenStandardError();
         using StreamWriter outWriter = new(stdout, new UTF8Encoding(false)) { AutoFlush = true };
         using StreamWriter errWriter = new(stderr, new UTF8Encoding(false)) { AutoFlush = true };
-        ApprovalSettings? settings = HumanCommands.LoadSettings(state, command.Port);
-        if (settings is null)
-        {
-            return RunCommand.StoreError;
-        }
-
-        // The page is served at the first target where an enrolled passkey works. When none works, the primary approver
-        // gives its own message (set up the first passkey with --config) and the run is denied.
-        (EnrollmentTarget primary, EnrollmentTarget local) = HumanCommands.Targets(state, settings, line => errWriter.WriteLine(line), null);
-        WebApprover approver = (EnrollmentTarget.FirstThatCanProve(primary, local) ?? primary).Approver;
-        RunCommand run = new(store, approver, new AuditLog(state), outWriter, errWriter, grants, ReuseSettings.Load(state));
-
-        return await run.ExecuteAsync(parsed, Directory.GetCurrentDirectory());
+        return await CommandWiring.Run(state, store, grants, parsed, command.Port, outWriter, errWriter, Directory.GetCurrentDirectory());
     }
 }
 
@@ -116,217 +104,15 @@ internal static class Program
 /// </summary>
 internal static class HumanCommands
 {
-    /// <summary>
-    /// --set and --remove. The values are typed on a web page, never here, so these need no terminal of their own. The
-    /// terminal shows only the link and the result, which has names only.
-    /// </summary>
-    public static int Change(CliCommand command, SecretStore store, StateDatabase state, int? port)
-    {
-        ApprovalSettings? settings = LoadSettings(state, port);
-        if (settings is null)
-        {
-            return RunCommand.StoreError;
-        }
-
-        Action<string> announce = line => Console.Error.WriteLine(line);
-        (EnrollmentTarget primary, EnrollmentTarget local) = Targets(state, settings, announce, null);
-        SecretEntry entry = new(primary, local, store, new AuditLog(state), announce);
-        SecretChange change = command switch
-        {
-            CliCommand.Set set => entry.Set(set.Names),
-            CliCommand.Remove remove => entry.Remove(remove.Names),
-            _ => new SecretChange(RunCommand.Usage, "not a change to the store"),
-        };
-
-        Console.Error.WriteLine(change.Done ? change.Detail : "with-secrets: " + change.Detail);
-
-        return change.Code;
-    }
-
-    /// <summary>--revoke: an admin passkey approves on a web page, then every saved approval ends.</summary>
-    public static int Revoke(StateDatabase state, GrantStore grants, int? port)
-    {
-        ApprovalSettings? settings = LoadSettings(state, port);
-        if (settings is null)
-        {
-            return RunCommand.StoreError;
-        }
-
-        (EnrollmentTarget primary, EnrollmentTarget local) = Targets(state, settings, line => Console.Error.WriteLine(line), null);
-        (int code, string detail) = Revocation.Run(state, primary, local, grants);
-        Console.Error.WriteLine(code == 0 ? detail : "with-secrets: " + detail);
-
-        return code;
-    }
-
-    /// <summary>--enroll, --enrolled and --unenroll. The terminal shows only links and results; never key bytes.</summary>
-    public static int Passkeys(CliCommand command, StateDatabase state, int? port)
-    {
-        ApprovalSettings? settings = LoadSettings(state, port);
-        if (settings is null)
-        {
-            return RunCommand.StoreError;
-        }
-
-        // --local makes the local target the place of the change.
-        Action<string> announce = line => Console.Error.WriteLine(line);
-        (EnrollmentTarget primary, EnrollmentTarget local) = Targets(state, settings, announce, CodeReader("If the page says nothing was added, press Ctrl+C."));
-        bool useLocal = command is CliCommand.Enroll { Local: true } or CliCommand.Unenroll { Local: true };
-        AuditLog audit = new(state);
-        Enrollment enrollment = useLocal ? new(local, primary, announce, audit) : new(primary, local, announce, audit);
-
-        switch (command)
-        {
-            case CliCommand.Enrolled:
-                IReadOnlyList<EnrolledEntry> entries;
-                try
-                {
-                    entries = enrollment.List();
-                }
-                catch (ProofUnavailableException failure)
-                {
-                    Console.Error.WriteLine("with-secrets: " + failure.Message);
-
-                    return RunCommand.StoreError;
-                }
-
-                // The admin keys' fingerprints, then one line per key: name, host, date, and "admin" for each admin key.
-                EnrolledListing.Write(state, entries, Console.Out, Console.Error);
-
-                return 0;
-
-            case CliCommand.Enroll:
-                return Finish(enrollment.Enroll());
-
-            case CliCommand.Unenroll unenroll:
-                return Finish(enrollment.Unenroll(unenroll.Name));
-
-            default:
-                return RunCommand.Usage;
-        }
-    }
-
-    /// <summary>
-    /// --config: the terminal shows only the link and the result. Settings that cannot be read are shown on the page as the
-    /// defaults, so saving there repairs them; the page targets are then the default ones.
-    /// </summary>
-    public static int Config(StateDatabase state, int? port)
-    {
-        ToolSettings settings = ToolSettings.Load(state, out _);
-        Action<string> announce = line => Console.Error.WriteLine(line);
-        Func<string?> readCode = CodeReader("If the page says nothing was saved, press Ctrl+C.");
-        (EnrollmentTarget primary, EnrollmentTarget local) = Targets(state, settings.Approval.WithPort(port), announce, readCode);
-        ConfigChange change = new SettingsPage(state, primary, local, announce, readCode).Run();
-        Console.Error.WriteLine(change.Done ? change.Detail : "with-secrets: " + change.Detail);
-
-        return change.Code;
-    }
-
-    /// <summary>
-    /// --recover: the terminal shows the links (page 1 for the recovery code, page 2 for the new passkey) and the result. The
-    /// recovery code is typed only into the page. The code that the new setup shows is read back in the terminal like --config.
-    /// </summary>
-    public static int Recover(StateDatabase state, int? port)
-    {
-        ToolSettings settings = ToolSettings.Load(state, out _);
-        Action<string> announce = line => Console.Error.WriteLine(line);
-        Func<string?> readCode = CodeReader("If the page says nothing was saved, press Ctrl+C.");
-        (EnrollmentTarget primary, EnrollmentTarget local) = Targets(state, settings.Approval.WithPort(port), announce, readCode);
-        ConfigChange change = new StoreRecovery(state, primary, local, announce, readCode).Run();
-        Console.Error.WriteLine(change.Done ? change.Detail : "with-secrets: " + change.Detail);
-
-        return change.Code;
-    }
-
-    /// <summary>--rotate-key: two taps of an admin key; the terminal shows the links and the result, never a key or the recovery code.</summary>
-    public static int RotateKey(StateDatabase state, SecretStore store, int? port)
-    {
-        ApprovalSettings? settings = LoadSettings(state, port);
-        if (settings is null)
-        {
-            return RunCommand.StoreError;
-        }
-
-        (EnrollmentTarget primary, EnrollmentTarget local) = Targets(state, settings, line => Console.Error.WriteLine(line), null);
-        ConfigChange change = new KeyRotation(state, store, primary, local, line => Console.Error.WriteLine(line)).Run();
-        Console.Error.WriteLine(change.Done ? change.Detail : "with-secrets: " + change.Detail);
-
-        return change.Code;
-    }
-
-    /// <summary>The approval settings, or null after printing why the settings in state.db cannot be used.</summary>
-    public static ApprovalSettings? LoadSettings(StateDatabase state, int? port = null)
-    {
-        ApprovalSettings settings = ApprovalSettings.Load(state, out string? error);
-        if (error is not null)
-        {
-            Console.Error.WriteLine("with-secrets: settings: " + error + " Fix them with: with-secrets --config");
-
-            return null;
-        }
-
-        // --port changes only where this call's page listens; the stored setting is not touched.
-        return settings.WithPort(port);
-    }
-
-    /// <summary>
-    /// Two page targets share one passkey store: the primary one (baseUrl if set) and the local one (baseUrl ignored).
-    /// Without a baseUrl they are the same.
-    /// </summary>
-    public static (EnrollmentTarget Primary, EnrollmentTarget Local) Targets(StateDatabase state, ApprovalSettings settings, Action<string> announce, Func<string?>? readCode)
-    {
-        PasskeyStore passkeys = new(state);
-        EnrollmentTarget Target(ApprovalSettings forPage)
-        {
-            PasskeyMethod method = new(passkeys, forPage, readCode);
-
-            return EnrollmentTarget.For(method, new WebApprover(method, forPage, announce));
-        }
-
-        return (Target(settings), Target(settings with { BaseUrl = null }));
-    }
-
     public static bool RequireTerminal(string message)
     {
         if (Console.IsInputRedirected || Console.IsOutputRedirected || Console.IsErrorRedirected)
         {
-            Console.Error.WriteLine(message);
+            TerminalPrompt.Final(message);
 
             return false;
         }
 
         return true;
-    }
-
-    /// <summary>
-    /// Reads the confirmation code from the page, typed in this terminal. The first prompt says what to do when the page
-    /// failed. The code itself is never printed.
-    /// </summary>
-    private static Func<string?> CodeReader(string firstHint)
-    {
-        int asked = 0;
-
-        return () =>
-        {
-            Console.Error.Write(asked++ == 0
-                ? firstHint + Environment.NewLine + "Code shown in the browser: "
-                : "That code is wrong. Code shown in the browser: ");
-
-            return Console.ReadLine();
-        };
-    }
-
-    private static int Finish(ApprovalDecision decision)
-    {
-        if (!decision.Approved)
-        {
-            Console.Error.WriteLine("with-secrets: " + decision.Detail);
-
-            return RunCommand.Denied;
-        }
-
-        Console.Error.WriteLine(decision.Detail);
-
-        return 0;
     }
 }

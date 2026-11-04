@@ -69,14 +69,20 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
     public ManifestApproval AskManifest(ApprovalPrompt prompt, string manifest) => AskManifest(prompt, manifest, null);
 
     /// <summary>As above; <paramref name="rows" /> is only for a change that also writes secret rows (key rotation), see <see cref="RowsCommit" />.</summary>
-    internal ManifestApproval AskManifest(ApprovalPrompt prompt, string manifest, RowsCommit? rows)
+    internal ManifestApproval AskManifest(ApprovalPrompt prompt, string manifest, RowsCommit? rows) => AskManifest(prompt, manifest, rows, PageFlow.Current?.TakeCode());
+
+    /// <summary>
+    /// As above; <paramref name="code" /> is the confirmation code that the final reply (after the signature verified) shows on the
+    /// page, to be typed in the terminal: the last page of a command that ends with a typed code (<c>--enroll</c> with an admin key at another host).
+    /// </summary>
+    internal ManifestApproval AskManifest(ApprovalPrompt prompt, string manifest, RowsCommit? rows, string? code)
     {
         IProofMethod signing = method is PasskeyMethod passkey && Manifest.Parse(manifest, out _) is { } next ? passkey.Signing(next) : method;
 
-        return Serve(prompt, ReuseOffer.Off, manifest, signing, false, rows);
+        return Serve(prompt, ReuseOffer.Off, manifest, signing, false, rows, code);
     }
 
-    private ManifestApproval Serve(ApprovalPrompt prompt, ReuseOffer reuse, string? manifest, IProofMethod? signing = null, bool unlock = false, RowsCommit? rows = null)
+    private ManifestApproval Serve(ApprovalPrompt prompt, ReuseOffer reuse, string? manifest, IProofMethod? signing = null, bool unlock = false, RowsCommit? rows = null, string? code = null)
     {
         IProofMethod method = signing ?? this.method;
 
@@ -100,8 +106,10 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
 
             lines.Add(ApprovalSummary.IssuedLine(DateTimeOffset.UtcNow));
             prompt = new ApprovalPrompt(ApprovalSummary.Clean(prompt.Heading), string.Join('\n', lines));
-            Session session = new(method, reuse, manifest, prfState, rows);
-            using OneShotServer server = new("a", settings.Port, session.Handle);
+            PageFlow? flow = PageFlow.Current;
+            Session session = new(method, reuse, manifest, prfState, rows, flow is null ? null : flow.TakeNext, code);
+            using PageSlot server = PageFlow.Open("a", settings.Port, session.Handle).Keep();
+            PageFlow.OnEnd(session.Forget);
             string nonce = Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(16));
             ProofContext context = new(RequestBinding.Compute(nonce, prompt.Text), settings.PageOrigin(server.Port));
             ProofStart start;
@@ -119,10 +127,16 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
             }
 
             TimeSpan delay = approveDelay ?? DefaultApproveDelay;
-            session.Open(context, nonce, prompt.Text, ApprovalPage.Build(prompt, start, nonce, rows is null ? context.Bind : SecretCrypto.ManifestBind(context.Bind, rows.Digest()), delay, reuse, manifest, prfKey, rows?.Recovery is not null));
-            announce($"Approval needed. Ask the person to open: {context.Origin}/a/{server.Token}");
+            session.Open(context, nonce, prompt.Text, ApprovalPage.Build(prompt, start, nonce, rows is null ? context.Bind : SecretCrypto.ManifestBind(context.Bind, rows.Digest()), delay, reuse, manifest, prfKey, rows?.Recovery is not null, code));
+            server.Ready();
 
-            return session.Wait(settings.Timeout);
+            // A page reached from the step before is already open in the person's browser: no second link.
+            if (!server.Reserved)
+            {
+                announce($"Approval needed. Ask the person to open: {context.Origin}/a/{server.Token}");
+            }
+
+            return session.Wait(PageFlow.Left(settings.Timeout));
         }
         catch (ProofUnavailableException error)
         {
@@ -142,7 +156,7 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
     }
 
     /// <summary>The state of one request. Requests are handled one at a time; the first decision is final.</summary>
-    private sealed class Session(IProofMethod method, ReuseOffer reuse, string? manifest, byte[]? prfState, RowsCommit? rows = null)
+    private sealed class Session(IProofMethod method, ReuseOffer reuse, string? manifest, byte[]? prfState, RowsCommit? rows = null, Func<string?>? takeNext = null, string? finalCode = null)
     {
         private static readonly OneShotResponse NotFound = new(404, "text/plain; charset=utf-8", "Not found.");
         private static readonly OneShotResponse Ok = new(200, "application/json", "{\"ok\":true}");
@@ -158,6 +172,8 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
         private SignedManifest? _signed;
         private string _nonce = "";
         private string _text = "";
+        private OneShotResponse? _reply;
+        private byte[]? _replyFor;
 
         public void Open(ProofContext context, string nonce, string text, OneShotResponse page)
         {
@@ -202,9 +218,14 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
         {
             lock (_gate)
             {
-                if (_context is null || _page is null || _decision.Task.IsCompleted)
+                if (_context is null || _page is null)
                 {
                     return NotFound;
+                }
+
+                if (_decision.Task.IsCompleted)
+                {
+                    return Again(verb, suffix, body);
                 }
 
                 switch (verb, suffix)
@@ -293,11 +314,21 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
                                 }
                             }
 
+                            // A step that a page follows (the PRF release before a new key or a rotation) makes its next page now, after the
+                            // proof verified and before the command goes on; a signature of a new state makes none.
+                            string? next = manifest is null ? takeNext?.Invoke() : null;
                             if (_decision.TrySetResult(ApprovalDecision.Allow(result.Detail, minutes, evidence, unlock)))
                             {
-                                return rows?.Recovery is { } recovery
-                                    ? new OneShotResponse(200, "application/json", JsonSerializer.Serialize(new { ok = true, recovery }))
-                                    : Ok;
+                                OneShotResponse reply = rows?.Recovery is { } recovery ? new OneShotResponse(200, "application/json", JsonSerializer.Serialize(new { ok = true, recovery }))
+                                    : finalCode is not null && manifest is not null ? new OneShotResponse(200, "application/json", JsonSerializer.Serialize(new { ok = true, code = finalCode }))
+                                    : next is null ? Ok
+                                    : new OneShotResponse(200, "application/json", JsonSerializer.Serialize(new { ok = true, next }));
+
+                                // The reply is kept for this one body: if it is lost on the way, the same body sent again gets it again.
+                                _reply = reply;
+                                _replyFor = SHA256.HashData(Encoding.UTF8.GetBytes(body));
+
+                                return reply;
                             }
 
                             unlock?.Dispose();
@@ -310,6 +341,31 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
                     default:
                         return NotFound;
                 }
+            }
+        }
+
+        /// <summary>
+        /// After the decision: the verified proof sent again, byte for byte, gets the kept reply (it holds the next address or the code, which
+        /// only the browser that sent the proof can have asked for). Any other request gets 404. Called with the lock held.
+        /// </summary>
+        private OneShotResponse Again(string verb, string suffix, string body)
+        {
+            if (verb == "POST" && suffix == "proof" && _reply is not null && _replyFor is not null
+                && CryptographicOperations.FixedTimeEquals(SHA256.HashData(Encoding.UTF8.GetBytes(body)), _replyFor))
+            {
+                return _reply;
+            }
+
+            return NotFound;
+        }
+
+        /// <summary>Drops the kept reply (the flow ended).</summary>
+        public void Forget()
+        {
+            lock (_gate)
+            {
+                _reply = null;
+                _replyFor = null;
             }
         }
 
@@ -438,6 +494,7 @@ internal static class ApprovalPage
             var approveFor = document.getElementById("approve-for");
             var reuse = document.getElementById("reuse");
             var deny = document.getElementById("deny");
+            var code = document.getElementById("code");
             var status = document.getElementById("status");
             var base = location.pathname.replace(/\/+$/, "");
             var encoder = new TextEncoder();
@@ -453,6 +510,8 @@ internal static class ApprovalPage
             function show(text) {
                 status.textContent = text + (diagLine ? " " + diagLine : "");
             }
+
+            //@FOLLOW@
 
             function controls(on) {
                 approve.disabled = !on;
@@ -549,7 +608,7 @@ internal static class ApprovalPage
                         clearTimeout(timer);
                         diagLine = "";
                         if (resent && (reply.status === 404 || reply.status === 409)) {
-                            finish("The program already finished this request. Check the terminal.");
+                            finish("The program already finished this request. If this page did not move on, press Ctrl+C in the terminal and run the command again.");
                             return new Promise(function () { });
                         }
                         return reply;
@@ -771,11 +830,21 @@ internal static class ApprovalPage
                     return post("proof", body).then(function (reply) {
                         busy = false;
                         if (reply.ok) {
-                            finish(minutes > 0 ? "Approved for " + minutes + " minutes. You can close this page." : "Approved once. You can close this page.");
-                            if (start.recovery === "1") {
-                                finish("Done. The keys were changed. Write down the recovery code below before you close this page.");
-                                reply.json().then(function (data) { showRecovery(data); }, function () { });
-                            }
+                            return reply.json().then(function (data) { return data; }, function () { return null; }).then(function (data) {
+                                if (data && typeof data.next === "string") {
+                                    follow(data.next);
+                                    return;
+                                }
+                                finish(minutes > 0 ? "Approved for " + minutes + " minutes. You can close this page." : "Approved once. You can close this page.");
+                                if (start.recovery === "1" && data) {
+                                    finish("Done. The keys were changed. Write down the recovery code below before you close this page.");
+                                    showRecovery(data);
+                                }
+                                if (start.code === "1" && code && data && typeof data.code === "string") {
+                                    finish("Done. Type this code in the terminal to finish.");
+                                    code.textContent = data.code;
+                                }
+                            });
                         } else if (reply.status === 403) {
                             finish("Your passkey was not accepted. The request is denied.");
                         } else if (reply.status === 400) {
@@ -878,20 +947,20 @@ internal static class ApprovalPage
         .hint { margin: 0.4rem 0 0; color: #333; }
         """;
 
-    public static OneShotResponse Build(ApprovalPrompt prompt, ProofStart start, string nonce, byte[] bind, TimeSpan approveDelay, ReuseOffer? reuse = null, string? manifest = null, string? prfKey = null, bool recovery = false)
+    public static OneShotResponse Build(ApprovalPrompt prompt, ProofStart start, string nonce, byte[] bind, TimeSpan approveDelay, ReuseOffer? reuse = null, string? manifest = null, string? prfKey = null, bool recovery = false, string? code = null)
     {
-        return Build(prompt, start, nonce, bind, approveDelay, Script, Style, reuse, manifest, prfKey, recovery);
+        return Build(prompt, start, nonce, bind, approveDelay, Script, Style, reuse, manifest, prfKey, recovery, code);
     }
 
     /// <summary>
     /// Builds the page with the given script and style. Their line endings become LF before hashing and output, so the CSP
     /// hashes match what is served even when the source file was checked out with CRLF.
     /// </summary>
-    internal static OneShotResponse Build(ApprovalPrompt prompt, ProofStart start, string nonce, byte[] bind, TimeSpan approveDelay, string script, string style, ReuseOffer? reuse = null, string? manifest = null, string? prfKey = null, bool recovery = false)
+    internal static OneShotResponse Build(ApprovalPrompt prompt, ProofStart start, string nonce, byte[] bind, TimeSpan approveDelay, string script, string style, ReuseOffer? reuse = null, string? manifest = null, string? prfKey = null, bool recovery = false, string? code = null)
     {
         reuse ??= ReuseOffer.Off;
-        script = PrfClient.Fill(script.ReplaceLineEndings("\n")).Replace("//@SHOW_RECOVERY@", recovery ? PasskeyRegistration.RecoveryScript.ReplaceLineEndings("\n") : "", StringComparison.Ordinal);
-        style = (recovery ? style + "\n" + PasskeyRegistration.CodeStyle : style).ReplaceLineEndings("\n");
+        script = PrfClient.Fill(PageContinue.Fill(script.ReplaceLineEndings("\n"))).Replace("//@SHOW_RECOVERY@", recovery ? PasskeyRegistration.RecoveryScript.ReplaceLineEndings("\n") : "", StringComparison.Ordinal);
+        style = (recovery || code is not null ? style + "\n" + PasskeyRegistration.CodeStyle : style).ReplaceLineEndings("\n");
         string policy = Policy(script, style);
 
         // The default encoder escapes < > & ' and non-ASCII, so the JSON cannot end the data block.
@@ -911,6 +980,12 @@ internal static class ApprovalPage
         {
             // The final page shows the new recovery code (it arrives in the answer to the proof, after the write).
             data["recovery"] = "1";
+        }
+
+        if (code is not null)
+        {
+            // The final page shows the confirmation code (it arrives in the answer to the proof), to be typed in the terminal.
+            data["code"] = "1";
         }
 
         if (prfKey is not null)
@@ -964,6 +1039,12 @@ internal static class ApprovalPage
 
         page.Append("<p class=\"hint\">Ctrl+Enter (Cmd+Enter on a Mac) presses Approve once.</p>\n");
         page.Append("<p id=\"status\" role=\"status\"></p>\n");
+        page.Append(PageContinue.Box);
+        if (code is not null)
+        {
+            page.Append("<p id=\"code\"></p>\n");
+        }
+
         if (recovery)
         {
             page.Append(PasskeyRegistration.RecoveryBox);
