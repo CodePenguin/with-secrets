@@ -743,9 +743,12 @@ internal static class RecoveryTests
             (string Url, string Origin)? two = flow.Next();
             string pageTwo = two is null ? "" : TestState.Get(client, two.Value.Url).Body;
             (int status2, string body2) = two is null ? (0, "") : TestState.Approve(client, two.Value.Url, two.Value.Origin, "localhost", laptop);
+            string resentBody = TestState.LastProofBody;
+            (int resentStatus, string resentReply) = two is null ? (0, "") : TestState.Post(client, two.Value.Url + "/proof", resentBody);
             ConfigChange result = flow.Result();
             SqliteConnection.ClearAllPools();
             string? newCode = Member(body2, "recovery");
+            check(resentStatus is 404 or 409 or 0 && Member(resentReply, "recovery") is null && !CodePattern.IsMatch(resentReply), "rotate: the same proof sent again (a page resend) gets 404 and no second code (" + resentStatus + ")");
 
             check(result.Code == 0 && status1 == 200 && status2 == 200, $"rotate: done after two taps ({result.Code} {result.Detail}; {status1}, {status2})");
             check(pageOne.Contains("These keys will be removed and must be enrolled again with --enroll: ", StringComparison.Ordinal) && pageOne.Contains("phone", StringComparison.Ordinal), "rotate: page 1 lists the keys that will be removed");

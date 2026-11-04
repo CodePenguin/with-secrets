@@ -211,6 +211,10 @@ It needs .NET 10 and the NuGet packages `Dotenvx.Primitives` (3.3.1), `Microsoft
 | The page scripts (buttons, the Approve delay, messages, encryption of `--set` values in the browser) | **Not tested** in a browser. Only the server side is tested. Check by hand |
 | `.cmd` and `.bat` programs | **Tested.** A quote in an argument ran another command through `cmd.exe`; such arguments are now refused (see Known limits). `npm` resolves to `npm.CMD` |
 
+## Troubleshooting
+
+If a page sits on "Checking your passkey..." and then says the program did not answer, look at the terminal. `with-secrets: connection opened (N s)` and `request POST /proof (headers read, N s)` (a method, a route word and whole seconds since the link was made, never the link, a body or a key) show that the request reached the program; `body slow` means its body was still arriving after 5 seconds; no line means it never arrived. The page adds a `Diagnostics:` line after a failed post (never after a success), with times only: when it was opened, when the passkey prompt started and answered, how long the page was hidden, each attempt, and whether the phone was online. Send those lines, not a screenshot of anything secret, when you report a problem.
+
 ## Known limits
 
 - **The page shows the code, but only so much of it.** It shows the whole command line, the inline code, and the first 200 lines (at most 16 KB) of each script file, with a `...cut` notice when there is more. A long or obfuscated script can still be hard to judge, and an agent can write a script that prints `$DB_URL` in a form that is not redacted. Approve only code you have read and understood.

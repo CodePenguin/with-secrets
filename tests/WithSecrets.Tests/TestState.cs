@@ -144,8 +144,13 @@ internal static class TestState
             body = body[..^1] + ",\"prf\":" + PrfMember(start.RootElement, prfKey.GetString()!, bind, signer, prf, other) + "}";
         }
 
+        LastProofBody = body;
+
         return Post(client, pageUrl + "/proof", body);
     }
+
+    /// <summary>The body of the last proof <see cref="Approve" /> sent, so a test can send it again as a page resend would.</summary>
+    public static string LastProofBody { get; private set; } = "";
 
     /// <summary>What the page sends as "prf": the output for the key's slot salt sealed to the page's key, or as a twist says.</summary>
     private static string PrfMember(JsonElement start, string serverKey, byte[] bind, TestAuthenticator signer, PrfMode mode, TestAuthenticator? other)

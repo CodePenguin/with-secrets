@@ -226,12 +226,12 @@ internal static class ProofReplyTests
         ];
         foreach ((string name, string script) in pages)
         {
-            check(script.Contains("new AbortController()", StringComparison.Ordinal) && script.Contains("}, 20000)", StringComparison.Ordinal) && script.Contains("signal: controller.signal", StringComparison.Ordinal), "page timeout: the " + name + " page aborts a post after 20 seconds");
+            check(script.Contains("new AbortController()", StringComparison.Ordinal) && script.Contains("20000]", StringComparison.Ordinal) && script.Contains("signal: controller.signal", StringComparison.Ordinal), "page timeout: the " + name + " page aborts a post after 20 seconds");
             check(script.Contains(message, StringComparison.Ordinal) && script.Contains("\"AbortError\"", StringComparison.Ordinal), "page timeout: the " + name + " page says the program did not answer and tells the person to tap again");
         }
 
         // The approval page ignores a reply of an old attempt and turns its controls back on when it is not finished.
-        int at = approval.IndexOf("\"AbortError\"", StringComparison.Ordinal);
+        int at = approval.LastIndexOf("\"AbortError\"", StringComparison.Ordinal);
         string around = approval[Math.Max(0, at - 300)..Math.Min(approval.Length, at + 400)];
         check(around.Contains("mine !== attempt", StringComparison.Ordinal) && around.Contains("if (!finished)", StringComparison.Ordinal) && around.Contains("controls(true)", StringComparison.Ordinal), "page timeout: the approval page ignores an old attempt and turns the controls back on when not finished");
     }

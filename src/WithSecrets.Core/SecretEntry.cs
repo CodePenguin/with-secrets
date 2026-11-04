@@ -625,7 +625,7 @@ internal static class SetPage
             var ready = null;
 
             function show(text) {
-                status.textContent = text;
+                status.textContent = text + (diagLine ? " " + diagLine : "");
             }
 
             function finish(text) {
@@ -640,25 +640,94 @@ internal static class SetPage
                 show(text);
             }
 
-            // A post that gets no answer within 20 seconds is aborted (its error is named AbortError), so the page is never stuck.
-            function post(what, body) {
-                var controller = new AbortController();
-                var timer = setTimeout(function () { controller.abort(); }, 20000);
-                return fetch(base + "/" + what, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: body,
-                    cache: "no-store",
-                    credentials: "omit",
-                    redirect: "error",
-                    signal: controller.signal
-                }).then(function (reply) {
-                    clearTimeout(timer);
-                    return reply;
-                }, function (error) {
-                    clearTimeout(timer);
-                    throw error;
+            // Timings for a failed post, shown on the page only after a failure or timeout (never on success): when the page was opened,
+            // when the passkey prompt started and answered, how long the page was hidden, each attempt, the network state. Times only:
+            // no key, PRF output, value or code is ever read here.
+            var diagStart = Date.now() - Math.round(performance.now());
+            var diag = { tap: null, answered: null, hidden: 0, hiddenAt: null, events: [], attempts: [] };
+            var diagLine = "";
+            function diagSec(ms) { return Math.round(ms / 100) / 10; }
+            function diagSince(time) { return diagSec(time - diagStart); }
+            function diagMark(name) {
+                diag.events.push(name + " " + diagSince(Date.now()) + " s");
+                if (diag.events.length > 8) { diag.events.shift(); }
+            }
+            document.addEventListener("visibilitychange", function () {
+                if (document.visibilityState === "hidden") { diag.hiddenAt = Date.now(); }
+                else if (diag.hiddenAt !== null) { diag.hidden += Date.now() - diag.hiddenAt; diag.hiddenAt = null; }
+                diagMark(document.visibilityState);
+            });
+            ["pagehide", "pageshow"].forEach(function (name) { window.addEventListener(name, function () { diagMark(name); }); });
+            ["freeze", "resume"].forEach(function (name) { document.addEventListener(name, function () { diagMark(name); }); });
+            try {
+                ["get", "create"].forEach(function (method) {
+                    var original = navigator.credentials && navigator.credentials[method];
+                    if (typeof original !== "function") { return; }
+                    navigator.credentials[method] = function () {
+                        diag.tap = Date.now();
+                        diagLine = "";
+                        diag.answered = null;
+                        var promise = original.apply(navigator.credentials, arguments);
+                        promise.then(function () { diag.answered = Date.now(); }, function () { diag.answered = Date.now(); });
+                        return promise;
+                    };
                 });
+            } catch (ignored) { }
+            function diagnostics() {
+                var parts = ["open " + diagSince(Date.now()) + " s"];
+                if (diag.tap !== null) { parts.push("tap at " + diagSince(diag.tap) + " s"); }
+                if (diag.answered !== null && diag.tap !== null) { parts.push("passkey answered at " + diagSince(diag.answered) + " s (" + diagSec(diag.answered - diag.tap) + " s)"); }
+                var hidden = diag.hidden + (diag.hiddenAt !== null ? Date.now() - diag.hiddenAt : 0);
+                parts.push("hidden " + diagSec(hidden) + " s");
+                parts = parts.concat(diag.attempts);
+                parts.push("online=" + navigator.onLine, "state=" + document.visibilityState);
+                if (diag.events.length > 0) { parts.push("events " + diag.events.join(", ")); }
+                return "Diagnostics: " + parts.join("; ");
+            }
+
+            // A post that gets no answer is aborted (its error is named AbortError) and sent again with the same body, up to 3 attempts in all
+            // (8, 8 and 20 seconds): after the phone suspended the page the connection can be stale, and the first attempt never arrives.
+            // The program keeps the first outcome, so a resend that comes after it was processed is answered "already ended" (404)
+            // and changes nothing. Cancel (the page is finished) stops the resends.
+            var resent = false;
+            function post(what, body) {
+                var limits = what === "deny" ? [20000] : [8000, 8000, 20000];
+                resent = false;
+                diag.attempts = [];
+                function send(number) {
+                    var controller = new AbortController();
+                    var started = Date.now();
+                    var timer = setTimeout(function () { controller.abort(); }, limits[number]);
+                    return fetch(base + "/" + what, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: body,
+                        cache: "no-store",
+                        keepalive: false,
+                        credentials: "omit",
+                        redirect: "error",
+                        signal: controller.signal
+                    }).then(function (reply) {
+                        clearTimeout(timer);
+                        diagLine = "";
+                        if (resent && (reply.status === 404 || reply.status === 409)) {
+                            finish("The program already finished this request. Check the terminal.");
+                            return new Promise(function () { });
+                        }
+                        return reply;
+                    }, function (error) {
+                        clearTimeout(timer);
+                        diag.attempts.push("attempt " + (number + 1) + " sent at " + diagSince(started) + " s, " + (error && error.name === "AbortError" ? "timed out" : "failed") + " after " + diagSec(Date.now() - started) + " s (" + (error && typeof error.name === "string" ? error.name : "Error") + ")");
+                        diagLine = diagnostics();
+                        if (number + 1 >= limits.length || finished) {
+                            throw error;
+                        }
+                        resent = true;
+                        show("Still waiting for the program... (retry " + (number + 2) + " of 3)");
+                        return send(number + 1);
+                    });
+                }
+                return send(0);
             }
 
             function fromBase64Url(text) {

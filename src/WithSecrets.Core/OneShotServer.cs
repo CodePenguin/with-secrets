@@ -32,6 +32,27 @@ internal static class ProofLog
 }
 
 /// <summary>
+/// Network diagnostics for the terminal: a line when a connection is opened and when a request line and its headers were read,
+/// with whole seconds since the link was made. The lines hold only a method, a route word (page, proof, sign, save, create, seal,
+/// deny, code or other) and seconds: never a path with its token, a body, a key or a value. Tests replace <see cref="Sink" />.
+/// </summary>
+internal static class NetLog
+{
+    public static Action<string> Sink { get; set; } = line => Console.Error.WriteLine(line);
+
+    public static void Line(string text) => Sink("with-secrets: " + text);
+
+    private static readonly HashSet<string> Routes = new(StringComparer.Ordinal) { "proof", "sign", "save", "create", "seal", "deny", "code" };
+
+    /// <summary>The route word of a suffix: "" is the page, an unknown one is "other".</summary>
+    public static string Route(string? suffix) => suffix is null ? "other" : suffix.Length == 0 ? "page" : Routes.Contains(suffix) ? suffix : "other";
+
+    public static string Method(string method) => method is "GET" or "POST" ? method : "other";
+
+    public static string Seconds(System.Diagnostics.Stopwatch clock) => ((long)clock.Elapsed.TotalSeconds).ToString(System.Globalization.CultureInfo.InvariantCulture) + " s";
+}
+
+/// <summary>
 /// The guard every one-shot session wraps its handler in. A bug that throws while a request is handled ends the session at
 /// once with a denial that says only "internal error" (never exception text) and answers 500, so nothing waits for the time
 /// limit. When the session has already ended, the request gets the "already ended" answer instead.
@@ -73,6 +94,11 @@ internal sealed class OneShotServer : IDisposable
 
     /// <summary>A request whose body has not fully arrived by then is answered 408, so no request waits for ever.</summary>
     public static TimeSpan BodyTimeout { get; set; } = TimeSpan.FromSeconds(15);
+
+    /// <summary>A body still being read after this long is logged once ("body slow").</summary>
+    public static TimeSpan SlowBody { get; set; } = TimeSpan.FromSeconds(5);
+
+    private readonly System.Diagnostics.Stopwatch _issued = System.Diagnostics.Stopwatch.StartNew();
 
     private const string StrictPolicy = "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
@@ -180,10 +206,10 @@ internal sealed class OneShotServer : IDisposable
         {
             options.AddServerHeader = false;
             options.Limits.MaxRequestBodySize = MaxBodyBytes;
-            options.Listen(IPAddress.Loopback, chosen);
+            options.Listen(IPAddress.Loopback, chosen, Opened);
             if (_ipv6 is not null)
             {
-                options.Listen(IPAddress.IPv6Loopback, chosen);
+                options.Listen(IPAddress.IPv6Loopback, chosen, Opened);
             }
         });
 
@@ -191,6 +217,17 @@ internal sealed class OneShotServer : IDisposable
         app.Map("/{**path}", Serve);
 
         return app;
+    }
+
+    // Logs each accepted connection, then hands it on unchanged.
+    private void Opened(Microsoft.AspNetCore.Server.Kestrel.Core.ListenOptions listen)
+    {
+        listen.Use(next => context =>
+        {
+            NetLog.Line($"connection opened ({NetLog.Seconds(_issued)})");
+
+            return next(context);
+        });
     }
 
     public int Port { get; }
@@ -292,6 +329,15 @@ internal sealed class OneShotServer : IDisposable
         }
         else
         {
+            string route = NetLog.Route(suffix);
+            NetLog.Line($"request {NetLog.Method(context.Request.Method)} /{route} (headers read, {NetLog.Seconds(_issued)})");
+            using CancellationTokenSource slowEnd = new();
+            _ = Task.Delay(SlowBody, slowEnd.Token).ContinueWith(
+                finished => NetLog.Line($"request {NetLog.Method(context.Request.Method)} /{route} body slow ({NetLog.Seconds(_issued)})"),
+                CancellationToken.None,
+                TaskContinuationOptions.OnlyOnRanToCompletion,
+                TaskScheduler.Default);
+
             // A POST to a step other than deny is a proof (or another signed step): it is logged when it arrives and when it ends.
             bool tracked = context.Request.Method == "POST" && suffix is not ("" or "deny" or "seal");
             string label = suffix == "proof" ? "proof" : "step " + new string(suffix.Where(char.IsAsciiLetterOrDigit).Take(12).ToArray());
@@ -310,6 +356,7 @@ internal sealed class OneShotServer : IDisposable
                 timedOut = error is OperationCanceledException && !context.RequestAborted.IsCancellationRequested;
             }
 
+            slowEnd.Cancel();
             if (tracked)
             {
                 ProofLog.Line(body is null ? $"{label} received (body not read)" : $"{label} received ({Encoding.UTF8.GetByteCount(body)} bytes)");
