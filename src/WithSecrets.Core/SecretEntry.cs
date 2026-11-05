@@ -196,7 +196,7 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
 
         if (names.Any(name => !SecretNames.IsValid(name)))
         {
-            return Denied("Use UPPER_SNAKE_CASE for the names (letters, digits, underscores). Names that start with DOTENV_ are reserved.");
+            return Denied(CliArgs.SecretNameRule);
         }
 
         if (names.Distinct(StringComparer.Ordinal).Count() != names.Count)

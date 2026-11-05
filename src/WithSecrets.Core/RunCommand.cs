@@ -1,6 +1,7 @@
 namespace WithSecrets;
 
-public sealed record RunArgs(IReadOnlyList<string> Secrets, string Reason, string Program, IReadOnlyList<string> Arguments);
+/// <summary><paramref name="EnvFiles" /> are the -f files; null or empty means the default .env in the working directory.</summary>
+public sealed record RunArgs(IReadOnlyList<string> Secrets, string Reason, string Program, IReadOnlyList<string> Arguments, IReadOnlyList<string>? EnvFiles = null);
 
 /// <summary>
 /// Exit codes: 2 usage, 3 denied, 4 store error, 5 audit error, 127 program not found. Anything else is the program's own.
@@ -9,7 +10,7 @@ public sealed record RunArgs(IReadOnlyList<string> Secrets, string Reason, strin
 /// signed it, for exactly that time, keeps that signature, and is used only while it verifies and its lifetime is within the
 /// current ceiling. One that does not verify is reported once on stderr and ignored: the person is asked again.
 /// </summary>
-public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog audit, TextWriter stdout, TextWriter stderr, GrantStore? grants = null, ReuseOffer? reuse = null)
+public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog audit, TextWriter stdout, TextWriter stderr, GrantStore? grants = null, ReuseOffer? reuse = null, Func<string, string?>? environment = null)
 {
     public const int Usage = 2;
     public const int Denied = 3;
@@ -29,7 +30,25 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             return await Fail(StoreError, $"cannot read the secret store: {error.Message}");
         }
 
-        IReadOnlyList<string> names = args.Secrets;
+        // The .env files are read once, here. This plan (pairs, files, ordinary values) goes to the page, the fingerprint, the audit
+        // row and the launch unchanged: a file edited later changes nothing.
+        EnvResult composed = EnvDeclarations.Compose(args.EnvFiles, workingDirectory, args.Secrets, environment ?? Environment.GetEnvironmentVariable);
+        if (composed.Plan is not { } plan)
+        {
+            return await Fail(Usage, composed.Error!);
+        }
+
+        foreach (string note in plan.Notes)
+        {
+            await stderr.WriteLineAsync("with-secrets: " + note);
+        }
+
+        if (plan.Mappings.Count == 0)
+        {
+            return await Fail(Usage, "Name the secrets with --secrets NAME[,NAME...]. There is no option for all secrets.");
+        }
+
+        IReadOnlyList<string> names = [.. plan.Mappings.Select(mapping => mapping.Secret).Distinct(StringComparer.Ordinal)];
         string[] invalid = [.. names.Where(name => !SecretNames.IsValid(name))];
         if (invalid.Length > 0)
         {
@@ -134,6 +153,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         AfterScriptRead?.Invoke();
 
         List<string> links = [];
+        links.AddRange(plan.Links ?? []);
         foreach (string? note in new[] { PathExpander.LinkNote(resolved), scriptIndex >= 0 ? PathExpander.LinkNote(arguments[scriptIndex]) : null })
         {
             if (note is not null)
@@ -146,7 +166,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         // such a store never offers or uses saved approvals.
         ReuseOffer offer = !store.NeedsUnlock && grants is not null && reuse is { IsOn: true } ? reuse : ReuseOffer.Off;
         Dictionary<string, string> sources = names.ToDictionary(name => name, _ => store.Label, StringComparer.Ordinal);
-        ApprovalRequest request = new(args.Program, resolved, arguments, workingDirectory, args.Reason, names, offer.IsOn ? offer : null, args.Arguments, links, Sources: sources, Unlock: store.NeedsUnlock, Script: script, ProgramFile: programFile);
+        ApprovalRequest request = new(args.Program, resolved, arguments, workingDirectory, args.Reason, names, offer.IsOn ? offer : null, args.Arguments, links, Sources: sources, Unlock: store.NeedsUnlock, Script: script, ProgramFile: programFile, Mappings: plan.Mappings, EnvFiles: plan.Files, EnvNames: [.. plan.Ordinary.Keys.Order(StringComparer.Ordinal)], EnvValues: plan.Ordinary);
         Fingerprint fingerprint = RequestFingerprint.Compute(request);
 
         // What the page shows must be the file the fingerprint covers; a file that changed in between is not approved unseen.
@@ -187,7 +207,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             else
             {
                 await stderr.WriteLineAsync("with-secrets: waiting for the user to approve this request...");
-                await stderr.WriteLineAsync(ApprovalSummary.BuildMessage(request));
+                await stderr.WriteLineAsync(ApprovalSummary.BuildMessage(request, showValues: false));
 
                 ApprovalDecision decision = approver.Request(request);
                 unlock = decision.Unlock;
@@ -249,7 +269,9 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             int exitCode;
             using (secrets)
             {
-                exitCode = await ChildRunner.RunAsync(new ChildSpec(resolved, arguments, workingDirectory, secrets.Texts()), stdout, stderr);
+                // The variable the program sees is the left side of the pair; the redactor gets every value.
+                Dictionary<string, string> injected = request.Mappings!.ToDictionary(mapping => mapping.Variable, mapping => secrets.Text(mapping.Secret), StringComparer.Ordinal);
+                exitCode = await ChildRunner.RunAsync(new ChildSpec(resolved, arguments, workingDirectory, injected, plan.Ordinary), stdout, stderr);
             }
 
             audit.TryWrite("finished", request, "", exitCode, fingerprint.Files);

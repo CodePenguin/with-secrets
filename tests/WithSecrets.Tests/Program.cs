@@ -149,7 +149,7 @@ internal static class Program
         RunArgs? parsed = CliArgs.ParseRun(["--secrets", "A,B,C", "--reason", "why", "--", "prog", "--x", "y"], out string error);
         Check(parsed is not null && parsed.Secrets.SequenceEqual(["A", "B", "C"]) && parsed.Program == "prog" && parsed.Arguments.SequenceEqual(["--x", "y"]), "parse: names, reason, program, args");
         Check(CliArgs.ParseRun(["--secrets", "A", "--", "prog"], out _) is null, "parse: reason is required");
-        Check(CliArgs.ParseRun(["--reason", "x", "--", "prog"], out _) is null, "parse: at least one secret name required");
+        Check(CliArgs.ParseRun(["--reason", "x", "--", "prog"], out _) is { Secrets.Count: 0 }, "parse: --secrets is optional (the .env may name the secrets; a run with neither fails in RunCommand)");
         Check(CliArgs.ParseRun(["--secrets", "A", "--reason", "x"], out _) is null, "parse: program required");
         Check(CliArgs.ParseRun(["--secrets", "A", "--reason", "x", "--bogus", "--", "prog"], out error) is null && error.Contains("--bogus", StringComparison.Ordinal), "parse: unknown option");
         Check(CliArgs.ParseRun(["--secrets", "A", "--reason=because", "--", "prog"], out _)?.Reason == "because", "parse: --reason=");
@@ -297,6 +297,11 @@ internal static class Program
         // WS_ONLY=KeyVault,Manifest runs just those suites (a quick loop); unset runs all of them.
         string[] only = (Environment.GetEnvironmentVariable("WS_ONLY") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         bool Wants(string suite) => only.Length == 0 || only.Contains(suite, StringComparer.OrdinalIgnoreCase);
+
+        if (Wants("EnvDeclarations"))
+        {
+            EnvDeclarationTests.Run(Check).GetAwaiter().GetResult();
+        }
 
         if (Wants("ApprovalSummary"))
         {

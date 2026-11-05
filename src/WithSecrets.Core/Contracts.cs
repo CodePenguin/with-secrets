@@ -8,13 +8,48 @@ public static class SecretNames
     /// <summary>Short values cause over-redaction, so the store refuses them.</summary>
     public const int MinValueLength = 6;
 
-    private static readonly Regex Pattern = new("^[A-Z][A-Z0-9_]*$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    /// <summary>The most characters of a whole secret name, folders included.</summary>
+    public const int MaxNameLength = 200;
 
-    /// <summary>UPPER_SNAKE_CASE. Names that start with DOTENV_ belong to dotenvx (public and private keys).</summary>
+    /// <summary>The most segments of a name: up to three folders and the name itself.</summary>
+    public const int MaxSegments = 4;
+
+    // \z, not $: "$" also matches before a final line break.
+    private static readonly Regex Pattern = new("^[A-Z][A-Z0-9_]*\\z", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    private static readonly Regex Folder = new("^[A-Za-z0-9_.-]{1,64}\\z", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// The one rule for a secret name, used by --set, --remove, --list, --audit, --needs, .env references and the store.
+    /// <c>[folder/]*NAME</c>: 1 to <see cref="MaxSegments" /> segments separated by a single '/', at most
+    /// <see cref="MaxNameLength" /> characters in all. The last segment is UPPER_SNAKE_CASE and does not start with DOTENV_ (those
+    /// belong to dotenvx: public and private keys). Each folder segment is 1 to 64 of letters, digits, '_', '.', '-', and is not
+    /// '.' or '..'. The whole text is the store name; it is data, never a file path. A name is compared exactly (case counts).
+    /// </summary>
     public static bool IsValid(string name)
     {
-        return Pattern.IsMatch(name) && !name.StartsWith("DOTENV_", StringComparison.Ordinal);
+        if (name.Length is 0 or > MaxNameLength)
+        {
+            return false;
+        }
+
+        string[] parts = name.Split('/');
+        if (parts.Length > MaxSegments)
+        {
+            return false;
+        }
+
+        string last = parts[^1];
+        if (!Pattern.IsMatch(last) || last.StartsWith("DOTENV_", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return parts.Take(parts.Length - 1).All(part => Folder.IsMatch(part) && part is not "." and not "..");
     }
+
+    /// <summary>True when the name can also be an environment variable name: valid and without a folder.</summary>
+    public static bool IsEnvName(string name) => name.IndexOf('/', StringComparison.Ordinal) < 0 && IsValid(name);
 }
 
 /// <summary>
@@ -40,7 +75,11 @@ public sealed record ApprovalRequest(
     IReadOnlyDictionary<string, string>? Sources = null,
     bool Unlock = false,
     ScriptView? Script = null,
-    ScriptView? ProgramFile = null);
+    ScriptView? ProgramFile = null,
+    IReadOnlyList<SecretMapping>? Mappings = null,
+    IReadOnlyList<string>? EnvFiles = null,
+    IReadOnlyList<string>? EnvNames = null,
+    IReadOnlyDictionary<string, string>? EnvValues = null);
 
 /// <summary>
 /// What a person signed on an approval page: the page nonce, the exact text that was bound (see <see cref="RequestBinding" />)

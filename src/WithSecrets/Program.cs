@@ -67,6 +67,9 @@ internal static class Program
                     return RunCommand.StoreError;
                 }
 
+            case CliCommand.Needs needs:
+                return NeedsCommand.Run(store, needs.EnvFiles, Directory.GetCurrentDirectory(), Console.Out, Console.Error);
+
             case CliCommand.Set or CliCommand.Remove:
                 return CommandWiring.Change(command, store, state, command.Port);
 

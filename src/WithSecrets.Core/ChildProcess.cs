@@ -65,7 +65,8 @@ public sealed record ChildSpec(
     string ResolvedProgram,
     IReadOnlyList<string> Arguments,
     string WorkingDirectory,
-    IReadOnlyDictionary<string, string> Secrets);
+    IReadOnlyDictionary<string, string> Secrets,
+    IReadOnlyDictionary<string, string>? Ordinary = null);
 
 /// <summary>Runs the program with the secrets as environment variables and redacts what it prints.</summary>
 public static class ChildRunner
@@ -127,6 +128,15 @@ public static class ChildRunner
         foreach (string name in start.Environment.Keys.Where(key => IsCodeLoading(key, OperatingSystem.IsWindows())).ToList())
         {
             start.Environment.Remove(name);
+        }
+
+        // Ordinary .env values: the agent wrote them, so the code-loading variables stay out of them too. Not redacted, not secret.
+        foreach ((string name, string value) in spec.Ordinary ?? new Dictionary<string, string>())
+        {
+            if (!IsCodeLoading(name, OperatingSystem.IsWindows()) && !name.StartsWith("DOTENV_PRIVATE_KEY", StringComparison.OrdinalIgnoreCase))
+            {
+                start.Environment[name] = value;
+            }
         }
 
         foreach ((string name, string value) in spec.Secrets)

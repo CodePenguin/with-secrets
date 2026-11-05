@@ -60,7 +60,7 @@ public static class ApprovalSummary
     /// The text the person reads on the approval page. Every line the agent controls starts with a fixed label and has its
     /// line breaks marked, so the agent cannot add a line of its own (such as a request id line).
     /// </summary>
-    public static string BuildMessage(ApprovalRequest request)
+    public static string BuildMessage(ApprovalRequest request, bool showValues = true)
     {
         StringBuilder text = new();
         text.Append("Allow an agent to use secrets?").Append('\n');
@@ -89,6 +89,35 @@ public static class ApprovalSummary
         if (request.Script is { } script)
         {
             text.Append('\n').Append(ScriptBlock(script));
+        }
+
+        // The .env block comes after the command and the code, so a long .env cannot push them out of sight. Every pair is on its own
+        // line; every ordinary value is shown (the page is the control for variables the program may treat as code); the terminal
+        // echo (showValues false) lists names only.
+        if (request.EnvFiles is { Count: > 0 } || request.Mappings is { } mapped && mapped.Any(pair => pair.Variable != pair.Secret))
+        {
+            foreach (string file in request.EnvFiles ?? [])
+            {
+                text.Append('\n').Append("Env file: ").Append(Clean(file));
+            }
+
+            foreach (SecretMapping pair in request.Mappings ?? [])
+            {
+                text.Append('\n').Append("Pair: ").Append(Clean(pair.Display)).Append(pair.Variable != pair.Secret ? " (renamed)" : "");
+            }
+        }
+
+        if (showValues && request.EnvValues is { Count: > 0 } values)
+        {
+            text.Append('\n').Append("Other variables from .env (values shown):");
+            foreach ((string name, string value) in values.OrderBy(item => item.Key, StringComparer.Ordinal))
+            {
+                text.Append('\n').Append(CodeMarker).Append(Clean(name + "=" + value));
+            }
+        }
+        else if (request.EnvNames is { Count: > 0 } others)
+        {
+            text.Append('\n').Append("Other variables from .env (names only): ").Append(string.Join(", ", others.Select(Clean)));
         }
 
         if (request.Reuse is { IsOn: true } reuse)

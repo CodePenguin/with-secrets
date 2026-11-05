@@ -309,13 +309,13 @@ The old file is never deleted. Old admin keys are gone from the new state. Any f
 
 | Area | Rule | File |
 | --- | --- | --- |
-| Secret names | UPPER_SNAKE_CASE, no `DOTENV_` prefix. Every name must be listed (no `--all`). `--set` and `--remove`: 1 to 20 names | `Contracts.cs` (`SecretNames`), `SecretEntry.cs`. Values: 6 to 4096 characters |
+| Secret names | `NAME` or `folder/NAME` (up to 3 folders, 200 characters in all; the last segment UPPER_SNAKE_CASE, no `DOTENV_` prefix; folders `[A-Za-z0-9_.-]{1,64}`, not `.` or `..`). One validator for all commands, the whole path is the store name and is data only. Every name must be listed (no `--all`). `--set` and `--remove`: 1 to 20 names | `Contracts.cs` (`SecretNames`), `SecretEntry.cs`. Values: 6 to 4096 characters |
 | Program lookup | `env`, `printenv`, `set` are refused (they print the environment). PATH entries that are absolute only. Working directory not searched unless the program has a slash or backslash. Windows App Execution Aliases refused | `ChildProcess.cs` (`ProgramResolver`), `RunCommand.cs` |
 | Paths | program and script are expanded to full paths. What is checked, shown and run is the expanded form. They must read the same as the typed form | `RunCommand.cs`, `Paths.cs` (`PathExpander`), `Policy.cs` |
 | Command grammar | Interpreters in one strict form only: `PROG script [args]` or `PROG -c/-e CODE` (sh family, python, node, perl, ruby), PowerShell: `-NoProfile` required, then `-NonInteractive`, `-NoLogo`, `-ExecutionPolicy VALUE` (once each), then exactly `-File` or `-Command`; `cmd /d /c` (or `/k`, `/r`) with a tail of letters, digits and `. _ : \ /` `-`, first word a `.cmd`/`.bat` file or echo, dir, type, ver. Encoded commands, a bare interpreter and code starting with a dash are refused. Other programs: no analysis, `Run:` line only (a text-file program is still shown). Matches README "Known limits" and `--help` | `Policy.cs` |
 | Limits | command max 16,000 characters. Inline code shown: first 4,000 characters. Script max 1 MB (page shows first 200 lines or 16 KB). Script must exist, be text, and be readable. Batch files ASCII | `Policy.cs`, `RunCommand.cs`, `ApprovalSummary.cs` |
 | Page text | every line of code prefixed `  \| `. Control, bidi and zero-width characters replaced by a mark. Part of the signed text | `ApprovalSummary.cs` |
-| Fingerprint | covers names, full program path, folder, and path and hash of the script and of the program file (when 1 MB or less). Recomputed after approval. A changed file denies | `Reuse.cs`, `RunCommand.cs` |
+| Fingerprint | covers names, every variable-to-secret pair, the `.env` paths and ordinary variable names (when a `.env` is used or a variable differs from its secret), full program path, folder, and path and hash of the script and of the program file (when 1 MB or less). Recomputed after approval. A changed file denies | `Reuse.cs`, `RunCommand.cs` |
 | File lock | shown files opened `FileShare.Read` until the child ends, hashed again. Windows only. Elsewhere only the last check before launch | `RunCommand.cs` (`HeldFiles`) |
 | Environment | removed before launch: `DOTENV_PRIVATE_KEY*`, `NODE_OPTIONS`, `BASH_ENV`, `ENV`, `PYTHONPATH`, `PYTHONSTARTUP`, `PYTHONHOME`, `PERL5OPT`, `RUBYOPT`, `LD_PRELOAD`, `DOTNET_STARTUP_HOOKS`, `JAVA_TOOL_OPTIONS`, five `GIT_*` names (`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_EXEC_PATH`, `GIT_SSH_COMMAND`, `GIT_ASKPASS`), `SHELLOPTS`, `BASHOPTS`, `PS4`, `PS0`, `PROMPT_COMMAND`, `BASH_FUNC_*` and more (case-insensitive on Windows). Full list in `ChildRunner.CodeLoadingVariables` and README. Known gaps: README | `ChildProcess.cs` |
 | Stdin | closed right after start: the child reads end of file | `ChildProcess.cs` |
@@ -361,10 +361,49 @@ Every web session ends on the first outcome. Deny, error and silence all end in 
 | Item | State |
 | --- | --- |
 | Task 20: remote mode for sandboxes (relay, pairing, end-to-end encrypted values) | Future. Design document first |
-| Task 19: project-level Dotenvx files | Undecided. `ISecretSource` and the `Sources` label on the page leave room, the global store is the only source |
+| Task 19: project `.env` declarations (`secret://` references) | **Phase A built** (see 10.1). Dotenvx encrypted values and the host service are later phases |
+| Host service and remote relay (10.2) | Planned, design only. Needs its own security design first |
 | Task 16: privilege separation (service or daemon under another OS account) | Future, priority not decided |
 | Serilog logging change (normal run quiet, `--debug` verbose, warnings and errors to a rolling file under `~/.with-secrets/logs`) | Queued |
 | Hand tests (real browsers, phones, tunnel) | Open, see README "Checks" |
+
+### 10.1 Project `.env` declarations
+
+**Phase A is built** (`EnvDeclarations.cs`; tests: the `EnvDeclarations` suite). Not built: Dotenvx encrypted values, `${VAR}` expansion, `--env NAME`, host service.
+
+The `.env` file in the working folder becomes the declaration of what a project needs. The agent no longer has to guess or list names.
+
+- **Three kinds of value.** Ordinary (`LOG_LEVEL=Debug`), Dotenvx encrypted (`encrypted:...`), and a reference (`TOKEN=secret://GITHUB_TOKEN`). The left side is the variable the program receives; the right side names the secret. They can differ (`STRIPE_KEY=secret://STRIPE_PRODUCTION_KEY`).
+- **Grammar.** `secret://[folder/...]NAME`. The qualifier is just a folder path the user chooses for their own organisation (`project/DB_PASSWORD`, `team/payments/STRIPE_KEY`); it has no built-in meaning. The whole path is the secret's name in the store, so `--set team/payments/STRIPE_KEY` stores it and `secret://team/payments/STRIPE_KEY` finds it. An unqualified name is the plain name. A reference is a logical name, never a storage location. Later, a default folder can come from the authority's configuration.
+- **Composition first, resolution after.** Files are layered like Dotenvx (first file wins; `-f` repeats; an inherited OS variable beats an ordinary `.env` value). Only the final effective declaration asks for a secret, so an overridden `secret://` never causes a prompt.
+- **`--secrets` stays.** Names given with `--secrets` are added to the references found in the `.env`. A new read-only `--needs` shows what the current project would ask for (names only, no values, no approval).
+- **Trust.** The agent can write the `.env`, so the page shows every `VARIABLE <- secret` pair (one per line, renamed ones marked), every ordinary `VARIABLE=value`, and the file paths (outside-folder and symlink marks). Counts and lengths are capped and anything over is refused, never hidden. The child still has code-loading variables removed (also from `.env` values), and references to proxy, git-identity or code-loading names are refused. The human approves what the page shows.
+- **Later phases.** Dotenvx encrypted values (the private key held in the store as a secret, approved like any other), `${VAR}` expansion, `--env NAME` layering.
+
+### 10.2 Host service and remote relay (planned)
+
+Goal: the same CLI workflow from Windows, WSL and Docker, and later from a remote authority, with the CLI never touching the store.
+
+```mermaid
+flowchart TB
+  subgraph Envs[Execution environments]
+    W[Windows CLI]
+    L[WSL CLI]
+    D[Docker CLI]
+  end
+  W & L & D -->|same versioned API| H[Windows host service<br/>authenticate, request lifecycle, approval, backend routing]
+  H -->|local authority| S[(Local encrypted store)]
+  H -->|remote relay, outbound HTTPS| R[Remote authority + secret store]
+```
+
+- **CLI** composes the environment, classifies values, asks the host for exactly the needed secrets, and launches the child in its own environment (a Docker CLI starts the child in Docker). The host never launches programs.
+- **Host service** owns the store and the API, authenticates clients, runs the approval, and either resolves locally or relays to the remote authority. The relay is not a transparent proxy: a request is bound to its id, client identity, host identity, secret names, project, command, expiry and approval state, and the answer is checked against it.
+- **API operations** (versioned, transport independent): create request, get status, submit approval, deny, retrieve approved values, cancel.
+- **Connectivity.** WSL finds the Windows host endpoint itself; Docker uses `host.docker.internal` or an explicit endpoint. Localhost, WSL and Docker are not trusted by position: clients authenticate, container credentials are short lived and scoped to the request, and an environment label is metadata, not identity.
+- **Network segregation.** Containers need no Internet; only the host service talks to the remote authority.
+- **Fits the current design.** The store key still needs a passkey tap per approval, so a service would hold no key at rest. The one-use page, passkey proof and audit carry over. This is the same ground as Task 20 and Task 16.
+- **Open questions.** Exact URI grammar and escaping; default namespace resolution; Dotenvx private key retrieval; where approval happens in remote mode; client authentication for WSL and Docker; transport and endpoint discovery; remote registration; reporting of missing references; conflicts with inherited variables; which Dotenvx composition rules must be kept exactly.
+- **Order.** `.env` syntax and composition (10.1) -> transport-independent API contract -> host service with local store -> Windows client -> WSL -> Docker -> remote relay -> remote authority -> tests proving local and remote behave the same.
 
 ## 11. Where is it in the code
 
@@ -374,6 +413,7 @@ Every web session ends on the first outcome. Deny, error and silence all end in 
 | Command wiring, targets, code reader | `CommandWiring.cs` |
 | Argument parsing, `NeedsTerminal` | `CommandLine.cs` |
 | Run pipeline, exit codes | `RunCommand.cs` |
+| Project `.env`: parser, composition, `secret://` grammar, `--needs` | `EnvDeclarations.cs` |
 | Command grammar, length limits | `Policy.cs` |
 | Approval text, request fingerprint, script view | `ApprovalSummary.cs`, `Reuse.cs` |
 | Child process, PATH lookup, env denylist | `ChildProcess.cs` |

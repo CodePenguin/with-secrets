@@ -41,6 +41,36 @@ public static class RequestFingerprint
         }
 
         text.Append('\u0001');
+        // A plain --secrets run (every variable named like its secret, no .env) keeps the key it always had.
+        if (request.Mappings is not null && (request.Mappings.Any(pair => pair.Variable != pair.Secret) || request.EnvFiles is { Count: > 0 } || request.EnvNames is { Count: > 0 } || request.EnvValues is { Count: > 0 }))
+        {
+            // Every pair and every file the declarations came from are part of what was approved.
+            foreach (SecretMapping pair in request.Mappings.OrderBy(pair => pair.Variable, StringComparer.Ordinal))
+            {
+                text.Append(pair.Variable).Append('\0').Append(pair.Secret).Append('\0');
+            }
+
+            text.Append('\u0002');
+            foreach (string file in (request.EnvFiles ?? []).Order(StringComparer.Ordinal))
+            {
+                text.Append(Normalize(file)).Append('\0');
+            }
+
+            text.Append('\u0002');
+            foreach (string name in (request.EnvNames ?? []).Order(StringComparer.Ordinal))
+            {
+                text.Append(name).Append('\0');
+            }
+
+            text.Append('\u0002');
+            foreach (KeyValuePair<string, string> variable in (request.EnvValues ?? new Dictionary<string, string>()).OrderBy(item => item.Key, StringComparer.Ordinal))
+            {
+                text.Append(variable.Key).Append('\0').Append(variable.Value).Append('\0');
+            }
+
+            text.Append('\u0001');
+        }
+
         foreach ((string path, string hash) in files)
         {
             text.Append(Normalize(path)).Append('\0').Append(hash).Append('\0');

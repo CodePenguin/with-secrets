@@ -42,6 +42,9 @@ public abstract record CliCommand
     /// <summary>--rotate-key: an admin makes a new store key and master key, keeps only the tapped key and gets a new recovery code.</summary>
     public sealed record RotateKey : CliCommand;
 
+    /// <summary>--needs [-f FILE]...: print what the project's .env files would ask for (names only; nothing is approved or decrypted).</summary>
+    public sealed record Needs(IReadOnlyList<string> EnvFiles) : CliCommand;
+
     /// <summary>--secrets ... --reason ... -- PROGRAM [ARGS...]: run a program with secrets.</summary>
     public sealed record Run(RunArgs Args) : CliCommand;
 
@@ -57,10 +60,13 @@ public abstract record CliCommand
 /// </summary>
 public static class CliArgs
 {
+    /// <summary>What a refused secret name is told.</summary>
+    public const string SecretNameRule = "A secret name is NAME or folder/NAME (up to 3 folders, 200 characters in all). NAME is UPPER_SNAKE_CASE (letters, digits, underscores) and does not start with DOTENV_; a folder uses letters, digits, _ . - (1 to 64) and is not . or ..";
+
     private const string Description = """
         Run a program with stored secrets, without showing the values to an agent.
 
-        To run a program: with-secrets --secrets NAME[,NAME...] --reason "why" -- PROGRAM [ARGS...]
+        To run a program: with-secrets [--secrets NAME[,NAME...]] --reason "why" [-f .env] -- PROGRAM [ARGS...]
         The user approves the request. Then PROGRAM runs with only those secrets as environment variables, and its output is
         redacted. Write -- before the program. Use --list to see the names.
 
@@ -85,6 +91,17 @@ public static class CliArgs
         approval covers the same secrets, program, script, and folder, whatever the other arguments, until it ends: the same
         request then runs without asking. The chosen time is signed with the passkey, and a saved approval is used only
         while that signature verifies; one that does not is ignored (stderr says so) and the user is asked again.
+
+        A project declares what it needs in a .env file in the working directory (not searched upward); -f/--env-file PATH
+        (repeatable) reads those files instead, and a missing -f file is an error. Lines are NAME=value, with # comments,
+        optional export, and single, double or no quotes. A value TOKEN=secret://NAME (or secret://folder/NAME; the whole
+        path is the store name) gives the program the secret under the variable TOKEN. Other values are ordinary variables
+        (names only on the approval page). --secrets and --reason work as before: --secrets is optional when the .env has
+        references, --reason is always required. The first file wins per name; an existing environment variable beats an
+        ordinary .env value, but a secret:// reference beats it. The approval page shows every "VARIABLE <- secret NAME" and
+        the .env paths, and the files are read once. Code-loading variables (NODE_OPTIONS...) are dropped from .env values
+        and a reference to one, or to PATH, is refused. Dotenvx encrypted values and ${} expansion are not supported yet.
+        --needs [-f PATH]... prints what the current project would ask for (names only) and whether each secret is in the store.
 
         A person changes the settings with --config: the terminal shows only a link, the page shows every setting, and a
         passkey approves the change. With nothing enrolled, --config is the first-time setup: it also creates the first
@@ -125,7 +142,7 @@ public static class CliArgs
             return command;
         }
 
-        if (command is CliCommand.List or CliCommand.Enrolled or CliCommand.Audit or CliCommand.Config { Show: true })
+        if (command is CliCommand.List or CliCommand.Needs or CliCommand.Enrolled or CliCommand.Audit or CliCommand.Config { Show: true })
         {
             error = "--port goes only with a command that opens a web page: --set, --remove, --revoke, --enroll, --unenroll, --config, --recover, --rotate-key, or a run.";
 
@@ -165,6 +182,12 @@ public static class CliArgs
             HelpName = "NAME[,NAME...]"
         };
         Option<string?> reason = new("--reason") { Description = "Why the program needs the secrets, in one sentence.", HelpName = "TEXT" };
+        Option<bool> needs = new("--needs") { Description = "Print what the project's .env files would ask for: the files, the ordinary variable names, and each secret reference with in store or NOT IN STORE. Names only. No approval." };
+        Option<string[]> envFile = new("--env-file", "-f")
+        {
+            Description = "With a run or --needs: read this .env file (repeatable; the first file wins per name). Replaces the default .env in the working directory.",
+            HelpName = "PATH"
+        };
 
         RootCommand root = new(Description);
         // Do not clear root.Directives: with none registered, System.CommandLine silently drops any [name:value] token. With the
@@ -188,6 +211,8 @@ public static class CliArgs
         root.Options.Add(port);
         root.Options.Add(secrets);
         root.Options.Add(reason);
+        root.Options.Add(needs);
+        root.Options.Add(envFile);
 
         ParseResult result = root.Parse(head, new ParserConfiguration { ResponseFileTokenReplacer = null });
         if (result.Errors.Count > 0)
@@ -214,6 +239,15 @@ public static class CliArgs
         string? unenrollName = result.GetValue(unenroll);
         bool localRequested = result.GetValue(local);
         bool runRequested = names.Length > 0 || reasonText is not null || separator >= 0;
+        string[] envFiles = [.. result.GetValue(envFile)!];
+        bool needsRequested = result.GetValue(needs);
+        if (envFiles.Length > 0 && !needsRequested && !runRequested)
+        {
+            error = "-f / --env-file goes only with a run or --needs.";
+
+            return null;
+        }
+
 
         if (localRequested && !enrollRequested && unenrollName is null)
         {
@@ -254,13 +288,13 @@ public static class CliArgs
             portNumber = parsed;
         }
 
-        int modes = (auditRequested ? 1 : 0) + (result.GetValue(list) ? 1 : 0) + (setName is not null ? 1 : 0) + (removeName is not null ? 1 : 0) + (result.GetValue(revoke) ? 1 : 0)
+        int modes = (auditRequested ? 1 : 0) + (result.GetValue(list) ? 1 : 0) + (needsRequested ? 1 : 0) + (setName is not null ? 1 : 0) + (removeName is not null ? 1 : 0) + (result.GetValue(revoke) ? 1 : 0)
             + (enrollRequested ? 1 : 0) + (result.GetValue(enrolled) ? 1 : 0) + (unenrollName is not null ? 1 : 0) + (configRequested ? 1 : 0) + (result.GetValue(recover) ? 1 : 0) + (result.GetValue(rotateKey) ? 1 : 0) + (runRequested ? 1 : 0);
         if (modes != 1)
         {
             error = modes == 0
-                ? "Nothing to do. Use --list, --audit, --config, --enroll, --enrolled, --unenroll NAME, --recover, --rotate-key, or --secrets NAME[,NAME...] --reason TEXT -- PROGRAM [ARGS...]. Try --help."
-                : "Use one command at a time: --list, --set, --remove, --revoke, --enroll, --enrolled, --unenroll, --audit, --config, --recover, --rotate-key, or a run with --secrets.";
+                ? "Nothing to do. Use --list, --needs, --audit, --config, --enroll, --enrolled, --unenroll NAME, --recover, --rotate-key, or --reason TEXT [--secrets NAME[,NAME...]] -- PROGRAM [ARGS...]. Try --help."
+                : "Use one command at a time: --list, --needs, --set, --remove, --revoke, --enroll, --enrolled, --unenroll, --audit, --config, --recover, --rotate-key, or a run with --secrets.";
 
             return null;
         }
@@ -302,6 +336,11 @@ public static class CliArgs
         }
 
         error = "";
+        if (needsRequested)
+        {
+            return new CliCommand.Needs(envFiles);
+        }
+
         if (!runRequested)
         {
             return result.GetValue(list) ? new CliCommand.List()
@@ -327,14 +366,15 @@ public static class CliArgs
             return null;
         }
 
-        if (names.Length == 0)
+        // --secrets may be empty: the project's .env can carry the references. A run with neither fails in RunCommand with this text.
+        if (names.FirstOrDefault(name => name.Contains('/', StringComparison.Ordinal)) is { } folded)
         {
-            error = "Name the secrets with --secrets NAME[,NAME...]. There is no option for all secrets.";
+            error = $"--secrets cannot name {ApprovalSummary.Clean(folded)}: a secret in a folder is not an environment variable name. Put it in the .env as VARIABLE=secret://{ApprovalSummary.Clean(folded)}";
 
             return null;
         }
 
-        return new CliCommand.Run(new RunArgs(names.Distinct(StringComparer.Ordinal).ToList(), reasonText.Trim(), tail[0], tail.Skip(1).ToList()));
+        return new CliCommand.Run(new RunArgs(names.Distinct(StringComparer.Ordinal).ToList(), reasonText.Trim(), tail[0], tail.Skip(1).ToList(), envFiles.Length == 0 ? null : envFiles));
     }
 
     /// <summary>
@@ -380,7 +420,7 @@ public static class CliArgs
         List<string> names = [.. text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Distinct(StringComparer.Ordinal)];
         error = names.Count == 0 ? "Give at least one secret name: NAME[,NAME...]."
             : names.Count > SecretEntry.MaxNames ? $"Give at most {SecretEntry.MaxNames} secret names at a time."
-            : names.Any(name => !SecretNames.IsValid(name)) ? "Use UPPER_SNAKE_CASE for the names (letters, digits, underscores). Names that start with DOTENV_ are reserved."
+            : names.Any(name => !SecretNames.IsValid(name)) ? SecretNameRule
             : "";
 
         return error.Length == 0 ? names : null;
@@ -398,7 +438,7 @@ public static class CliArgs
 
         if (secretName is not null && !SecretNames.IsValid(secretName))
         {
-            error = "--secret takes one secret name in UPPER_SNAKE_CASE.";
+            error = "--secret takes one secret name. " + SecretNameRule;
 
             return null;
         }

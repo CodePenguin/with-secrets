@@ -159,7 +159,7 @@ public static partial class Policy
     [GeneratedRegex("(powershell|pwsh)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex NestedPowerShell();
 
-    [GeneratedRegex("^[A-Za-z0-9._:\\\\/-]+$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex("^[A-Za-z0-9._:\\\\/-]+\\z", RegexOptions.CultureInvariant)]
     private static partial Regex PlainWord();
 
     // An argument that an interpreter would trim, or that starts with a dash that is not the ASCII one (PowerShell reads the
