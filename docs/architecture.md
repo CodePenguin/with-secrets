@@ -382,7 +382,7 @@ The `.env` file in the working folder becomes the declaration of what a project 
 
 ### 10.2 Local service, machine identity and end-to-end encrypted relay (planned)
 
-Status: design only, reviewed against the current code (review notes below). Nothing here is built. It is the layer after 10.1 and does not change the `.env` model.
+Status: design only, reviewed against the current code (review notes below). Nothing here is built. The proposal is kept as written; the review notes raise concerns and options, and every item marked OPEN is the maintainer's decision. Nothing in the proposal has been rejected. It is the layer after 10.1 and does not change the `.env` model.
 
 **Principles.**
 1. Every installation has a local service. The CLI talks only to it, never to a remote authority or the database, and does not know which backend answers.
@@ -443,16 +443,16 @@ sequenceDiagram
 - **Identity.** Created at install, persistent, stored through the platform (CNG with TPM where available, Keychain or Secure Enclave on macOS, a service-owned file elsewhere). Hardware backing is an enhancement. The authority registers the public key at an explicit enrollment, never trusts a bare fingerprint, and supports revocation and replacement. Each independent service has its own identity; a container using the host service shares the host's.
 
 **Review notes (where the proposal meets the current design).**
-1. **A memory cache conflicts with the store design.** The proposal allows a short-lived plaintext cache in the service. Today a value can be decrypted only inside a tap-approved run, and saved approvals are inactive on purpose. A cache would let secrets outlive their approval. Decision: no cache in the first versions. If one is added, it must be tied to an explicit, shown approval lifetime.
-2. **The security gain of the service depends on its account.** A service running as the same user can be read by any same-user process, like today's one-shot process. The gain is real for WSL, Docker and relay (isolation, one outbound boundary, request binding), and for the store key only if the service runs under a separate account. That is Task 16 and should be decided with this.
-3. **Signing adds nothing in local mode.** A self-signed request protects against nothing that a local attacker holding the identity key could not forge. Keep one code path (it proves the protocol and shares tests), but treat the signature as meaningful only in relay mode, where the authority knows the machine.
-4. **The ephemeral key is only as trustworthy as the local client authentication.** The service signs whatever ephemeral key the connected client supplies, so another local process that passes client authentication could ask with its own key. The person decides from the command and secrets shown, so the authentication step must identify the requester and the page should say which client asked.
-5. **Passkeys are bound to the site.** Today's passkeys use the `localhost` RP ID. A remote authority has its own HTTPS site, so keys are enrolled there separately; local and remote stores do not share passkeys, recovery codes or manifests.
-6. **A remote approval page cannot read local files.** Script contents, the `.env` with its values, symlink marks and the command check live on the machine. The request must carry them (hash bound), and the authority must apply the same grammar and limits as `Policy.cs`. The 10.1 rule that the page shows everything must hold unchanged.
-7. **Dotenvx crypto stays separate.** The store rows keep secp256k1 ECIES (Dotenvx). The new protocol is a transport layer on P-256 around the decrypted values. The two never mix.
-8. **Reuse what exists.** Canonical JSON and signing from `Manifest.cs`, one-use tokens and `HandleGuard` for the approval page, the audit hash chain, and the PRF key chain for local authority. The local authority is today's `RunCommand` pipeline behind an interface.
+1. **OPEN: a memory cache conflicts with the current store design.** The proposal allows a short-lived plaintext cache in the service. Today a value can be decrypted only inside a tap-approved run, and saved approvals are inactive on purpose, so a cache would let secrets outlive their approval. Options: keep the proposal's cache with a bounded lifetime, tie it to an explicit shown approval lifetime, or defer any cache to a later phase. Deferred to the maintainer; the proposal stands until decided.
+2. **OPEN: the security gain of the service depends on its account.** A service running as the same user can be read by any same-user process, like today's one-shot process. The gain is real for WSL, Docker and relay (isolation, one outbound boundary, request binding), and for the store key only if the service runs under a separate account. That is Task 16; whether to decide it together with this is the maintainer's call.
+3. **Observation: signing adds little in local mode.** A self-signed request protects against nothing that a local attacker holding the identity key could not forge. The proposal's single code path for both modes still stands (it proves the protocol and shares tests); this only notes where the signature carries weight (relay mode, where the authority knows the machine).
+4. **OPEN: the ephemeral key is only as trustworthy as the local client authentication.** The service signs whatever ephemeral key the connected client supplies, so another local process that passes client authentication could ask with its own key. Suggestion for the maintainer: have the authentication step identify the requester and show which client asked on the approval page.
+5. **Fact to plan around: passkeys are bound to the site.** Today's passkeys use the `localhost` RP ID. A remote authority has its own HTTPS site, so keys are enrolled there separately; local and remote stores do not share passkeys, recovery codes or manifests.
+6. **Fact to plan around: a remote approval page cannot read local files.** Script contents, the `.env` with its values, symlink marks and the command check live on the machine. The request must carry them (hash bound), and the authority must apply the same grammar and limits as `Policy.cs`. The 10.1 rule that the page shows everything must hold unchanged.
+7. **Observation: Dotenvx crypto and the new protocol are different layers.** The store rows keep secp256k1 ECIES (Dotenvx). The new protocol is a transport layer on P-256 around the decrypted values. They need not mix.
+8. **Suggestion: reuse what exists.** Canonical JSON and signing from `Manifest.cs`, one-use tokens and `HandleGuard` for the approval page, the audit hash chain, and the PRF key chain for local authority. The local authority is today's `RunCommand` pipeline behind an interface.
 
-**Build order (adjusted).**
+**Build order (proposed adjustment, awaiting the maintainer's approval; the proposal's own order is in the original handoff).**
 1. Protocol types and tests: envelopes, canonical form, digest, signature, ECDH, HKDF, AES-GCM, tamper, replay, wrong-key and substitution tests. No daemon, no network.
 2. Run the protocol in one process: the CLI and the "service" together, local authority behind the interface, approval bound to the digest. The command behaves as today.
 3. Machine identity: generation, platform storage, fingerprint.
@@ -461,7 +461,7 @@ sequenceDiagram
 6. Relay mode and a remote authority, enrollment, revocation.
 7. Integration tests proving local and relay give identical results, plus the failure cases above.
 
-**Open questions.** Enrollment of a machine key at the authority (who confirms, how); key rotation and revocation propagation; canonical serialization details and associated data; authority signing key distribution; whether relay metadata is encrypted; response retry semantics; local API transport per platform; client authentication for Docker and WSL; whether a container uses its own identity; service account and key storage; approval lifetime; cache policy (note 1); where approval happens in remote mode (in principle at the authority, with the request details carried in the request, note 6).
+**Open questions.** Enrollment of a machine key at the authority (who confirms, how); key rotation and revocation propagation; canonical serialization details and associated data; authority signing key distribution; whether relay metadata is encrypted; response retry semantics; local API transport per platform; client authentication for Docker and WSL; whether a container uses its own identity; service account and key storage; approval lifetime; cache policy (note 1); where approval happens in remote mode (the proposal leaves this open; note 6 applies if it is at the authority).
 
 ## 11. Where is it in the code
 
