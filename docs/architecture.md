@@ -69,7 +69,7 @@ flowchart LR
 | Lost reply | page resends the same body (3 tries: 8 s, 8 s, 20 s; `deny` one try of 20 s) | same bytes | Steps that lead on (`proof`, `create`, `sign`, `code`) keep one reply per verified body (SHA-256 of body, fixed-time compare), in memory until the command ends. No second page, no second code. Other steps (`save`, `seal`, `deny`): a resend after the outcome gets 404 and the page says the program already finished |
 | CLI <-> `state.db` | SQLite, WAL, one transaction per write | manifest, ciphertext rows, sign counts, audit rows | Manifest signature checked before use (exit 4). Writes check the version they replace |
 | CLI -> spawned program | environment, argv, closed stdin | only the approved secrets as env vars | Denylist, no stdin, redacted output (section 7) |
-| Network diagnostics | terminal lines | method, route word, whole seconds | No path, token, body, key or value (`NetLog`, `ProofLog`) |
+| Network diagnostics | Debug log events: terminal only with `--debug`, and the log file | method, route word, whole seconds, sizes, verdict words | No path, token, body, key or value (`NetLog` words, constant `AppLog` templates) |
 
 What is public: everything on stdout/stderr. What never leaves the browser: typed values (only sealed), the recovery code in plaintext (only sealed on `--recover`, shown on the page once), the passkey private key, the raw PRF output.
 
@@ -364,7 +364,7 @@ Every web session ends on the first outcome. Deny, error and silence all end in 
 | Task 19: project `.env` declarations (`secret://` references) | **Phase A built** (see 10.1). Dotenvx encrypted values and the host service are later phases |
 | Host service and remote relay (10.2) | Planned, design only. Needs its own security design first |
 | Task 16: privilege separation (service or daemon under another OS account) | Future, priority not decided |
-| Serilog logging change (normal run quiet, `--debug` verbose, warnings and errors to a rolling file under `~/.with-secrets/logs`) | Queued |
+| Serilog logging (normal run quiet, `--debug` verbose, warnings and errors to a rolling file under `~/.with-secrets/logs`) | **Built** (`AppLog.cs`): Debug events to the terminal and file only with `--debug` or `WITH_SECRETS_DEBUG=1`; warnings and above always to the file (daily, 1 MB roll, 7 files); call sites use constant templates with route words, sizes and type names only |
 | Hand tests (real browsers, phones, tunnel) | Open, see README "Checks" |
 
 ### 10.1 Project `.env` declarations
@@ -434,13 +434,14 @@ flowchart TB
 | Rotate keys, recover | `KeyRotation.cs`, `StoreRecovery.cs` |
 | Revoke | `Revocation.cs` |
 | Audit log, hash chain, `--audit` | `AuditLog.cs` |
-| Terminal prompt and held lines | `TerminalPrompt.cs` |
+| Terminal prompt (lines are written at once; nothing is held or dropped) | `TerminalPrompt.cs` |
+| Logging: Serilog setup, file rules, `--debug` terminal sink | `AppLog.cs` |
 | Saved approvals (inactive with this store) | `Reuse.cs` |
 | Tests | `tests/WithSecrets.Tests`, browser tests `tests/WithSecrets.E2E` |
 
 ## Open questions for the maintainer
 
-Answered from the code: the grammar in section 7 matches `Policy.cs`, README "Known limits" and `--help` (the page scripts never zero the PRF output: see section 4). Task 19, Task 20 and the Serilog item are in `.claude/plan.md` and the ledger, not in the plan file; no code exists for them.
+Answered from the code: the grammar in section 7 matches `Policy.cs`, README "Known limits" and `--help` (the page scripts never zero the PRF output: see section 4). Task 19 and Task 20 are in `.claude/plan.md` and the ledger, not in the plan file; no code exists for them.
 
 1. Cross-host `--enroll` (6.4, the `else` branch) is traced in `Enrollment.cs` and `PasskeyRegistration.cs` but has not been run in a browser. Hand test still open.
 2. Should the page scripts overwrite the PRF `Uint8Array` after sealing? Today they do not (no `fill(0)` in any page), and the browser's copy is out of reach anyway.

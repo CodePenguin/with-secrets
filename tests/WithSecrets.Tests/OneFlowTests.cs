@@ -143,7 +143,7 @@ internal static class OneFlowTests
     }
 
     /// <summary>The enrollment page as the browser makes the registration: reads the options, registers <paramref name="creator" />, posts it.</summary>
-    private static (string Page, string Reply) Create(HttpClient client, (string Url, string Origin) link, TestAuthenticator creator, string rpId, string name, bool admin)
+    internal static (string Page, string Reply) Create(HttpClient client, (string Url, string Origin) link, TestAuthenticator creator, string rpId, string name, bool admin)
     {
         (_, string page) = TestState.Get(client, link.Url);
         Match options = Json.Match(page);
@@ -382,17 +382,18 @@ internal static class OneFlowTests
         TerminalPrompt.Input = () => typed.Take();
         try
         {
-            // The gate itself: lines that arrive while the prompt waits are held (diagnostics dropped) and shown after Enter.
+            // No line is held or dropped: the prompt is shown, then whatever is written next appears at once (on a new line).
             Task<string?> reading = Task.Run(() => TerminalPrompt.ReadCode(false));
             WaitFor(() => Snapshot(output).EndsWith(TerminalPrompt.Waiting, StringComparison.Ordinal));
+            string during = Snapshot(output);
+            check(during == TerminalPrompt.Waiting, "prompt: the prompt is the only text, with no new line after it, while it waits (nothing else is written in normal mode) (" + during + ")");
             TerminalPrompt.Line("with-secrets: a late line");
             TerminalPrompt.Noise("with-secrets: connection opened (1 s)");
-            string during = Snapshot(output);
-            check(during == TerminalPrompt.Waiting, "prompt: the prompt is the only text, with no new line after it, while it waits (" + during + ")");
+            string now = Unix(output);
+            check(now == TerminalPrompt.Waiting + "\nwith-secrets: a late line\nwith-secrets: connection opened (1 s)\n", "prompt: a line written while the prompt waits is written at once, none is held or dropped (" + now.Replace("\n", "|") + ")");
             typed.Add("111111");
             check(reading.Wait(TimeSpan.FromSeconds(10)) && reading.Result == "111111", "prompt: the typed line is returned");
-            string after = Snapshot(output);
-            check(after.IndexOf("a late line", StringComparison.Ordinal) > after.IndexOf("Paste it here", StringComparison.Ordinal) && !after.Contains("connection opened", StringComparison.Ordinal), "prompt: the held line is shown after Enter and the diagnostic is dropped");
+            check(Unix(output) == now, "prompt: nothing is replayed after Enter");
             check(TerminalPrompt.Waiting.EndsWith(": ", StringComparison.Ordinal) && !TerminalPrompt.Waiting.Contains('\n') && TerminalPrompt.Waiting.StartsWith("Waiting for the code from the page. Paste it here and press Enter", StringComparison.Ordinal), "prompt: the text names the page and Enter and ends so that the cursor stays on its line");
 
             // The whole --enroll flow, with the real gate as terminal: after the last tap the prompt is last, whatever the network does.

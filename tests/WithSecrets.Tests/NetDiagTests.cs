@@ -3,6 +3,9 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.RegularExpressions;
 
+using Serilog.Core;
+using Serilog.Events;
+
 namespace WithSecrets.Tests;
 
 /// <summary>
@@ -58,16 +61,9 @@ internal static class NetDiagTests
     private static async Task Server(Action<bool, string> check)
     {
         List<string> lines = [];
-        Action<string> saved = NetLog.Sink;
         TimeSpan savedSlow = OneShotServer.SlowBody;
         TimeSpan savedBody = OneShotServer.BodyTimeout;
-        NetLog.Sink = line =>
-        {
-            lock (lines)
-            {
-                lines.Add(line);
-            }
-        };
+        AppLog.Tap = new LineSink(lines, LogEventLevel.Debug, "^with-secrets: (connection opened|request )");
         OneShotServer.SlowBody = TimeSpan.FromSeconds(1);
         OneShotServer.BodyTimeout = TimeSpan.FromSeconds(3);
         try
@@ -118,7 +114,7 @@ internal static class NetDiagTests
         }
         finally
         {
-            NetLog.Sink = saved;
+            AppLog.Tap = null;
             OneShotServer.SlowBody = savedSlow;
             OneShotServer.BodyTimeout = savedBody;
         }
@@ -133,5 +129,25 @@ internal static class NetDiagTests
         }
 
         return File.ReadAllText(Path.Combine(folder!, "src", "WithSecrets.Core", file));
+    }
+}
+
+/// <summary>Collects the rendered lines of the events at one level (optionally only those matching a pattern), as the old line sinks did.</summary>
+internal sealed class LineSink(List<string> lines, LogEventLevel level, string? pattern = null) : ILogEventSink
+{
+    private readonly Regex? _pattern = pattern is null ? null : new Regex(pattern, RegexOptions.CultureInvariant);
+
+    public void Emit(LogEvent logEvent)
+    {
+        string line = AppLog.Render(logEvent);
+        if (logEvent.Level != level || (_pattern is not null && !_pattern.IsMatch(line)))
+        {
+            return;
+        }
+
+        lock (lines)
+        {
+            lines.Add(line);
+        }
     }
 }

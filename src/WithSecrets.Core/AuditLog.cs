@@ -331,6 +331,8 @@ public sealed partial class AuditLog
         }
         catch (StateDatabaseException)
         {
+            AppLog.Warn("an audit log row could not be written");
+
             return false;
         }
     }

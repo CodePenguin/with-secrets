@@ -87,8 +87,6 @@ internal static class Program
 
     private static int Main()
     {
-        ProofLog.Sink = _ => { };
-        NetLog.Sink = _ => { };
         const string Secret = "S3cr3t-Value/with+chars==";
 
         // --- redaction: forms
@@ -311,6 +309,11 @@ internal static class Program
         if (Wants("ProofReply"))
         {
             ProofReplyTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("Logging"))
+        {
+            LoggingTests.Run(Check).GetAwaiter().GetResult();
         }
 
         if (Wants("NetDiag"))

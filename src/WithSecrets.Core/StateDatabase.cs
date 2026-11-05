@@ -116,6 +116,8 @@ public sealed class StateDatabase
             return null;
         }
 
+        // Logged without the reason text: it can name a path. The terminal gets the reason.
+        AppLog.Warn("the state failed its check, so the command stopped (exit {Code})", RunCommand.StoreError);
         stderr.WriteLine("with-secrets: " + error);
 
         return RunCommand.StoreError;

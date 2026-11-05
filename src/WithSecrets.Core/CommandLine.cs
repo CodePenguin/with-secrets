@@ -9,6 +9,9 @@ public abstract record CliCommand
     /// <summary>--port N: where the one-use page listens for this call, in place of the port setting. Null: use the setting.</summary>
     public int? Port { get; init; }
 
+    /// <summary>--debug (any command): diagnostic lines go to the terminal and the log file. Off by default.</summary>
+    public bool Debug { get; init; }
+
     /// <summary>--list: print the secret names.</summary>
     public sealed record List : CliCommand;
 
@@ -129,6 +132,8 @@ public static class CliArgs
         on port N instead of the port setting (random free port if the setting is 0). It is not saved. If N is in use the call fails.
         Use it to forward the page over ssh: ssh -L N:localhost:N host.
 
+        --debug (with any command, before --) shows diagnostic lines on the terminal (connections, requests, proof sizes and verdicts) and writes them to the log file; WITH_SECRETS_DEBUG=1 does the same for every call. Normally the terminal shows none of them. Warnings and errors always go to the log file, %USERPROFILE%\.with-secrets\logs\with-secrets-YYYYMMDD.log (1 MB per file, 7 files kept). The log holds route words, sizes, seconds and error type names, never a value, a code, a key or a link.
+
         --audit prints the admin keys' fingerprints, then the newest audit entries (default 20; --last N, 1 to 1000; --secret NAME for one secret): time, event,
         secret names, program, outcome and key name. Never values. --verify also checks the hash chain (exit 4 if broken).
         """;
@@ -136,8 +141,14 @@ public static class CliArgs
     /// <summary>Returns the command, or null and an error message when the arguments are wrong.</summary>
     public static CliCommand? Parse(IReadOnlyList<string> args, out string error)
     {
-        CliCommand? command = ParseCommand(args, out int? port, out error);
-        if (command is null || port is null)
+        CliCommand? command = ParseCommand(args, out int? port, out bool debug, out error);
+        if (command is null)
+        {
+            return null;
+        }
+
+        command = command with { Debug = debug };
+        if (port is null)
         {
             return command;
         }
@@ -152,9 +163,10 @@ public static class CliArgs
         return command with { Port = port };
     }
 
-    private static CliCommand? ParseCommand(IReadOnlyList<string> args, out int? portNumber, out string error)
+    private static CliCommand? ParseCommand(IReadOnlyList<string> args, out int? portNumber, out bool debugRequested, out string error)
     {
         portNumber = null;
+        debugRequested = false;
         int separator = IndexOfSeparator(args);
         List<string> head = args.Count == 0 ? ["--help"] : [.. separator < 0 ? args : args.Take(separator)];
         List<string> tail = separator < 0 ? [] : [.. args.Skip(separator + 1)];
@@ -176,6 +188,7 @@ public static class CliArgs
         Option<bool> rotateKey = new("--rotate-key") { Description = "An admin makes a new store key and master key, keeps only the key tapped and shows a new recovery code. Removes the other keys (real terminal)." };
         Option<bool> show = new("--show") { Description = "With --config: print the settings and their values (anywhere)." };
         Option<string?> port = new("--port") { Description = "Where the one-use web page listens for this call, 1 to 65535, in place of the port setting (nothing is saved). If it is in use, the call fails. For ssh -L.", HelpName = "N" };
+        Option<bool> debug = new("--debug") { Description = "With any command: show diagnostic lines on the terminal and write them to the log file (WITH_SECRETS_DEBUG=1 does it for every call). Warnings always go to the log file." };
         Option<string[]> secrets = new("--secrets")
         {
             Description = "Names of the secrets to give the program, separated by commas. Write every name. There is no option for all secrets.",
@@ -209,6 +222,7 @@ public static class CliArgs
         root.Options.Add(rotateKey);
         root.Options.Add(show);
         root.Options.Add(port);
+        root.Options.Add(debug);
         root.Options.Add(secrets);
         root.Options.Add(reason);
         root.Options.Add(needs);
@@ -231,6 +245,7 @@ public static class CliArgs
             return new CliCommand.Help(text.ToString());
         }
 
+        debugRequested = result.GetValue(debug);
         string[] names = [.. result.GetValue(secrets)!.SelectMany(value => value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))];
         string? reasonText = result.GetValue(reason);
         string? setName = result.GetValue(set);

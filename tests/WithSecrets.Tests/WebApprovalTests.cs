@@ -2368,7 +2368,7 @@ internal static partial class WebApprovalTests
         }
     }
 
-    private enum Twist
+    internal enum Twist
     {
         None,
         TamperCt,
@@ -2387,7 +2387,7 @@ internal static partial class WebApprovalTests
     }
 
     /// <summary>What one SecretEntry call did, as the test client saw it.</summary>
-    private sealed class EntryRun
+    internal sealed class EntryRun
     {
         public SecretChange? Result { get; set; }
 
@@ -2550,7 +2550,7 @@ internal static partial class WebApprovalTests
     }
 
     /// <summary>Runs SecretEntry.Set and plays the browser on the set page.</summary>
-    private static Task<EntryRun> SetRun(HttpClient client, PasskeyStore passkeys, ApprovalSettings primary, ApprovalSettings local, SecretStore store, IReadOnlyList<string> names, TestAuthenticator key, string plaintext, Twist twist = Twist.None)
+    internal static Task<EntryRun> SetRun(HttpClient client, PasskeyStore passkeys, ApprovalSettings primary, ApprovalSettings local, SecretStore store, IReadOnlyList<string> names, TestAuthenticator key, string plaintext, Twist twist = Twist.None)
     {
         return EntryDrive(announce => Entry(passkeys, primary, local, store, announce).Set(names), (run, text) =>
         {

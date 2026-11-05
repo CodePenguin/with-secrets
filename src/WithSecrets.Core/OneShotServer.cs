@@ -20,28 +20,14 @@ namespace WithSecrets;
 internal sealed record OneShotResponse(int Status, string ContentType, string Body, string? ContentSecurityPolicy = null, string? Outcome = null);
 
 /// <summary>
-/// The one line the terminal gets when a proof (or other signed step) arrives and one when it is finished, so a person can tell
-/// "the page never sent it" from "the program is checking it". The lines hold a size and a verdict word only: never a key, a
-/// PRF output, a code or a value. Tests replace <see cref="Sink" />.
-/// </summary>
-internal static class ProofLog
-{
-    public static Action<string> Sink { get; set; } = TerminalPrompt.Noise;
-
-    public static void Line(string text) => Sink("with-secrets: " + text);
-}
-
-/// <summary>
-/// Network diagnostics for the terminal: a line when a connection is opened and when a request line and its headers were read,
-/// with whole seconds since the link was made. The lines hold only a method, a route word (page, proof, sign, save, create, seal,
-/// deny, code or other) and seconds: never a path with its token, a body, a key or a value. Tests replace <see cref="Sink" />.
+/// Words for the network diagnostics (Debug events, seen with --debug): a line when a connection is opened and when a request line
+/// and its headers were read, with whole seconds since the link was made; one when a proof (or other signed step) arrives and one
+/// when it is finished, so a person can tell "the page never sent it" from "the program is checking it". They hold only a method, a
+/// route word (page, proof, sign, save, create, seal, deny, code or other), a size, a verdict word and seconds: never a path with
+/// its token, a body, a key, a PRF output, a code or a value.
 /// </summary>
 internal static class NetLog
 {
-    public static Action<string> Sink { get; set; } = TerminalPrompt.Noise;
-
-    public static void Line(string text) => Sink("with-secrets: " + text);
-
     private static readonly HashSet<string> Routes = new(StringComparer.Ordinal) { "proof", "sign", "save", "create", "seal", "deny", "code" };
 
     /// <summary>The route word of a suffix: "" is the page, an unknown one is "other".</summary>
@@ -49,7 +35,7 @@ internal static class NetLog
 
     public static string Method(string method) => method is "GET" or "POST" ? method : "other";
 
-    public static string Seconds(System.Diagnostics.Stopwatch clock) => ((long)clock.Elapsed.TotalSeconds).ToString(System.Globalization.CultureInfo.InvariantCulture) + " s";
+    public static long Seconds(System.Diagnostics.Stopwatch clock) => (long)clock.Elapsed.TotalSeconds;
 }
 
 /// <summary>
@@ -73,8 +59,11 @@ internal static class HandleGuard
 
             return handle();
         }
-        catch (Exception)
+        catch (Exception error)
         {
+            // The exception's type name only: its text could carry a value.
+            AppLog.Warn("internal error in a {Method:l} /{Route:l} request: {ExceptionType:l}", NetLog.Method(verb), NetLog.Route(suffix), error.GetType().Name);
+
             return deny() ? failed : notFound;
         }
     }
@@ -263,7 +252,7 @@ internal sealed class OneShotServer : IDisposable
     {
         listen.Use(next => context =>
         {
-            NetLog.Line($"connection opened ({NetLog.Seconds(_issued)})");
+            AppLog.Debug("connection opened ({Seconds} s)", NetLog.Seconds(_issued));
 
             return next(context);
         });
@@ -413,10 +402,11 @@ internal sealed class OneShotServer : IDisposable
         else
         {
             string word = NetLog.Route(suffix);
-            NetLog.Line($"request {NetLog.Method(context.Request.Method)} /{word} (headers read, {NetLog.Seconds(_issued)})");
+            string method = NetLog.Method(context.Request.Method);
+            AppLog.Debug("request {Method:l} /{Route:l} (headers read, {Seconds} s)", method, word, NetLog.Seconds(_issued));
             using CancellationTokenSource slowEnd = new();
             _ = Task.Delay(SlowBody, slowEnd.Token).ContinueWith(
-                finished => NetLog.Line($"request {NetLog.Method(context.Request.Method)} /{word} body slow ({NetLog.Seconds(_issued)})"),
+                finished => AppLog.Debug("request {Method:l} /{Route:l} body slow ({Seconds} s)", method, word, NetLog.Seconds(_issued)),
                 CancellationToken.None,
                 TaskContinuationOptions.OnlyOnRanToCompletion,
                 TaskScheduler.Default);
@@ -440,9 +430,18 @@ internal sealed class OneShotServer : IDisposable
             }
 
             slowEnd.Cancel();
-            if (tracked)
+            if (timedOut)
             {
-                ProofLog.Line(body is null ? $"{label} received (body not read)" : $"{label} received ({Encoding.UTF8.GetByteCount(body)} bytes)");
+                AppLog.Warn("request {Method:l} /{Route:l} body timed out ({Seconds} s)", method, word, NetLog.Seconds(_issued));
+            }
+
+            if (tracked && body is null)
+            {
+                AppLog.Debug("{Label:l} received (body not read)", label);
+            }
+            else if (tracked)
+            {
+                AppLog.Debug("{Label:l} received ({Bytes} bytes)", label, Encoding.UTF8.GetByteCount(body!));
             }
 
             try
@@ -454,14 +453,15 @@ internal sealed class OneShotServer : IDisposable
                     : handle is null ? Gone
                     : handle(context.Request.Method, suffix, body);
             }
-            catch (Exception)
+            catch (Exception error)
             {
+                AppLog.Warn("request {Method:l} /{Route:l} failed: {ExceptionType:l}", method, word, error.GetType().Name);
                 response = new OneShotResponse(500, "text/plain; charset=utf-8", "Something went wrong.");
             }
 
             if (tracked)
             {
-                ProofLog.Line($"{label} checked: " + (response.Outcome ?? response.Status switch
+                AppLog.Debug("{Label:l} checked: {Verdict:l}", label, response.Outcome ?? response.Status switch
                 {
                     200 => "accepted",
                     403 => "refused",
@@ -469,7 +469,7 @@ internal sealed class OneShotServer : IDisposable
                     404 => "already ended",
                     408 => "body timed out",
                     _ => "error " + response.Status.ToString(System.Globalization.CultureInfo.InvariantCulture)
-                }));
+                });
             }
         }
 

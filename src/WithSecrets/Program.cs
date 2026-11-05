@@ -11,6 +11,18 @@ internal static class Program
 
     private static async Task<int> Main(string[] args)
     {
+        try
+        {
+            return await Execute(args);
+        }
+        finally
+        {
+            AppLog.Close();
+        }
+    }
+
+    private static async Task<int> Execute(string[] args)
+    {
         CliCommand? command = CliArgs.Parse(args, out string error);
         if (command is null)
         {
@@ -25,6 +37,9 @@ internal static class Program
 
             return 0;
         }
+
+        // Diagnostics: warnings go to the log file always; --debug (or WITH_SECRETS_DEBUG=1) adds the Debug events, to the terminal too.
+        AppLog.Configure(AppLog.DebugRequested(command.Debug));
 
         string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), StoreFolder);
         StateDatabase state = StateDatabase.InFolder(folder);

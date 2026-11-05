@@ -213,7 +213,7 @@ public static class CommandWiring
                 TerminalPrompt.Line(firstHint);
             }
 
-            // The prompt is the last thing on the terminal while it waits: other lines are held until Enter.
+            // The prompt is the last thing on the terminal while it waits: in normal mode the command writes nothing else meanwhile.
             return TerminalPrompt.ReadCode(asked++ > 0);
         };
     }

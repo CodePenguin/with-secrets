@@ -22,7 +22,7 @@ Deny, a wrong proof, an error, or no answer before the time limit all deny the r
 
 ## Install
 
-Requires the .NET 10 SDK.
+Requires the .NET 10 SDK. Third-party components (Dotenvx.Primitives, SQLite, Serilog and Serilog.Sinks.File for logging, and others) are listed in `THIRD-PARTY-NOTICES.md`.
 
 ```
 dotnet tool install -g WithSecrets
@@ -121,7 +121,7 @@ The schema version is 9 (the signed manifest, with any number of admin keys, hol
 
 ### One link per command
 
-A command prints one link. When it has more steps (`--enroll`, `--recover`, `--rotate-key`), the page of a step that has verified (the passkey proof or the recovery code was checked) answers with the address of the next step's page, made at that moment (a new one-use token, the same server and port; the host is the admin keys' host or the `baseUrl` host, as before), and moves on by itself with the text "Step done. Continuing..." If the browser blocks that, the page shows the same address as a link and a **Continue** button. The next page needs the step before it done: its address is not known before, and each page works once. Every page keeps its own rules (a passkey prompt only in a tap, Cancel, retries, diagnostics). The command's time limit is shared by its steps, not restarted at each. Where a command ends with a code from the page (the first `--config`, `--enroll`, the new-store step of `--recover`), the terminal asks for it after every tap, and nothing is stored before it is typed. While it waits, the last thing on the terminal is `Waiting for the code from the page. Paste it here and press Enter: ` with the cursor after it; other lines the program writes meanwhile are held and shown after Enter (network diagnostics are dropped). The first `--config` is one page too (its Step 2 button signs the new state on the same page), like `--unenroll`, `--revoke`, `--set`, `--remove` and a later change with `--config`.
+A command prints one link. When it has more steps (`--enroll`, `--recover`, `--rotate-key`), the page of a step that has verified (the passkey proof or the recovery code was checked) answers with the address of the next step's page, made at that moment (a new one-use token, the same server and port; the host is the admin keys' host or the `baseUrl` host, as before), and moves on by itself with the text "Step done. Continuing..." If the browser blocks that, the page shows the same address as a link and a **Continue** button. The next page needs the step before it done: its address is not known before, and each page works once. Every page keeps its own rules (a passkey prompt only in a tap, Cancel, retries, diagnostics). The command's time limit is shared by its steps, not restarted at each. Where a command ends with a code from the page (the first `--config`, `--enroll`, the new-store step of `--recover`), the terminal asks for it after every tap, and nothing is stored before it is typed. While it waits, the last thing on the terminal is `Waiting for the code from the page. Paste it here and press Enter: ` with the cursor after it; the command writes nothing else meanwhile (no line is held back or dropped; with `--debug` the diagnostic lines print as they arrive). The first `--config` is one page too (its Step 2 button signs the new state on the same page), like `--unenroll`, `--revoke`, `--set`, `--remove` and a later change with `--config`.
 
 If the reply of a step that verified is lost on the way, the page sends the same request again and gets the same reply (the same next address or the same code), which makes no second page and no second code; the program keeps that reply only in memory until the command ends, and a different request after the decision gets 404. If the page still did not move on, press Ctrl+C and run the command again. A page whose step is gone says so in a short text (404) and points to the terminal.
 
@@ -269,9 +269,18 @@ dotnet run --project tests/WithSecrets.E2E            # all scenarios; or: dotne
 
 The one-time browser install downloads Chromium's headless shell (about 280 MB, plus a few MB for ffmpeg) into `%LOCALAPPDATA%\ms-playwright`, per user; nothing global is changed. Chromium and a virtual authenticator are not an iPhone or 1Password: Safari and iOS prompt rules, a phone's real PRF, 1Password and Windows Hello still need the hand tests listed above.
 
+## Logging
+
+Normally the terminal shows only what a command always showed: its result, errors, links and the code prompt. The lines that explain what the program is doing (`with-secrets: connection opened (3 s)`, `request POST /proof (headers read, 3 s)`, `proof received (N bytes)`, `proof checked: accepted`) are Debug events and are not shown.
+
+- **`--debug`** (with any command, before `--`) or **`WITH_SECRETS_DEBUG=1`**: those lines print on the terminal as they happen, and are also written to the log file.
+- **Log file:** `%USERPROFILE%\.with-secrets\logs\with-secrets-YYYYMMDD.log`, one file a day, rolled at 1 MB, the newest 7 files kept. The folder is made when needed; if the file cannot be opened or written, the command goes on without it.
+- **Always in the file, without `--debug`:** warnings and errors: a request handler that failed (the exception type name only), a request body that timed out, a state that failed its check, an audit row that could not be written.
+- **Nothing secret:** the log holds route words (`page`, `proof`, `save`...), sizes, whole seconds and exception type names. Never a link or token, a request body, a key, PRF output, a code or recovery code, a secret value, a `.env` value or exception text.
+
 ## Troubleshooting
 
-If a page sits on "Checking your passkey..." and then says the program did not answer, look at the terminal. `with-secrets: connection opened (N s)` and `request POST /proof (headers read, N s)` (a method, a route word and whole seconds since the link was made, never the link, a body or a key) show that the request reached the program; `body slow` means its body was still arriving after 5 seconds; no line means it never arrived. The page adds a `Diagnostics:` line after a failed post (never after a success), with times only: when it was opened, when the passkey prompt started and answered, how long the page was hidden, each attempt, and whether the phone was online. Send those lines, not a screenshot of anything secret, when you report a problem.
+If a page sits on "Checking your passkey..." and then says the program did not answer, run the command again with `--debug` (or set `WITH_SECRETS_DEBUG=1`) and look at the terminal and the log file (see [Logging](#logging)). `with-secrets: connection opened (N s)` and `request POST /proof (headers read, N s)` (a method, a route word and whole seconds since the link was made, never the link, a body or a key) show that the request reached the program; `body slow` means its body was still arriving after 5 seconds; no line means it never arrived. The page adds a `Diagnostics:` line after a failed post (never after a success), with times only: when it was opened, when the passkey prompt started and answered, how long the page was hidden, each attempt, and whether the phone was online. Send those lines, not a screenshot of anything secret, when you report a problem.
 
 ## Known limits
 

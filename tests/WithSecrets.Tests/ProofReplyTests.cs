@@ -3,6 +3,9 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.RegularExpressions;
 
+using Serilog.Core;
+using Serilog.Events;
+
 namespace WithSecrets.Tests;
 
 /// <summary>
@@ -18,14 +21,7 @@ internal static class ProofReplyTests
     public static async Task Run(Action<bool, string> check)
     {
         List<string> lines = [];
-        Action<string> saved = ProofLog.Sink;
-        ProofLog.Sink = line =>
-        {
-            lock (lines)
-            {
-                lines.Add(line);
-            }
-        };
+        AppLog.Tap = new LineSink(lines, LogEventLevel.Debug, "^with-secrets: (proof|step ) ");
         try
         {
             using HttpClient client = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false });
@@ -36,7 +32,7 @@ internal static class ProofReplyTests
         }
         finally
         {
-            ProofLog.Sink = saved;
+            AppLog.Tap = null;
         }
     }
 

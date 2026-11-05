@@ -2,9 +2,9 @@ namespace WithSecrets;
 
 /// <summary>
 /// The terminal side of a code that the person types after the last tap. Every line the program writes to the terminal while a
-/// command runs goes through <see cref="Line" />. While the prompt waits for the code (<see cref="ReadCode" />), the prompt is the
-/// last thing shown: other lines are held back and shown after the person pressed Enter; the network diagnostics
-/// (<see cref="Noise" />) are dropped in that time. The prompt names no code and no key.
+/// command runs goes through <see cref="Line" />, and is written at once: nothing is held back or dropped. The prompt is the last
+/// thing shown at the wait because, in normal mode, the command writes nothing but its result while it waits (the diagnostics are
+/// Debug events and off). With --debug they print as they arrive. The prompt names no code and no key.
 /// </summary>
 public static class TerminalPrompt
 {
@@ -13,8 +13,7 @@ public static class TerminalPrompt
     public const string Wrong = "That code is wrong. Paste the code from the page and press Enter: ";
 
     private static readonly Lock Gate = new();
-    private static readonly List<string> Held = [];
-    private static bool _waiting;
+    private static bool _promptOpen;
 
     /// <summary>For tests: where lines go (the standard error stream when null).</summary>
     public static TextWriter? Output { get; set; }
@@ -24,77 +23,41 @@ public static class TerminalPrompt
 
     private static TextWriter Out => Output ?? Console.Error;
 
-    /// <summary>One line for the terminal; held until the code was typed when the prompt is waiting.</summary>
+    /// <summary>One line for the terminal, written now. If the prompt line is still open (the read has not returned), it is ended first.</summary>
     public static void Line(string text)
     {
         lock (Gate)
         {
-            if (_waiting)
-            {
-                Held.Add(text);
-
-                return;
-            }
-
+            EndPromptLine();
             Out.WriteLine(text);
         }
     }
 
-    /// <summary>A diagnostic line (network, proof): shown now, but dropped while the prompt waits.</summary>
-    public static void Noise(string text)
-    {
-        lock (Gate)
-        {
-            if (!_waiting)
-            {
-                Out.WriteLine(text);
-            }
-        }
-    }
+    /// <summary>A diagnostic line (--debug): written now, like any line.</summary>
+    public static void Noise(string text) => Line(text);
 
-    /// <summary>
-    /// A line that ends the command (its result). When the wait ended while the read is still blocked (the time limit, Cancel on the
-    /// page), the prompt line is ended first and the held lines are shown, so the result is not appended to the prompt.
-    /// </summary>
-    public static void Final(string text)
-    {
-        lock (Gate)
-        {
-            Release(false);
-            Out.WriteLine(text);
-        }
-    }
+    /// <summary>A line that ends the command (its result).</summary>
+    public static void Final(string text) => Line(text);
 
-    /// <summary>Ends the waiting state: a new line after the prompt (tests only; the console echoes Enter itself, so it is not added there) and the held lines. Call with the lock held.</summary>
-    private static void Release(bool echoed)
+    /// <summary>Call with the lock held: a new line after a prompt that is still open.</summary>
+    private static void EndPromptLine()
     {
-        if (!_waiting)
+        if (_promptOpen)
         {
-            return;
-        }
-
-        _waiting = false;
-        if (!echoed)
-        {
+            _promptOpen = false;
             Out.WriteLine();
         }
-
-        foreach (string text in Held)
-        {
-            Out.WriteLine(text);
-        }
-
-        Held.Clear();
     }
 
-    /// <summary>Shows the prompt (no new line after it), reads the typed line, then shows the lines held meanwhile.</summary>
+    /// <summary>Shows the prompt (no new line after it) and reads the typed line.</summary>
     public static string? ReadCode(bool again)
     {
         lock (Gate)
         {
+            EndPromptLine();
             Out.Write(again ? Wrong : Waiting);
             Out.Flush();
-            _waiting = true;
+            _promptOpen = true;
         }
 
         try
@@ -105,7 +68,13 @@ public static class TerminalPrompt
         {
             lock (Gate)
             {
-                Release(Output is null);
+                // The console echoes Enter itself; a test output does not.
+                if (_promptOpen && Output is not null)
+                {
+                    Out.WriteLine();
+                }
+
+                _promptOpen = false;
             }
         }
     }
