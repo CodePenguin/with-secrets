@@ -378,6 +378,15 @@ The `.env` file in the working folder becomes the declaration of what a project 
 - **Composition first, resolution after.** Files are layered like Dotenvx (first file wins; `-f` repeats; an inherited OS variable beats an ordinary `.env` value). Only the final effective declaration asks for a secret, so an overridden `secret://` never causes a prompt.
 - **`--secrets` stays.** Names given with `--secrets` are added to the references found in the `.env`. A new read-only `--needs` shows what the current project would ask for (names only, no values, no approval).
 - **Trust.** The agent can write the `.env`, so the page shows every `VARIABLE <- secret` pair (one per line, renamed ones marked), every ordinary `VARIABLE=value`, and the file paths (outside-folder and symlink marks). Counts and lengths are capped and anything over is refused, never hidden. The child still has code-loading variables removed (also from `.env` values), and references to proxy, git-identity or code-loading names are refused. The human approves what the page shows.
+- **Provisional choices to confirm (made by the implementer, not decided by the maintainer).** The code follows them today. Each is the maintainer's call and can be changed or removed.
+  1. The name `--needs` for the listing (the request only said a listing should show what the project requires).
+  2. Secret names: folders of 1 to 4 segments, each `[A-Za-z0-9_.-]`, the last segment UPPER_SNAKE, folder case exact, whole path at most 200 characters.
+  3. Limits that refuse a run when exceeded: 256 KB per file, 8 `-f` files, 50 pairs, 50 ordinary variables, names of 64 characters, values of 512 characters. (The maintainer has said complicated limits make the tool a pain to use.)
+  4. Refused reference targets: proxy names (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, anything ending `_PROXY`), `GIT_AUTHOR_*`, `GIT_COMMITTER_*`, `PATH`-like names and the code-loading list.
+  5. Code-loading variables are silently dropped from ordinary `.env` values (with a note), instead of being refused or shown only.
+  6. Precedence: a reference beats an inherited OS variable, an ordinary `.env` value does not, and `--secrets` beats an ordinary `.env` value. Only the default `.env` in the working folder is read, no search of parent folders.
+  7. A Dotenvx `encrypted:` value that is the effective declaration stops the run with an error, instead of being passed through or ignored. This is a deferral of phase B, not a rejection.
+  8. A `--secrets` name containing `/` is refused because it has no valid variable name; a `.env` reference is the way to use such a secret.
 - **Later phases.** Dotenvx encrypted values (the private key held in the store as a secret, approved like any other), `${VAR}` expansion, `--env NAME` layering.
 
 ### 10.2 Local service, machine identity and end-to-end encrypted relay (planned)
