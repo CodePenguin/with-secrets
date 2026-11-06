@@ -356,121 +356,242 @@ What the agent can and cannot do, and the known limits: README "Known limits", "
 
 Every web session ends on the first outcome. Deny, error and silence all end in a denial, never an approval. Gate failures happen before any link is printed.
 
-## 10. Planned, not built
+## 10. Roadmap and target architecture
 
-| Item | State |
-| --- | --- |
-| Task 20: remote mode for sandboxes (relay, pairing, end-to-end encrypted values) | Future. Design document first |
-| Task 19: project `.env` declarations (`secret://` references) | **Phase A built** (see 10.1). Dotenvx encrypted values and the host service are later phases |
-| Local service, machine identity, end-to-end encrypted relay (10.2) | Planned, design only; reviewed (see its review notes). Task 16, the service account, should be decided with it |
-| Task 16: privilege separation (service or daemon under another OS account) | Future, priority not decided |
-| Serilog logging (normal run quiet, `--debug` verbose, warnings and errors to a rolling file under `~/.with-secrets/logs`) | **Built** (`AppLog.cs`): Debug events to the terminal and file only with `--debug` or `WITH_SECRETS_DEBUG=1`; warnings and above always to the file (daily, 1 MB roll, 7 files); call sites use constant templates with route words, sizes and type names only |
-| Hand tests (real browsers, phones, tunnel) | Open, see README "Checks" |
+This document records both the implemented baseline and the intended architecture. A design decision is not evidence that a feature is implemented.
 
-### 10.1 Project `.env` declarations
+Status labels:
+- **Implemented** — present in the repository and covered by the stated checks.
+- **Agreed / design** — a maintainer decision; implementation is not implied.
+- **Proposed** — a concrete option for review, not yet accepted.
+- **Open** — requires validation or a maintainer decision.
+- **Deferred** — intentionally postponed.
 
-**Phase A is built** (`EnvDeclarations.cs`; tests: the `EnvDeclarations` suite). Not built: Dotenvx encrypted values, `${VAR}` expansion, `--env NAME`, host service.
+### 10.1 Project environment declarations and Dotenvx
 
-The `.env` file in the working folder becomes the declaration of what a project needs. The agent no longer has to guess or list names.
+**Status:** Phase A project declarations are implemented in `EnvDeclarations.cs`. Host service and remote authority are design-only. Integration with the existing Dotenvx loading/evaluation behavior, including encrypted project `.env` values and profile selection, remains follow-up work.
 
-- **Three kinds of value.** Ordinary (`LOG_LEVEL=Debug`), Dotenvx encrypted (`encrypted:...`), and a reference (`TOKEN=secret://GITHUB_TOKEN`). The left side is the variable the program receives; the right side names the secret. They can differ (`STRIPE_KEY=secret://STRIPE_PRODUCTION_KEY`).
-- **Grammar.** `secret://[folder/...]NAME`. The qualifier is just a folder path the user chooses for their own organisation (`project/DB_PASSWORD`, `team/payments/STRIPE_KEY`); it has no built-in meaning. The whole path is the secret's name in the store, so `--set team/payments/STRIPE_KEY` stores it and `secret://team/payments/STRIPE_KEY` finds it. An unqualified name is the plain name. A reference is a logical name, never a storage location. Later, a default folder can come from the authority's configuration.
-- **Composition first, resolution after.** Files are layered like Dotenvx (first file wins; `-f` repeats; an inherited OS variable beats an ordinary `.env` value). Only the final effective declaration asks for a secret, so an overridden `secret://` never causes a prompt.
-- **`--secrets` stays.** Names given with `--secrets` are added to the references found in the `.env`. A new read-only `--needs` shows what the current project would ask for (names only, no values, no approval).
-- **Trust.** The agent can write the `.env`, so the page shows every `VARIABLE <- secret` pair (one per line, renamed ones marked), every ordinary `VARIABLE=value`, and the file paths (outside-folder and symlink marks). Counts and lengths are capped and anything over is refused, never hidden. The child still has code-loading variables removed (also from `.env` values), and references to proxy, git-identity or code-loading names are refused. The human approves what the page shows.
-- **Provisional choices to confirm (made by the implementer, not decided by the maintainer).** The code follows them today. Each is the maintainer's call and can be changed or removed.
-  1. The name `--needs` for the listing (the request only said a listing should show what the project requires).
-  2. Secret names: folders of 1 to 4 segments, each `[A-Za-z0-9_.-]`, the last segment UPPER_SNAKE, folder case exact, whole path at most 200 characters.
-  3. Limits that refuse a run when exceeded: 256 KB per file, 8 `-f` files, 50 pairs, 50 ordinary variables, names of 64 characters, values of 512 characters. (The maintainer has said complicated limits make the tool a pain to use.)
-  4. Refused reference targets: proxy names (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, anything ending `_PROXY`), `GIT_AUTHOR_*`, `GIT_COMMITTER_*`, `PATH`-like names and the code-loading list.
-  5. Code-loading variables are silently dropped from ordinary `.env` values (with a note), instead of being refused or shown only.
-  6. Precedence: a reference beats an inherited OS variable, an ordinary `.env` value does not, and `--secrets` beats an ordinary `.env` value. Only the default `.env` in the working folder is read, no search of parent folders.
-  7. A Dotenvx `encrypted:` value that is the effective declaration stops the run with an error, instead of being passed through or ignored. This is a deferral of phase B, not a rejection.
-  8. A `--secrets` name containing `/` is refused because it has no valid variable name; a `.env` reference is the way to use such a secret.
-- **Later phases.** Dotenvx encrypted values (the private key held in the store as a secret, approved like any other), `${VAR}` expansion, `--env NAME` layering.
+**Ownership boundary**
 
-### 10.2 Local service, machine identity and end-to-end encrypted relay (planned)
+- Use the existing `Dotenvx.Core` NuGet package unchanged. The maintainer owns the C# port, not Dotenvx core; do not propose modifying either to accommodate with-secrets.
+- Dotenvx remains responsible for its existing parsing/loading, interpolation/evaluation, encrypted `.env` value handling, and standard environment construction/injection behavior.
+- with-secrets owns project-file selection/composition policy, classification of effective declarations, `secret://` resolution, provider mounts, approval, audit/request binding, and launching the child.
+- The current Phase A parser is a deliberately limited implementation and rejects an effective encrypted declaration. That is current state, not the desired long-term parser boundary. Integrate with the existing package rather than reimplementing Dotenvx semantics.
 
-Status: design only, reviewed against the current code (review notes below). Nothing here is built. The proposal is kept as written; the review notes raise concerns and options, and every item marked OPEN is the maintainer's decision. Nothing in the proposal has been rejected. It is the layer after 10.1 and does not change the `.env` model.
+**File selection**
 
-**Principles.**
-1. Every installation has a local service. The CLI talks only to it, never to a remote authority or the database, and does not know which backend answers.
-2. The service runs in one of two modes behind the same CLI-facing API: **local authority** (it owns the encrypted store, runs the approval, resolves the secrets) or **relay** (it forwards signed requests to a remote authority and passes the answer back).
-3. A persistent **machine identity key** (ECDSA P-256) only signs. It never encrypts or wraps.
-4. Each request uses a fresh **ephemeral key pair** made in the CLI. The private half never leaves the CLI. The authority encrypts its answer to the public half, so a relay cannot read the values.
-5. Approval is bound to the digest of the exact request. The CLI delivers nothing to the program until it has verified the response signature and the request binding.
-6. The program still receives ordinary environment variables. Windows, WSL, Docker, Linux and macOS use the same flow. The service is the one outbound network boundary, so containers need no Internet.
+- Default selection is the project's `.env` in the current working directory. Do not search parent directories.
+- If the caller selects a Dotenvx profile (for example `local` or `development`), follow Dotenvx's existing profile/file-selection convention. Do not invent a second convention or infer profiles from ambient variables such as `NODE_ENV`.
+- Explicit file selection through the existing repeatable `-f` / `--env-file` interface selects exactly the supplied files and replaces default selection.
+- File ordering and profile expansion must match the actual Dotenvx implementation. The with-secrets composition rule is **first file wins**. Verify exact Dotenvx ordering and repeated-key semantics with tests before documenting specific profile filename patterns or precedence examples.
+- A missing default `.env` means there are no project declarations. An explicitly selected missing file is an error; never silently skip it.
 
-```mermaid
-flowchart TB
-  subgraph Envs[Execution environments]
-    W[Windows CLI]
-    L[WSL CLI]
-    D[Docker CLI]
-  end
-  W & L & D -->|local API, client authenticated| H[Local service<br/>signs requests with machine identity]
-  H -->|local authority mode| S[(Encrypted local store<br/>approval by passkey)]
-  H -->|relay mode: signed request, HTTPS| R[Remote authority<br/>verifies enrolled machine, approves, encrypts response]
-  R --> RS[(Remote secret store)]
+**Declarative model**
+
+Selected project environment files may contain ordinary configuration, Dotenvx-encrypted project values, and external secret references:
+
+```dotenv
+# Ordinary configuration
+API_URL=http://localhost:5000
+LOG_LEVEL=Debug
+
+# Dotenvx-encrypted project value
+API_KEY=<encrypted Dotenvx value>
+
+# External secret resolved by with-secrets
+GITHUB_TOKEN=secret://team/development/github/token
+DATABASE_PASSWORD=secret://personal/database/password
 ```
 
-**Request and response protocol (proposed suite).**
+- The left side is the child environment-variable name; the right side is a logical secret path. They may differ, e.g. `STRIPE_KEY=secret://team/payments/STRIPE_PRODUCTION_KEY`.
+- Dotenvx comments and syntax remain Dotenvx's responsibility. Comments are not declarations.
+- Ordinary values are not secret-store references. Dotenvx-encrypted values remain encrypted in source control and are decrypted through the existing Dotenvx mechanism. External `secret://` values are resolved by with-secrets.
+- Compose selected files first, using the ordered first-file-wins rule, then classify only the final effective value of each variable. An overridden reference must never be requested, approved, or decrypted.
+- Validate every effective reference before approval. A missing mount, permission, provider, secret, or required credential is a hard error. No fallback, cross-provider search, silent substitution, or alternate-name prompt.
+- An explicit `secret://` declaration must not silently be satisfied or replaced by an inherited environment variable. Ordinary inherited-environment behavior and encrypted-value precedence must remain compatible with Dotenvx and be covered by tests.
 
-| Item | Choice |
+**Discovery and CLI behavior**
+
+- Keep `--secrets NAME[,NAME...]` for explicit requests and compatibility; it composes with effective declarations from selected project files.
+- `--needs` is read-only discovery. It reports selected files, ordinary variable names, effective variable-to-secret mappings, and whether references are resolvable. It does not approve, decrypt, or display secret values.
+- A `--needs` result is informational, not an authorization or trusted cached plan. The run command independently recomputes and validates its plan.
+- Do not scan source code for environment-variable usage; dynamic lookups make this unreliable and language-specific. The request set is selected declarations plus explicit `--secrets`.
+- Additional `--env NAME` layering is deferred.
+
+**Approval and trust**
+
+- The human approval page is the control point because an agent can modify project environment files.
+- Show the human approver every selected file path, every effective secret mapping, and every effective ordinary variable/value. Never show plaintext secret values. Agent/terminal-facing output shows names and paths only.
+- Bind selected file paths, effective declarations, ordinary values, secret mappings, command/script, working directory, request identity, and expiry to the approval fingerprint/signature. Read files once per request; approval, audit, and launch use the same immutable snapshot. A file changed while approval is pending must not change what launches.
+- Preserve protected-variable rules: secret references cannot target code-loading variables, process-selection variables such as `PATH`, `PATHEXT`, or `COMSPEC`, proxy variables, or git identity variables. Continue stripping the existing child code-loading variables. A denylist is not a complete security boundary; showing ordinary values is still required.
+- Do not expose the Dotenvx decryption key or plaintext secrets to the agent.
+
+**Implementation status**
+
+| Capability | State |
 | --- | --- |
-| Machine identity signatures | ECDSA P-256 (the curve family of the passkeys' ES256) |
-| Response key agreement | ECDH P-256, authority ephemeral key against the CLI's request key |
-| Key derivation | HKDF-SHA-256, a context string and the request digest as info |
-| Payload | AES-256-GCM, with the request digest and ids as associated data |
-| Fingerprint | SHA-256 of the canonical public key |
-| Canonical form | the canonical JSON of `Manifest.cs`, protocol version in every object |
+| Default `.env` in working directory; no parent traversal | Implemented |
+| Explicit repeatable `-f` / `--env-file` selection | Implemented |
+| Phase A comments, optional `export`, basic quoted/unquoted values | Implemented in current parser |
+| First-file-wins composition and effective-reference-only resolution | Implemented and tested |
+| `secret://` references and renamed environment mapping | Implemented and tested |
+| `--secrets` additions and read-only `--needs` | Implemented and tested |
+| Approval display of paths, secret mappings, and ordinary values | Implemented in Phase A |
+| Dotenvx encrypted project values through existing `Dotenvx.Core` | Follow-up integration; current Phase A parser rejects effective encrypted values |
+| Dotenvx profile selection | Open pending verification against current Dotenvx behavior |
+| Additional `--env NAME` layering | Deferred |
 
-```mermaid
-sequenceDiagram
-  participant C as CLI
-  participant S as Local service
-  participant A as Authority (local store or remote)
-  participant P as Person (passkey page)
-  C->>C: new ephemeral key pair (private half stays here)
-  C->>S: request (names, reasons, command, project, ephemeral public key)
-  S->>S: authenticate the CLI, validate, sign the whole envelope with the machine identity
-  S->>A: signed request (in local mode a call inside the service)
-  A->>A: verify machine enrolled and not revoked, signature, expiry, nonce unused, compute digest
-  A->>P: approval page for exactly this request digest
-  P-->>A: passkey tap (PRF opens the store key, as today)
-  A->>A: resolve only the approved names, new response key pair, ECDH + HKDF, encrypt, sign response
-  A-->>S: response envelope (ciphertext, authority ephemeral public key, digest, signature)
-  S-->>C: same envelope, unread
-  C->>C: verify signature and digest, ECDH + HKDF, decrypt, then start the program
+### 10.2 Local host service and remote authority
+
+**Status:** Agreed architecture direction; not implemented. Define the service contract before implementation.
+
+**Architecture decisions**
+
+1. The CLI uses one shared, versioned API/protocol regardless of storage backend. It does not know whether a request is fulfilled locally or remotely.
+2. The Windows host service is the stable endpoint for Windows, WSL, and Docker clients:
+   `CLI (Windows / WSL / Docker) -> Windows host service -> local authority OR remote authority`.
+3. In local mode, the host service accesses the encrypted local SQLite store and configured local providers. In remote mode, it authenticates and relays to a remote with-secrets authority over HTTPS.
+4. The host service is the outbound network boundary, allowing WSL/Docker clients to operate without direct Internet access.
+5. The host service does **not** launch child processes, change execution identity, or own child lifecycle. The requesting CLI launches the child and injects approved values into its environment.
+6. Local and remote authorities implement the same logical API contract. The host service is not a blind HTTP proxy: it authenticates callers, validates requests, binds approvals to request identity/names, and validates responses.
+7. The service is an implementation/deployment boundary, not a reason to turn with-secrets into a general authorization broker. The product remains focused on minimizing plaintext secret exposure. Convenience and standard process/environment compatibility remain important; same-user malicious-process inspection is not claimed to be prevented.
+
+**Host service responsibilities**
+
+- Own access to local encrypted storage, provider configuration, and provider credentials.
+- Authenticate local clients; loopback, pipe name, WSL/Docker labels, or `host.docker.internal` reachability alone are not identity.
+- Validate protocol version, request shape, caller scope, project policy, requested names, and expiry.
+- Bind request ID to authenticated client, project, command context, selected declarations, requested logical names, and approval.
+- In relay mode, authenticate/forward to remote and validate the signed response.
+- Never log secret values, decrypted payloads, passkey material, or bearer credentials. Avoid persistent plaintext caches; retain plaintext only as long as required.
+
+**CLI responsibilities**
+
+- Discover and compose project declarations using section 10.1.
+- Generate a fresh per-request ephemeral key pair; its private key remains in the CLI process.
+- Submit structured request metadata, including project/working-directory context, command/script summary and fingerprint, selected declaration snapshot, requested secret mappings, reasons, and ephemeral public key.
+- Wait for approval/result, verify signature and request binding, decrypt locally, compose the final environment, and launch the child.
+- Preserve normal inherited environment and child process semantics subject to explicit policy filtering. Environment variables remain the delivery mechanism, not a storage mechanism or security boundary; descendants may inherit them and sufficiently privileged or same-user processes may inspect them.
+
+**Local client authentication**
+
+- Windows local transport should use a secured named pipe with an explicit ACL.
+- WSL and Docker need deliberate host access and short-lived, request-scoped client credentials. Do not treat a client label as proof of identity or expose a general-purpose store token.
+- Exact WSL/Docker bootstrap, peer identity, and credential-delivery mechanics remain open for threat-model review.
+
+**Request and response binding**
+
+A request includes protocol version, unique ID, creation/expiry, nonce, authenticated client and machine identity, project/working-directory identity, command/script summary and fingerprint, selected file/declaration snapshot, requested names, reasons, and the CLI ephemeral public key.
+
+The host authenticates the caller and signs the canonical request envelope. The authority approves the exact request digest and resolves only those names. The response includes protocol version, request ID/digest, authority identity, response ephemeral public key, encrypted payload, expiry/one-time semantics, and authority signature. The CLI verifies the trusted authority signature and all request bindings before decrypting or launching.
+
+Replay, response substitution, cross-request reuse, expired requests, and changed secret-name sets fail closed. Retry after a lost response must be idempotent for the same request, not create a second approval. The relay must not be able to substitute a response or decrypt secret values.
+
+**Cryptographic direction**
+
+Agreed shape: persistent machine identity signing key plus a fresh CLI-held ephemeral key per request; the authority response is encrypted to that request key and signed by the authority. Do not reuse the machine identity signing key as an encryption key. Use standard .NET cryptography and standard formats; no custom cryptography or third-party crypto dependencies.
+
+The following suite is a **proposed default pending protocol review**, not a final wire-protocol commitment:
+
+| Purpose | Proposed choice |
+| --- | --- |
+| Machine identity signature | ECDSA P-256 |
+| Ephemeral response key agreement | ECDH P-256 |
+| KDF | HKDF-SHA-256 |
+| Payload encryption | AES-256-GCM |
+| Fingerprint | SHA-256 of canonical public-key representation |
+| Serialization | Canonical JSON with explicit protocol version |
+
+Canonicalization, signature input, associated data, nonce/replay storage, key rotation, trust-root distribution, and test vectors require protocol design before implementation.
+
+**Machine identity lifecycle**
+
+- Generate a persistent machine identity during explicit enrollment/installation. Show the public key and fingerprint to the user.
+- The authority must explicitly enroll and authorize the public key; a fingerprint alone is not proof of enrollment.
+- Support revocation and replacement. Reconnection must not silently replace a trusted identity.
+- Protect private identity material with platform facilities where possible (Windows CNG, TPM-backed protection when available). Hardware backing is an enhancement, not a prerequisite.
+- Each independent host service has its own identity. WSL/Docker clients using the Windows host service use that host service identity; they do not silently gain independent authority identities.
+- Enrollment UX, approval of new identities, rotation/revocation propagation, and recovery remain open.
+
+**Approval authority**
+
+- Every request identifies which authority is responsible for approval. Local and remote authorities must not independently approve or disagree about the same request.
+- In local mode, approval is performed by the local authority using the existing passkey approval model.
+- In remote mode, the remote authority is the source of truth for policy, approval, and secret resolution unless a later explicit decision changes this.
+- Passkeys are origin/RP-bound. A remote HTTPS authority has its own passkey origin and enrollment; local and remote stores do not share passkeys, recovery codes, manifests, or trust roots.
+- A remote authority cannot inspect local files. The CLI sends the relevant paths, human-readable declaration/command summary, and fingerprints needed for the human to review exactly what will run. The authority binds that submitted snapshot to approval; the CLI enforces the local snapshot at launch.
+- Local-versus-remote approval UX, remote page reachability, and metadata confidentiality from the relay remain open.
+
+**Proposed build sequence**
+
+1. Define versioned protocol types, canonical serialization, request digest, signatures, ephemeral key agreement, KDF, AEAD, expiry, replay, retry, and substitution tests.
+2. Put the current local run/approval pipeline behind an authority interface without changing CLI child-process behavior.
+3. Implement the Windows host service and secured local API; keep local authority mode working end-to-end.
+4. Add machine identity enrollment, fingerprint display, revocation, and rotation.
+5. Add WSL connectivity, then Docker connectivity, with explicit client authentication.
+6. Add remote relay mode and remote authority; verify local and remote modes implement the same API contract.
+7. Add integration tests for parity, failure behavior, request binding, and no-plaintext-persistence guarantees.
+
+### 10.3 Secret providers, logical mounts, and namespaces
+
+**Status:** Agreed architecture direction; provider implementations and mount configuration are not yet built.
+
+with-secrets supports multiple secret sources/providers concurrently. Project declarations use logical names; the host authority maps those names to configured provider instances.
+
+**Logical paths**
+
+Examples:
+
+- `secret://personal/github/token`
+- `secret://team/development/github/token`
+- `secret://infrastructure/aws/production/access-key`
+
+The path is a logical name only. It does not expose provider name, account, SDK, API endpoint, or physical storage location to the project. Path segments are organizational namespaces, not implicit provider selectors.
+
+**Mount model**
+
+- A mount maps a logical path prefix to one configured provider instance and its provider-side namespace/path.
+- Mounts are configured by the host authority, not checked into the project repository. Project files remain portable and contain no provider credentials or machine-specific provider configuration.
+- Initial direction: global mount definitions with project-specific permissions/allowlists. A project may use a mount only when policy grants access.
+- Multiple mounts/providers coexist. A host may have local with-secrets storage, Dotenvx project values, and external providers concurrently.
+- Provider ACLs remain in force. with-secrets human approval is an additional release gate, not a replacement for provider authorization.
+- Provider authentication and SDK/API credentials stay on the host/authority side. Windows/WSL/Docker CLIs do not receive provider credentials and do not need provider SDKs.
+- Each logical path resolves deterministically through exactly one mount. Ambiguous overlapping mounts must be rejected or handled by an explicit documented longest-prefix rule; never guess.
+
+**No fallback or cross-provider search**
+
+- A missing mount, denied project permission, unavailable provider, missing secret, or provider authentication failure is a hard error.
+- Do not search other mounts/providers, fall back to an environment variable, prompt for an alternate name, or silently substitute another value.
+- Do not query every provider looking for a matching name. This prevents accidental cross-tenant disclosure and keeps resolution auditable.
+- Approval and audit identify the logical name and selected provider/mount identity without exposing credentials or values.
+
+**Provider candidates**
+
+1Password and Bitwarden Secrets Manager are optional provider candidates behind the host/authority adapter boundary. For Bitwarden, the target is Secrets Manager, not the personal password-manager product. These are not first-release requirements. The local encrypted SQLite store remains a first-party provider.
+
+Mount configuration format, path-prefix conflict rules, provider versioning/rotation semantics, project permission format, provider outage behavior, and provider metadata shown to approvers remain open. Provider-specific syntax must not leak into project `.env` declarations.
+
+### 10.4 Application-specific request declarations (curl add-on)
+
+**Status:** Complementary design proposal accepted for documentation; adapter behavior and security review remain open. This extends the declarative `.env` model; it does not replace ordinary environment variables or `secret://` mappings.
+
+Initial curl-oriented naming proposal:
+
+```dotenv
+# Header name is ordinary configuration.
+curl_api.github.com_authorization_key=Authorization
+
+# Header value is resolved by with-secrets.
+curl_api.github.com_authorization_value=secret://team/development/github/token
 ```
 
-- **Request envelope.** Protocol version, request id, created and expiry times, nonce, machine fingerprint and public key, ephemeral public key, project, working directory, command, execution context, requested secrets with their reasons. The service signs every field; any change changes the digest and voids an approval.
-- **Replay.** Random ids and nonces, short expiry, and the authority records consumed ids. An approved response is retrievable under a defined rule (proposed: once, and again only for the same digest inside a short retry window), never as a new authorization.
-- **Response envelope.** Protocol version, request id and digest, the authority's ephemeral public key, ciphertext with tag, and the authority's signature over all of it. The CLI trusts a configured authority signing key.
-- **Metadata.** The relay sees names, reasons and commands unless the payload is also encrypted to the authority. That is a separate decision.
-- **Local client authentication.** Windows named pipe with a security descriptor; Linux and macOS Unix socket with peer credentials; WSL and Docker over a restricted host connection with a short-lived credential scoped to the request. Localhost and `host.docker.internal` are never authentication. The service never receives the ephemeral private key and never exposes the identity key.
-- **Identity.** Created at install, persistent, stored through the platform (CNG with TPM where available, Keychain or Secure Enclave on macOS, a service-owned file elsewhere). Hardware backing is an enhancement. The authority registers the public key at an explicit enrollment, never trusts a bare fingerprint, and supports revocation and replacement. Each independent service has its own identity; a container using the host service shares the host's.
-
-**Review notes (where the proposal meets the current design).**
-1. **OPEN: a memory cache conflicts with the current store design.** The proposal allows a short-lived plaintext cache in the service. Today a value can be decrypted only inside a tap-approved run, and saved approvals are inactive on purpose, so a cache would let secrets outlive their approval. Options: keep the proposal's cache with a bounded lifetime, tie it to an explicit shown approval lifetime, or defer any cache to a later phase. Deferred to the maintainer; the proposal stands until decided.
-2. **OPEN: the security gain of the service depends on its account.** A service running as the same user can be read by any same-user process, like today's one-shot process. The gain is real for WSL, Docker and relay (isolation, one outbound boundary, request binding), and for the store key only if the service runs under a separate account. That is Task 16; whether to decide it together with this is the maintainer's call.
-3. **Observation: signing adds little in local mode.** A self-signed request protects against nothing that a local attacker holding the identity key could not forge. The proposal's single code path for both modes still stands (it proves the protocol and shares tests); this only notes where the signature carries weight (relay mode, where the authority knows the machine).
-4. **OPEN: the ephemeral key is only as trustworthy as the local client authentication.** The service signs whatever ephemeral key the connected client supplies, so another local process that passes client authentication could ask with its own key. Suggestion for the maintainer: have the authentication step identify the requester and show which client asked on the approval page.
-5. **Fact to plan around: passkeys are bound to the site.** Today's passkeys use the `localhost` RP ID. A remote authority has its own HTTPS site, so keys are enrolled there separately; local and remote stores do not share passkeys, recovery codes or manifests.
-6. **Fact to plan around: a remote approval page cannot read local files.** Script contents, the `.env` with its values, symlink marks and the command check live on the machine. The request must carry them (hash bound), and the authority must apply the same grammar and limits as `Policy.cs`. The 10.1 rule that the page shows everything must hold unchanged.
-7. **Observation: Dotenvx crypto and the new protocol are different layers.** The store rows keep secp256k1 ECIES (Dotenvx). The new protocol is a transport layer on P-256 around the decrypted values. They need not mix.
-8. **Suggestion: reuse what exists.** Canonical JSON and signing from `Manifest.cs`, one-use tokens and `HandleGuard` for the approval page, the audit hash chain, and the PRF key chain for local authority. The local authority is today's `RunCommand` pipeline behind an interface.
-
-**Build order (proposed adjustment, awaiting the maintainer's approval; the proposal's own order is in the original handoff).**
-1. Protocol types and tests: envelopes, canonical form, digest, signature, ECDH, HKDF, AES-GCM, tamper, replay, wrong-key and substitution tests. No daemon, no network.
-2. Run the protocol in one process: the CLI and the "service" together, local authority behind the interface, approval bound to the digest. The command behaves as today.
-3. Machine identity: generation, platform storage, fingerprint.
-4. Local API and client authentication, then the service process and installation (Windows first).
-5. WSL, then Docker connectivity.
-6. Relay mode and a remote authority, enrollment, revocation.
-7. Integration tests proving local and relay give identical results, plus the failure cases above.
-
-**Open questions.** Enrollment of a machine key at the authority (who confirms, how); key rotation and revocation propagation; canonical serialization details and associated data; authority signing key distribution; whether relay metadata is encrypted; response retry semantics; local API transport per platform; client authentication for Docker and WSL; whether a container uses its own identity; service account and key storage; approval lifetime; cache policy (note 1); where approval happens in remote mode (the proposal leaves this open; note 6 applies if it is at the authority).
+- The `curl_` prefix identifies the intended application adapter. The host portion identifies the exact destination domain; `_key` names the header and `_value` provides its literal or secret-reference value.
+- These are with-secrets curl-adapter declarations, not ordinary variables passed through to the child environment.
+- Compose declarations first. Only the effective surviving declaration is considered. A secret-valued `_value` uses the same mount and approval model as any other `secret://` reference.
+- Exact-host matching is the initial proposal. Do not send a credential to a different host. HTTPS-only use, redirect behavior, conflicting headers, duplicate declarations, and interactions with curl configuration files require explicit security review.
+- The adapter must not place the secret in command-line arguments, shell history, terminal output, logs, or persistent temporary files. The concrete interception/injection mechanism is open; do not claim it is implemented.
+- Unknown application prefixes must not silently become ordinary environment variables. Behavior when an adapter is unavailable (clear error versus unused declaration) remains open.
+- This is curl-specific initially. Do not generalize it into a broad command/network authorization broker; with-secrets remains focused on secret exposure.
 
 ## 11. Where is it in the code
 
