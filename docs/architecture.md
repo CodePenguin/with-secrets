@@ -556,7 +556,7 @@ The path is a logical name only. It does not expose provider name, account, SDK,
 - Multiple mounts/providers coexist. A host may have local with-secrets storage, Dotenvx project values, and external providers concurrently.
 - Provider ACLs remain in force. with-secrets human approval is an additional release gate, not a replacement for provider authorization.
 - Provider authentication and SDK/API credentials stay on the host/authority side. Windows/WSL/Docker CLIs do not receive provider credentials and do not need provider SDKs.
-- Each logical path resolves deterministically through exactly one mount. Ambiguous overlapping mounts must be rejected or handled by an explicit documented longest-prefix rule; never guess.
+- Each logical path resolves deterministically through exactly one mount using **longest-prefix matching**. Prefix matching is segment-boundary-aware: a mount at `secret://team` matches `secret://team/development/app`, but does not match `secret://teamwork/app`. More-specific mounts override broader mounts for their subtrees (for example, `secret://team/development` takes precedence over `secret://team`). This is deterministic namespace routing, not fallback: once the most-specific matching mount is selected, any permission, availability, authentication, or missing-secret failure is a hard error and must not fall through to a broader mount or another provider.
 
 **No fallback or cross-provider search**
 
