@@ -550,14 +550,32 @@ The path is a logical name only. It does not expose provider name, account, SDK,
 
 **Mount model**
 
-- A mount maps a logical path prefix to one configured provider instance and its provider-side namespace/path.
+- A mount maps a logical location to a configured provider instance and a provider-side location. There are two forms: a **tree mount**, which maps a provider-side folder/namespace and exposes its relative contents below a logical folder; and an **individual-secret mount**, which maps one specific provider secret to an arbitrary logical secret path.
+- For a tree mount, the logical path is formed from the logical mount point plus the provider-relative path beneath the configured provider base path. For an individual-secret mount, the configured logical path names that one provider secret; its provider-side path need not resemble the logical path.
 - Mounts are configured by the host authority, not checked into the project repository. Project files remain portable and contain no provider credentials or machine-specific provider configuration.
-- Initial direction: global mount definitions with project-specific permissions/allowlists. A project may use a mount only when policy grants access.
-- Multiple mounts/providers coexist. A host may have local with-secrets storage, Dotenvx project values, and external providers concurrently.
+- Mount definitions are global, with project-specific permissions/allowlists. A project may use a logical path only when policy grants access.
+- Multiple mounts/providers coexist. A provider tree can be mounted at multiple logical locations, and individual secrets from different providers can be mounted into the same logical namespace. The same underlying provider secret may therefore have multiple logical paths.
 - Provider ACLs remain in force. with-secrets human approval is an additional release gate, not a replacement for provider authorization.
 - Provider authentication and SDK/API credentials stay on the host/authority side. Windows/WSL/Docker CLIs do not receive provider credentials and do not need provider SDKs.
-- Each logical path resolves deterministically through exactly one mount using **longest-prefix matching**. Prefix matching is segment-boundary-aware: a mount at `secret://team` matches `secret://team/development/app`, but does not match `secret://teamwork/app`. More-specific mounts override broader mounts for their subtrees (for example, `secret://team/development` takes precedence over `secret://team`). This is deterministic namespace routing, not fallback: once the most-specific matching mount is selected, any permission, availability, authentication, or missing-secret failure is a hard error and must not fall through to a broader mount or another provider.
+- Logical path resolution uses **longest-prefix matching** for tree mounts, with segment-boundary-aware prefixes. More-specific tree mounts override broader tree mounts for their subtrees. An individual-secret mount resolves its exact logical secret path. This is deterministic namespace routing, not fallback: once a logical path selects a mount, any permission, availability, authentication, or missing-secret failure is a hard error and must not fall through to another mount or provider.
 
+**Provider identity, logical identity, and shared values**
+
+- Every listed provider secret has an external identity supplied by its adapter. The identity is opaque to the core and scoped to one provider instance; the core stores and compares it but does not parse it.
+- If the provider exposes no native stable ID, its first-party adapter constructs one from provider-specific information. The adapter must return the same ID for the same underlying secret across listings and restarts, and preserve it across renames or moves when the provider can establish continuity.
+- The core associates provider instance ID plus external secret ID with one underlying secret identity. Logical paths are separate references to that identity, not the identity itself.
+- The same external identity may be exposed through multiple logical paths, including multiple tree mounts or a combination of tree and individual-secret mounts. These are references to the same underlying secret.
+- Cache entries and freshness state are keyed by provider instance ID plus external secret ID, so the underlying value is cached once regardless of how many logical paths reference it. Grants and project permissions remain specific to the logical path through which access is requested; a grant for one logical path does not authorize another.
+- Provider invalidation identifies an underlying secret by external ID. The core resolves that identity and invalidates its cached value and grants for every logical reference.
+
+**Logical namespace reconciliation**
+
+- The core maintains the logical folder/file structure implied by configured mounts and provider listings. Tree mounts populate and reconcile their exposed files; individual-secret mounts define one explicit logical file.
+- Provider paths returned by an adapter are relative to the provider-side base path for the tree mount. The core combines that relative path with the logical mount point to form the logical path.
+- A successful, complete listing reconciles the contents of the listed scope. A failed, cancelled, rate-limited, or incomplete listing never implies deletion and leaves the last known logical entries intact.
+- A file is removed from the logical namespace only when the core has reliable confirmation that it is genuinely absent, such as its absence from a successful, complete listing of the relevant scope or an explicit provider deletion signal.
+- Confirmed deletion removes the logical file entry and invalidates its cached value and all grants associated with that logical file. A later file created at the same provider path with a different external ID is a new underlying secret at the same logical location; it receives no previous cache value or grants and requires fresh authorization.
+- Removing a provider file does not remove the configured mount or its parent logical folders. Multiple logical references to the same external identity are reconciled independently as files, while sharing the underlying cache identity.
 **No fallback or cross-provider search**
 
 - A missing mount, denied project permission, unavailable provider, missing secret, or provider authentication failure is a hard error.
@@ -569,7 +587,7 @@ The path is a logical name only. It does not expose provider name, account, SDK,
 
 1Password and Bitwarden Secrets Manager are optional provider candidates behind the host/authority adapter boundary. For Bitwarden, the target is Secrets Manager, not the personal password-manager product. These are not first-release requirements. The local encrypted SQLite store remains a first-party provider.
 
-Mount configuration format, project permission format, and provider metadata shown to approvers remain open. Mount resolution, provider version/rotation semantics, provider outage behavior, and retrieval error handling are specified below. Provider-specific syntax must not leak into project `.env` declarations.
+Mount configuration and project permission formats, and provider metadata shown to approvers, remain open. Mount resolution, provider identity/reconciliation, provider version/rotation semantics, provider outage behavior, and retrieval error handling are specified below. Provider-specific syntax must not leak into project `.env` declarations.
 
 ### 10.3.1 Provider adapter contract and lifecycle
 
@@ -609,11 +627,12 @@ public interface IProviderAdapter
 
     Task ShutdownAsync(CancellationToken cancellationToken);
 
-    Task<IReadOnlyList<AdapterValidationIssue>> ValidateConfigurationAsync(
+    Task<IReadOnlyList<ProviderValidationIssue>> ValidateConfigurationAsync(
         IAdapterConfiguration configuration,
         CancellationToken cancellationToken);
 
-    Task<IReadOnlyList<AdapterValidationIssue>> ValidateMountAsync(
+    Task<IReadOnlyList<ProviderValidationIssue>> ValidateMountAsync(
+        IAdapterConfiguration configuration,
         string basePath,
         CancellationToken cancellationToken);
 
@@ -658,21 +677,24 @@ public enum ValidationSeverity
     Warning
 }
 
-public sealed record AdapterValidationIssue(
+public sealed record ProviderValidationIssue(
     string Message,
     ValidationSeverity Severity,
-    string? Target = null);
+    string? Target = null,
+    string? ProviderCode = null);
 ```
 
-An error blocks saving. A warning permits saving after explicit admin confirmation; for example, a provider may be temporarily unavailable or rate-limited during validation. `Target` may identify a field or category for UI highlighting. Mount validation checks a provider-side base path using the active configuration. Both validation methods return `IReadOnlyList<AdapterValidationIssue>`.
+An error blocks saving. A warning permits saving after explicit admin confirmation; for example, a provider may be temporarily unavailable or rate-limited during validation. `Target` may identify a field or category for UI highlighting. `ProviderCode` is an optional provider-specific diagnostic code for display and troubleshooting; core behavior does not depend on it. Messages must be actionable and safe for administrator display and must not include credentials, secret values, or raw provider response bodies. Adapters are first-party code; normal UI output encoding applies.
 
-When a configuration change changes the effective source, affected mounts are revalidated and the relevant cache/grant invalidation rules apply. Credential-only rotation preserves grants and cached values when the effective source is unchanged. Operational metadata changes are harmless. Unknown configuration fields are treated as source-defining until explicitly classified otherwise.
+Both validation methods return all reliably identifiable issues, not just the first failure. Multiple issues may target the same field or section. The core preserves the adapter's deterministic issue order and does not deduplicate issues. Validation findings are normal return values; operational failures use `ProviderAdapterException`.
 
-Configuration changes are classified by effect, at the provider-instance level:
+`ValidateConfigurationAsync` validates a proposed provider-instance configuration, including its connection and credentials. `ValidateMountAsync` validates a provider-side base path using the supplied proposed configuration without changing the active configuration. Core validation of logical path syntax, mount overlap, and logical routing remains separate from provider-side mount validation.
 
-- **Connection changes** (for example, credentials, endpoints, and authentication settings) may require provider connection resources to be re-established.
-- **Source changes** alter which external secret a logical path resolves to. They require the applicable mount revalidation and cache/grant invalidation.
-- **Policy changes** affect how retrieved values may be used without changing the provider connection or secret source. They take effect immediately and do not reconnect, reinitialize, or invalidate cached values. A policy change that reduces an allowed age or duration is enforced immediately against existing cache entries; it never resets lastVerifiedAt.
+Provider-specific configuration changes can affect connection state, mount access, or the identity/source of exposed secrets. The adapter determines which existing mounts are affected and reports required provider-data invalidation through the event contract below; the core does not inspect provider-specific configuration fields or classify their meaning.
+
+A proposed configuration is validated before activation. The authority validates the proposed configuration and revalidates every affected mount using that proposed configuration. Any validation error rejects the entire change and leaves the previous configuration, provider resources, mounts, cache, grants, and operational state unchanged. Warnings require explicit administrator confirmation. Only after all required validations pass (and warnings are confirmed) does the authority commit the new configuration and call `UpdateConfigurationAsync`. The adapter then applies the committed configuration and manages its connection/recovery asynchronously. A post-commit operational connection failure does not roll back the committed configuration.
+
+Policy-only changes take effect immediately without reconnecting or invalidating provider data. Reducing a permitted age or duration is enforced immediately against existing cache entries; it never resets `lastVerifiedAt`.
 
 Provider settings belong to configured **provider instances**, not provider types. Two instances using the same adapter/provider type may have different credentials, connection settings, and policies.
 
@@ -722,7 +744,20 @@ public sealed record LifecycleChangedEvent(
 public sealed record HealthChangedEvent(
     AdapterHealthState State,
     string? Message = null) : AdapterStatusEvent;
+
+public sealed record InvalidateProviderDataEvent(
+    IReadOnlyList<Guid>? MountIds = null,
+    IReadOnlyList<string>? ExternalSecretIds = null,
+    bool InvalidateEntireProviderInstance = false) : AdapterStatusEvent;
 ```
+
+`InvalidateProviderDataEvent` is a separate event on the same reporter/event channel. It identifies what provider data must be invalidated, not why. The adapter may request invalidation for the entire provider instance, one or more mounts, or one or more external secret IDs. The event is scoped to the reporting provider instance, so external IDs are interpreted within that instance. The core resolves the requested scopes to affected logical references.
+
+Every invalidation invalidates both cached values and grants for the selected scope; there are no independent cache-only or grant-only flags. Invalidating an external secret ID affects its shared cached value and every logical reference to it, including references through different mounts. Invalidating a mount affects data exposed through that logical mount; invalidating the provider instance affects all its data.
+
+Adapters may report invalidation while active, including while initializing, ready, or unavailable. The authority rejects invalidation after shutdown begins or after the adapter instance is unregistered. Handling begins immediately but must not block unrelated provider operations; physical cleanup may complete asynchronously. Invalidation takes precedence over work already in progress: a retrieval that finishes after its target has been invalidated must be discarded and must not be cached or delivered. Unrelated in-flight operations continue normally.
+
+Each accepted invalidation produces an audit record identifying the provider instance, requested scope, affected identifiers, and timestamp, without values or credentials. The event and audit record do not carry a reason; explanatory detail belongs in structured logs.
 
 The initialization context supplies the instance identity, provider identity/version, logger, and status reporter:
 
@@ -768,14 +803,20 @@ public sealed record ListSecretsRequest(
 
 public sealed record ListSecretsResult(
     IReadOnlyList<ProviderSecretInfo> Secrets,
-    string? NextContinuationToken);
+    string? NextContinuationToken,
+    bool IsComplete);
 
 public sealed record ProviderSecretInfo(
     string Path,
+    string ExternalSecretId,
     string? Description);
 ```
 
-The adapter owns provider pagination. The authority passes the opaque continuation token through unchanged. The adapter scopes paths to the mount's provider-side base path; the UI navigates by requesting subpaths. Provider listing may supply descriptions. Description ownership is explicit:
+`IsComplete` is true only when the adapter has successfully enumerated the entire requested scope; intermediate pages are false, and the final page is true only when no results remain for that scope. A failed or cancelled enumeration is an operational failure, not a complete empty result. The core reconciles deletions only after the complete scope has been successfully enumerated.
+
+`Path` is relative to the provider-side base path selected by the mount. `ExternalSecretId` is required and opaque to the core; it is stable for the same underlying provider secret across listings and adapter restarts, and unique within the provider instance. The adapter must supply it even when the provider has no native identifier, constructing a stable provider-specific identifier when necessary. The core stores the external ID and associates it with the underlying secret identity; adapters do not need to know logical secret IDs.
+
+The adapter owns provider pagination. The authority passes the opaque continuation token through unchanged. Listing returns immediate children only (nonrecursive); the UI navigates by requesting subpaths. Provider listing may supply descriptions. Description ownership is explicit:
 
 ```csharp
 public enum DescriptionSource
@@ -797,6 +838,10 @@ Adapters use the existing `Microsoft.Extensions.Logging.ILogger` abstraction, wh
 - Provider-specific connection setup, authentication, retry/backoff strategy, and recovery are adapter responsibilities; global timeouts, cancellation, concurrency enforcement, cache policy, and status retention remain authority responsibilities.
 - The precise public API for declaring adapter concurrency constraints and the exact configuration factory/registration mechanism remain implementation details to settle while implementing the common contract.
 - Provider listing, mount validation, and retrieval must all resolve against the exact configured adapter instance selected by the mount. They must not search other providers or mounts.
+- The cache is keyed by provider instance ID plus opaque external secret ID, never by logical path. Grants and project permissions are evaluated against the requested logical path.
+- The core owns the association between provider external identity and logical references. Adapters supply external IDs and provider-relative paths; they never need to know core logical IDs.
+- Tree-mount listing reconciliation updates the logical file/folder structure. Individual-secret mounts identify one explicit provider secret. Multiple logical references to one external identity share a cache entry but retain independent logical-path authorization.
+- A confirmed provider-side deletion removes the affected logical file references and invalidates their grants and the shared cached value. Recreating a secret at the same provider path with a different external ID creates a new underlying identity and does not inherit grants or cached values.
 
 ### 10.3.2 Provider versioning and secret rotation
 
