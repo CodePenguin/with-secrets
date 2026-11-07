@@ -571,6 +571,225 @@ The path is a logical name only. It does not expose provider name, account, SDK,
 
 Mount configuration format, path-prefix conflict rules, provider versioning/rotation semantics, project permission format, provider outage behavior, and provider metadata shown to approvers remain open. Provider-specific syntax must not leak into project `.env` declarations.
 
+### 10.3.1 Provider adapter contract and lifecycle
+
+**Status:** Architecture decisions agreed; common interface and provider implementations are not yet implemented.
+
+Provider adapters isolate provider-specific access behind the authority. Adapters execute in-process with the authority; they are not separate services or plugins loaded dynamically at runtime. The authority discovers and registers the adapters bundled with its release. Adapter implementations may be independently identified/versioned, but are distributed with and tied to an authority release.
+
+An adapter instance represents one configured provider connection. Multiple connections to the same provider type use separate instances and independent configuration. The authority assigns each instance a unique, stable instance ID and supplies it during initialization. In remote mode, adapters run at the remote authority; in local mode, they run at the local authority.
+
+**Responsibilities and boundary**
+
+- The adapter contains provider integration logic only. It does not provide UI, HTML, JavaScript, dynamic configuration forms, or configuration schemas for the admin UI.
+- The admin UI owns provider-specific configuration screens. The adapter exposes its configuration type and validation results for the authority/UI integration.
+- Adapters are read-only with respect to provider data: no create, modify, rotate, delete, or migration operations.
+- The core depends only on the common adapter contract, not provider SDKs or provider-specific types.
+- Every adapter implements the complete required contract. There are no optional capability flags or optional operations.
+- The authority owns provider configuration persistence, configuration revisions, operation timeouts, concurrency limits, cache/freshness policy, grant lifetimes, and secret delivery. Adapters do not own the secret cache and do not write cache timestamps.
+- Adapters must be thread-safe, support concurrent calls, and honor cancellation. They may declare provider-specific concurrency constraints for the authority to enforce.
+
+**Required operations**
+
+Every adapter provides initialization, configuration update, shutdown, configuration validation, mount validation, secret retrieval, and secret listing. Pagination is implemented internally by the adapter and exposed through opaque continuation tokens.
+
+```csharp
+public interface IProviderAdapter
+{
+    Type ConfigurationType { get; }
+
+    Task InitializeAsync(
+        IAdapterConfiguration configuration,
+        AdapterInitializationContext context,
+        CancellationToken cancellationToken);
+
+    Task UpdateConfigurationAsync(
+        IAdapterConfiguration configuration,
+        CancellationToken cancellationToken);
+
+    Task ShutdownAsync(CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<AdapterValidationIssue>> ValidateConfigurationAsync(
+        IAdapterConfiguration configuration,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<AdapterValidationIssue>> ValidateMountAsync(
+        string basePath,
+        CancellationToken cancellationToken);
+
+    Task<RetrieveSecretResult> RetrieveSecretAsync(
+        string path,
+        CancellationToken cancellationToken);
+
+    Task<ListSecretsResult> ListSecretsAsync(
+        ListSecretsRequest request,
+        CancellationToken cancellationToken);
+}
+```
+
+There is deliberately no health-check or refresh operation. The adapter owns its provider connection and recovery behavior and reports health changes when it learns them; the core does not poll adapters. Retrieval occurs only when the core asks for a secret. The core decides when to retrieve again based on its cache and freshness policy.
+
+**Configuration contract**
+
+- Adapter configuration is a strongly typed in-process .NET object. JSON is the persistence format, not the runtime boundary.
+- Each adapter defines a concrete configuration type implementing `IAdapterConfiguration`, including `Load(JsonDocument document)` to load persisted JSON.
+- The adapter factory selects the adapter type, creates the matching configuration type, loads it, and passes the typed configuration to the adapter.
+- A generic base class may provide typed configuration storage, type checking, and dispatch only:
+
+```csharp
+public abstract class ProviderAdapter<TConfiguration> : IProviderAdapter
+    where TConfiguration : class, IAdapterConfiguration
+{
+    public Type ConfigurationType => typeof(TConfiguration);
+    protected TConfiguration? Configuration { get; private set; }
+}
+```
+
+The base class does not manage provider connections, recovery, rollback, or atomic replacement of adapter-owned resources.
+
+The authority serializes configuration updates per adapter instance. `UpdateConfigurationAsync` receives an already committed configuration, applies it, and returns promptly; provider connection establishment/re-establishment continues asynchronously. A connection failure after the configuration has been committed does not reject or roll back that configuration. When a newer update arrives while an earlier connection attempt is running, the adapter cancels or supersedes the stale attempt and converges on the latest committed configuration. A stale attempt must not overwrite health for the newer configuration.
+
+Configuration validation may contact the real provider using the proposed configuration. Validation issues have a message, severity, and optional UI target:
+
+```csharp
+public enum ValidationSeverity
+{
+    Error,
+    Warning
+}
+
+public sealed record AdapterValidationIssue(
+    string Message,
+    ValidationSeverity Severity,
+    string? Target = null);
+```
+
+An error blocks saving. A warning permits saving after explicit admin confirmation; for example, a provider may be temporarily unavailable or rate-limited during validation. `Target` may identify a field or category for UI highlighting. Mount validation checks a provider-side base path using the active configuration. Both validation methods return `IReadOnlyList<AdapterValidationIssue>`.
+
+When a configuration change changes the effective source, affected mounts are revalidated and the relevant cache/grant invalidation rules apply. Credential-only rotation preserves grants and cached values when the effective source is unchanged. Operational metadata changes are harmless. Unknown configuration fields are treated as source-defining until explicitly classified otherwise.
+
+**Initialization, lifecycle, and health**
+
+Lifecycle and health are independent status dimensions.
+
+```csharp
+public enum AdapterLifecycleState
+{
+    Initializing,
+    Ready,
+    Unavailable,
+    ShuttingDown
+}
+
+public enum AdapterHealthState
+{
+    Initializing,
+    Healthy,
+    Degraded,
+    Unavailable,
+    Misconfigured
+}
+```
+
+The authority initializes both dimensions to `Initializing`. It owns lifecycle boundary transitions: it sets `Initializing` and `ShuttingDown`; the adapter may report `Ready` or `Unavailable`. Health remains `Initializing` until the adapter has a real provider response or other reliable health information. This avoids presenting an unknown or empty health result during startup.
+
+`InitializeAsync` performs adapter-internal setup and starts provider connection work without waiting for provider connectivity to succeed. Once its internal setup is complete, the adapter reports lifecycle `Ready`, even if the provider connection is still being established; health can remain `Initializing`. If adapter-internal initialization fails, it reports lifecycle `Unavailable` and remains registered so it can recover. Provider connectivity failures normally affect health, not lifecycle. The adapter owns recovery and may later report `Ready` after an internal initialization failure; there is no separate `RecoverAsync` operation.
+
+When configuration is updated, the adapter immediately reports health `Initializing`, applies the configuration, and begins reconnecting asynchronously. Lifecycle does not need to change during a configuration update; for example, it may remain `Ready` while health is `Initializing`.
+
+Status reporting uses one reporter method and typed events:
+
+```csharp
+public interface IAdapterStatusReporter
+{
+    void Report(AdapterStatusEvent statusEvent);
+}
+
+public abstract record AdapterStatusEvent;
+
+public sealed record LifecycleChangedEvent(
+    AdapterLifecycleState State,
+    string? Message = null) : AdapterStatusEvent;
+
+public sealed record HealthChangedEvent(
+    AdapterHealthState State,
+    string? Message = null) : AdapterStatusEvent;
+```
+
+The initialization context supplies the instance identity, provider identity/version, logger, and status reporter:
+
+```csharp
+public sealed record AdapterInitializationContext(
+    Guid InstanceId,
+    string ProviderType,
+    string AdapterVersion,
+    ILogger Logger,
+    IAdapterStatusReporter StatusReporter);
+```
+
+The authority timestamps status receipt and retains the latest lifecycle and health states, each with an optional concise message and authority-assigned timestamp. It does not persist status history; detailed history belongs in logs. No operation/correlation ID is required in status events because instance identity and structured logs provide correlation. Status messages are suitable for the admin UI and must not contain secret values, credentials, or sensitive provider responses.
+
+Invalid or stale lifecycle reports (for example, a delayed `Ready` after shutdown has started) are ignored and logged at Debug/Warning level; they are not thrown back to the adapter. Health updates are accepted until shutdown begins. After shutdown begins, further health updates are ignored and the last health value is retained.
+
+**Shutdown and removal**
+
+- The authority stops accepting new operations for the adapter and transitions lifecycle to `ShuttingDown`.
+- It cancels ongoing initialization and background connection attempts.
+- In-flight provider operations are cancelled or allowed to finish within a bounded shutdown deadline enforced by the authority.
+- The authority invokes `ShutdownAsync(CancellationToken)`; the adapter releases its connections and other resources.
+- The status reporter remains available during shutdown for any permitted final reporting, but lifecycle remains authority-controlled. Once shutdown completes, the authority stops accepting status updates.
+- Deleting an adapter instance is blocked while mounts reference it. After references are removed and deletion is committed, the authority stops new operations, drains/cancels in-flight work within the shutdown deadline, shuts down and disposes the adapter, then removes it from the registry. Provider-side data is never modified or deleted.
+
+**Retrieval and listing data contracts**
+
+A retrieval returns UTF-8 bytes only; provider metadata is not returned with the value:
+
+```csharp
+public sealed record RetrieveSecretResult(byte[] Value);
+```
+
+The core validates strict UTF-8 before updating its cache and preserves the exact bytes without normalization or re-encoding. The CLI later converts to the target process encoding; if the value cannot be represented, the operation fails rather than silently corrupting it. Host-service responses use UTF-8. An empty provider value is treated as unset. A missing path or provider error is a hard failure; there is no fallback.
+
+Listing returns one page of immediate children (nonrecursive), names and optional descriptions only, never values:
+
+```csharp
+public sealed record ListSecretsRequest(
+    string Path,
+    string? Filter,
+    string? ContinuationToken);
+
+public sealed record ListSecretsResult(
+    IReadOnlyList<ProviderSecretInfo> Secrets,
+    string? NextContinuationToken);
+
+public sealed record ProviderSecretInfo(
+    string Path,
+    string? Description);
+```
+
+The adapter owns provider pagination. The authority passes the opaque continuation token through unchanged. The adapter scopes paths to the mount's provider-side base path; the UI navigates by requesting subpaths. Provider listing may supply descriptions. Description ownership is explicit:
+
+```csharp
+public enum DescriptionSource
+{
+    Provider,
+    Local
+}
+```
+
+When the source is `Provider`, each provider listing refreshes the effective description, including setting it to null when the provider has no description. When the source is `Local`, provider listings do not overwrite it. There is one effective description and one source marker, not separate competing local/provider descriptions.
+
+**Logging and diagnostics**
+
+Adapters use the existing `Microsoft.Extensions.Logging.ILogger` abstraction, which can be backed by the application's existing Serilog setup. There is no separate adapter logging framework or metrics interface. Detailed diagnostics go to structured logs; status messages remain concise and safe for display. Never log secret values, credentials, or decrypted provider responses.
+
+**Implementation notes**
+
+- The adapter contract is a design boundary, not a promise that a provider is already implemented.
+- Provider-specific connection setup, authentication, retry/backoff strategy, and recovery are adapter responsibilities; global timeouts, cancellation, concurrency enforcement, cache policy, and status retention remain authority responsibilities.
+- The precise public API for declaring adapter concurrency constraints and the exact configuration factory/registration mechanism remain implementation details to settle while implementing the common contract.
+- Provider listing, mount validation, and retrieval must all resolve against the exact configured adapter instance selected by the mount. They must not search other providers or mounts.
+
 ### 10.4 Application-specific request declarations (curl add-on)
 
 **Status:** Complementary design proposal accepted for documentation; adapter behavior and security review remain open. This extends the declarative `.env` model; it does not replace ordinary environment variables or `secret://` mappings.
