@@ -569,7 +569,7 @@ The path is a logical name only. It does not expose provider name, account, SDK,
 
 1Password and Bitwarden Secrets Manager are optional provider candidates behind the host/authority adapter boundary. For Bitwarden, the target is Secrets Manager, not the personal password-manager product. These are not first-release requirements. The local encrypted SQLite store remains a first-party provider.
 
-Mount configuration format, project permission format, provider outage behavior, and provider metadata shown to approvers remain open. Mount resolution and provider version/rotation semantics are specified below. Provider-specific syntax must not leak into project `.env` declarations.
+Mount configuration format, project permission format, and provider metadata shown to approvers remain open. Mount resolution, provider version/rotation semantics, provider outage behavior, and retrieval error handling are specified below. Provider-specific syntax must not leak into project `.env` declarations.
 
 ### 10.3.1 Provider adapter contract and lifecycle
 
@@ -667,6 +667,14 @@ public sealed record AdapterValidationIssue(
 An error blocks saving. A warning permits saving after explicit admin confirmation; for example, a provider may be temporarily unavailable or rate-limited during validation. `Target` may identify a field or category for UI highlighting. Mount validation checks a provider-side base path using the active configuration. Both validation methods return `IReadOnlyList<AdapterValidationIssue>`.
 
 When a configuration change changes the effective source, affected mounts are revalidated and the relevant cache/grant invalidation rules apply. Credential-only rotation preserves grants and cached values when the effective source is unchanged. Operational metadata changes are harmless. Unknown configuration fields are treated as source-defining until explicitly classified otherwise.
+
+Configuration changes are classified by effect, at the provider-instance level:
+
+- **Connection changes** (for example, credentials, endpoints, and authentication settings) may require provider connection resources to be re-established.
+- **Source changes** alter which external secret a logical path resolves to. They require the applicable mount revalidation and cache/grant invalidation.
+- **Policy changes** affect how retrieved values may be used without changing the provider connection or secret source. They take effect immediately and do not reconnect, reinitialize, or invalidate cached values. A policy change that reduces an allowed age or duration is enforced immediately against existing cache entries; it never resets lastVerifiedAt.
+
+Provider settings belong to configured **provider instances**, not provider types. Two instances using the same adapter/provider type may have different credentials, connection settings, and policies.
 
 **Initialization, lifecycle, and health**
 
@@ -803,6 +811,80 @@ Logical secret paths resolve to the provider's **current active value**; project
 - Provider-specific version selection, rollback, and historical-version retrieval are outside the common adapter contract unless explicitly introduced as a future, separately designed feature.
 
 This keeps project declarations and authorization independent of provider-specific versioning models while preserving the core's single cache/freshness policy.
+
+### 10.3.3 Cache freshness, provider outages, and stale serving
+
+**Status:** Agreed architecture decision.
+
+The core owns cache freshness and stale-serving policy. Stale serving is an availability safeguard for temporary provider outages, not an alternate source of truth.
+
+- Stale serving is configured per provider instance through MaxStaleDuration. It is not a provider-type setting and is not configured per secret or mount.
+- The default is zero (disabled). A configured value may be from zero through a hard system-wide maximum of 24 hours. Values above the cap are rejected, not silently clamped. The cap is a system constant initially, not another administrator setting.
+- The maximum age is measured from the cached value's lastVerifiedAt timestamp: the last successful retrieval that proved the value current. It is not measured from when an outage begins. A value already 20 hours old has at most 4 hours remaining under the 24-hour maximum.
+- A cached value may be served stale only after the core's bounded retry policy is exhausted for an eligible temporary availability failure (Unavailable or RateLimited), and only while its age remains within that provider instance's configured MaxStaleDuration.
+- Stale fallback does not apply to authentication or authorization failures, missing/deleted secrets, invalid configuration, invalid provider responses, unknown errors, or cancellation. If no cached value exists, retrieval fails.
+- A successful provider retrieval replaces the cached value and updates lastVerifiedAt. A failed refresh leaves both the existing cached value and its original lastVerifiedAt unchanged. A failure must never extend the stale-serving window.
+- Once the maximum permitted age is reached, retrieval fails closed. When the provider recovers, the next retrieval attempt fetches the current provider value and replaces the stale cache entry; there is no special stale-first recovery mode.
+- Changing MaxStaleDuration is a policy-only provider-instance configuration change. It applies immediately to existing cache entries without reconnecting or reinitializing the adapter and without changing cached values or timestamps. Reducing the duration immediately enforces the shorter limit.
+
+Audit history records the retrieval outcome without recording secret values or credentials:
+
+| Outcome | Meaning |
+| --- | --- |
+| Fresh | Value retrieved successfully from the provider for this request |
+| Cached | Value served from cache within the normal freshness policy |
+| Stale | Expired cache value served under the provider instance's outage allowance |
+| Failed | Retrieval failed and no value was delivered |
+
+Each audit event identifies the logical secret path and selected provider instance, with its timestamp. A Cached outcome does not imply an outage; it means the cached value was still within normal freshness policy.
+
+### 10.3.4 Provider errors, cancellation, and retries
+
+**Status:** Agreed architecture decision.
+
+Adapters translate provider-specific failures into a common typed exception. Core behavior depends only on the common error category, never on provider-specific exception types or message parsing.
+
+~~~csharp
+public enum ProviderErrorKind
+{
+    Unavailable,
+    RateLimited,
+    AuthenticationFailed,
+    AccessDenied,
+    SecretNotFound,
+    InvalidConfiguration,
+    InvalidResponse,
+    Unknown
+}
+
+public sealed class ProviderAdapterException : Exception
+{
+    public ProviderErrorKind Kind { get; }
+    public string? ProviderCode { get; }
+    public TimeSpan? RetryAfter { get; }
+
+    public ProviderAdapterException(
+        ProviderErrorKind kind,
+        string message,
+        string? providerCode = null,
+        TimeSpan? retryAfter = null,
+        Exception? innerException = null)
+        : base(message, innerException)
+    {
+        Kind = kind;
+        ProviderCode = providerCode;
+        RetryAfter = retryAfter;
+    }
+}
+~~~
+
+- ProviderCode is optional provider-specific diagnostic metadata for structured logs and troubleshooting only. It must not contain credentials, secret values, or sensitive provider response data. Core behavior is determined exclusively by Kind.
+- RetryAfter is optional provider-supplied retry guidance, principally for rate limiting. The core owns retry scheduling, limits, and backoff; adapters do not run independent retry loops.
+- Only Unavailable and RateLimited are retryable. Authentication failures, access denial, missing secrets, invalid configuration, invalid responses, and Unknown fail immediately and are never retried.
+- The core applies a small, bounded number of automatic retries with a bounded overall retrieval deadline. System-wide defaults and limits govern retries; provider instances and adapters cannot expand them. A supplied RetryAfter is respected only within those core-enforced limits.
+- Retries apply only to the provider operation. Mount resolution, authorization, and cache-policy evaluation occur once per request, and the selected provider instance remains fixed throughout the request.
+- Caller or authority cancellation propagates as cancellation and does not qualify for stale fallback. A provider-side timeout is translated to ProviderAdapterException(Unavailable). If the authority's provider-operation deadline expires while the caller remains active, the operation is treated as Unavailable and may qualify for stale fallback after retries, subject to the normal stale policy.
+- After retry exhaustion, stale-cache eligibility is determined by the final common error category and the provider instance's MaxStaleDuration. Unexpected exceptions are treated as Unknown and fail closed.
 
 ### 10.4 Application-specific request declarations (curl add-on)
 
