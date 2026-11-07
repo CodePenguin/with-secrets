@@ -569,7 +569,7 @@ The path is a logical name only. It does not expose provider name, account, SDK,
 
 1Password and Bitwarden Secrets Manager are optional provider candidates behind the host/authority adapter boundary. For Bitwarden, the target is Secrets Manager, not the personal password-manager product. These are not first-release requirements. The local encrypted SQLite store remains a first-party provider.
 
-Mount configuration format, path-prefix conflict rules, provider versioning/rotation semantics, project permission format, provider outage behavior, and provider metadata shown to approvers remain open. Provider-specific syntax must not leak into project `.env` declarations.
+Mount configuration format, project permission format, provider outage behavior, and provider metadata shown to approvers remain open. Mount resolution and provider version/rotation semantics are specified below. Provider-specific syntax must not leak into project `.env` declarations.
 
 ### 10.3.1 Provider adapter contract and lifecycle
 
@@ -789,6 +789,20 @@ Adapters use the existing `Microsoft.Extensions.Logging.ILogger` abstraction, wh
 - Provider-specific connection setup, authentication, retry/backoff strategy, and recovery are adapter responsibilities; global timeouts, cancellation, concurrency enforcement, cache policy, and status retention remain authority responsibilities.
 - The precise public API for declaring adapter concurrency constraints and the exact configuration factory/registration mechanism remain implementation details to settle while implementing the common contract.
 - Provider listing, mount validation, and retrieval must all resolve against the exact configured adapter instance selected by the mount. They must not search other providers or mounts.
+
+### 10.3.2 Provider versioning and secret rotation
+
+**Status:** Agreed architecture decision.
+
+Logical secret paths resolve to the provider's **current active value**; project declarations and grants do not pin a provider-specific version.
+
+- The adapter retrieves the provider's current active value when the core requests retrieval. Provider version identifiers, version history, and rotation metadata remain internal to the adapter and are not exposed through logical paths, project declarations, grants, or the common retrieval result.
+- The core owns cache freshness and determines when another retrieval occurs. A provider-side rotation becomes visible to with-secrets when the core next retrieves the value; it does not bypass the core's cache policy.
+- Provider rotation does not change the logical secret identity or require grant changes. Grants authorize the logical secret, not a particular provider version.
+- If the provider deletes, retires, or otherwise makes the current secret unavailable, retrieval fails. The adapter must not silently return an older version as a fallback.
+- Provider-specific version selection, rollback, and historical-version retrieval are outside the common adapter contract unless explicitly introduced as a future, separately designed feature.
+
+This keeps project declarations and authorization independent of provider-specific versioning models while preserving the core's single cache/freshness policy.
 
 ### 10.4 Application-specific request declarations (curl add-on)
 
