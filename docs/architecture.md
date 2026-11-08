@@ -1,16 +1,18 @@
 # with-secrets: architecture
 
-Source of truth is the code (`src/WithSecrets.Core`, `src/WithSecrets`), then `README.md`. This page links to the README for limits instead of repeating them.
+The code and README describe the current single-process prototype. Sections 10.1 and 10.2 describe later work; Section 10.2 is the accepted target design, not implemented behavior. For current behavior, the source of truth is the code (`src/WithSecrets.Core`, `src/WithSecrets`), then `README.md`. For the accepted service/authority/relay design, use Section 10.2 and the decisions recorded there. This page links to the README for current implementation limits instead of repeating them.
 
-## 1. What it is
+## 1. What it is (current prototype)
 
-- A CLI that runs a program with secrets in its environment. An AI agent starts it, a person approves it.
-- The agent names secrets and gives a reason. It never sees a value, a key or a recovery code.
-- The person approves on a one-use web page with a passkey (WebAuthn). The same tap releases the secret store key (WebAuthn PRF).
-- Everything is in one SQLite file, `state.db` (signed manifest, Dotenvx ciphertext rows, audit chain). No key is stored on the machine.
-- Terminal output is public (the agent reads it). Values and the recovery code appear only in the browser.
+- A CLI runs a program with secrets in its environment. An agent starts the command; a person approves it.
+- The agent supplies secret names and a reason. The CLI does not print secret values, private keys, or the recovery code to agent-visible output. Approved values are injected into the child process environment.
+- The person approves on a one-use web page with a passkey (WebAuthn). The same tap releases the secret-store key (WebAuthn PRF).
+- The current prototype keeps its signed manifest, wrapped key material, Dotenvx ciphertext rows, settings, and audit chain in one SQLite file, `state.db`. The store private key is persisted only wrapped in the vault; the master key is persisted only in wrapped passkey/recovery slots. No plaintext store or master key is persisted.
+- Terminal output is public (the agent reads it). Values and the recovery code appear only in the browser, apart from approved secret values in the child environment. Same-user process-memory access remains a documented limit (README).
 
-## 2. Components
+## 2. Components (current prototype)
+
+The diagram below is the existing single-process CLI. It is not the host-service topology accepted in Section 10.2.
 
 ```mermaid
 flowchart LR
@@ -53,7 +55,9 @@ flowchart LR
 - `CommandWiring.cs` lives in Core, not in the exe. `Program.cs` parses, opens `state.db`, runs the gate, then dispatches.
 - Every page of one command shares one `OneShotServer` (`PageFlow`), so one port and one link per command.
 
-## 3. Communications
+## 3. Communications (current prototype)
+
+The table describes the current CLI/browser/child-process flow, not the future local-service and authority protocol in Section 10.2.
 
 | From -> to | Transport | What is sent | What protects it |
 | --- | --- | --- | --- |
@@ -323,9 +327,9 @@ The old file is never deleted. Old admin keys are gone from the new state. Any f
 | Output | read as UTF-8, redacted by `StreamRedactor` (chunk splits and common forms). Reversed, split, compressed or encrypted copies are not caught | `Redaction.cs` |
 | Terminal-only commands | `--revoke --enroll --enrolled --unenroll --config` (not `--config --show`) `--recover --rotate-key` refuse when input, output or error is redirected (exit 3). `--set`, `--remove`, `--list`, `--audit` do not check | `CommandLine.cs`, `Program.cs` |
 
-## 8. Trust boundaries
+## 8. Trust boundaries (current prototype)
 
-What the agent can and cannot do, and the known limits: README "Known limits", "Admin keys" and "The secret store". Summary:
+This table describes the current single-process implementation. The future local API trust model is described separately in Section 10.2. What the agent can and cannot do, and the known limits: README "Known limits", "Admin keys" and "The secret store". Summary:
 
 | Actor | Capability | What stops it |
 | --- | --- | --- |
@@ -360,9 +364,9 @@ Every web session ends on the first outcome. Deny, error and silence all end in 
 
 | Item | State |
 | --- | --- |
-| Task 20: remote mode for sandboxes (relay, pairing, end-to-end encrypted values) | Future. Design document first |
+| Task 20: remote mode for sandboxes (relay, pairing, end-to-end encrypted values) | Accepted target design in 10.2; implementation remains future work |
 | Task 19: project `.env` declarations (`secret://` references) | **Phase A built** (see 10.1). Dotenvx encrypted values and the host service are later phases |
-| Local service, machine identity, end-to-end encrypted relay (10.2) | Planned, design only; reviewed (see its review notes). Task 16, the service account, should be decided with it |
+| Local service, machine identity, end-to-end encrypted relay (10.2) | Accepted target design; implementation not started. Task 16 (privilege separation) remains separate |
 | Task 16: privilege separation (service or daemon under another OS account) | Future, priority not decided |
 | Serilog logging (normal run quiet, `--debug` verbose, warnings and errors to a rolling file under `~/.with-secrets/logs`) | **Built** (`AppLog.cs`): Debug events to the terminal and file only with `--debug` or `WITH_SECRETS_DEBUG=1`; warnings and above always to the file (daily, 1 MB roll, 7 files); call sites use constant templates with route words, sizes and type names only |
 | Hand tests (real browsers, phones, tunnel) | Open, see README "Checks" |
@@ -479,7 +483,7 @@ Application-level authenticated encryption is mandatory for authority communicat
 - The handshake uses fresh ephemeral key pairs. Identity signatures bind the ephemeral public keys and handshake transcript to the authenticated identities, preventing key substitution and active man-in-the-middle attacks.
 - Derive fresh session keys using HKDF-SHA-256 over the ephemeral shared secret and transcript context. Use an established AEAD construction (AES-256-GCM) with separate directional keys.
 - Every encrypted message is bound to its session and sequence number. Reject duplicate, out-of-order, invalid, or wrong-session messages. Reconnection always creates a new session with new keys.
-- The application protocol uses canonical JSON and includes a protocol version. The request digest binds the exact request approved by the human. The CLI verifies the authority signature and request binding before releasing values to the child.
+- The authority-facing application protocol uses canonical JSON and includes a protocol version. The request digest binds the exact request approved by the human. The host service verifies authority signatures and request binding before releasing approved values to the local child-launch path.
 - Dotenvx/store encryption and transport encryption are separate layers. Existing store ciphertext format is not changed by this protocol.
 - Application encryption protects message contents, not all traffic metadata. Network addresses, connection times, message sizes, and traffic timing may remain visible.
 
@@ -505,7 +509,7 @@ The relay keeps registrations in memory only, replaces stale registrations on re
 
 - Every connection has fresh session keys and per-session monotonically increasing message sequence numbers. Old-session messages are never accepted in a new session.
 - Every logical operation has a unique request ID. A retry of the same operation reuses that ID.
-- Durable operations are idempotent. The authority records processed request IDs and their results in the same SQLite transaction as the operation, so a retry returns the committed result rather than executing it twice.
+- Durable operations are idempotent. The authority records processed request IDs and their results in the same SQLite transaction as the operation, so a retry returns the committed result rather than executing it twice. These stored results are operation metadata, not secret values or decrypted payloads.
 - If a connection drops and the outcome is unknown, the client retries with the same request ID. It does not create a new logical operation.
 - Invalidation notifications and their acknowledgment state are durable at the authority. Unacknowledged notifications are retried after authority restart; reconnect revision reconciliation remains the source of truth.
 - SQLite is the authority's durable store. Ordinary database transactions provide atomicity for security-sensitive operations; no distributed transaction system or message broker is required.
@@ -553,11 +557,12 @@ This section is the accepted target design, not a claim that the service, author
 | Saved approvals (inactive with this store) | `Reuse.cs` |
 | Tests | `tests/WithSecrets.Tests`, browser tests `tests/WithSecrets.E2E` |
 
-## Open questions for the maintainer
+## Remaining implementation checks and maintainer choices
 
-Answered from the code: the grammar in section 7 matches `Policy.cs`, README "Known limits" and `--help` (the page scripts never zero the PRF output: see section 4). Task 19 and Task 20 are in `.claude/plan.md` and the ledger, not in the plan file; no code exists for them.
+These are not unresolved questions about the accepted Section 10.2 architecture. They are current-prototype validation or product-maintenance items.
 
-1. Cross-host `--enroll` (6.4, the `else` branch) is traced in `Enrollment.cs` and `PasskeyRegistration.cs` but has not been run in a browser. Hand test still open.
-2. Should the page scripts overwrite the PRF `Uint8Array` after sealing? Today they do not (no `fill(0)` in any page), and the browser's copy is out of reach anyway.
-3. `--revoke` clears saved approvals, which are inactive with the PRF store. Keep the command or retire it?
-4. README line 39 shows the path as `%USERPROFILE%.with-secretsstate.db` (backslashes lost). It should be `%USERPROFILE%\.with-secrets\state.db`. Not edited here.
+1. **Cross-host `--enroll` browser test:** the server-side flow is implemented and traced in `Enrollment.cs` and `PasskeyRegistration.cs`, but the real cross-host HTTPS flow still needs a manual browser test. The existing E2E test cannot complete it because its test server has no HTTPS host.
+2. **PRF output cleanup:** page scripts currently do not overwrite the browser-side PRF `Uint8Array` after sealing. Calling `fill(0)` after successful sealing may reduce its lifetime, but cannot erase browser/WebAuthn or other copies. Decide whether to add this best-effort cleanup as implementation hardening.
+3. **`--revoke` command:** the current passkey-PRF store does not create or use saved approvals, but `--revoke` remains implemented and can clear any rows in the grants table. Decide whether to retain this dormant compatibility/admin command or remove it.
+
+The README path spelling is already correct (`%USERPROFILE%\\.with-secrets\\state.db`); the previous note about missing backslashes was stale and has been removed.
