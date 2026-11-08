@@ -1,6 +1,6 @@
 # with-secrets
 
-An agent runs a program that needs secrets. A person approves each request on a web page with a passkey. The agent never sees a value.
+An agent starts a program that needs secrets. A person approves each request on a web page with a passkey. The CLI does not print secret values; it injects approved values into the child process environment.
 
 ```
 with-secrets --secrets DB_URL,API_KEY --reason "run the migration" -- dotnet ef database update
