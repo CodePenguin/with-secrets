@@ -401,7 +401,7 @@ Status: design only. This section records the accepted design. It supersedes the
 
 - The CLI is backend-agnostic. It communicates only with its local host service through one shared API/protocol, whether the service uses a local authority/store or connects to a remote authority through the relay.
 - The host service is the trusted execution boundary: it validates the request, obtains authorization, resolves and decrypts approved secrets, prepares the child environment, and owns the final launch decision. The CLI is a client; it does not independently retrieve secret values or make the final launch decision.
-- Each independently installed host service has its own machine identity. Windows and WSL installations are separate identities. Docker launched through the host-side CLI uses the host service and host identity; the host service launches the Docker client with approved values in its environment. The container does not run an independently enrolled service or hold a machine key.
+- Each independently installed host service has its own machine identity. Windows and WSL installations are separate identities. Docker launched through the host-side CLI uses the host service and host identity; the host service launches the Docker client with approved values in its environment and passes variable names, not secret values, in Docker command arguments. Values are not written to Docker volumes or secret files. The container receives them as environment variables; it does not run an independently enrolled service or hold a machine key.
 - A host service operates in one of two modes:
   - **Local authority:** the host service also performs the authority role, owns/accesses the local encrypted store, and handles approval and resolution.
   - **Remote authority:** the host service authenticates to a remote authority and communicates with it through the relay. The remote authority owns the authoritative store, grants, machine records, and approval decisions; the local host service retains only its permitted in-memory cache and working authorization state.
@@ -414,7 +414,7 @@ All local clients use the same HTTP API and application protocol. The CLI sends 
 
 - The local service binds to loopback interfaces only. Localhost alone is not treated as client authentication.
 - Do not embed a client signing key or shared authentication secret in the executable. An executable cannot keep an embedded private key secret.
-- Secret disclosure remains controlled by the existing request validation, human approval, and grant rules. Local API access does not itself grant access to secrets.
+- Secret disclosure remains controlled by request validation, a human approval page that displays the trustworthy request context, and grant rules. Local API access does not itself grant access to secrets.
 - This is a developer-machine trust model, not isolation from malicious processes already running with the developer's privileges. Such processes may be able to interact with the local service or inspect same-user process memory.
 - Docker is launched through the host-side CLI. The CLI obtains the secrets from the host service and supplies them to the container as environment variables. The container does not need direct service access, a separate machine identity, or an identity-key volume.
 
@@ -446,7 +446,7 @@ The authority retains machine records and their history. A previously known Untr
 - Disabled → Trusted is an ordinary re-enable, but starts clean: no old grants or cache are restored.
 - Untrusted → Trusted requires an explicit confirmation identifying the machine. It also starts clean.
 - Disabled and Untrusted have the same access-control effect; the distinction records administrative intent.
-- Every security-relevant administrative transition increments a monotonically increasing security revision for that machine fingerprint. The revision is per machine, not global.
+- Every administrative action that invalidates a machine's authorization increments a monotonically increasing security revision for that machine fingerprint. The revision is per machine, not global. Display-only friendly-name changes do not increment it.
 - A revision change invalidates the machine's entire cache and all grants. No selective preservation is attempted.
 - Status changes, revision changes, grant invalidation, and cancellation of pending work are recorded in the authority audit history.
 
@@ -482,8 +482,9 @@ Application-level authenticated encryption is mandatory for authority communicat
 - Machine identity private keys authenticate the machine. Authority signing keys authenticate authority-issued messages and responses. The authority public key is pinned during the administrator-approved enrollment flow. The host rejects unknown authority keys and does not treat TLS server identity alone as authority-message authorization.
 - The host accepts authority messages only when signed by a pinned, trusted authority key. Routine key rotation is authorized by a transition signed by the currently trusted key. If the current key is compromised or unavailable, replacement requires an explicit authenticated administrator recovery/re-enrollment process; an unknown key is never trusted automatically.
 - Each connection performs a fresh mutually authenticated handshake. Both parties prove possession of their identity private keys.
-- The handshake uses fresh ephemeral key pairs. Identity signatures bind the ephemeral public keys and handshake transcript to the authenticated identities, preventing key substitution and active man-in-the-middle attacks.
+- The handshake uses fresh ephemeral ECDH P-256 key pairs. Identity signatures bind the ephemeral public keys and handshake transcript to the authenticated identities, preventing key substitution and active man-in-the-middle attacks.
 - Derive fresh session keys using HKDF-SHA-256 over the ephemeral shared secret and transcript context. Use an established AEAD construction (AES-256-GCM) with separate directional keys.
+- Use built-in .NET cryptographic primitives and standard formats. Do not add a third-party cryptography dependency or invent cryptographic algorithms.
 - Every encrypted message is bound to its session and sequence number. Reject duplicate, out-of-order, invalid, or wrong-session messages. Reconnection always creates a new session with new keys. Application-level authority messages that affect trust, grants, revisions, or secret release are also authenticated as authority-issued data; the relay cannot forge them.
 - The authority-facing application protocol uses canonical JSON and includes a protocol version. The request digest binds the exact request approved by the human. The host service verifies authority signatures and request binding before releasing approved values to the local child-launch path.
 - Dotenvx/store encryption and transport encryption are separate layers. Existing store ciphertext format is not changed by this protocol.
