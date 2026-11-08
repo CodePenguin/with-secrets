@@ -404,7 +404,7 @@ Status: design only. This section records the accepted design. It supersedes the
 - Each independently installed host service has its own machine identity. Windows and WSL installations are separate identities. Docker launched through the host-side CLI uses the host service and host identity; the host service launches the Docker client with approved values in its environment. The container does not run an independently enrolled service or hold a machine key.
 - A host service operates in one of two modes:
   - **Local authority:** the host service also performs the authority role, owns/accesses the local encrypted store, and handles approval and resolution.
-  - **Remote authority:** the host service authenticates to a remote authority and communicates with it through the relay. The remote authority owns the authoritative store, grants, and machine records; the local host service retains only its permitted in-memory cache and working authorization state.
+  - **Remote authority:** the host service authenticates to a remote authority and communicates with it through the relay. The remote authority owns the authoritative store, grants, machine records, and approval decisions; the local host service retains only its permitted in-memory cache and working authorization state.
 - The relay is a minimal message router between the host service and remote authority. It does not understand application messages, store session state or payloads, or make authorization decisions.
 - Secret delivery to a child remains ordinary environment variables. The agent does not receive secret values, private keys, or recovery codes.
 
@@ -412,7 +412,7 @@ Status: design only. This section records the accepted design. It supersedes the
 
 All local clients use the same HTTP API and application protocol. The CLI sends launch requests to the host service; the service prepares and launches the requested child process and returns its exit status and redacted output. Do not introduce separate named-pipe, Unix-socket, or Docker-specific authentication protocols.
 
-- The local service binds to local interfaces. Localhost alone is not treated as client authentication.
+- The local service binds to loopback interfaces only. Localhost alone is not treated as client authentication.
 - Do not embed a client signing key or shared authentication secret in the executable. An executable cannot keep an embedded private key secret.
 - Secret disclosure remains controlled by the existing request validation, human approval, and grant rules. Local API access does not itself grant access to secrets.
 - This is a developer-machine trust model, not isolation from malicious processes already running with the developer's privileges. Such processes may be able to interact with the local service or inspect same-user process memory.
