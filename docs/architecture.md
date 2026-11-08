@@ -399,17 +399,18 @@ Status: design only. This section records the accepted design. It supersedes the
 
 #### Goals and operating model
 
-- The CLI is backend-agnostic. It communicates only with its local host service through one shared API/protocol, whether the service uses a local authority/store or relays to a remote authority.
-- Each independently installed host service has its own machine identity. Windows and WSL installations are separate identities. Docker launched through the host-side CLI uses the host service and host identity; it does not run an independently enrolled service or hold a machine key.
+- The CLI is backend-agnostic. It communicates only with its local host service through one shared API/protocol, whether the service uses a local authority/store or connects to a remote authority through the relay.
+- The host service is the trusted execution boundary: it validates the request, obtains authorization, resolves and decrypts approved secrets, prepares the child environment, and owns the final launch decision. The CLI is a client; it does not independently retrieve secret values or make the final launch decision.
+- Each independently installed host service has its own machine identity. Windows and WSL installations are separate identities. Docker launched through the host-side CLI uses the host service and host identity; the host service launches the Docker client with approved values in its environment. The container does not run an independently enrolled service or hold a machine key.
 - A host service operates in one of two modes:
-  - **Local authority:** owns/accesses the local encrypted store and performs approval and resolution.
-  - **Remote authority:** authenticates to and relays requests to a remote authority.
-- The relay is a minimal message router. It does not understand application messages, store session state or payloads, or make authorization decisions.
+  - **Local authority:** the host service also performs the authority role, owns/accesses the local encrypted store, and handles approval and resolution.
+  - **Remote authority:** the host service authenticates to a remote authority and communicates with it through the relay. The remote authority owns the authoritative store, grants, and machine records; the local host service retains only its permitted in-memory cache and working authorization state.
+- The relay is a minimal message router between the host service and remote authority. It does not understand application messages, store session state or payloads, or make authorization decisions.
 - Secret delivery to a child remains ordinary environment variables. The agent does not receive secret values, private keys, or recovery codes.
 
 #### Local clients and transport
 
-All local clients use the same HTTP API and application protocol. Do not introduce separate named-pipe, Unix-socket, or Docker-specific authentication protocols.
+All local clients use the same HTTP API and application protocol. The CLI sends launch requests to the host service; the service prepares and launches the requested child process and returns its exit status and redacted output. Do not introduce separate named-pipe, Unix-socket, or Docker-specific authentication protocols.
 
 - The local service binds to local interfaces. Localhost alone is not treated as client authentication.
 - Do not embed a client signing key or shared authentication secret in the executable. An executable cannot keep an embedded private key secret.
@@ -424,6 +425,7 @@ All local clients use the same HTTP API and application protocol. Do not introdu
 - The private key is kept outside ordinary application data. On a developer machine it is protected by the host OS. For Docker-launched workloads, the host service retains the key; no Docker volume contains it.
 - Losing or regenerating the key creates a new fingerprint and requires fresh enrollment. There is no silent identity transfer or recovery.
 - Enrollment uses the existing CLI \`admin\` verb. A newly discovered fingerprint is **Pending** and cannot request secrets or create grants until an administrator approves it and assigns a friendly name through the authority's admin web interface.
+- First contact presents a newly generated machine public key, its fingerprint, and host name, with proof of possession of the private key. The authority may record that identity as Pending, but it grants no secret access. An administrator explicitly approves the pending identity and pins the authority's public signing key through the authenticated enrollment flow; the host must not accept an untrusted authority key merely because it was presented by the network.
 - The authority records the host name established at enrollment. Requests present both fingerprint and current host name; both must match. A mismatch is rejected and recorded as pending for administrator review. The administrator explicitly approves a legitimate host-name change in the admin web interface. A mismatch does not silently change the binding or delete the enrollment.
 - Friendly-name changes are display-only, may be made at any time, and do not invalidate grants or cache. They are audited.
 - Machine listing, details, status changes, friendly-name changes, host-name change approval, and audit history are managed through the admin web interface.
@@ -456,7 +458,7 @@ The authority retains machine records and their history. A previously known Untr
 - After successful startup reconciliation, if the security revision is unchanged, the authority may restore still-valid grants into host-service memory. Secret values are fetched on demand and cached in memory. If the revision changed, old grants are not restored.
 - If the authority becomes temporarily unavailable while the service is already running, existing in-memory cache and grants may continue to be used within their established freshness and offline-expiration limits. New retrievals or approvals that require authority participation cannot proceed.
 - Losing connectivity alone does not invalidate the cache.
-- The authority invalidates grants and in-flight requests when a security transition occurs, sends an authenticated invalidation event, and retries unacknowledged events while the connection is active.
+- The authority invalidates grants and in-flight requests when a security transition occurs, sends an authenticated, end-to-end protected invalidation event, and retries unacknowledged events while the connection is active.
 - The host cancels its own affected pending work and clears the affected cache and authorization state before acknowledging. It never inspects, signals, suspends, terminates, or otherwise interacts with already-launched child processes.
 - Invalidation events are notifications, not the source of truth. On every reconnect, the host authenticates and obtains current status and security revision before resuming requests. If the revision differs from the last successfully synchronized revision, it purges all cached secret values and authorization state even if the machine is Trusted again.
 - Duplicate or older invalidation events are ignored by revision. An acknowledgment is sent only after cleanup and cancellation of pending pre-launch work completes. If cleanup fails, no acknowledgment is sent; reconnect reconciliation remains the fallback.
@@ -464,12 +466,12 @@ The authority retains machine records and their history. A previously known Untr
 
 #### Process launch and invalidation race
 
-- The host prepares the child and its environment without launching it.
-- Immediately before process creation, it performs a final authorization check and commits the launch against the current local authorization state.
+- The host service prepares the child process and its environment without launching it. Secret values are held only in the service's working memory and the prepared child environment; they are not returned to the CLI as a separate secret response.
+- Immediately before process creation, the host service performs a final authorization check and commits the launch against its current local authorization state. The service, not the CLI, owns this launch boundary.
 - Launch commit and local invalidation handling are serialized so only one wins the race.
 - If invalidation wins, the pending launch is cancelled and the prepared environment is discarded.
 - If launch wins, the child is considered launched. Later invalidation must not inspect, signal, suspend, terminate, or otherwise interact with it.
-- An authority cannot prevent a launch that occurs while the host is disconnected and has not yet received an invalidation. This is consistent with the offline-cache policy.
+- An authority cannot prevent a launch that occurs while the host is disconnected and has not yet received an invalidation. This is consistent with the offline-cache policy. In remote-authority mode, the host service's offline freshness and expiration policy remains the limit on cached use; a new retrieval or new approval requiring the authority cannot proceed.
 
 #### Authority authentication and cryptographic protocol
 
@@ -477,12 +479,12 @@ Application-level authenticated encryption is mandatory for authority communicat
 
 - Local developer deployments may use HTTP; they do not require developers to create or install self-signed HTTPS certificates.
 - Connections to externally hosted authorities require HTTPS in addition to application-level authenticated encryption.
-- Machine identity private keys authenticate the machine. Authority signing keys authenticate authority-issued messages and responses. The authority public key is pinned during authenticated enrollment.
+- Machine identity private keys authenticate the machine. Authority signing keys authenticate authority-issued messages and responses. The authority public key is pinned during the administrator-approved enrollment flow. The host rejects unknown authority keys and does not treat TLS server identity alone as authority-message authorization.
 - The host accepts authority messages only when signed by a pinned, trusted authority key. Routine key rotation is authorized by a transition signed by the currently trusted key. If the current key is compromised or unavailable, replacement requires an explicit authenticated administrator recovery/re-enrollment process; an unknown key is never trusted automatically.
 - Each connection performs a fresh mutually authenticated handshake. Both parties prove possession of their identity private keys.
 - The handshake uses fresh ephemeral key pairs. Identity signatures bind the ephemeral public keys and handshake transcript to the authenticated identities, preventing key substitution and active man-in-the-middle attacks.
 - Derive fresh session keys using HKDF-SHA-256 over the ephemeral shared secret and transcript context. Use an established AEAD construction (AES-256-GCM) with separate directional keys.
-- Every encrypted message is bound to its session and sequence number. Reject duplicate, out-of-order, invalid, or wrong-session messages. Reconnection always creates a new session with new keys.
+- Every encrypted message is bound to its session and sequence number. Reject duplicate, out-of-order, invalid, or wrong-session messages. Reconnection always creates a new session with new keys. Application-level authority messages that affect trust, grants, revisions, or secret release are also authenticated as authority-issued data; the relay cannot forge them.
 - The authority-facing application protocol uses canonical JSON and includes a protocol version. The request digest binds the exact request approved by the human. The host service verifies authority signatures and request binding before releasing approved values to the local child-launch path.
 - Dotenvx/store encryption and transport encryption are separate layers. Existing store ciphertext format is not changed by this protocol.
 - Application encryption protects message contents, not all traffic metadata. Network addresses, connection times, message sizes, and traffic timing may remain visible.
@@ -518,7 +520,7 @@ The relay keeps registrations in memory only, replaces stale registrations on re
 - Grant approval atomically records the approved scope, expiration, and audit event.
 - Authority key rotation atomically records the new key and its authenticated trust transition.
 - A committed operation remains committed after a crash; an uncommitted operation has no partial effects.
-- The authority signing private key is not stored in plaintext in the SQLite database. It is protected separately from ordinary database records.
+- The authority signing private key is not stored in plaintext in the SQLite database. It is protected separately using an OS-protected key store or equivalent protected secret storage; SQLite contains public trust material and metadata, not the plaintext private key.
 
 #### Current implementation boundary
 
