@@ -416,7 +416,7 @@ All local clients use the same HTTP API and application protocol. The CLI sends 
 - Do not embed a client signing key or shared authentication secret in the executable. An executable cannot keep an embedded private key secret.
 - Secret disclosure remains controlled by request validation, a human approval page that displays the trustworthy request context, and grant rules. Local API access does not itself grant access to secrets.
 - This is a developer-machine trust model, not isolation from malicious processes already running with the developer's privileges. Such processes may be able to interact with the local service or inspect same-user process memory.
-- Docker is launched through the host-side CLI. The CLI obtains the secrets from the host service and supplies them to the container as environment variables. The container does not need direct service access, a separate machine identity, or an identity-key volume.
+- Docker is launched through a host-side CLI request, but the host service owns the launch and supplies approved values to the Docker client through its process environment. The container does not need direct service access, a separate machine identity, an identity-key volume, or secret files.
 
 #### Machine identity and enrollment
 
