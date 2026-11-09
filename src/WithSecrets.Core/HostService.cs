@@ -58,6 +58,9 @@ public sealed class HostServiceOptions
     /// <summary>How often the service asks the authority for invalidations of this machine that it has not applied (a launch also asks before it begins).</summary>
     public TimeSpan InvalidationPoll { get; init; } = TimeSpan.FromSeconds(1);
 
+    /// <summary>For tests: the clock that measures the offline lease (default: the system's monotonic clock).</summary>
+    public IMonotonicClock? Monotonic { get; init; }
+
     /// <summary>The port on 127.0.0.1 and [::1]. 0 picks a free one (tests).</summary>
     public int Port { get; init; } = ServiceEndpoint.DefaultPort;
 
@@ -81,6 +84,9 @@ public sealed class HostServiceOptions
 
     /// <summary>For tests.</summary>
     internal Action? AfterCommit { get; init; }
+
+    /// <summary>For tests: replaces the key provider (default: the passkey tap).</summary>
+    internal Func<IApprover, IStoreKeyProvider>? KeyProviderFactory { get; init; }
 }
 
 /// <summary>
@@ -120,8 +126,14 @@ public sealed class HostService : IDisposable
         _options = options;
         _app = app;
         Port = port;
-        Authorization = options.Deployment.CreateAuthorization(options.Gate, () => options.Grants?.TryClear());
+        Authorization = options.Deployment.CreateAuthorization(options.Gate, () => options.Grants?.TryClear(), options.Monotonic);
     }
+
+    private bool _ready;
+
+    /// <summary>True once the host has checked in with its authority at startup (or later): until then launches are refused with 503. An authority that answers with something this host cannot verify (nothing is pinned yet) counts: the launch is then denied with the reason.</summary>
+    public bool Ready => Volatile.Read(ref _ready);
+
 
     /// <summary>The host's side of the authority protocol: signs requests, verifies answers, applies invalidations.</summary>
     public HostAuthorization Authorization { get; }
@@ -160,6 +172,8 @@ public sealed class HostService : IDisposable
             {
                 WebApplication app = Build(options, port, withIpv6);
                 service = new HostService(options, app, port);
+                // Before any request is accepted: check machine status, host name binding and security revision with the authority (it also issues the lease).
+                service.StartupReconcile();
                 app.Run(service.Handle);
                 app.StartAsync().GetAwaiter().GetResult();
                 service._pump = Task.Run(service.PumpLoop);
@@ -174,6 +188,19 @@ public sealed class HostService : IDisposable
         }
 
         throw new InvalidOperationException("The host service could not listen on the loopback address.");
+    }
+
+    private void StartupReconcile()
+    {
+        try
+        {
+            using CancellationTokenSource limit = new(TimeSpan.FromSeconds(10));
+            Volatile.Write(ref _ready, Authorization.ReconcileAsync(limit.Token).GetAwaiter().GetResult() != HostAuthorization.Reconciliation.Unreachable);
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            AppLog.Warn("the startup check-in with the authority failed: {Type}", error.GetType().Name);
+        }
     }
 
     private static WebApplication Build(HostServiceOptions options, int port, bool withIpv6)
@@ -270,7 +297,21 @@ public sealed class HostService : IDisposable
                 return;
             }
 
-            await Launch(context);
+            await Launch(context, approve: false);
+
+            return;
+        }
+
+        if (path == "/v1/approve")
+        {
+            if (!HttpMethods.IsPost(request.Method))
+            {
+                await Refuse(response, 405, "use POST");
+
+                return;
+            }
+
+            await Launch(context, approve: true);
 
             return;
         }
@@ -431,11 +472,21 @@ public sealed class HostService : IDisposable
             {
                 try
                 {
+                    if (!Ready && await Authorization.ReconcileAsync(_stop.Token) != HostAuthorization.Reconciliation.Unreachable)
+                    {
+                        Volatile.Write(ref _ready, true);
+                    }
+
                     await Authorization.PumpAsync(_stop.Token);
                 }
                 catch (Exception error) when (error is not OperationCanceledException)
                 {
                     AppLog.Warn("applying an invalidation failed: {Type}", error.GetType().Name);
+                }
+                finally
+                {
+                    // Whatever the authority did or did not answer, a held key outlives neither its grant nor the lease.
+                    Authorization.SweepKey();
                 }
             }
         }
@@ -445,10 +496,17 @@ public sealed class HostService : IDisposable
         }
     }
 
-    private async Task Launch(HttpContext context)
+    private async Task Launch(HttpContext context, bool approve)
     {
         HttpRequest request = context.Request;
         HttpResponse response = context.Response;
+        if (!Ready)
+        {
+            await Refuse(response, 503, "the host service has not checked in with its authority yet, so it accepts no requests; it keeps trying. Try again in a moment");
+
+            return;
+        }
+
         if (request.ContentType is not { } contentType || !contentType.Split(';')[0].Trim().Equals("application/json", StringComparison.OrdinalIgnoreCase))
         {
             await Refuse(response, 415, "the body must be application/json");
@@ -606,7 +664,7 @@ public sealed class HostService : IDisposable
                 AfterCommit = _options.AfterCommit,
             };
 
-            (LaunchOutcome outcome, int exitCode) = await Task.Run(() => Run(launch, launchContext, pagePort, events));
+            (LaunchOutcome outcome, int exitCode) = await Task.Run(() => Run(launch, launchContext, pagePort, events, approve));
             events.Send(LaunchEvent.Result(outcome, exitCode));
             await events.Complete();
         }
@@ -619,7 +677,7 @@ public sealed class HostService : IDisposable
         }
     }
 
-    private async Task<(LaunchOutcome Outcome, int ExitCode)> Run(LaunchRequest launch, LaunchContext context, int? pagePort, EventStream events)
+    private async Task<(LaunchOutcome Outcome, int ExitCode)> Run(LaunchRequest launch, LaunchContext context, int? pagePort, EventStream events, bool approve)
     {
         using EventTextWriter stdout = new("stdout", events);
         using EventTextWriter stderr = new("stderr", events);
@@ -652,8 +710,8 @@ public sealed class HostService : IDisposable
             };
 
             IApprover approver = _options.ApproverFactory?.Invoke(settings, announce) ?? CommandWiring.RunApprover(_options.State, settings, announce);
-            RunCommand run = new(_options.Store, approver, new AuditLog(_options.State), stdout, stderr, _options.Grants, ReuseSettings.Load(_options.State));
-            int code = await run.ExecuteAsync(launch, context);
+            RunCommand run = new(_options.Store, approver, new AuditLog(_options.State), stdout, stderr, _options.Grants, ReuseSettings.Load(_options.State), keyProvider: _options.KeyProviderFactory?.Invoke(approver) ?? new HeldStoreKeyProvider(approver, Authorization));
+            int code = await run.ExecuteAsync(launch, context, approve);
             stdout.Complete();
             stderr.Complete();
 
@@ -697,6 +755,7 @@ public sealed class HostService : IDisposable
         }
 
         _stop.Cancel();
+        Authorization.Keys.Dispose();
         CancellationTokenSource[] sources;
         lock (_lock)
         {

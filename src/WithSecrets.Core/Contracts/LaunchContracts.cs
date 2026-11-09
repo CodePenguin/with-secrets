@@ -275,6 +275,9 @@ public enum LaunchOutcome
 
     /// <summary>The program ran and ended: <see cref="LaunchResult.ExitCode" /> is its status.</summary>
     Exited,
+
+    /// <summary>An approval that makes a grant (<c>approve</c>) was given: nothing was launched.</summary>
+    Approved,
 }
 
 /// <summary>

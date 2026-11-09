@@ -361,6 +361,11 @@ internal static class Program
             AuthorityTests.Run(Check).GetAwaiter().GetResult();
         }
 
+        if (Wants("GrantAuthority"))
+        {
+            GrantAuthorityTests.Run(Check).GetAwaiter().GetResult();
+        }
+
         if (Wants("Admin"))
         {
             AdminTests.Run(Check).GetAwaiter().GetResult();

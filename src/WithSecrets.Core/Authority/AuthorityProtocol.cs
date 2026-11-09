@@ -110,7 +110,7 @@ public sealed record AuthorityResponse(
     DateTimeOffset Issued,
     DateTimeOffset Expires,
     string AuthorityKeyId,
-    byte[] Signature)
+    byte[] Signature) : ISignedAnswer
 {
     /// <summary>The longest a response may be valid (issue to expiry); a host rejects a longer one.</summary>
     public static readonly TimeSpan MaxLifetime = TimeSpan.FromMinutes(5);
@@ -282,4 +282,16 @@ public interface IAuthority
 
     /// <summary>The machine has cleaned up for this revision (pending work cancelled, cache and grants cleared).</summary>
     Task AcknowledgeInvalidationAsync(string machineFingerprint, int revision, CancellationToken cancel = default);
+
+    /// <summary>Asks about a grant for a request (use) or gets one made by the person's approval (approve). Idempotent by request id; the answer is signed.</summary>
+    Task<GrantResponse> GrantAsync(GrantEnvelope envelope, CancellationToken cancel = default);
+
+    /// <summary>A machine's check-in: its status, host name binding, security revision and the offline lease the authority grants it. Signed.</summary>
+    Task<ReconcileResponse> ReconcileAsync(ReconcileEnvelope envelope, CancellationToken cancel = default);
+
+    /// <summary>Grant revocations for the machine that it has not acknowledged yet, oldest first.</summary>
+    Task<IReadOnlyList<PendingGrantEvent>> PendingGrantEventsAsync(string machineFingerprint, CancellationToken cancel = default);
+
+    /// <summary>The machine has dropped the grant and cancelled the pending work that used it.</summary>
+    Task AcknowledgeGrantEventAsync(string machineFingerprint, long sequence, CancellationToken cancel = default);
 }

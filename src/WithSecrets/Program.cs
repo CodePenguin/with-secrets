@@ -44,7 +44,13 @@ internal static class Program
         // A run is a client of the host service: it opens no store and no state.db, decrypts nothing and starts nothing itself.
         if (command is CliCommand.Run run)
         {
-            return await RunThroughService(run);
+            return await RunThroughService(run, run.Args, approve: false);
+        }
+
+        // approve takes the same road to the service: the service shows the page and the authority records the grant; nothing is launched.
+        if (command is CliCommand.Approve approve)
+        {
+            return await RunThroughService(approve, approve.Args, approve: true);
         }
 
         string folder = StorePath();
@@ -117,12 +123,15 @@ internal static class Program
 
             case CliCommand.Admin admin:
                 return CommandWiring.Admin(admin, state, folder, command.Port);
+
+            case CliCommand.GrantAdmin grantAdmin:
+                return CommandWiring.AdminGrants(grantAdmin, state, folder, command.Port);
         }
 
         return RunCommand.Usage;
     }
 
-    private static async Task<int> RunThroughService(CliCommand.Run command)
+    private static async Task<int> RunThroughService(CliCommand command, RunArgs args, bool approve)
     {
         int? port = ServiceEndpoint.Resolve(command.ServicePort, Environment.GetEnvironmentVariable, out string? portError);
         if (port is null)
@@ -140,7 +149,7 @@ internal static class Program
         using StreamWriter outWriter = new(stdout, new UTF8Encoding(false)) { AutoFlush = true };
         using StreamWriter errWriter = new(stderr, new UTF8Encoding(false)) { AutoFlush = true };
 
-        return await LaunchClient.RunAsync(command.Args, Directory.GetCurrentDirectory(), port.Value, command.Port, outWriter, errWriter, trust);
+        return await LaunchClient.RunAsync(args, Directory.GetCurrentDirectory(), port.Value, command.Port, outWriter, errWriter, trust, approve: approve);
     }
 
     /// <summary>The host service in the foreground, until Ctrl+C. Windows service installation and start at logon come later.</summary>

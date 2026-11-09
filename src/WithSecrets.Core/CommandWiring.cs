@@ -81,6 +81,47 @@ public static class CommandWiring
         return code;
     }
 
+    /// <summary>admin grant ACTION: lists the grants, or shows the change on a one-use page and applies it after an admin passkey approved there.</summary>
+    public static int AdminGrants(CliCommand.GrantAdmin command, StateDatabase state, string folder, int? port, TextWriter? output = null)
+    {
+        output ??= Console.Out;
+        AuthorityStore store = AuthorityStore.InFolder(folder);
+        if (command.Action == GrantAdminAction.List)
+        {
+            try
+            {
+                AdminGrantCommand.List(store, output, DateTimeOffset.UtcNow);
+
+                return 0;
+            }
+            catch (AuthorityDatabaseException failure)
+            {
+                TerminalPrompt.Final("with-secrets: " + failure.Message);
+
+                return RunCommand.StoreError;
+            }
+        }
+
+        ApprovalSettings? settings = LoadSettings(state, port);
+        if (settings is null)
+        {
+            return RunCommand.StoreError;
+        }
+
+        if (!OperatingSystem.IsWindows())
+        {
+            TerminalPrompt.Final("with-secrets: the authority signing key needs Windows CNG for now; admin grant changes cannot run on this system.");
+
+            return RunCommand.StoreError;
+        }
+
+        (EnrollmentTarget primary, EnrollmentTarget local) = Targets(state, settings, TerminalPrompt.Line, null);
+        (int code, string detail) = AdminGrantCommand.Run(command, new AdminContext(store, LocalDeployment.ProductionKeyRing(store), HostConfigFile.InFolder(folder), null, primary, local, new AuditLog(state), output));
+        TerminalPrompt.Final(code == 0 ? detail : "with-secrets: " + detail);
+
+        return code;
+    }
+
     /// <summary>--revoke: an admin passkey approves on a web page, then every saved approval ends.</summary>
     public static int Revoke(StateDatabase state, GrantStore grants, int? port)
     {

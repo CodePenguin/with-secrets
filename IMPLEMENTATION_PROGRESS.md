@@ -4,7 +4,7 @@ Worktree `C:\Users\codep\Projects\with-secrets-impl`, branch `impl/host-service`
 
 ## Current phase
 
-Phase 0 (extract contracts, preserve behaviour): done, reviewed. Phase 1 (local host service and shared API): done, pending review. Phase 2 (machine identity and local authority): done, pending review. Next: Phase 3 (grants).
+Phase 0 (extract contracts, preserve behaviour): done, reviewed. Phase 1 (local host service and shared API): done, pending review. Phase 2 (machine identity and local authority): done, pending review. Phase 3 (the independent parts: grants, offline lease, startup reconciliation, plus the maintainer's decision to hold the store key in service memory for a grant's life): done, pending review. Next: Phase 4 onward.
 
 ## Commands
 
@@ -134,6 +134,49 @@ Documented only: **L7** a running service learns of an invalidation through the 
 
 (a) Host skips the response signature check: the `Authority` suite fails 9 of the tamper checks. (b) Authority treats a Pending machine as allowed: "a Pending machine (pinned) is denied..." fails. (c) Disable no longer raises the revision: 10+ checks fail (revision stays 1, grants and invalidations, "a newer revision clears the host's state").
 
+## Phase 3: grants, offline lease, startup reconciliation (done, pending review)
+
+Result: `dotnet build with-secrets.slnx --no-incremental` 0 warnings, 0 errors; full suite 3696 passed, 0 failed (one check, the list of launch outcomes, needed `Approved` added; rerun of LaunchContract and GrantAuthority: 467 passed, 0 failed); E2E ALL PASSED (55.5 s). New suite `GrantAuthorityTests.cs` (alone with `WS_ONLY=GrantAuthority`). Brief: `.superpowers/sdd/2026-11-01-web-approval-passkey/task-p3-brief.md`.
+
+### What was built
+
+- `Authority/GrantProtocol.cs`: `GrantOps`, `GrantReasons`, `GrantEnvelope` (machine-signed use/approve request, domain "with-secrets grant request v1"), `GrantResponse` (authority-signed canonical JSON, strict `TryParse`, domain "grant response v1"), `GrantRecord`, `GrantAdminCommand`, `ReconcileEnvelope`/`ReconcileResponse` (the only carrier of the lease), `IMonotonicClock`/`SystemMonotonicClock`, `OfflineLease`.
+- `AuthorityStore.cs`: schema 2 (grants rebuilt, `grant_events`, `processed_grant_requests`; schema 1 migrated in place); `ApplyGrant` runs one `BEGIN IMMEDIATE` transaction per operation (grant row, revocation notice, stored answer, audit row) with fault points; idempotent by request id.
+- `LocalAuthority.cs`: `GrantAsync` (use, approve through the existing page via `Offer`), `AdminGrant` (extend, renew, revoke; expected revision), `ReconcileAsync`, notices. No operation bumps the machine's security revision.
+- `Authority/AdminGrantCommand.cs`, `CommandLine.cs`, `CommandWiring.cs`, `src/WithSecrets/Program.cs`: `approve COMMAND`, `admin grant list|extend|renew|revoke ID` (terminal-only; page and admin tap like the machine commands; list needs no tap).
+- `HostAuthorization.cs`: synchronized grants, the lease (`no-lease` deny code, same path in local mode), startup `ReconcileAsync`, revocation notices (drop, `gate.Invalidate()`, acknowledge), `TryUseGrantAsync`, `ApproveGrantAsync`, held-key sweep. `HostService.cs`: `/v1/approve`, 503 until reconciled, default `HeldStoreKeyProvider`. `RunCommand.cs`: grant branch and `ApproveGrantOnly`. `StoreKeyProvider.cs`: `IStoreKeyProvider`, `TapStoreKeyProvider`, `StoreKeyHolder`, `HeldStoreKeyProvider`.
+
+### Decisions (inside the design; 10.2 is silent unless stated)
+
+1. **Scope key** is the host's request fingerprint key (names, resolved program, folder, `.env` plan, script hash, environment hash); opaque 64-hex to the authority, which also stores a description. Stricter than the brief's fallback; other arguments and the reason are not part of it (as for saved approvals).
+2. **Lease** is issued only by a signed reconcile answer, default 15 minutes (`LocalAuthority.LeaseDuration`, provisional), measured on a monotonic clock from receipt, in memory only. Grant answers carry no lease. Offline use needs a synchronized grant, a valid lease and the grant's own wall-clock end not passed.
+3. **Approve** needs the reuse setting on; the expiry is chosen on the page (10, 60, 240, 480 minutes, up to 1440); indefinite only by `admin grant extend|renew --indefinite`. Approve asks for no unlock (nothing is decrypted).
+4. **Revoke** invalidates the gate for every unlaunched launch (the gate does not know which grant a launch used). Extend and renew have no push event; the host sees them on its next online use.
+5. **Startup**: the service reconciles before listening; an unreachable authority gives 503 on `/v1/launch` and `/v1/approve` until the pump succeeds. An unpinned authority counts as ready (the run gets the normal denial).
+6. **Maintainer decision on the blocker (see below):** the service holds the key after the first approving tap. What is held is the PRF output (a byte array that can be zeroed) that opens K; K is opened from it per run and zeroed there.
+
+### Blockers requiring maintainer input: RESOLVED, one item open
+
+The Phase 3 blocker ("how does a grant-based `run` obtain the store key K without a tap?") was decided by the maintainer: **the service holds the key in memory after the approving passkey tap for the grant's lifetime; runs under a valid grant need no further tap or approval.** Implemented as above (the seam `IStoreKeyProvider` stays; `HeldStoreKeyProvider` is the default). The held key is dropped and zeroed on: grant expiry, revoke, machine disable or untrust, security revision change, lease end, service restart (memory only), service stop, and every failed or refused run under a grant. It is never written to disk or logged; nothing else is cached. Options 2 to 4 of the earlier analysis (hold only the granted values, taps for every run, authority-held keys) were not chosen.
+
+**Open item: cleaner mitigation, REVISIT later.** Holding the key weakens "K never rests in memory" (README, architecture 4 and 6): while a grant lives, a same-user process that can read the service's memory (or a debugger, a crash dump) gets the key material for the whole store, not only the granted secrets, and an indefinite grant makes that lifetime unbounded up to the lease/restart limits. Candidates for later: hold only the granted values re-encrypted under a random in-memory key (option 2), cap the held time shorter than the grant, require a re-tap after N minutes or N runs, or move the key to an OS-protected region.
+
+### Other risks and limits
+
+- `authority.db` has no integrity protection: a same-user process can insert a grant row (saved approvals self-verify with the passkey assertion; grants do not).
+- The Phase 1 requirement "grants unusable by other OS users" is **not** implemented: the API has no caller identity. Idea for later: a Windows TCP-table owner-PID same-user check behind a seam.
+- The grant scope excludes non-script arguments. A revocation cancels all pending launches. The lease default is provisional. The host persists no revision and fetches grants on demand, so a restart restores none.
+- The held key is a PRF output: anything that can read the service's memory has it (same-user trust limit, as for secret values during a run).
+- M2 (relay of `/v1/identity`) remains open, unchanged.
+
+### Tests (suite `GrantAuthority`)
+
+Parsing of `approve` and `admin grant` and `NeedsTerminal`; grant creation, no-time and refused approvals, use, scope mismatch, update, expiry, extend, renew, revoke (notice, pump, gate, acknowledge), idempotent retries, request id reuse; lease expiry, wall-clock jumps both ways, restart destroying the lease and synchronized grants, no lease means no secret use (even after a person's approval), an indefinite grant not extending the lease, extension not seen offline, reconnect reconciliation after disable and enable, startup 503 and ready; tamper and replay at the authority (signature, scope, operation, stranger key, host name, expired request, replayed envelope, reused id) and at the host (damaged signature, forged outcome, replayed answer, wrong key, late answer, wrong operation, changed lease); atomic faults (grant creation, revocation), concurrent approvals, v1 to v2 migration; the admin page flow (no answer, non-admin 403, tap applies, stale grant refused, prefix ids, list); service level through `Rig` (approve then run without a decision, scope variations, revoke, denied approve, seam refusal, offline lease). **Held key:** the first run taps, later runs under the grant need no tap and use the key, a failed run drops and zeroes it, revoke, expiry, disable, a revision bump, an untrusted check-in, lease end, restart and service stop each drop and zero it, a run is lent a copy and the held bytes are never zeroed by a run, a request outside the grant does not touch the held key.
+
+### Mutation evidence (applied, suite run, reverted)
+
+(a) `OfflineUse` ignores the lease: 5 checks fail (lease expiry fails closed, wall clock set back, indefinite grant beyond the lease, grant expiry offline, service lease). (b) The authority's `UseGrant` ignores the grant's end: "expiry: after its end the grant covers nothing" fails. (c) `SweepKey` no longer drops the key when the lease ends: "drop: when the lease ends the key is dropped and zeroed" fails.
+
 ## Reconnaissance: who owns what today
 
 | Responsibility | Owner today (file / type) | Notes |
@@ -182,9 +225,11 @@ Documented only: **L7** a running service learns of an invalidation through the 
 
 ## Remaining work
 
-- Phase 3 onward per `docs/implementation-plan.md` (Phases 1 and 2 are done, see above). Phase 2 leftovers: wire the `service` startup of the real CNG key on a Windows machine by hand once; decide whether retired authority keys should be deleted.
+- Phase 4 onward per `docs/implementation-plan.md` (Phases 1 to 3 are done, see above). Open: the cleaner mitigation for the held key (REVISIT later), the same-user check for grants, the M2 relay. Phase 2 leftovers: wire the `service` startup of the real CNG key on a Windows machine by hand once; decide whether retired authority keys should be deleted.
 
-## Blockers requiring maintainer input (Phase 3)
+## Blockers requiring maintainer input (Phase 3): resolved, see the Phase 3 section
+
+(Kept for history; the maintainer chose option 1, with the cleaner mitigation left as an open item.)
 
 **How does a grant-based `run` obtain the store key K without a passkey tap?**
 

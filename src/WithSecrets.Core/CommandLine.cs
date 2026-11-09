@@ -21,6 +21,12 @@ public abstract record CliCommand
     /// <summary>admin ACTION ...: a person manages the machines that may use secrets (and the authority key). See <see cref="AdminAction" />.</summary>
     public sealed record Admin(AdminAction Action, string? Fingerprint = null, string? Name = null) : CliCommand;
 
+    /// <summary>admin grant list|extend|renew|revoke ID [--minutes N | --indefinite]: a person manages the grants that let a command run without a page decision.</summary>
+    public sealed record GrantAdmin(GrantAdminAction Action, string? Id = null, int? Minutes = null, bool Indefinite = false) : CliCommand;
+
+    /// <summary>approve --secrets ... --reason ... -- PROGRAM [ARGS...]: the approval of a run (same grammar), but it makes a grant for the request and launches nothing.</summary>
+    public sealed record Approve(RunArgs Args) : CliCommand;
+
     /// <summary>--list: print the secret names.</summary>
     public sealed record List : CliCommand;
 
@@ -96,6 +102,14 @@ public static class CliArgs
         BASH_ENV. On Windows the shown files are held open against changes until the program ends; elsewhere that is not
         enforced. A long or obfuscated script can still be hard to judge, and files a script loads are not shown.
 
+        Grants. with-secrets approve --secrets NAME[,NAME...] --reason TEXT -- PROGRAM [ARGS...] takes the same arguments as a run and shows the
+        same approval page, where the user also picks how long the approval lasts; the authority then records a grant for exactly that
+        request (the secrets, the program, the working folder, the script and the .env plan; not the other arguments) and nothing is run.
+        A later run of that request needs no approval page decision while the grant lasts, the machine is Trusted and the host service is
+        in contact with its authority or holds the grant under its offline lease. A request the grant does not cover, or one after it ends or is
+        revoked, goes through the page as before. A store whose key is released by a passkey tap still asks for that tap at each run. A
+        person changes a grant with: admin grant list | extend ID (--minutes N | --indefinite) | renew ID (--minutes N | --indefinite) | revoke ID.
+
         Saved approvals do not apply while the secret store is protected by a passkey PRF (the only kind of store): every run
         asks, and the approval page offers only Approve once. The rest of this paragraph applies only to a store without that
         protection (none exists today).
@@ -167,7 +181,12 @@ public static class CliArgs
 
         if (args.Count > 0 && args[0] == "admin")
         {
-            return ParseAdmin(args, out error);
+            return args.Count > 1 && args[1] == "grant" ? ParseGrantAdmin(args, out error) : ParseAdmin(args, out error);
+        }
+
+        if (args.Count > 0 && args[0] == "approve")
+        {
+            return ParseApprove(args, out error);
         }
 
         CliCommand? command = ParseCommand(args, out int? port, out bool debug, out error, out int? servicePort);
@@ -179,7 +198,7 @@ public static class CliArgs
         command = command with { Debug = debug, ServicePort = servicePort };
         if (servicePort is not null && command is not CliCommand.Run)
         {
-            error = "--service-port goes only with a run.";
+            error = "--service-port goes only with a run or approve.";
 
             return null;
         }
@@ -197,6 +216,105 @@ public static class CliArgs
         }
 
         return command with { Port = port };
+    }
+
+    /// <summary>approve ...: the arguments of a run, with the same checks; the result is an approval that makes a grant.</summary>
+    private static CliCommand? ParseApprove(IReadOnlyList<string> args, out string error)
+    {
+        CliCommand? inner = Parse([.. args.Skip(1)], out error);
+        if (inner is CliCommand.Help)
+        {
+            return inner;
+        }
+
+        if (inner is CliCommand.Run run)
+        {
+            return new CliCommand.Approve(run.Args) { Port = run.Port, Debug = run.Debug, ServicePort = run.ServicePort };
+        }
+
+        if (inner is null && error.Length > 0)
+        {
+            return null;
+        }
+
+        error = "approve takes the arguments of a run: with-secrets approve --secrets NAME[,NAME...] --reason TEXT -- PROGRAM [ARGS...]. It makes a grant for that exact request and runs nothing.";
+
+        return null;
+    }
+
+    private const string GrantAdminUsage = "Usage: with-secrets admin grant list | extend ID (--minutes N | --indefinite) | renew ID (--minutes N | --indefinite) | revoke ID  [--port N] [--debug]. ID is a grant id from the list (4 or more characters). N is 1 to 1440.";
+
+    /// <summary>admin grant ACTION [ID] [--minutes N | --indefinite] [--port N] [--debug].</summary>
+    private static CliCommand? ParseGrantAdmin(IReadOnlyList<string> args, out string error)
+    {
+        error = GrantAdminUsage;
+        GrantAdminAction? action = args.Count > 2 ? args[2] switch
+        {
+            "list" => GrantAdminAction.List,
+            "extend" => GrantAdminAction.Extend,
+            "renew" => GrantAdminAction.Renew,
+            "revoke" => GrantAdminAction.Revoke,
+            _ => null,
+        } : null;
+        if (action is null)
+        {
+            return null;
+        }
+
+        int? port = null;
+        int? minutes = null;
+        bool debug = false;
+        bool indefinite = false;
+        List<string> positional = [];
+        for (int index = 3; index < args.Count; index++)
+        {
+            if (args[index] == "--debug")
+            {
+                debug = true;
+            }
+            else if (args[index] == "--indefinite")
+            {
+                indefinite = true;
+            }
+            else if ((args[index] == "--port" || args[index] == "--minutes") && index + 1 < args.Count)
+            {
+                bool isPort = args[index] == "--port";
+                int limit = isPort ? ToolSettings.MaxPort : ReuseSettings.MaxMinutes;
+                if (!int.TryParse(args[++index], NumberStyles.None, CultureInfo.InvariantCulture, out int parsed) || parsed < 1 || parsed > limit)
+                {
+                    error = $"{(isPort ? "--port" : "--minutes")} takes a number from 1 to {limit}.";
+
+                    return null;
+                }
+
+                if (isPort)
+                {
+                    port = parsed;
+                }
+                else
+                {
+                    minutes = parsed;
+                }
+            }
+            else if (args[index].StartsWith("--", StringComparison.Ordinal))
+            {
+                return null;
+            }
+            else
+            {
+                positional.Add(args[index]);
+            }
+        }
+
+        bool timed = action is GrantAdminAction.Extend or GrantAdminAction.Renew;
+        if (positional.Count != (action == GrantAdminAction.List ? 0 : 1) || (timed ? (minutes is null) == !indefinite : minutes is not null || indefinite) || (action == GrantAdminAction.List && port is not null))
+        {
+            return null;
+        }
+
+        error = "";
+
+        return new CliCommand.GrantAdmin(action.Value, positional.Count == 1 ? positional[0] : null, minutes, indefinite) { Port = port, Debug = debug };
     }
 
     private const string AdminUsage = "Usage: with-secrets admin machines | approve FINGERPRINT --name NAME | disable FINGERPRINT | enable FINGERPRINT | untrust FINGERPRINT | trust FINGERPRINT (all 64 digits) | rename FINGERPRINT NAME | approve-host-change FINGERPRINT | rotate-authority-key | recover-authority  [--port N] [--debug]";
@@ -572,7 +690,7 @@ public static class CliArgs
     /// </summary>
     public static bool NeedsTerminal(CliCommand command)
     {
-        return command is CliCommand.Revoke or CliCommand.Enroll or CliCommand.Enrolled or CliCommand.Unenroll or CliCommand.Config { Show: false } or CliCommand.Recover or CliCommand.RotateKey or CliCommand.Admin;
+        return command is CliCommand.Revoke or CliCommand.Enroll or CliCommand.Enrolled or CliCommand.Unenroll or CliCommand.Config { Show: false } or CliCommand.Recover or CliCommand.RotateKey or CliCommand.Admin or CliCommand.GrantAdmin;
     }
 
     /// <summary>What a command that needs a terminal says when it has none.</summary>

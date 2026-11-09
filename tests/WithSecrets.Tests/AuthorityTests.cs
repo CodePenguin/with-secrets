@@ -45,6 +45,14 @@ internal static class AuthorityTests
         public Task<IReadOnlyList<PendingInvalidation>> PendingInvalidationsAsync(string machineFingerprint, CancellationToken cancel = default) => inner.PendingInvalidationsAsync(machineFingerprint, cancel);
 
         public Task AcknowledgeInvalidationAsync(string machineFingerprint, int revision, CancellationToken cancel = default) => inner.AcknowledgeInvalidationAsync(machineFingerprint, revision, cancel);
+
+        public Task<GrantResponse> GrantAsync(GrantEnvelope envelope, CancellationToken cancel = default) => inner.GrantAsync(envelope, cancel);
+
+        public Task<ReconcileResponse> ReconcileAsync(ReconcileEnvelope envelope, CancellationToken cancel = default) => inner.ReconcileAsync(envelope, cancel);
+
+        public Task<IReadOnlyList<PendingGrantEvent>> PendingGrantEventsAsync(string machineFingerprint, CancellationToken cancel = default) => inner.PendingGrantEventsAsync(machineFingerprint, cancel);
+
+        public Task AcknowledgeGrantEventAsync(string machineFingerprint, long sequence, CancellationToken cancel = default) => inner.AcknowledgeGrantEventAsync(machineFingerprint, sequence, cancel);
     }
 
     /// <summary>A machine, its authority and a host, in a folder of their own.</summary>
@@ -704,7 +712,7 @@ internal static class AuthorityTests
             command.CommandText = "PRAGMA journal_mode";
             string mode = command.ExecuteScalar()!.ToString()!;
             check(mode.Equals("wal", StringComparison.OrdinalIgnoreCase), "schema: the database uses WAL");
-            command.CommandText = "UPDATE schema_version SET version = 2";
+            command.CommandText = "UPDATE schema_version SET version = 99";
             command.ExecuteNonQuery();
         }
 
@@ -718,7 +726,7 @@ internal static class AuthorityTests
             mismatch = error;
         }
 
-        check(mismatch is not null && mismatch.Message == "authority.db is not of schema version 1; delete authority.db to start over (machines then enroll again)", "schema: another schema version is refused with the delete-it message (" + mismatch?.Message + ")");
+        check(mismatch is not null && mismatch.Message == "authority.db is not of schema version 2; delete authority.db to start over (machines then enroll again)", "schema: another schema version is refused with the delete-it message (" + mismatch?.Message + ")");
         AuthorityDatabaseException? writing = null;
         try
         {

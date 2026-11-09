@@ -45,7 +45,7 @@ public static class LaunchClient
     /// Runs the request through the service on 127.0.0.1:<paramref name="servicePort" />. <paramref name="environment" /> is the
     /// environment the program inherits (this process's own when null); <paramref name="pagePort" /> is the --port of the run.
     /// </summary>
-    public static async Task<int> RunAsync(RunArgs args, string workingDirectory, int servicePort, int? pagePort, TextWriter stdout, TextWriter stderr, ServiceTrust trust, IReadOnlyDictionary<string, string>? environment = null, HttpMessageHandler? handler = null, CancellationToken cancel = default)
+    public static async Task<int> RunAsync(RunArgs args, string workingDirectory, int servicePort, int? pagePort, TextWriter stdout, TextWriter stderr, ServiceTrust trust, IReadOnlyDictionary<string, string>? environment = null, HttpMessageHandler? handler = null, CancellationToken cancel = default, bool approve = false)
     {
         environment ??= CurrentEnvironment();
         Func<string, string?> lookup = name => environment.FirstOrDefault(item => string.Equals(item.Key, name, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) is { Key: not null } found ? found.Value : null;
@@ -102,7 +102,7 @@ public static class LaunchClient
             return refused;
         }
 
-        string url = $"http://127.0.0.1:{servicePort}/v1/launch" + (pagePort is { } page ? "?pagePort=" + page : "");
+        string url = $"http://127.0.0.1:{servicePort}/v1/{(approve ? "approve" : "launch")}" + (pagePort is { } page ? "?pagePort=" + page : "");
         using HttpRequestMessage message = new(HttpMethod.Post, url)
         {
             Content = new StringContent(request.Canonical(), new UTF8Encoding(false), new MediaTypeHeaderValue("application/json"))

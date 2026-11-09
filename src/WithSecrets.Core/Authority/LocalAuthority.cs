@@ -104,12 +104,16 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
     /// <summary>How long a response is valid after it was issued.</summary>
     public static readonly TimeSpan ResponseLifetime = TimeSpan.FromSeconds(60);
 
+    /// <summary>The longest a host may go on using what it synchronized while it cannot reach the authority: the authority's policy (a provisional default of 15 minutes), sent to the host in each reconcile answer. A connected host applies a change at its next check-in.</summary>
+    public TimeSpan LeaseDuration { get; set; } = TimeSpan.FromMinutes(15);
+
     private static readonly TimeSpan ChallengeLifetime = TimeSpan.FromMinutes(2);
     private const int MaxChallenges = 64;
 
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
     private readonly ConcurrentDictionary<string, Offered> _offers = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, Lazy<Task<AuthorityResponse>>> _inflight = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, Lazy<Task<GrantResponse>>> _grantInflight = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DateTimeOffset> _challenges = new(StringComparer.Ordinal);
 
     private sealed record Offered(string RequestDigest, Func<ApprovalDecision> Present);
@@ -231,9 +235,11 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
     }
 
     /// <summary>The reason code that stops a machine from asking, or null when it may: its host name must be the bound one and its status Trusted.</summary>
-    private static string? Problem(MachineRecord machine, MachineRequestEnvelope envelope)
+    private static string? Problem(MachineRecord machine, MachineRequestEnvelope envelope) => Problem(machine, envelope.HostName);
+
+    private static string? Problem(MachineRecord machine, string hostName)
     {
-        if (!string.Equals(envelope.HostName, machine.HostName, StringComparison.Ordinal))
+        if (!string.Equals(hostName, machine.HostName, StringComparison.Ordinal))
         {
             return ReasonCodes.HostNameMismatch;
         }
@@ -257,6 +263,297 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
         string code = Problem(machine, envelope) ?? ReasonCodes.AuthorizationChanged;
 
         return new DecisionPlan(answer(AuthorityDecision.Denied, code, machine.SecurityRevision), code == ReasonCodes.HostNameMismatch ? envelope.HostName : null, $"machine is {machine.Status}");
+    }
+
+    // ---- grants and reconciliation ----
+
+    public Task<GrantResponse> GrantAsync(GrantEnvelope envelope, CancellationToken cancel = default)
+    {
+        string id = envelope.Request.RequestId;
+        Lazy<Task<GrantResponse>> shared = _grantInflight.GetOrAdd(id, _ => new Lazy<Task<GrantResponse>>(() => Task.Run(() => Grant(envelope, cancel))));
+        Task<GrantResponse> task = shared.Value;
+        _ = task.ContinueWith(_ => _grantInflight.TryRemove(new KeyValuePair<string, Lazy<Task<GrantResponse>>>(id, shared)), TaskScheduler.Default);
+
+        return task;
+    }
+
+    private GrantResponse Grant(GrantEnvelope envelope, CancellationToken cancel)
+    {
+        LaunchRequest request = envelope.Request;
+        string digest = request.Digest();
+        ISigningKey key = keys.Current();
+        GrantResponse Answer(string outcome, string reason, GrantInfo? grant, int revision)
+        {
+            DateTimeOffset issued = _clock.GetUtcNow();
+
+            return GrantResponse.Create(request.RequestId, digest, envelope.MachineFingerprint, envelope.Operation, outcome, reason, grant, revision, issued, issued + ResponseLifetime, key);
+        }
+
+        GrantResponse Refuse(string reason, int revision) => Answer(GrantOps.Denied, reason, null, revision);
+
+        MachineRecord? machine = store.Find(envelope.MachineFingerprint);
+        if (machine is null)
+        {
+            return Refuse(ReasonCodes.UnknownMachine, 0);
+        }
+
+        if (!envelope.Verify(machine.PublicKey))
+        {
+            return Refuse(ReasonCodes.BadSignature, machine.SecurityRevision);
+        }
+
+        if (store.GetProcessedGrant(request.RequestId) is { } done)
+        {
+            return done.Fingerprint == machine.Fingerprint && done.RequestDigest == digest ? done.Response : Refuse(ReasonCodes.RequestIdReused, machine.SecurityRevision);
+        }
+
+        if (envelope.Operation is not (GrantOps.Use or GrantOps.Approve))
+        {
+            return Refuse(GrantReasons.BadOperation, machine.SecurityRevision);
+        }
+
+        if (request.Validate(_clock.GetUtcNow()) is not null)
+        {
+            return Refuse(ReasonCodes.InvalidRequest, machine.SecurityRevision);
+        }
+
+        if (!GrantOps.IsScopeKey(envelope.ScopeKey))
+        {
+            return Refuse(GrantReasons.BadScope, machine.SecurityRevision);
+        }
+
+        if (Problem(machine, envelope.HostName) is { } problem)
+        {
+            if (problem == ReasonCodes.HostNameMismatch)
+            {
+                store.RecordHostMismatch(machine.Fingerprint, envelope.HostName);
+            }
+
+            return Refuse(problem, machine.SecurityRevision);
+        }
+
+        return envelope.Operation == GrantOps.Use ? UseGrant(envelope, machine, Answer, Refuse) : ApproveGrant(envelope, machine, cancel, Answer, Refuse);
+    }
+
+    private GrantResponse UseGrant(GrantEnvelope envelope, MachineRecord machine, Func<string, string, GrantInfo?, int, GrantResponse> answer, Func<string, int, GrantResponse> refuse)
+    {
+        string digest = envelope.Request.Digest();
+
+        return store.ApplyGrant(envelope.Request.RequestId, digest, machine.Fingerprint, (tx, current) =>
+        {
+            if (current is null || Problem(current, envelope.HostName) is not null)
+            {
+                return new AuthorityStore.GrantPlan(refuse(current is null ? ReasonCodes.UnknownMachine : Problem(current, envelope.HostName)!, current?.SecurityRevision ?? 0), null, "", false);
+            }
+
+            DateTimeOffset now = _clock.GetUtcNow();
+            GrantRecord? grant = tx.FindByScope(machine.Fingerprint, envelope.ScopeKey);
+            if (grant is null || grant.SecurityRevision != current.SecurityRevision)
+            {
+                return new AuthorityStore.GrantPlan(answer(GrantOps.None, GrantReasons.NoGrant, null, current.SecurityRevision), null, "", false);
+            }
+
+            if (grant.IsExpired(now))
+            {
+                return new AuthorityStore.GrantPlan(answer(GrantOps.None, GrantReasons.Expired, null, current.SecurityRevision), null, "", false);
+            }
+
+            return new AuthorityStore.GrantPlan(answer(GrantOps.Granted, GrantReasons.Ok, grant.Info, current.SecurityRevision), "grant-use", $"grant {grant.Id} revision {grant.Revision}");
+        });
+    }
+
+    private GrantResponse ApproveGrant(GrantEnvelope envelope, MachineRecord machine, CancellationToken cancel, Func<string, string, GrantInfo?, int, GrantResponse> answer, Func<string, int, GrantResponse> refuse)
+    {
+        LaunchRequest request = envelope.Request;
+        string digest = request.Digest();
+        if (!_offers.TryGetValue(request.RequestId, out Offered? offered) || offered.RequestDigest != digest)
+        {
+            return refuse(offered is null ? ReasonCodes.NoApprovalChannel : ReasonCodes.DigestMismatch, machine.SecurityRevision);
+        }
+
+        int startRevision = machine.SecurityRevision;
+        ApprovalDecision answered;
+        try
+        {
+            answered = offered.Present();
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            answered = ApprovalDecision.Deny("the approval failed: " + error.GetType().Name);
+        }
+
+        bool cancelled = cancel.IsCancellationRequested;
+        string detail = ApprovalSummary.Clean(answered.Detail);
+        detail = detail.Length > 200 ? detail[..200] : detail;
+        string keyName = AuditLog.KeyName(answered.Detail);
+        string approvedBy = keyName.Length > 0 ? "passkey " + ApprovalSummary.Clean(keyName) : "approval page";
+
+        return store.ApplyGrant(request.RequestId, digest, machine.Fingerprint, (tx, current) =>
+        {
+            if (current is null || Problem(current, envelope.HostName) is not null)
+            {
+                return new AuthorityStore.GrantPlan(refuse(current is null ? ReasonCodes.UnknownMachine : Problem(current, envelope.HostName)!, current?.SecurityRevision ?? 0), null, "", false);
+            }
+
+            if (current.SecurityRevision != startRevision)
+            {
+                return new AuthorityStore.GrantPlan(refuse(ReasonCodes.AuthorizationChanged, current.SecurityRevision), "grant-denied", "the security revision changed while the approval was open");
+            }
+
+            if (!answered.Approved)
+            {
+                return new AuthorityStore.GrantPlan(refuse(cancelled ? ReasonCodes.Cancelled : ReasonCodes.UserDenied, current.SecurityRevision), "grant-denied", detail);
+            }
+
+            if (answered.ReuseMinutes is < 1 or > ReuseSettings.MaxMinutes)
+            {
+                return new AuthorityStore.GrantPlan(refuse(GrantReasons.NoTime, current.SecurityRevision), "grant-denied", "no time was chosen on the approval page");
+            }
+
+            DateTimeOffset now = _clock.GetUtcNow();
+            DateTimeOffset expires = now.AddMinutes(answered.ReuseMinutes);
+            GrantRecord? existing = tx.FindByScope(machine.Fingerprint, envelope.ScopeKey);
+            string names = string.Join(", ", request.SecretNames.Order(StringComparer.Ordinal));
+            GrantRecord grant = existing is null
+                ? tx.Create(machine.Fingerprint, envelope.ScopeKey, Short(request.Program), Short(request.WorkingDirectory), Short(names), expires, current.SecurityRevision, approvedBy)
+                : tx.SetExpiry(existing.Id, expires, approvedBy);
+
+            return new AuthorityStore.GrantPlan(answer(GrantOps.Granted, GrantReasons.Ok, grant.Info, current.SecurityRevision), existing is null ? "grant-created" : "grant-updated", $"grant {grant.Id}, {answered.ReuseMinutes} min, by {approvedBy}");
+        });
+    }
+
+    private static string Short(string text)
+    {
+        string clean = ApprovalSummary.Clean(text);
+
+        return clean.Length > 300 ? clean[..300] : clean;
+    }
+
+    /// <summary>
+    /// An administrator's extend, renew or revoke of a grant (the admin passkey approved it in the caller). Extend lengthens an active grant (by
+    /// <see cref="GrantAdminCommand.Minutes" />, or makes it indefinite), renew gives an expired grant a new end counted from now, and revoke ends it and tells its
+    /// machine. The answer is signed and stored under the request id; a retry returns it. None of them touches the machine's security revision or any lease.
+    /// </summary>
+    public GrantResponse AdminGrant(GrantAdminCommand command)
+    {
+        string digest = command.Digest();
+        ISigningKey key = keys.Current();
+        GrantRecord? first = store.FindGrant(command.GrantId);
+        string fingerprint = first?.Fingerprint ?? "";
+        int machineRevision = first is null ? 0 : store.Find(first.Fingerprint)?.SecurityRevision ?? 0;
+        GrantResponse Answer(string outcome, string reason, GrantInfo? info)
+        {
+            DateTimeOffset issued = _clock.GetUtcNow();
+
+            return GrantResponse.Create(command.RequestId, digest, fingerprint, command.Operation, outcome, reason, info, machineRevision, issued, issued + ResponseLifetime, key);
+        }
+
+        GrantResponse Refuse(string reason) => Answer(GrantOps.Denied, reason, null);
+
+        if (first is null)
+        {
+            return Refuse(GrantReasons.NotFound);
+        }
+
+        if (store.GetProcessedGrant(command.RequestId) is { } done)
+        {
+            return done.Fingerprint == fingerprint && done.RequestDigest == digest ? done.Response : Refuse(ReasonCodes.RequestIdReused);
+        }
+
+        if (command.Operation is not (GrantOps.Extend or GrantOps.Renew or GrantOps.Revoke))
+        {
+            return Refuse(GrantReasons.BadOperation);
+        }
+
+        if (command.Operation != GrantOps.Revoke && !command.Indefinite && command.Minutes is null or < 1 or > ReuseSettings.MaxMinutes)
+        {
+            return Refuse(GrantReasons.NoTime);
+        }
+
+        return store.ApplyGrant(command.RequestId, digest, fingerprint, (tx, machine) =>
+        {
+            GrantRecord? grant = tx.Find(command.GrantId);
+            if (grant is null)
+            {
+                return new AuthorityStore.GrantPlan(Refuse(GrantReasons.NotFound), null, "", false);
+            }
+
+            if (command.ExpectedRevision is { } expected && expected != grant.Revision)
+            {
+                return new AuthorityStore.GrantPlan(Refuse(GrantReasons.RevisionChanged), null, "", false);
+            }
+
+            DateTimeOffset now = _clock.GetUtcNow();
+            if (grant.Status != "active")
+            {
+                return new AuthorityStore.GrantPlan(Refuse(GrantReasons.NotActive), null, "", false);
+            }
+
+            switch (command.Operation)
+            {
+                case GrantOps.Revoke:
+                    GrantRecord revoked = tx.Revoke(grant.Id);
+
+                    return new AuthorityStore.GrantPlan(Answer(GrantOps.Revoked, GrantReasons.Ok, revoked.Info), "grant-revoked", $"grant {grant.Id} by {command.Actor}");
+                case GrantOps.Extend:
+                    if (grant.IsExpired(now))
+                    {
+                        return new AuthorityStore.GrantPlan(Refuse(GrantReasons.Expired), null, "", false);
+                    }
+
+                    if (grant.Expires is null)
+                    {
+                        return new AuthorityStore.GrantPlan(Refuse(GrantReasons.NotExpired), null, "", false);
+                    }
+
+                    GrantRecord extended = tx.SetExpiry(grant.Id, command.Indefinite ? null : grant.Expires.Value.AddMinutes(command.Minutes!.Value), command.Actor);
+
+                    return new AuthorityStore.GrantPlan(Answer(GrantOps.Extended, GrantReasons.Ok, extended.Info), "grant-extended", $"grant {grant.Id} by {command.Actor}; " + (command.Indefinite ? "indefinite" : $"{command.Minutes} min"));
+                default:
+                    if (!grant.IsExpired(now))
+                    {
+                        return new AuthorityStore.GrantPlan(Refuse(GrantReasons.NotExpired), null, "", false);
+                    }
+
+                    GrantRecord renewed = tx.SetExpiry(grant.Id, command.Indefinite ? null : now.AddMinutes(command.Minutes!.Value), command.Actor);
+
+                    return new AuthorityStore.GrantPlan(Answer(GrantOps.Renewed, GrantReasons.Ok, renewed.Info), "grant-renewed", $"grant {grant.Id} by {command.Actor}; " + (command.Indefinite ? "indefinite" : $"{command.Minutes} min"));
+            }
+        });
+    }
+
+    public Task<ReconcileResponse> ReconcileAsync(ReconcileEnvelope envelope, CancellationToken cancel = default)
+    {
+        string digest = envelope.Digest();
+        ISigningKey key = keys.Current();
+        DateTimeOffset now = _clock.GetUtcNow();
+        ReconcileResponse Answer(string status, bool bound, int revision, TimeSpan lease) => ReconcileResponse.Create(envelope.RequestId, digest, envelope.MachineFingerprint, status, bound, revision, (int)lease.TotalSeconds, now, now + ResponseLifetime, key);
+
+        MachineRecord? machine = store.Find(envelope.MachineFingerprint);
+        if (machine is null || !envelope.Verify(machine.PublicKey) || (envelope.Created - now).Duration() > TimeSpan.FromMinutes(5))
+        {
+            return Task.FromResult(Answer("Unknown", false, machine?.SecurityRevision ?? 0, TimeSpan.Zero));
+        }
+
+        bool bound = string.Equals(envelope.HostName, machine.HostName, StringComparison.Ordinal);
+        if (!bound)
+        {
+            store.RecordHostMismatch(machine.Fingerprint, envelope.HostName);
+        }
+
+        return Task.FromResult(Answer(machine.Status.ToString(), bound, machine.SecurityRevision, machine.Status == MachineStatus.Trusted && bound ? LeaseDuration : TimeSpan.Zero));
+    }
+
+    public Task<IReadOnlyList<PendingGrantEvent>> PendingGrantEventsAsync(string machineFingerprint, CancellationToken cancel = default)
+    {
+        return Task.FromResult(store.PendingGrantEvents(machineFingerprint));
+    }
+
+    public Task AcknowledgeGrantEventAsync(string machineFingerprint, long sequence, CancellationToken cancel = default)
+    {
+        store.AcknowledgeGrantEvent(machineFingerprint, sequence);
+
+        return Task.CompletedTask;
     }
 
     // ---- enrollment, key transitions, invalidations ----

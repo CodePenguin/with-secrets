@@ -318,7 +318,7 @@ internal static class LaunchContractTests
         LaunchResult result = LaunchResult.Exited("req-0001", 3, "hello [REDACTED]\n");
         check(result.Canonical() == GoldenResult, "launch result: canonical text matches the golden vector (" + result.Canonical() + ")");
         check(LaunchResult.TryParse(GoldenResult, out LaunchResult? back, out string? error) && back == result, "launch result: parses back to the same result (" + error + ")");
-        check(Enum.GetNames<LaunchOutcome>().Order().SequenceEqual(["Cancelled", "Denied", "Exited", "Failed", "Launched"]), "launch result: the outcomes are denied, cancelled, failed, launched and exited");
+        check(Enum.GetNames<LaunchOutcome>().Order().SequenceEqual(["Approved", "Cancelled", "Denied", "Exited", "Failed", "Launched"]), "launch result: the outcomes are denied, cancelled, failed, launched and exited, and approved (a grant made by approve; Phase 3)");
         check(LaunchResult.Denied("req-0001", "the user said no").Canonical().Contains("\"outcome\":\"denied\",\"exitCode\":null", StringComparison.Ordinal), "launch result: a denial has no exit status");
         check(!LaunchResult.TryParse(GoldenResult.Replace("\"exited\"", "\"vanished\"", StringComparison.Ordinal), out _, out error) && error is not null, "launch result: an unknown outcome is rejected");
         check(!LaunchResult.TryParse(GoldenResult.Replace("\"detail\":\"\"", "\"detail\":\"\",\"secret\":\"x\"", StringComparison.Ordinal), out _, out error) && error is not null && error.Contains("unknown field secret", StringComparison.Ordinal), "launch result: an unknown field (a smuggled payload) is rejected");

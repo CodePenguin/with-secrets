@@ -15,6 +15,9 @@ public sealed class LocalDeployment(AuthorityStore store, AuthorityKeyRing keys,
 
     public LocalAuthority Authority => authority;
 
+    /// <summary>What the host service talks to: the local authority itself. Tests put a link in its place that can go offline or alter answers.</summary>
+    public IAuthority Link { get; set; } = authority;
+
     public ISigningKey MachineKey => machineKey;
 
     public string HostName => hostName;
@@ -72,7 +75,7 @@ public sealed class LocalDeployment(AuthorityStore store, AuthorityKeyRing keys,
         return await authority.EnrollAsync(EnrollmentRequest.Create(hostName, challenge, machineKey), cancel);
     }
 
-    public HostAuthorization CreateAuthorization(LaunchGate gate, Action? clearSaved = null) => new(authority, machineKey, hostName, hostConfig, gate, authority.Offer, clock, clearSaved);
+    public HostAuthorization CreateAuthorization(LaunchGate gate, Action? clearSaved = null, IMonotonicClock? monotonic = null) => new(Link, machineKey, hostName, hostConfig, gate, authority.Offer, clock, clearSaved, monotonic);
 
     public void Dispose() => machineKey.Dispose();
 }

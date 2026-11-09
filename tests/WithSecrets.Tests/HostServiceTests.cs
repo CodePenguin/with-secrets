@@ -17,11 +17,19 @@ internal static class HostServiceTests
     private const string Other = "Canary-Other-9001337";
 
     /// <summary>A secret source in memory that counts decryptions.</summary>
-    internal sealed class CountingStore(Dictionary<string, string> values) : ISecretSource
+    internal sealed class CountingStore(Dictionary<string, string> values, bool needsUnlock = false) : ISecretSource
     {
         private int _reads;
 
+        public bool NeedsUnlock => needsUnlock;
+
         public int Reads => Volatile.Read(ref _reads);
+
+        /// <summary>Reads that were given usable key material (not null, not zeroed).</summary>
+        public int KeyedReads { get; private set; }
+
+        /// <summary>Makes the next reads fail, as a store that cannot open its key would.</summary>
+        public bool Fail { get; set; }
 
         public string Label => SecretStore.GlobalLabel;
 
@@ -30,6 +38,15 @@ internal static class HostServiceTests
         public SecretValues GetValues(IReadOnlyCollection<string> names, Unlock? unlock)
         {
             Interlocked.Increment(ref _reads);
+            if (unlock is not null && unlock.Output.Any(b => b != 0))
+            {
+                KeyedReads++;
+            }
+
+            if (Fail)
+            {
+                throw new SecretStoreException("the key could not be opened (test)");
+            }
 
             return new SecretValues(names.ToDictionary(name => name, name => Encoding.UTF8.GetBytes(values[name]), StringComparer.Ordinal));
         }
@@ -87,7 +104,7 @@ internal static class HostServiceTests
         private readonly string _dir;
         private int _ids;
 
-        public Rig(string parent, Dictionary<string, string>? values = null, Func<IApprover>? approver = null, TimeSpan? bodyTimeout = null, Action<PreparedChild>? afterPrepare = null, Action? afterCommit = null, bool trusted = true, TestMachine? machine = null, TestAuthenticator? savedApprovalSigner = null)
+        public Rig(string parent, Dictionary<string, string>? values = null, Func<IApprover>? approver = null, TimeSpan? bodyTimeout = null, Action<PreparedChild>? afterPrepare = null, Action? afterCommit = null, bool trusted = true, TestMachine? machine = null, TestAuthenticator? savedApprovalSigner = null, bool needsUnlock = false, Func<IApprover, IStoreKeyProvider>? keyProvider = null, IMonotonicClock? monotonic = null)
         {
             _dir = Path.Combine(parent, "svc-" + Guid.NewGuid().ToString("N")[..8]);
             Work = Path.Combine(_dir, "work");
@@ -99,7 +116,7 @@ internal static class HostServiceTests
                 TestState.Add(State, savedApprovalSigner.Record("localhost", "laptop") with { Created = DateTimeOffset.UtcNow });
             }
 
-            Store = new CountingStore(values ?? new Dictionary<string, string> { ["TOKEN"] = Value, ["OTHER_KEY"] = Other });
+            Store = new CountingStore(values ?? new Dictionary<string, string> { ["TOKEN"] = Value, ["OTHER_KEY"] = Other }, needsUnlock);
             Approvers = [];
             Service = HostService.Start(new HostServiceOptions
             {
@@ -118,6 +135,8 @@ internal static class HostServiceTests
                 },
                 AfterPrepare = child => afterPrepare?.Invoke(child),
                 AfterCommit = () => afterCommit?.Invoke(),
+                KeyProviderFactory = keyProvider,
+                Monotonic = monotonic,
             });
             Http = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(60) };
         }

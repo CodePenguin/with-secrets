@@ -358,6 +358,14 @@ internal static class IdentityTests
         public Task<IReadOnlyList<PendingInvalidation>> PendingInvalidationsAsync(string machineFingerprint, CancellationToken cancel = default) => throw new InvalidOperationException("no answer");
 
         public Task AcknowledgeInvalidationAsync(string machineFingerprint, int revision, CancellationToken cancel = default) => throw new InvalidOperationException("no answer");
+
+        public Task<GrantResponse> GrantAsync(GrantEnvelope envelope, CancellationToken cancel = default) => throw new InvalidOperationException("no answer");
+
+        public Task<ReconcileResponse> ReconcileAsync(ReconcileEnvelope envelope, CancellationToken cancel = default) => throw new InvalidOperationException("no answer");
+
+        public Task<IReadOnlyList<PendingGrantEvent>> PendingGrantEventsAsync(string machineFingerprint, CancellationToken cancel = default) => throw new InvalidOperationException("no answer");
+
+        public Task AcknowledgeGrantEventAsync(string machineFingerprint, long sequence, CancellationToken cancel = default) => throw new InvalidOperationException("no answer");
     }
 
     private static void Startup(Action<bool, string> check)

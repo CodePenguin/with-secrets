@@ -10,8 +10,10 @@ public sealed record RunArgs(IReadOnlyList<string> Secrets, string Reason, strin
 /// signed it, for exactly that time, keeps that signature, and is used only while it verifies and its lifetime is within the
 /// current ceiling. One that does not verify is reported once on stderr and ignored: the person is asked again.
 /// </summary>
-public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog audit, TextWriter stdout, TextWriter stderr, GrantStore? grants = null, ReuseOffer? reuse = null, Func<string, string?>? environment = null)
+public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog audit, TextWriter stdout, TextWriter stderr, GrantStore? grants = null, ReuseOffer? reuse = null, Func<string, string?>? environment = null, IStoreKeyProvider? keyProvider = null)
 {
+    private readonly IStoreKeyProvider _keys = keyProvider ?? new TapStoreKeyProvider(approver);
+
     public const int Usage = 2;
     public const int Denied = 3;
     public const int StoreError = 4;
@@ -27,7 +29,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
     /// <see cref="ExecuteAsync(RunArgs, string)" /> does it, except that the program starts only through the gate in
     /// <paramref name="context" /> and the child gets the environment the request carries.
     /// </summary>
-    public async Task<int> ExecuteAsync(LaunchRequest launch, LaunchContext context)
+    public async Task<int> ExecuteAsync(LaunchRequest launch, LaunchContext context, bool approveOnly = false)
     {
         // A request over the API is never launched on the host's own say-so: it needs an authority to answer for it.
         if (context.Authorization is null)
@@ -71,7 +73,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
 
         context.Request = launch;
 
-        return await RunPlan(launch.Program, launch.Arguments, launch.Reason, launch.WorkingDirectory, plan, available, context);
+        return await RunPlan(launch.Program, launch.Arguments, launch.Reason, launch.WorkingDirectory, plan, available, context, approveOnly);
     }
 
     public async Task<int> ExecuteAsync(RunArgs args, string workingDirectory)
@@ -102,7 +104,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         return await RunPlan(args.Program, args.Arguments, args.Reason, workingDirectory, plan, available, new LaunchContext());
     }
 
-    private async Task<int> RunPlan(string program, IReadOnlyList<string> typedArguments, string reason, string workingDirectory, EnvPlan plan, IReadOnlyList<string> available, LaunchContext context)
+    private async Task<int> RunPlan(string program, IReadOnlyList<string> typedArguments, string reason, string workingDirectory, EnvPlan plan, IReadOnlyList<string> available, LaunchContext context, bool approveOnly = false)
     {
         if (plan.Mappings.Count == 0)
         {
@@ -251,6 +253,26 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         // The request id goes into the text the person signs, so a saved approval names the request it covers.
         request = request with { RequestId = fingerprint.Key };
 
+        // approve: the same validation and the human approval, but the result is a grant for this scope and nothing is launched.
+        if (approveOnly)
+        {
+            return await ApproveGrantOnly(request, fingerprint, context);
+        }
+
+        // A grant for exactly this request (the authority answers, or one this host synchronized, under a valid lease) stands in for the
+        // approval page's decision. A request that is not covered, or whose grant ended, goes through the page as before.
+        GrantUse? grantUse = null;
+        if (context.Authorization is { } grantHost && context.Request is { } grantLaunch)
+        {
+            grantUse = await grantHost.TryUseGrantAsync(grantLaunch, fingerprint.Key, context.Cancel);
+            if (grantUse.Kind == GrantUseKind.Denied)
+            {
+                audit.TryWrite("denied", request, grantUse.Message, files: fingerprint.Files);
+
+                return context.Cancel.IsCancellationRequested ? await Cancelled() : await Fail(Denied, grantUse.Message);
+            }
+        }
+
         // A saved approval that does not verify is never used; the person is asked again.
         GrantLookup saved = offer.IsOn ? grants!.Find(fingerprint.Key, offer.MaxMinutes) : GrantLookup.None;
 
@@ -264,6 +286,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         // What the approving passkey released (PRF) on the approval page: the only thing that opens the store key. It is zeroed
         // when the values were read, and on every way out.
         Unlock? unlock = null;
+        bool keyFromGrant = false;
         try
         {
             if (saved.Rejected is not null)
@@ -271,7 +294,28 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                 await stderr.WriteLineAsync($"with-secrets: {GrantStore.RejectedMessage} ({saved.Rejected}).");
             }
 
-            if (saved.Grant is { } grant)
+            if (grantUse is { Kind: GrantUseKind.Granted } granted)
+            {
+                string how = granted.Offline ? "offline, within the lease" : "checked with the authority";
+                await stderr.WriteLineAsync($"with-secrets: a grant covers this request (grant {granted.GrantId}, {how}); no approval page decision is needed.");
+                if (!audit.TryWrite("granted", request, $"grant {granted.GrantId}, {how}", files: fingerprint.Files))
+                {
+                    return await Fail(AuditError, "cannot write the audit log, so nothing was run.");
+                }
+
+                // What the store needs to open comes from the key provider: a passkey tap, or the key the service holds for this grant since an earlier tap.
+                KeyRelease release = _keys.Obtain(store, request, context.Cancel, line => stderr.WriteLine(line), granted.GrantId);
+                if (!release.Ok)
+                {
+                    audit.TryWrite("denied", request, release.Detail, files: fingerprint.Files);
+
+                    return context.Cancel.IsCancellationRequested ? await Cancelled() : await Fail(Denied, release.Detail);
+                }
+
+                unlock = release.Unlock;
+                keyFromGrant = true;
+            }
+            else if (saved.Grant is { } grant)
             {
                 // A saved approval stands in for the page, not for the authority: the machine must still be Trusted.
                 if (context.Authorization is { } reusedHost && context.Request is { } reusedLaunch)
@@ -384,6 +428,11 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             }
             catch (Exception error)
             {
+                if (keyFromGrant)
+                {
+                    _keys.Discard();
+                }
+
                 return await Fail(StoreError, $"cannot decrypt the secret store: {error.Message}");
             }
             finally
@@ -481,7 +530,77 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         finally
         {
             unlock?.Dispose();
+
+            // A run under a grant that did not end normally (any refusal, failure or cancel) drops whatever key is held for it.
+            if (keyFromGrant && Outcome != LaunchOutcome.Exited)
+            {
+                _keys.Discard();
+            }
         }
+    }
+
+    /// <summary>
+    /// <c>approve</c>: the person approves this exact request on the page and picks how long (the times the page offers); the authority records a grant for
+    /// the request's scope (secrets, program, folder, script and .env plan: the fingerprint of the request) for that time and nothing is launched. A new
+    /// approval needs the authority, so it fails while the authority cannot be reached. The page's unlock material is never used here.
+    /// </summary>
+    private async Task<int> ApproveGrantOnly(ApprovalRequest request, Fingerprint fingerprint, LaunchContext context)
+    {
+        if (context.Authorization is not { } host || context.Request is not { } launch)
+        {
+            return await Fail(Denied, "no authority is configured for this host service. Nothing was saved.");
+        }
+
+        ReuseOffer times = reuse is { IsOn: true } ? reuse : ReuseOffer.Off;
+        if (!times.IsOn)
+        {
+            return await Fail(Usage, "a grant needs a time to choose on the approval page, and the settings offer none (reuseMaxMinutes is below 10). Raise it with: with-secrets --config");
+        }
+
+        // The page offers the times and no unlock: nothing is decrypted by an approval.
+        ApprovalRequest shown = request with { Reuse = times, Unlock = false };
+        GrantApproval result = await host.ApproveGrantAsync(launch, fingerprint.Key, () =>
+        {
+            stderr.WriteLine("with-secrets: waiting for the user to approve this request and choose how long the grant lasts...");
+            stderr.WriteLine(ApprovalSummary.BuildMessage(shown, showValues: false));
+            ApprovalDecision decision = approver.Request(shown, context.Cancel);
+            if (decision.Approved && !times.Allows(decision.ReuseMinutes))
+            {
+                decision.Unlock?.Dispose();
+                decision = ApprovalDecision.Deny("the approval named a time that was not offered");
+            }
+
+            // A script can change while the prompt is open. The person approved what they saw.
+            if (decision.Approved && RequestFingerprint.Compute(request).Key != fingerprint.Key)
+            {
+                decision.Unlock?.Dispose();
+                decision = ApprovalDecision.Deny("a file named in the command changed while the prompt was open");
+            }
+
+            return decision;
+        }, context.Cancel);
+
+        if (!result.Granted)
+        {
+            audit.TryWrite("denied", request, result.Message, files: fingerprint.Files);
+
+            return context.Cancel.IsCancellationRequested ? await Cancelled() : await Fail(Denied, result.Message);
+        }
+
+        string ends = result.Expires is { } at ? $"until {at.UtcDateTime:yyyy-MM-dd HH:mm} UTC" : "with no end";
+        if (!audit.TryWrite("grant-approved", request, $"grant {result.GrantId} {ends}", files: fingerprint.Files))
+        {
+            return await Fail(AuditError, $"the authority recorded grant {result.GrantId}, but the audit log cannot be written here.");
+        }
+
+        Outcome = LaunchOutcome.Approved;
+        await stdout.WriteLineAsync($"with-secrets: grant {result.GrantId} approved {ends}. A run of this exact request (same secrets, program, folder, script and .env plan) needs no approval page decision while it lasts. Nothing was run.");
+        if (store.NeedsUnlock)
+        {
+            await stdout.WriteLineAsync("with-secrets: this store's key still needs a passkey tap at each run.");
+        }
+
+        return 0;
     }
 
     /// <summary>

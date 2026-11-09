@@ -27,6 +27,8 @@ public sealed record TransitionResult(bool Ok, string Message, MachineRecord? Ma
 
 public sealed record ProcessedRequest(string RequestId, string Fingerprint, string RequestDigest, AuthorityResponse Response);
 
+public sealed record ProcessedGrant(string RequestId, string Fingerprint, string RequestDigest, GrantResponse Response);
+
 /// <summary>An authority signing key's public part and where it stands. <see cref="Status" /> is Active or Retired; <see cref="How" /> is created, rotated or recovered.</summary>
 public sealed record AuthorityKeyRecord(int Generation, string Fingerprint, byte[] PublicKey, string Status, DateTimeOffset Created, string? PreviousFingerprint, byte[]? TransitionSignature, string How);
 
@@ -38,17 +40,19 @@ public sealed record HistoryEntry(long Id, string Fingerprint, DateTimeOffset Ti
 public sealed record DecisionPlan(AuthorityResponse Response, string? HostMismatch, string AuditDetail, bool Store = true);
 
 /// <summary>
-/// <c>authority.db</c> in the store folder: the authority's durable state in SQLite (WAL, schema version 1): machines and their
-/// status history, grants (the table only; grants are made in a later phase), the public part of the authority signing keys and
+/// <c>authority.db</c> in the store folder: the authority's durable state in SQLite (WAL, schema version 2): machines and their
+/// status history, grants (scoped, with their expiry, revision and revocation) with the revocation notices for hosts and the stored
+/// results of grant requests, the public part of the authority signing keys and
 /// their rotation history, the authority-side audit history, processed request ids with their signed results (idempotency),
 /// and pending invalidation notifications. The authority signing private key is not here (see <see cref="CngSigningKey" />),
 /// and no secret value is. Every operation is one transaction that takes the write lock first, so it commits whole or leaves
-/// nothing; a database of another schema version is never migrated: delete it and start over (machines then enroll again).
+/// nothing; a database of another schema version is never migrated, except version 1 (Phase 2), whose grants table was never written
+/// by the program and is replaced by the Phase 3 tables: any other version: delete it and start over (machines then enroll again).
 /// </summary>
 public sealed class AuthorityStore
 {
     public const string FileName = "authority.db";
-    public const int SchemaVersion = 1;
+    public const int SchemaVersion = 2;
 
     private const string Schema = """
         CREATE TABLE schema_version (version INTEGER NOT NULL);
@@ -59,8 +63,14 @@ public sealed class AuthorityStore
             id INTEGER PRIMARY KEY AUTOINCREMENT, fingerprint TEXT NOT NULL, time TEXT NOT NULL, kind TEXT NOT NULL,
             from_status TEXT, to_status TEXT, security_revision INTEGER NOT NULL, actor TEXT NOT NULL, detail TEXT NOT NULL);
         CREATE TABLE grants (
-            id TEXT PRIMARY KEY NOT NULL, fingerprint TEXT NOT NULL, scope_digest TEXT NOT NULL, created TEXT NOT NULL,
-            expires TEXT, security_revision INTEGER NOT NULL, status TEXT NOT NULL);
+            id TEXT PRIMARY KEY NOT NULL, fingerprint TEXT NOT NULL, scope_key TEXT NOT NULL, program TEXT NOT NULL, working_directory TEXT NOT NULL,
+            secret_names TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL, expires TEXT, grant_revision INTEGER NOT NULL,
+            security_revision INTEGER NOT NULL, status TEXT NOT NULL, approved_by TEXT NOT NULL, revoked TEXT);
+        CREATE TABLE grant_events (
+            seq INTEGER PRIMARY KEY AUTOINCREMENT, fingerprint TEXT NOT NULL, grant_id TEXT NOT NULL, scope_key TEXT NOT NULL, kind TEXT NOT NULL,
+            grant_revision INTEGER NOT NULL, state TEXT NOT NULL, created TEXT NOT NULL, acknowledged TEXT);
+        CREATE TABLE processed_grant_requests (
+            request_id TEXT PRIMARY KEY NOT NULL, fingerprint TEXT NOT NULL, request_digest TEXT NOT NULL, response TEXT NOT NULL, created TEXT NOT NULL);
         CREATE TABLE authority_keys (
             generation INTEGER PRIMARY KEY NOT NULL, fingerprint TEXT NOT NULL UNIQUE, public_key TEXT NOT NULL, status TEXT NOT NULL,
             created TEXT NOT NULL, retired TEXT, previous_fingerprint TEXT, transition_signature TEXT, how TEXT NOT NULL);
@@ -466,16 +476,173 @@ public sealed class AuthorityStore
         return chain;
     }
 
-    // ---- grants (table only here), invalidations ----
+    // ---- grants ----
 
-    /// <summary>Grants are made in a later phase; this only fills the table so that invalidation can be tested.</summary>
+    private const string GrantColumns = "id, fingerprint, scope_key, program, working_directory, secret_names, created, updated, expires, grant_revision, security_revision, status, approved_by, revoked";
+
+    private static GrantRecord ReadGrant(SqliteDataReader reader)
+    {
+        return new GrantRecord(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetString(5), ParseTime(reader.GetString(6)), ParseTime(reader.GetString(7)),
+            reader.IsDBNull(8) ? null : ParseTime(reader.GetString(8)), reader.GetInt32(9), reader.GetInt32(10), reader.GetString(11), reader.GetString(12), reader.IsDBNull(13) ? null : ParseTime(reader.GetString(13)));
+    }
+
+    /// <summary>Every grant (of one machine when <paramref name="fingerprint" /> is given), oldest first.</summary>
+    public IReadOnlyList<GrantRecord> Grants(string? fingerprint = null)
+    {
+        return Read(connection => connection is null ? [] : Query(connection, null, $"SELECT {GrantColumns} FROM grants WHERE $fp IS NULL OR fingerprint = $fp ORDER BY created, id", ReadGrant, ("$fp", fingerprint)));
+    }
+
+    public GrantRecord? FindGrant(string id)
+    {
+        return Read(connection => connection is null ? null : Query(connection, null, $"SELECT {GrantColumns} FROM grants WHERE id = $id", ReadGrant, ("$id", id)).FirstOrDefault());
+    }
+
+    /// <summary>The grants whose id starts with the given text.</summary>
+    public IReadOnlyList<GrantRecord> FindGrantsByPrefix(string prefix)
+    {
+        return [.. Grants().Where(grant => grant.Id.StartsWith(prefix, StringComparison.Ordinal))];
+    }
+
+    /// <summary>For tests: puts a grant (as an approval makes it) with a scope key only.</summary>
     internal void AddGrant(string id, string fingerprint, string scopeDigest, DateTimeOffset? expires)
     {
         Write((connection, transaction) =>
         {
             int revision = Query(connection, transaction, "SELECT * FROM machines WHERE fingerprint = $fp", Machine, ("$fp", fingerprint)).Single().SecurityRevision;
-            StateDatabase.Execute(connection, transaction, "INSERT INTO grants (id, fingerprint, scope_digest, created, expires, security_revision, status) VALUES ($id, $fp, $scope, $now, $expires, $revision, 'active')",
-                ("$id", id), ("$fp", fingerprint), ("$scope", scopeDigest), ("$now", Time(Now)), ("$expires", expires is { } at ? Time(at) : null), ("$revision", revision));
+            string now = Time(Now);
+            StateDatabase.Execute(connection, transaction, $"INSERT INTO grants ({GrantColumns}) VALUES ($id, $fp, $scope, 'test', 'test', 'TEST', $now, $now, $expires, 1, $revision, 'active', 'test', NULL)",
+                ("$id", id), ("$fp", fingerprint), ("$scope", scopeDigest), ("$now", now), ("$expires", expires is { } at ? Time(at) : null), ("$revision", revision));
+
+            return 0;
+        });
+    }
+
+    /// <summary>What a grant operation works with inside its transaction.</summary>
+    public sealed class GrantTx
+    {
+        private readonly AuthorityStore _store;
+        private readonly SqliteConnection _connection;
+        private readonly SqliteTransaction _transaction;
+
+        internal GrantTx(AuthorityStore store, SqliteConnection connection, SqliteTransaction transaction)
+        {
+            _store = store;
+            _connection = connection;
+            _transaction = transaction;
+        }
+
+        public GrantRecord? Find(string id) => Query(_connection, _transaction, $"SELECT {GrantColumns} FROM grants WHERE id = $id", ReadGrant, ("$id", id)).FirstOrDefault();
+
+        /// <summary>The newest grant of the machine for the scope that is active (it may be past its end: it is then renewed, not made again).</summary>
+        public GrantRecord? FindByScope(string fingerprint, string scopeKey)
+        {
+            return Query(_connection, _transaction, $"SELECT {GrantColumns} FROM grants WHERE fingerprint = $fp AND scope_key = $scope AND status = 'active' ORDER BY created DESC, id LIMIT 1", ReadGrant, ("$fp", fingerprint), ("$scope", scopeKey)).FirstOrDefault();
+        }
+
+        public GrantRecord Create(string fingerprint, string scopeKey, string program, string workingDirectory, string secretNames, DateTimeOffset? expires, int securityRevision, string approvedBy)
+        {
+            string id = "g-" + Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(9)).Replace('+', '-').Replace('/', '_');
+            string now = Time(_store.Now);
+            StateDatabase.Execute(_connection, _transaction, $"INSERT INTO grants ({GrantColumns}) VALUES ($id, $fp, $scope, $program, $dir, $names, $now, $now, $expires, 1, $revision, 'active', $by, NULL)",
+                ("$id", id), ("$fp", fingerprint), ("$scope", scopeKey), ("$program", program), ("$dir", workingDirectory), ("$names", secretNames), ("$now", now), ("$expires", expires is { } at ? Time(at) : null), ("$revision", securityRevision), ("$by", approvedBy));
+            _store.Fault?.Invoke("after-grant");
+
+            return Find(id)!;
+        }
+
+        /// <summary>Sets the end of an active grant (null: indefinite), raises the grant's revision and records who. Returns the grant as it is now.</summary>
+        public GrantRecord SetExpiry(string id, DateTimeOffset? expires, string approvedBy)
+        {
+            StateDatabase.Execute(_connection, _transaction, "UPDATE grants SET expires = $expires, updated = $now, grant_revision = grant_revision + 1, approved_by = $by WHERE id = $id AND status = 'active'",
+                ("$expires", expires is { } at ? Time(at) : null), ("$now", Time(_store.Now)), ("$by", approvedBy), ("$id", id));
+            _store.Fault?.Invoke("after-grant");
+
+            return Find(id)!;
+        }
+
+        /// <summary>Ends the grant for good and queues the notice for its machine.</summary>
+        public GrantRecord Revoke(string id)
+        {
+            GrantRecord grant = Find(id)!;
+            string now = Time(_store.Now);
+            StateDatabase.Execute(_connection, _transaction, "UPDATE grants SET status = 'revoked', revoked = $now, updated = $now, grant_revision = grant_revision + 1 WHERE id = $id AND status = 'active'", ("$now", now), ("$id", id));
+            _store.Fault?.Invoke("after-grant");
+            StateDatabase.Execute(_connection, _transaction, "INSERT INTO grant_events (fingerprint, grant_id, scope_key, kind, grant_revision, state, created, acknowledged) VALUES ($fp, $id, $scope, 'revoked', $revision, 'Pending', $now, NULL)",
+                ("$fp", grant.Fingerprint), ("$id", id), ("$scope", grant.ScopeKey), ("$revision", grant.Revision + 1), ("$now", now));
+            _store.Fault?.Invoke("after-event");
+
+            return Find(id)!;
+        }
+    }
+
+    /// <summary>What a grant operation decided: the signed answer, the audit event and text (when it should be recorded), and whether the answer is stored for retries.</summary>
+    public sealed record GrantPlan(GrantResponse Response, string? AuditEvent, string AuditDetail, bool Store = true);
+
+    /// <summary>
+    /// One durable grant operation, atomically: the stored answer when the request id was done before (nothing is done again; the
+    /// caller compares the digest first); otherwise <paramref name="produce" /> works on the grants in this transaction, with the machine's
+    /// current record, and returns the signed answer, which is stored with its audit row. A throw anywhere leaves no change.
+    /// </summary>
+    public GrantResponse ApplyGrant(string requestId, string requestDigest, string fingerprint, Func<GrantTx, MachineRecord?, GrantPlan> produce)
+    {
+        return Write((connection, transaction) =>
+        {
+            if (Query(connection, transaction, "SELECT request_id, fingerprint, request_digest, response FROM processed_grant_requests WHERE request_id = $id", ReadProcessedGrant, ("$id", requestId)).FirstOrDefault() is { } stored)
+            {
+                return stored.Response;
+            }
+
+            MachineRecord? machine = Query(connection, transaction, "SELECT * FROM machines WHERE fingerprint = $fp", Machine, ("$fp", fingerprint)).FirstOrDefault();
+            GrantPlan plan = produce(new GrantTx(this, connection, transaction), machine);
+            if (plan.Store)
+            {
+                StateDatabase.Execute(connection, transaction, "INSERT INTO processed_grant_requests (request_id, fingerprint, request_digest, response, created) VALUES ($id, $fp, $digest, $response, $now)",
+                    ("$id", requestId), ("$fp", fingerprint), ("$digest", requestDigest), ("$response", plan.Response.ToJson()), ("$now", Time(Now)));
+                Fault?.Invoke("after-result");
+                if (plan.AuditEvent is { } auditEvent)
+                {
+                    Audit(connection, transaction, auditEvent, fingerprint, requestId, "authority", plan.Response.ReasonCode + (plan.AuditDetail.Length > 0 ? "; " + plan.AuditDetail : "") + "; request " + requestDigest[..Math.Min(12, requestDigest.Length)]);
+                }
+            }
+
+            Fault?.Invoke("before-commit");
+
+            return plan.Response;
+        });
+    }
+
+    /// <summary>The stored answer of a grant request id, with the machine and digest it was made for, or null.</summary>
+    public ProcessedGrant? GetProcessedGrant(string requestId)
+    {
+        return Read(connection => connection is null ? null : Query(connection, null, "SELECT request_id, fingerprint, request_digest, response FROM processed_grant_requests WHERE request_id = $id", ReadProcessedGrant, ("$id", requestId)).FirstOrDefault());
+    }
+
+    private static ProcessedGrant ReadProcessedGrant(SqliteDataReader reader)
+    {
+        if (!GrantResponse.TryParse(reader.GetString(3), out GrantResponse? response, out string? problem))
+        {
+            throw new AuthorityDatabaseException("a stored grant result cannot be read (" + problem + "); delete authority.db to start over");
+        }
+
+        return new ProcessedGrant(reader.GetString(0), reader.GetString(1), reader.GetString(2), response!);
+    }
+
+    public IReadOnlyList<PendingGrantEvent> PendingGrantEvents(string fingerprint)
+    {
+        return Read(connection => connection is null ? [] : Query(connection, null, "SELECT seq, fingerprint, grant_id, scope_key, kind, grant_revision FROM grant_events WHERE fingerprint = $fp AND state = 'Pending' ORDER BY seq",
+            reader => new PendingGrantEvent(reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetInt32(5)), ("$fp", fingerprint)));
+    }
+
+    /// <summary>Marks the notice delivered and applied. Idempotent.</summary>
+    public void AcknowledgeGrantEvent(string fingerprint, long sequence)
+    {
+        Write((connection, transaction) =>
+        {
+            int changed = StateDatabase.Execute(connection, transaction, "UPDATE grant_events SET state = 'Acknowledged', acknowledged = $now WHERE fingerprint = $fp AND seq = $seq AND state = 'Pending'", ("$now", Time(Now)), ("$fp", fingerprint), ("$seq", sequence));
+            if (changed > 0)
+            {
+                Audit(connection, transaction, "grant-revocation-acknowledged", fingerprint, null, fingerprint, $"notice {sequence} applied by the host");
+            }
 
             return 0;
         });
@@ -613,6 +780,12 @@ public sealed class AuthorityStore
                 found = -1;
             }
 
+            if (found == 1)
+            {
+                Migrate(connection);
+                found = SchemaVersion;
+            }
+
             if (found != SchemaVersion)
             {
                 throw new AuthorityDatabaseException($"{FileLabel} is not of schema version {SchemaVersion}; delete {FileLabel} to start over (machines then enroll again)");
@@ -627,6 +800,22 @@ public sealed class AuthorityStore
             connection.Dispose();
             throw;
         }
+    }
+
+    /// <summary>Schema 1 (Phase 2) to 2: its grants table only had the structure (nothing wrote it); it is replaced and the new tables are made, in one transaction.</summary>
+    private static void Migrate(SqliteConnection connection)
+    {
+        using SqliteTransaction transaction = connection.BeginTransaction(deferred: false);
+        if (Convert.ToInt64(StateDatabase.Scalar(connection, transaction, "SELECT version FROM schema_version"), CultureInfo.InvariantCulture) != 1)
+        {
+            // Another process migrated first.
+            return;
+        }
+
+        StateDatabase.Execute(connection, transaction, "DROP TABLE grants");
+        StateDatabase.Execute(connection, transaction, Schema[Schema.IndexOf("CREATE TABLE grants (", StringComparison.Ordinal)..Schema.IndexOf("CREATE TABLE authority_keys (", StringComparison.Ordinal)]);
+        StateDatabase.Execute(connection, transaction, "UPDATE schema_version SET version = $version", ("$version", SchemaVersion));
+        transaction.Commit();
     }
 
     private void Create()
