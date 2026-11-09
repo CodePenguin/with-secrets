@@ -62,9 +62,11 @@ The table describes the current CLI/browser/child-process flow, not the future l
 | From -> to | Transport | What is sent | What protects it |
 | --- | --- | --- | --- |
 | Agent -> CLI | argv, process start | secret names, reason, program, args | Policy checks before any page; names are not secret |
+| CLI -> host service | HTTP on 127.0.0.1 and [::1] (port 8765, `--service-port N` / `--port N` of `service`, `WITH_SECRETS_PORT`); `POST /v1/launch` with the canonical `LaunchRequest` JSON and its digest in `X-Request-Digest`, `POST /v1/launch/{id}/cancel`, `GET /v1/status` | the request (names, pairs, reason, program, arguments, folder, the `.env` plan, the inherited environment), never a secret value | Loopback bind only; `Host` must be a loopback name (DNS rebinding), no `Origin` header, JSON only, body max 1 MB with a 15 s read timeout, strict parse, digest, version and expiry checked, one use per request id. No caller identity: the API alone authorizes nothing, because secrets open only after a passkey approved the page |
+| Host service -> CLI | the response body of `POST /v1/launch`: NDJSON, one event per line (`approval` with the page link, `output` with redacted text and the stream, `result` with the outcome and the exit code) | the public link, redacted output, the exit status | **Public by design.** No event has a member that could hold a value; output is redacted in the service before it is sent |
 | CLI -> Agent / terminal | stdout, stderr | one-use link, names, admin fingerprint line, redacted child output, exit code | **Public by design.** Never values, keys, recovery code |
 | Person -> CLI | terminal stdin | the 6-digit confirmation code (first `--config`, `--enroll`, new store of `--recover`) | Read only after the last tap, 3 tries, prompt is the last line (`TerminalPrompt`) |
-| CLI -> browser | HTTP on 127.0.0.1 and [::1], same port (setting `port`, `--port N`, else free). With `baseUrl` (http or https; passkeys need https or localhost): that name pointed at the port, or `ssh -L PORT:localhost:PORT` | HTML page, inline script and style allowed by CSP hash, data block (request text, bind, challenges) | Token: 16 random bytes in the path, fixed-time compare, 404 for anything else. Headers: strict CSP (`default-src 'none'`, `connect-src 'self'`), `no-store`, `nosniff`, `X-Frame-Options: DENY`, `no-referrer`. Both loopback addresses held, `ExclusiveAddressUse` on Windows |
+| Host service -> browser | HTTP on 127.0.0.1 and [::1], same port (setting `port`, `--port N`, else free). With `baseUrl` (http or https; passkeys need https or localhost): that name pointed at the port, or `ssh -L PORT:localhost:PORT` | HTML page, inline script and style allowed by CSP hash, data block (request text, bind, challenges) | Token: 16 random bytes in the path, fixed-time compare, 404 for anything else. Headers: strict CSP (`default-src 'none'`, `connect-src 'self'`), `no-store`, `nosniff`, `X-Frame-Options: DENY`, `no-referrer`. Both loopback addresses held, `ExclusiveAddressUse` on Windows |
 | Browser -> CLI | POST `proof`, `deny`, `seal`, `save`, `create`, `sign`, `code` (body max 1 MB, 15 s body timeout) | passkey assertion or attestation, reuse minutes, PRF output, typed `--set` values, recovery code | See rows below. First outcome of a step is final, later requests get 404 |
 | Browser <-> passkey | WebAuthn in the browser | challenge, assertion, PRF eval of the slot salt | Each prompt starts in its own tap (iOS rule). RP ID is the page host, passkey ignores ports |
 | PRF output, browser -> CLI | inside the proof POST | 32 bytes sealed: fresh ECDH P-256 key, HKDF-SHA-256 (salt = bind, info `with-secrets/v1 prf`), AES-256-GCM (bind as AAD) to the page's own server key | Sealed to a key that lives for that page only. A passive observer (tunnel that ends TLS) sees ciphertext. An active man in the middle who replaces the page key is not stopped (README) |
@@ -72,7 +74,7 @@ The table describes the current CLI/browser/child-process flow, not the future l
 | Recovery code, browser -> CLI | `--recover` code page | code sealed to the page key | Never in terminal, log, audit or `state.db`. A typed code is not origin-bound: compare the printed admin fingerprint first |
 | Lost reply | page resends the same body (3 tries: 8 s, 8 s, 20 s; `deny` one try of 20 s) | same bytes | Steps that lead on (`proof`, `create`, `sign`, `code`) keep one reply per verified body (SHA-256 of body, fixed-time compare), in memory until the command ends. No second page, no second code. Other steps (`save`, `seal`, `deny`): a resend after the outcome gets 404 and the page says the program already finished |
 | CLI <-> `state.db` | SQLite, WAL, one transaction per write | manifest, ciphertext rows, sign counts, audit rows | Manifest signature checked before use (exit 4). Writes check the version they replace |
-| CLI -> spawned program | environment, argv, closed stdin | only the approved secrets as env vars | Denylist, no stdin, redacted output (section 7) |
+| Host service -> spawned program | environment (the sender's inherited block, minus the denylist, plus ordinary `.env` values and the approved secrets), argv, closed stdin | only the approved secrets as env vars | Denylist, no stdin, redacted output (section 7) |
 | Network diagnostics | Debug log events: terminal only with `--debug`, and the log file | method, route word, whole seconds, sizes, verdict words | No path, token, body, key or value (`NetLog` words, constant `AppLog` templates) |
 
 What is public: everything on stdout/stderr. What never leaves the browser: typed values (only sealed), the recovery code in plaintext (only sealed on `--recover`, shown on the page once), the passkey private key, the raw PRF output.
@@ -225,6 +227,8 @@ sequenceDiagram
 
 Deny, wrong proof, any error or the time limit gives exit 3 and the audit row `denied`. If the audit row cannot be written nothing runs (exit 5).
 
+Since Phase 1 the participant "with-secrets" is two parts: the CLI (parses, reads the `.env` once, prints, exits with the reported code) and the host service (everything from the policy checks to the exit status). The CLI sends a `LaunchRequest` and receives the events in section 3. The service prepares the child and its environment, then commits through a `LaunchGate` (a lock and an authorization revision): the process starts only if the launch was not cancelled and the revision is unchanged since it began; otherwise the prepared environment is discarded and the launch ends `cancelled` (exit 3, audit row `finished`, nothing ran). After the start nothing touches the child; a later invalidation does not stop it.
+
 ### 6.4 Enroll a passkey (`--enroll`)
 
 ```mermaid
@@ -355,6 +359,7 @@ This table describes the current single-process implementation. The future local
 | 3 | denied | Deny on the page, wrong proof, time limit, internal error in a session (`HandleGuard`, text says only `internal error`), files changed while the page was open, file hold failed, nothing enrolled, no terminal for a human command, refused change |
 | 4 | store error | `state.db` damaged, locked over 5 s, other schema, failed signature or row hash, unusable settings, cannot decrypt, `--audit --verify` finds a broken link |
 | 5 | audit error | the audit row could not be written, so nothing ran |
+| 6 | host service not running | a run could not reach the host service (`with-secrets: the host service is not running. Start it with: with-secrets service`); nothing was asked and nothing ran |
 | 127 | not found | program not on PATH, or the process cannot be started |
 | other | the child's own exit code | passed through on a run |
 
@@ -591,7 +596,8 @@ The relay keeps registrations in memory only, replaces stale registrations on re
 
 #### Current implementation boundary
 
-This section is the accepted target design, not a claim that the service, authority, relay, or protocol is already implemented. The current prototype uses SQLite. Task 16 (service account and privilege separation) remains separate and is not expanded here. The existing Phase A \`.env\` behavior in Section 10.1 remains unchanged.
+This section is the accepted target design. What exists today (Phase 1): a local **host service** (`with-secrets service`, foreground console host, loopback only; Windows service installation, start at logon and the service account are not built) and the CLI as its client for runs, over the shared HTTP API with versioned JSON (`LaunchRequest` with a digest, NDJSON events). The service owns the approval page, store access for runs, decryption, environment preparation, launch, redaction and exit status, and serializes the final launch commit against local authorization invalidation (`LaunchGate`). Not built: machine identity, the authority, grants as authority operations, offline leases, the relay, signed audit events with an outbox and sequence numbers (the audit is still the per-run rows in `state.db`), and the Windows privilege separation of Task 16. The human commands (`--config`, `--set`, `--remove`, `--enroll`, `--unenroll`, `--recover`, `--rotate-key`, `--revoke`, `--audit`, `--list`, `--enrolled`, `--needs`) still open `state.db` in the CLI process. The current prototype uses SQLite. Task 16 (service account and privilege separation) remains separate and is not expanded here. The existing Phase A `.env` behavior in Section 10.1 remains unchanged: the CLI reads the files once and the service checks the plan it receives with the same rules.
+
 ### 10.3 Secret providers, logical mounts, and namespaces
 
 **Status:** Agreed architecture direction; provider implementations and mount configuration are not yet built.
@@ -1021,10 +1027,15 @@ curl_api.github.com_authorization_value=secret://team/development/github/token
 | Command wiring, targets, code reader | `CommandWiring.cs` |
 | Argument parsing, `NeedsTerminal` | `CommandLine.cs` |
 | Run pipeline, exit codes | `RunCommand.cs` |
+| Host service: loopback API, request checks, event stream, cancel | `HostService.cs` |
+| Final launch commit against invalidation | `LaunchGate.cs` |
+| CLI client of a run (reads `.env`, sends the request, prints events, exit code 6 without a service) | `LaunchClient.cs` |
+| Launch events (NDJSON: approval, output, result) | `LaunchEvents.cs` |
+| Launch request, result, digest, binding | `Contracts/LaunchContracts.cs` |
 | Project `.env`: parser, composition, `secret://` grammar, `--needs` | `EnvDeclarations.cs` |
 | Command grammar, length limits | `Policy.cs` |
 | Approval text, request fingerprint, script view | `ApprovalSummary.cs`, `Reuse.cs` |
-| Child process, PATH lookup, env denylist | `ChildProcess.cs` |
+| Child process (prepare, start, discard), PATH lookup, env denylist | `ChildProcess.cs` |
 | Output redaction | `Redaction.cs` |
 | Loopback server, tokens, headers, `HandleGuard`, `NetLog` | `OneShotServer.cs` |
 | One link per command, `next`, time budget | `PageFlow.cs` |
