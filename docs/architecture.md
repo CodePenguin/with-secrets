@@ -371,24 +371,79 @@ Every web session ends on the first outcome. Deny, error and silence all end in 
 | Serilog logging (normal run quiet, `--debug` verbose, warnings and errors to a rolling file under `~/.with-secrets/logs`) | **Built** (`AppLog.cs`): Debug events to the terminal and file only with `--debug` or `WITH_SECRETS_DEBUG=1`; warnings and above always to the file (daily, 1 MB roll, 7 files); call sites use constant templates with route words, sizes and type names only |
 | Hand tests (real browsers, phones, tunnel) | Open, see README "Checks" |
 
-### 10.1 Project `.env` declarations
+### 10.1 Project environment declarations and Dotenvx
 
-**Phase A is built** (`EnvDeclarations.cs`; tests: the `EnvDeclarations` suite). The accepted behavior below extends Phase A; implementation work remains for the accepted `--env` layering and Dotenvx integration.
+**Status:** Phase A project declarations are implemented in `EnvDeclarations.cs`. Host service and remote authority are design-only. Integration with the existing Dotenvx loading/evaluation behavior, including encrypted project `.env` values and profile selection, remains follow-up work.
 
-The `.env` file in the working folder declares the environment a project needs. The agent no longer has to guess or list secret names.
+**Ownership boundary**
 
-- **Three kinds of value.** Ordinary (`LOG_LEVEL=Debug`), Dotenvx encrypted (`encrypted:...`), and a reference (`TOKEN=secret://GITHUB_TOKEN`). The left side is the environment-variable name the program receives; the right side names the secret. They can differ (`STRIPE_KEY=secret://STRIPE_PRODUCTION_KEY`).
-- **Secret-name grammar.** `secret://[folder/...]NAME`. Folder segments use the safe path-segment character set `[A-Za-z0-9_.-]`; empty segments and the special segments `.` and `..` are invalid. There is no arbitrary folder-depth limit, and secret names are not required to be uppercase or snake-cased. Folder case is significant. Environment-variable names are independent of secret names and are not subject to the secret-name convention. The whole path is the logical secret name in the store, not a storage location. For example, `DATABASE_PASSWORD=secret://production/database/Password` maps the environment variable `DATABASE_PASSWORD` to the secret `production/database/Password`.
-- **Composition first, resolution after.** Compose declarations before resolving any secrets. For dotenv files, the first file wins; repeated `-f` options layer files in the same order as Dotenvx. An inherited OS environment variable overrides an ordinary `.env` value, but an effective `secret://` reference takes precedence over an inherited variable of the same name and is resolved. Only the final effective declaration requests a secret, so an overridden reference does not cause a prompt. Only the default `.env` in the working directory is read unless files are explicitly supplied; do not search parent folders.
-- **Invocation overrides use Dotenvx-style `--env`.** Repeatable `--env NAME=value` adds or overrides a declaration for this invocation. Values are evaluated exactly like declarations from `.env`, including `secret://` references and Dotenvx `encrypted:` values. Command-line declarations take precedence over `.env` declarations and inherited OS variables. There is no separate `--secrets` option: an additional secret is requested with, for example, `--env DEPLOY_TOKEN=secret://production/deployment/ApiToken`. This allows the environment-variable name and secret-store path to differ.
-- **Listing.** Read-only `--needs` shows the effective secret requirements for the current project (names only; no values, approval, or child launch). It reflects the composed declarations, including invocation overrides when supplied.
-- **Dotenvx command compatibility.** A dedicated `with-secrets dotenvx` verb exposes the Dotenvx command interface. Everything after `dotenvx` is interpreted using Dotenvx's own command syntax and semantics through the existing `Dotenvx.Core` implementation; `with-secrets` does not reimplement Dotenvx commands or invent a competing encryption/file format. This provides one installable product while keeping generated and existing dotenv files interoperable with the wider Dotenvx ecosystem. Support is bounded by the capabilities of the bundled `Dotenvx.Core` version.
-- **Dotenvx key creation and storage.** Dotenvx-compatible key creation must leave the matching private key durably available to the configured authority or supported local key source before a new encrypted file is left relying on it. An authority may generate and retain the keypair and return only its public key, or a host may generate a keypair and securely transfer the private key to the authority through the existing end-to-end encrypted relay. The host must receive confirmation of durable authority storage before treating that import as complete. The relay remains an opaque router and does not inspect key material. A host without a remote authority may use an explicitly local-only key.
-- **Dotenvx private-key sources.** Private keys may be authority-managed, imported from an existing `.env.keys` file or supported native credential store, or used locally without importing them. Import is explicit and copies key material into managed storage; it never implies ownership of or permission to delete, modify, move, or take over the original file or native credential entry. Local-only keys remain on the host and are not uploaded. The same key may exist in more than one source; its cryptographic identity is its public-key fingerprint, independent of storage location. Resolution prefers the authority-managed copy and may fall back to an available local copy of the same key.
-- **Key revocation and deletion.** Revocation is permanent for that key fingerprint at the authority: the authority marks it revoked, invalidates all its grants, and refuses future approval or use. A revoked fingerprint cannot be reactivated; continued runtime use requires a new keypair with a new fingerprint. This applies equally to authority-managed and local-only keys; local-only private material remains on its host but is no longer authorized. Revocation does not delete key material, so encrypted files are not accidentally destroyed. A revoked key may be used only by an explicit migration operation to decrypt and re-encrypt files; migration requires the user to review and confirm the exact files to be migrated. It does not restore the key's authorization or permit ordinary runtime resolution. Deletion is a separate, explicit operation that removes a selected managed or local private-key copy. Before deleting a copy, the user is warned if it is the last known usable copy for encrypted files and those files may become unrecoverable. Deleting one copy does not imply permission to modify or delete other copies or original imported sources.
-- **Key approval and grants.** The user approves the required key identity, not its storage location. The approval request identifies the public-key fingerprint and the encrypted file/value requiring it; it never displays or transmits private key material to the approval page, CLI output, logs, or child process. Authority-managed and local-only keys use the same approval and persistent-grant model. Grants are bound to the key fingerprint and applicable machine/project/environment scope; replacing a key with a different fingerprint does not inherit the old key's grant. Before use, the host verifies that the resolved private key matches the approved fingerprint. Local-only private key material stays on the host, while the authority still makes the approval/grant decision.
-- **Trust and approval.** The agent can modify project declarations, so the approval page shows every effective `VARIABLE <- secret` mapping (one per line, renamed variables marked), every effective ordinary `VARIABLE=value`, and the relevant file paths (including outside-folder and symlink marks). Invocation-level `--env` declarations are included in the same review. Required Dotenvx key identities are included in that approval request. The human approves the effective request that will actually be launched. Keep one aggregate 1 MB input limit across loaded `.env` files; do not impose separate low limits on file count, pair count, variable count, name length, or value length.
-- **Environment-variable behavior.** Do not impose a code-loading-variable denylist on project or command-line environment declarations. Runtime variables such as `DOTNET_STARTUP_HOOKS` are legitimate application/runtime configuration. Do not silently remove them or add special warnings. Secret references to proxy, Git identity, or PATH-like names remain refused as separate explicit restrictions; those restrictions do not imply a general code-loading-variable filter.
+- Use the existing `Dotenvx.Core` NuGet package unchanged. The maintainer owns the C# port, not Dotenvx core; do not propose modifying either to accommodate with-secrets.
+- Dotenvx remains responsible for its existing parsing/loading, interpolation/evaluation, encrypted `.env` value handling, and standard environment construction/injection behavior.
+- with-secrets owns project-file selection/composition policy, classification of effective declarations, `secret://` resolution, provider mounts, approval, audit/request binding, and launching the child.
+- The current Phase A parser is a deliberately limited implementation and rejects an effective encrypted declaration. That is current state, not the desired long-term parser boundary. Integrate with the existing package rather than reimplementing Dotenvx semantics.
+
+**File selection**
+
+- Default selection is the project's `.env` in the current working directory. Do not search parent directories.
+- If the caller selects a Dotenvx profile (for example `local` or `development`), follow Dotenvx's existing profile/file-selection convention. Do not invent a second convention or infer profiles from ambient variables such as `NODE_ENV`.
+- Explicit file selection through the existing repeatable `-f` / `--env-file` interface selects exactly the supplied files and replaces default selection.
+- File ordering and profile expansion must match the actual Dotenvx implementation. The with-secrets composition rule is **first file wins**. Verify exact Dotenvx ordering and repeated-key semantics with tests before documenting specific profile filename patterns or precedence examples.
+- A missing default `.env` means there are no project declarations. An explicitly selected missing file is an error; never silently skip it.
+
+**Declarative model**
+
+Selected project environment files may contain ordinary configuration, Dotenvx-encrypted project values, and external secret references:
+
+```dotenv
+# Ordinary configuration
+API_URL=http://localhost:5000
+LOG_LEVEL=Debug
+
+# Dotenvx-encrypted project value
+API_KEY=<encrypted Dotenvx value>
+
+# External secret resolved by with-secrets
+GITHUB_TOKEN=secret://team/development/github/token
+DATABASE_PASSWORD=secret://personal/database/password
+```
+
+- The left side is the child environment-variable name; the right side is a logical secret path. They may differ, e.g. `STRIPE_KEY=secret://team/payments/STRIPE_PRODUCTION_KEY`.
+- Dotenvx comments and syntax remain Dotenvx's responsibility. Comments are not declarations.
+- Ordinary values are not secret-store references. Dotenvx-encrypted values remain encrypted in source control and are decrypted through the existing Dotenvx mechanism. External `secret://` values are resolved by with-secrets.
+- Compose selected files first, using the ordered first-file-wins rule, then classify only the final effective value of each variable. An overridden reference must never be requested, approved, or decrypted.
+- Validate every effective reference before approval. A missing mount, permission, provider, secret, or required credential is a hard error. No fallback, cross-provider search, silent substitution, or alternate-name prompt.
+- An explicit `secret://` declaration must not silently be satisfied or replaced by an inherited environment variable. Ordinary inherited-environment behavior and encrypted-value precedence must remain compatible with Dotenvx and be covered by tests.
+
+**Discovery and CLI behavior**
+
+- Keep `--secrets NAME[,NAME...]` for explicit requests and compatibility; it composes with effective declarations from selected project files.
+- `--needs` is read-only discovery. It reports selected files, ordinary variable names, effective variable-to-secret mappings, and whether references are resolvable. It does not approve, decrypt, or display secret values.
+- A `--needs` result is informational, not an authorization or trusted cached plan. The run command independently recomputes and validates its plan.
+- Do not scan source code for environment-variable usage; dynamic lookups make this unreliable and language-specific. The request set is selected declarations plus explicit `--secrets`.
+- Additional `--env NAME` layering is deferred.
+
+**Approval and trust**
+
+- The human approval page is the control point because an agent can modify project environment files.
+- Show the human approver every selected file path, every effective secret mapping, and every effective ordinary variable/value. Never show plaintext secret values. Agent/terminal-facing output shows names and paths only.
+- Bind selected file paths, effective declarations, ordinary values, secret mappings, command/script, working directory, request identity, and expiry to the approval fingerprint/signature. Read files once per request; approval, audit, and launch use the same immutable snapshot. A file changed while approval is pending must not change what launches.
+- Preserve protected-variable rules: secret references cannot target code-loading variables, process-selection variables such as `PATH`, `PATHEXT`, or `COMSPEC`, proxy variables, or git identity variables. Continue stripping the existing child code-loading variables. A denylist is not a complete security boundary; showing ordinary values is still required.
+- Do not expose the Dotenvx decryption key or plaintext secrets to the agent.
+
+**Implementation status**
+
+| Capability | State |
+| --- | --- |
+| Default `.env` in working directory; no parent traversal | Implemented |
+| Explicit repeatable `-f` / `--env-file` selection | Implemented |
+| Phase A comments, optional `export`, basic quoted/unquoted values | Implemented in current parser |
+| First-file-wins composition and effective-reference-only resolution | Implemented and tested |
+| `secret://` references and renamed environment mapping | Implemented and tested |
+| `--secrets` additions and read-only `--needs` | Implemented and tested |
+| Approval display of paths, secret mappings, and ordinary values | Implemented in Phase A |
+| Dotenvx encrypted project values through existing `Dotenvx.Core` | Follow-up integration; current Phase A parser rejects effective encrypted values |
+| Dotenvx profile selection | Open pending verification against current Dotenvx behavior |
+| Additional `--env NAME` layering | Deferred |
 
 ### 10.2 Local service, machine identity and end-to-end encrypted relay (planned)
 
@@ -537,6 +592,427 @@ The relay keeps registrations in memory only, replaces stale registrations on re
 #### Current implementation boundary
 
 This section is the accepted target design, not a claim that the service, authority, relay, or protocol is already implemented. The current prototype uses SQLite. Task 16 (service account and privilege separation) remains separate and is not expanded here. The existing Phase A \`.env\` behavior in Section 10.1 remains unchanged.
+### 10.3 Secret providers, logical mounts, and namespaces
+
+**Status:** Agreed architecture direction; provider implementations and mount configuration are not yet built.
+
+with-secrets supports multiple secret sources/providers concurrently. Project declarations use logical names; the host authority maps those names to configured provider instances.
+
+**Logical paths**
+
+Examples:
+
+- `secret://personal/github/token`
+- `secret://team/development/github/token`
+- `secret://infrastructure/aws/production/access-key`
+
+The path is a logical name only. It does not expose provider name, account, SDK, API endpoint, or physical storage location to the project. Path segments are organizational namespaces, not implicit provider selectors.
+
+**Mount model**
+
+- A mount maps a logical location to a configured provider instance and a provider-side location. There are two forms: a **tree mount**, which maps a provider-side folder/namespace and exposes its relative contents below a logical folder; and an **individual-secret mount**, which maps one specific provider secret to an arbitrary logical secret path.
+- For a tree mount, the logical path is formed from the logical mount point plus the provider-relative path beneath the configured provider base path. For an individual-secret mount, the configured logical path names that one provider secret; its provider-side path need not resemble the logical path.
+- Mounts are configured by the host authority, not checked into the project repository. Project files remain portable and contain no provider credentials or machine-specific provider configuration.
+- Mount definitions are global, with project-specific permissions/allowlists. A project may use a logical path only when policy grants access.
+- Multiple mounts/providers coexist. A provider tree can be mounted at multiple logical locations, and individual secrets from different providers can be mounted into the same logical namespace. The same underlying provider secret may therefore have multiple logical paths.
+- Provider ACLs remain in force. with-secrets human approval is an additional release gate, not a replacement for provider authorization.
+- Provider authentication and SDK/API credentials stay on the host/authority side. Windows/WSL/Docker CLIs do not receive provider credentials and do not need provider SDKs.
+- Logical path resolution uses **longest-prefix matching** for tree mounts, with segment-boundary-aware prefixes. More-specific tree mounts override broader tree mounts for their subtrees. An individual-secret mount resolves its exact logical secret path. This is deterministic namespace routing, not fallback: once a logical path selects a mount, any permission, availability, authentication, or missing-secret failure is a hard error and must not fall through to another mount or provider.
+
+**Provider identity, logical identity, and shared values**
+
+- Every listed provider secret has an external identity supplied by its adapter. The identity is opaque to the core and scoped to one provider instance; the core stores and compares it but does not parse it.
+- If the provider exposes no native stable ID, its first-party adapter constructs one from provider-specific information. The adapter must return the same ID for the same underlying secret across listings and restarts, and preserve it across renames or moves when the provider can establish continuity.
+- The core associates provider instance ID plus external secret ID with one underlying secret identity. Logical paths are separate references to that identity, not the identity itself.
+- The same external identity may be exposed through multiple logical paths, including multiple tree mounts or a combination of tree and individual-secret mounts. These are references to the same underlying secret.
+- Cache entries and freshness state are keyed by provider instance ID plus external secret ID, so the underlying value is cached once regardless of how many logical paths reference it. Grants and project permissions remain specific to the logical path through which access is requested; a grant for one logical path does not authorize another.
+- Provider invalidation identifies an underlying secret by external ID. The core resolves that identity and invalidates its cached value and grants for every logical reference.
+
+**Logical namespace reconciliation**
+
+- The core maintains the logical folder/file structure implied by configured mounts and provider listings. Tree mounts populate and reconcile their exposed files; individual-secret mounts define one explicit logical file.
+- Provider paths returned by an adapter are relative to the provider-side base path for the tree mount. The core combines that relative path with the logical mount point to form the logical path.
+- A successful, complete listing reconciles the contents of the listed scope. A failed, cancelled, rate-limited, or incomplete listing never implies deletion and leaves the last known logical entries intact.
+- A file is removed from the logical namespace only when the core has reliable confirmation that it is genuinely absent, such as its absence from a successful, complete listing of the relevant scope or an explicit provider deletion signal.
+- Confirmed deletion removes the logical file entry and invalidates its cached value and all grants associated with that logical file. A later file created at the same provider path with a different external ID is a new underlying secret at the same logical location; it receives no previous cache value or grants and requires fresh authorization.
+- Removing a provider file does not remove the configured mount or its parent logical folders. Multiple logical references to the same external identity are reconciled independently as files, while sharing the underlying cache identity.
+**No fallback or cross-provider search**
+
+- A missing mount, denied project permission, unavailable provider, missing secret, or provider authentication failure is a hard error.
+- Do not search other mounts/providers, fall back to an environment variable, prompt for an alternate name, or silently substitute another value.
+- Do not query every provider looking for a matching name. This prevents accidental cross-tenant disclosure and keeps resolution auditable.
+- Approval and audit identify the logical name and selected provider/mount identity without exposing credentials or values.
+
+**Provider candidates**
+
+1Password and Bitwarden Secrets Manager are optional provider candidates behind the host/authority adapter boundary. For Bitwarden, the target is Secrets Manager, not the personal password-manager product. These are not first-release requirements. The local encrypted SQLite store remains a first-party provider.
+
+Mount configuration and project permission formats, and provider metadata shown to approvers, remain open. Mount resolution, provider identity/reconciliation, provider version/rotation semantics, provider outage behavior, and retrieval error handling are specified below. Provider-specific syntax must not leak into project `.env` declarations.
+
+### 10.3.1 Provider adapter contract and lifecycle
+
+**Status:** Architecture decisions agreed; common interface and provider implementations are not yet implemented.
+
+Provider adapters isolate provider-specific access behind the authority. Adapters execute in-process with the authority; they are not separate services or plugins loaded dynamically at runtime. The authority discovers and registers the adapters bundled with its release. Adapter implementations may be independently identified/versioned, but are distributed with and tied to an authority release.
+
+An adapter instance represents one configured provider connection. Multiple connections to the same provider type use separate instances and independent configuration. The authority assigns each instance a unique, stable instance ID and supplies it during initialization. In remote mode, adapters run at the remote authority; in local mode, they run at the local authority.
+
+**Responsibilities and boundary**
+
+- The adapter contains provider integration logic only. It does not provide UI, HTML, JavaScript, dynamic configuration forms, or configuration schemas for the admin UI.
+- The admin UI owns provider-specific configuration screens. The adapter exposes its configuration type and validation results for the authority/UI integration.
+- Adapters are read-only with respect to provider data: no create, modify, rotate, delete, or migration operations.
+- The core depends only on the common adapter contract, not provider SDKs or provider-specific types.
+- Every adapter implements the complete required contract. There are no optional capability flags or optional operations.
+- The authority owns provider configuration persistence, configuration revisions, operation timeouts, concurrency limits, cache/freshness policy, grant lifetimes, and secret delivery. Adapters do not own the secret cache and do not write cache timestamps.
+- Adapters must be thread-safe, support concurrent calls, and honor cancellation. They may declare provider-specific concurrency constraints for the authority to enforce.
+
+**Required operations**
+
+Every adapter provides initialization, configuration update, shutdown, configuration validation, mount validation, secret retrieval, and secret listing. Pagination is implemented internally by the adapter and exposed through opaque continuation tokens.
+
+```csharp
+public interface IProviderAdapter
+{
+    Type ConfigurationType { get; }
+
+    Task InitializeAsync(
+        IAdapterConfiguration configuration,
+        AdapterInitializationContext context,
+        CancellationToken cancellationToken);
+
+    Task UpdateConfigurationAsync(
+        IAdapterConfiguration configuration,
+        CancellationToken cancellationToken);
+
+    Task ShutdownAsync(CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<ProviderValidationIssue>> ValidateConfigurationAsync(
+        IAdapterConfiguration configuration,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<ProviderValidationIssue>> ValidateMountAsync(
+        IAdapterConfiguration configuration,
+        string basePath,
+        CancellationToken cancellationToken);
+
+    Task<RetrieveSecretResult> RetrieveSecretAsync(
+        string path,
+        CancellationToken cancellationToken);
+
+    Task<ListSecretsResult> ListSecretsAsync(
+        ListSecretsRequest request,
+        CancellationToken cancellationToken);
+}
+```
+
+There is deliberately no health-check or refresh operation. The adapter owns its provider connection and recovery behavior and reports health changes when it learns them; the core does not poll adapters. Retrieval occurs only when the core asks for a secret. The core decides when to retrieve again based on its cache and freshness policy.
+
+**Configuration contract**
+
+- Adapter configuration is a strongly typed in-process .NET object. JSON is the persistence format, not the runtime boundary.
+- Each adapter defines a concrete configuration type implementing `IAdapterConfiguration`, including `Load(JsonDocument document)` to load persisted JSON.
+- The adapter factory selects the adapter type, creates the matching configuration type, loads it, and passes the typed configuration to the adapter.
+- A generic base class may provide typed configuration storage, type checking, and dispatch only:
+
+```csharp
+public abstract class ProviderAdapter<TConfiguration> : IProviderAdapter
+    where TConfiguration : class, IAdapterConfiguration
+{
+    public Type ConfigurationType => typeof(TConfiguration);
+    protected TConfiguration? Configuration { get; private set; }
+}
+```
+
+The base class does not manage provider connections, recovery, rollback, or atomic replacement of adapter-owned resources.
+
+The authority serializes configuration updates per adapter instance. `UpdateConfigurationAsync` receives an already committed configuration, applies it, and returns promptly; provider connection establishment/re-establishment continues asynchronously. A connection failure after the configuration has been committed does not reject or roll back that configuration. When a newer update arrives while an earlier connection attempt is running, the adapter cancels or supersedes the stale attempt and converges on the latest committed configuration. A stale attempt must not overwrite health for the newer configuration.
+
+Configuration validation may contact the real provider using the proposed configuration. Validation issues have a message, severity, and optional UI target:
+
+```csharp
+public enum ValidationSeverity
+{
+    Error,
+    Warning
+}
+
+public sealed record ProviderValidationIssue(
+    string Message,
+    ValidationSeverity Severity,
+    string? Target = null,
+    string? ProviderCode = null);
+```
+
+An error blocks saving. A warning permits saving after explicit admin confirmation; for example, a provider may be temporarily unavailable or rate-limited during validation. `Target` may identify a field or category for UI highlighting. `ProviderCode` is an optional provider-specific diagnostic code for display and troubleshooting; core behavior does not depend on it. Messages must be actionable and safe for administrator display and must not include credentials, secret values, or raw provider response bodies. Adapters are first-party code; normal UI output encoding applies.
+
+Both validation methods return all reliably identifiable issues, not just the first failure. Multiple issues may target the same field or section. The core preserves the adapter's deterministic issue order and does not deduplicate issues. Validation findings are normal return values; operational failures use `ProviderAdapterException`.
+
+`ValidateConfigurationAsync` validates a proposed provider-instance configuration, including its connection and credentials. `ValidateMountAsync` validates a provider-side base path using the supplied proposed configuration without changing the active configuration. Core validation of logical path syntax, mount overlap, and logical routing remains separate from provider-side mount validation.
+
+Provider-specific configuration changes can affect connection state, mount access, or the identity/source of exposed secrets. The adapter determines which existing mounts are affected and reports required provider-data invalidation through the event contract below; the core does not inspect provider-specific configuration fields or classify their meaning.
+
+A proposed configuration is validated before activation. The authority validates the proposed configuration and revalidates every affected mount using that proposed configuration. Any validation error rejects the entire change and leaves the previous configuration, provider resources, mounts, cache, grants, and operational state unchanged. Warnings require explicit administrator confirmation. Only after all required validations pass (and warnings are confirmed) does the authority commit the new configuration and call `UpdateConfigurationAsync`. The adapter then applies the committed configuration and manages its connection/recovery asynchronously. A post-commit operational connection failure does not roll back the committed configuration.
+
+Policy-only changes take effect immediately without reconnecting or invalidating provider data. Reducing a permitted age or duration is enforced immediately against existing cache entries; it never resets `lastVerifiedAt`.
+
+Provider settings belong to configured **provider instances**, not provider types. Two instances using the same adapter/provider type may have different credentials, connection settings, and policies.
+
+**Initialization, lifecycle, and health**
+
+Lifecycle and health are independent status dimensions.
+
+```csharp
+public enum AdapterLifecycleState
+{
+    Initializing,
+    Ready,
+    Unavailable,
+    ShuttingDown
+}
+
+public enum AdapterHealthState
+{
+    Initializing,
+    Healthy,
+    Degraded,
+    Unavailable,
+    Misconfigured
+}
+```
+
+The authority initializes both dimensions to `Initializing`. It owns lifecycle boundary transitions: it sets `Initializing` and `ShuttingDown`; the adapter may report `Ready` or `Unavailable`. Health remains `Initializing` until the adapter has a real provider response or other reliable health information. This avoids presenting an unknown or empty health result during startup.
+
+`InitializeAsync` performs adapter-internal setup and starts provider connection work without waiting for provider connectivity to succeed. Once its internal setup is complete, the adapter reports lifecycle `Ready`, even if the provider connection is still being established; health can remain `Initializing`. If adapter-internal initialization fails, it reports lifecycle `Unavailable` and remains registered so it can recover. Provider connectivity failures normally affect health, not lifecycle. The adapter owns recovery and may later report `Ready` after an internal initialization failure; there is no separate `RecoverAsync` operation.
+
+When configuration is updated, the adapter immediately reports health `Initializing`, applies the configuration, and begins reconnecting asynchronously. Lifecycle does not need to change during a configuration update; for example, it may remain `Ready` while health is `Initializing`.
+
+Status reporting uses one reporter method and typed events:
+
+```csharp
+public interface IAdapterStatusReporter
+{
+    void Report(AdapterStatusEvent statusEvent);
+}
+
+public abstract record AdapterStatusEvent;
+
+public sealed record LifecycleChangedEvent(
+    AdapterLifecycleState State,
+    string? Message = null) : AdapterStatusEvent;
+
+public sealed record HealthChangedEvent(
+    AdapterHealthState State,
+    string? Message = null) : AdapterStatusEvent;
+
+public sealed record InvalidateProviderDataEvent(
+    IReadOnlyList<Guid>? MountIds = null,
+    IReadOnlyList<string>? ExternalSecretIds = null,
+    bool InvalidateEntireProviderInstance = false) : AdapterStatusEvent;
+```
+
+`InvalidateProviderDataEvent` is a separate event on the same reporter/event channel. It identifies what provider data must be invalidated, not why. The adapter may request invalidation for the entire provider instance, one or more mounts, or one or more external secret IDs. The event is scoped to the reporting provider instance, so external IDs are interpreted within that instance. The core resolves the requested scopes to affected logical references.
+
+Every invalidation invalidates both cached values and grants for the selected scope; there are no independent cache-only or grant-only flags. Invalidating an external secret ID affects its shared cached value and every logical reference to it, including references through different mounts. Invalidating a mount affects data exposed through that logical mount; invalidating the provider instance affects all its data.
+
+Adapters may report invalidation while active, including while initializing, ready, or unavailable. The authority rejects invalidation after shutdown begins or after the adapter instance is unregistered. Handling begins immediately but must not block unrelated provider operations; physical cleanup may complete asynchronously. Invalidation takes precedence over work already in progress: a retrieval that finishes after its target has been invalidated must be discarded and must not be cached or delivered. Unrelated in-flight operations continue normally.
+
+Each accepted invalidation produces an audit record identifying the provider instance, requested scope, affected identifiers, and timestamp, without values or credentials. The event and audit record do not carry a reason; explanatory detail belongs in structured logs.
+
+The initialization context supplies the instance identity, provider identity/version, logger, and status reporter:
+
+```csharp
+public sealed record AdapterInitializationContext(
+    Guid InstanceId,
+    string ProviderType,
+    string AdapterVersion,
+    ILogger Logger,
+    IAdapterStatusReporter StatusReporter);
+```
+
+The authority timestamps status receipt and retains the latest lifecycle and health states, each with an optional concise message and authority-assigned timestamp. It does not persist status history; detailed history belongs in logs. No operation/correlation ID is required in status events because instance identity and structured logs provide correlation. Status messages are suitable for the admin UI and must not contain secret values, credentials, or sensitive provider responses.
+
+Invalid or stale lifecycle reports (for example, a delayed `Ready` after shutdown has started) are ignored and logged at Debug/Warning level; they are not thrown back to the adapter. Health updates are accepted until shutdown begins. After shutdown begins, further health updates are ignored and the last health value is retained.
+
+**Shutdown and removal**
+
+- The authority stops accepting new operations for the adapter and transitions lifecycle to `ShuttingDown`.
+- It cancels ongoing initialization and background connection attempts.
+- In-flight provider operations are cancelled or allowed to finish within a bounded shutdown deadline enforced by the authority.
+- The authority invokes `ShutdownAsync(CancellationToken)`; the adapter releases its connections and other resources.
+- The status reporter remains available during shutdown for any permitted final reporting, but lifecycle remains authority-controlled. Once shutdown completes, the authority stops accepting status updates.
+- Deleting an adapter instance is blocked while mounts reference it. After references are removed and deletion is committed, the authority stops new operations, drains/cancels in-flight work within the shutdown deadline, shuts down and disposes the adapter, then removes it from the registry. Provider-side data is never modified or deleted.
+
+**Retrieval and listing data contracts**
+
+A retrieval returns UTF-8 bytes only; provider metadata is not returned with the value:
+
+```csharp
+public sealed record RetrieveSecretResult(byte[] Value);
+```
+
+The core validates strict UTF-8 before updating its cache and preserves the exact bytes without normalization or re-encoding. The CLI later converts to the target process encoding; if the value cannot be represented, the operation fails rather than silently corrupting it. Host-service responses use UTF-8. An empty provider value is treated as unset. A missing path or provider error is a hard failure; there is no fallback.
+
+Listing returns one page of immediate children (nonrecursive), names and optional descriptions only, never values:
+
+```csharp
+public sealed record ListSecretsRequest(
+    string Path,
+    string? Filter,
+    string? ContinuationToken);
+
+public sealed record ListSecretsResult(
+    IReadOnlyList<ProviderSecretInfo> Secrets,
+    string? NextContinuationToken,
+    bool IsComplete);
+
+public sealed record ProviderSecretInfo(
+    string Path,
+    string ExternalSecretId,
+    string? Description);
+```
+
+`IsComplete` is true only when the adapter has successfully enumerated the entire requested scope; intermediate pages are false, and the final page is true only when no results remain for that scope. A failed or cancelled enumeration is an operational failure, not a complete empty result. The core reconciles deletions only after the complete scope has been successfully enumerated.
+
+`Path` is relative to the provider-side base path selected by the mount. `ExternalSecretId` is required and opaque to the core; it is stable for the same underlying provider secret across listings and adapter restarts, and unique within the provider instance. The adapter must supply it even when the provider has no native identifier, constructing a stable provider-specific identifier when necessary. The core stores the external ID and associates it with the underlying secret identity; adapters do not need to know logical secret IDs.
+
+The adapter owns provider pagination. The authority passes the opaque continuation token through unchanged. Listing returns immediate children only (nonrecursive); the UI navigates by requesting subpaths. Provider listing may supply descriptions. Description ownership is explicit:
+
+```csharp
+public enum DescriptionSource
+{
+    Provider,
+    Local
+}
+```
+
+When the source is `Provider`, each provider listing refreshes the effective description, including setting it to null when the provider has no description. When the source is `Local`, provider listings do not overwrite it. There is one effective description and one source marker, not separate competing local/provider descriptions.
+
+**Logging and diagnostics**
+
+Adapters use the existing `Microsoft.Extensions.Logging.ILogger` abstraction, which can be backed by the application's existing Serilog setup. There is no separate adapter logging framework or metrics interface. Detailed diagnostics go to structured logs; status messages remain concise and safe for display. Never log secret values, credentials, or decrypted provider responses.
+
+**Implementation notes**
+
+- The adapter contract is a design boundary, not a promise that a provider is already implemented.
+- Provider-specific connection setup, authentication, retry/backoff strategy, and recovery are adapter responsibilities; global timeouts, cancellation, concurrency enforcement, cache policy, and status retention remain authority responsibilities.
+- The precise public API for declaring adapter concurrency constraints and the exact configuration factory/registration mechanism remain implementation details to settle while implementing the common contract.
+- Provider listing, mount validation, and retrieval must all resolve against the exact configured adapter instance selected by the mount. They must not search other providers or mounts.
+- The cache is keyed by provider instance ID plus opaque external secret ID, never by logical path. Grants and project permissions are evaluated against the requested logical path.
+- The core owns the association between provider external identity and logical references. Adapters supply external IDs and provider-relative paths; they never need to know core logical IDs.
+- Tree-mount listing reconciliation updates the logical file/folder structure. Individual-secret mounts identify one explicit provider secret. Multiple logical references to one external identity share a cache entry but retain independent logical-path authorization.
+- A confirmed provider-side deletion removes the affected logical file references and invalidates their grants and the shared cached value. Recreating a secret at the same provider path with a different external ID creates a new underlying identity and does not inherit grants or cached values.
+
+### 10.3.2 Provider versioning and secret rotation
+
+**Status:** Agreed architecture decision.
+
+Logical secret paths resolve to the provider's **current active value**; project declarations and grants do not pin a provider-specific version.
+
+- The adapter retrieves the provider's current active value when the core requests retrieval. Provider version identifiers, version history, and rotation metadata remain internal to the adapter and are not exposed through logical paths, project declarations, grants, or the common retrieval result.
+- The core owns cache freshness and determines when another retrieval occurs. A provider-side rotation becomes visible to with-secrets when the core next retrieves the value; it does not bypass the core's cache policy.
+- Provider rotation does not change the logical secret identity or require grant changes. Grants authorize the logical secret, not a particular provider version.
+- If the provider deletes, retires, or otherwise makes the current secret unavailable, retrieval fails. The adapter must not silently return an older version as a fallback.
+- Provider-specific version selection, rollback, and historical-version retrieval are outside the common adapter contract unless explicitly introduced as a future, separately designed feature.
+
+This keeps project declarations and authorization independent of provider-specific versioning models while preserving the core's single cache/freshness policy.
+
+### 10.3.3 Cache freshness, provider outages, and stale serving
+
+**Status:** Agreed architecture decision.
+
+The core owns cache freshness and stale-serving policy. Stale serving is an availability safeguard for temporary provider outages, not an alternate source of truth.
+
+- Stale serving is configured per provider instance through MaxStaleDuration. It is not a provider-type setting and is not configured per secret or mount.
+- The default is zero (disabled). A configured value may be from zero through a hard system-wide maximum of 24 hours. Values above the cap are rejected, not silently clamped. The cap is a system constant initially, not another administrator setting.
+- The maximum age is measured from the cached value's lastVerifiedAt timestamp: the last successful retrieval that proved the value current. It is not measured from when an outage begins. A value already 20 hours old has at most 4 hours remaining under the 24-hour maximum.
+- A cached value may be served stale only after the core's bounded retry policy is exhausted for an eligible temporary availability failure (Unavailable or RateLimited), and only while its age remains within that provider instance's configured MaxStaleDuration.
+- Stale fallback does not apply to authentication or authorization failures, missing/deleted secrets, invalid configuration, invalid provider responses, unknown errors, or cancellation. If no cached value exists, retrieval fails.
+- A successful provider retrieval replaces the cached value and updates lastVerifiedAt. A failed refresh leaves both the existing cached value and its original lastVerifiedAt unchanged. A failure must never extend the stale-serving window.
+- Once the maximum permitted age is reached, retrieval fails closed. When the provider recovers, the next retrieval attempt fetches the current provider value and replaces the stale cache entry; there is no special stale-first recovery mode.
+- Changing MaxStaleDuration is a policy-only provider-instance configuration change. It applies immediately to existing cache entries without reconnecting or reinitializing the adapter and without changing cached values or timestamps. Reducing the duration immediately enforces the shorter limit.
+
+Audit history records the retrieval outcome without recording secret values or credentials:
+
+| Outcome | Meaning |
+| --- | --- |
+| Fresh | Value retrieved successfully from the provider for this request |
+| Cached | Value served from cache within the normal freshness policy |
+| Stale | Expired cache value served under the provider instance's outage allowance |
+| Failed | Retrieval failed and no value was delivered |
+
+Each audit event identifies the logical secret path and selected provider instance, with its timestamp. A Cached outcome does not imply an outage; it means the cached value was still within normal freshness policy.
+
+### 10.3.4 Provider errors, cancellation, and retries
+
+**Status:** Agreed architecture decision.
+
+Adapters translate provider-specific failures into a common typed exception. Core behavior depends only on the common error category, never on provider-specific exception types or message parsing.
+
+~~~csharp
+public enum ProviderErrorKind
+{
+    Unavailable,
+    RateLimited,
+    AuthenticationFailed,
+    AccessDenied,
+    SecretNotFound,
+    InvalidConfiguration,
+    InvalidResponse,
+    Unknown
+}
+
+public sealed class ProviderAdapterException : Exception
+{
+    public ProviderErrorKind Kind { get; }
+    public string? ProviderCode { get; }
+    public TimeSpan? RetryAfter { get; }
+
+    public ProviderAdapterException(
+        ProviderErrorKind kind,
+        string message,
+        string? providerCode = null,
+        TimeSpan? retryAfter = null,
+        Exception? innerException = null)
+        : base(message, innerException)
+    {
+        Kind = kind;
+        ProviderCode = providerCode;
+        RetryAfter = retryAfter;
+    }
+}
+~~~
+
+- ProviderCode is optional provider-specific diagnostic metadata for structured logs and troubleshooting only. It must not contain credentials, secret values, or sensitive provider response data. Core behavior is determined exclusively by Kind.
+- RetryAfter is optional provider-supplied retry guidance, principally for rate limiting. The core owns retry scheduling, limits, and backoff; adapters do not run independent retry loops.
+- Only Unavailable and RateLimited are retryable. Authentication failures, access denial, missing secrets, invalid configuration, invalid responses, and Unknown fail immediately and are never retried.
+- The core applies a small, bounded number of automatic retries with a bounded overall retrieval deadline. System-wide defaults and limits govern retries; provider instances and adapters cannot expand them. A supplied RetryAfter is respected only within those core-enforced limits.
+- Retries apply only to the provider operation. Mount resolution, authorization, and cache-policy evaluation occur once per request, and the selected provider instance remains fixed throughout the request.
+- Caller or authority cancellation propagates as cancellation and does not qualify for stale fallback. A provider-side timeout is translated to ProviderAdapterException(Unavailable). If the authority's provider-operation deadline expires while the caller remains active, the operation is treated as Unavailable and may qualify for stale fallback after retries, subject to the normal stale policy.
+- After retry exhaustion, stale-cache eligibility is determined by the final common error category and the provider instance's MaxStaleDuration. Unexpected exceptions are treated as Unknown and fail closed.
+
+### 10.4 Application-specific request declarations (curl add-on)
+
+**Status:** Complementary design proposal accepted for documentation; adapter behavior and security review remain open. This extends the declarative `.env` model; it does not replace ordinary environment variables or `secret://` mappings.
+
+Initial curl-oriented naming proposal:
+
+```dotenv
+# Header name is ordinary configuration.
+curl_api.github.com_authorization_key=Authorization
+
+# Header value is resolved by with-secrets.
+curl_api.github.com_authorization_value=secret://team/development/github/token
+```
+
+- The `curl_` prefix identifies the intended application adapter. The host portion identifies the exact destination domain; `_key` names the header and `_value` provides its literal or secret-reference value.
+- These are with-secrets curl-adapter declarations, not ordinary variables passed through to the child environment.
+- Compose declarations first. Only the effective surviving declaration is considered. A secret-valued `_value` uses the same mount and approval model as any other `secret://` reference.
+- Exact-host matching is the initial proposal. Do not send a credential to a different host. HTTPS-only use, redirect behavior, conflicting headers, duplicate declarations, and interactions with curl configuration files require explicit security review.
+- The adapter must not place the secret in command-line arguments, shell history, terminal output, logs, or persistent temporary files. The concrete interception/injection mechanism is open; do not claim it is implemented.
+- Unknown application prefixes must not silently become ordinary environment variables. Behavior when an adapter is unavailable (clear error versus unused declaration) remains open.
+- This is curl-specific initially. Do not generalize it into a broad command/network authorization broker; with-secrets remains focused on secret exposure.
+
 ## 11. Where is it in the code
 
 | Concept | File (`src/WithSecrets.Core` unless noted) |
