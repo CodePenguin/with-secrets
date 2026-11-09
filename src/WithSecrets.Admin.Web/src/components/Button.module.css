@@ -13,7 +13,6 @@
   font-weight: 600;
   text-decoration: none;
   cursor: pointer;
-  transition: background-color 120ms;
 }
 
 .button:hover:not(:disabled) {

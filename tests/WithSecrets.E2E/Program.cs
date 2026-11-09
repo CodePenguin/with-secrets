@@ -18,10 +18,14 @@ internal static class Program
         ("h3-lost-reply", ScenariosH.LostReply),
         ("h4-continue-fallback", ScenariosH.ContinueFallback),
         ("h5-tap-rule", ScenariosH.TapRule),
-        ("i1-admin-login", ScenariosAdmin.Login),
-        ("i2-admin-approve-machine", ScenariosAdmin.ApproveMachine),
-        ("i3-admin-grant-revoke", ScenariosAdmin.GrantRevoke),
-        ("i4-admin-audit-search", ScenariosAdmin.AuditSearch),
+        ("i1-spa-sign-in-out", ScenariosSpa.SignInAndOut),
+        ("i2-spa-approve-machine", ScenariosSpa.ApproveMachine),
+        ("i3-spa-revoke-grant", ScenariosSpa.RevokeGrant),
+        ("i4-spa-audit-search", ScenariosSpa.AuditSearch),
+        ("i5-spa-lock-unlock", ScenariosSpa.LockUnlock),
+        ("i6-spa-settings-change", ScenariosSpa.Settings),
+        ("i7-spa-refused-without-authorization", ScenariosSpa.RefusedWithoutAuthorization),
+        ("j1-spa-accessibility", ScenariosSpa.Accessibility),
     ];
 
     private static async Task<int> Main(string[] args)

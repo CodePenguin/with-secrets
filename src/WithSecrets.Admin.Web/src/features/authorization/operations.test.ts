@@ -22,8 +22,9 @@ describe('operations: what is authorized is exactly what is performed', () => {
     expect(p.summary).toContain('ci box')
   })
 
-  it('leaves an empty optional name out of both', () => {
-    expect(prepared(approveMachine(machine()), { name: '  ' }).parameters).toEqual({ fingerprint: machine().fingerprint })
+  it('needs a name to approve a pending machine, and leaves an empty optional name out when re-pinning a trusted one', () => {
+    expect(approveMachine(machine()).prepare({ name: '  ' })).toEqual({ errors: { name: 'Enter a friendly name.' } })
+    expect(prepared(approveMachine(machine({ status: 'trusted', thisMachine: true })), { name: '  ' }).parameters).toEqual({ fingerprint: machine().fingerprint })
   })
 
   it('refuses an invalid form before anything is asked of the service', () => {

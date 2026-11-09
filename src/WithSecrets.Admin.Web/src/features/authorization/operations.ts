@@ -166,7 +166,9 @@ function machineFacts(machine: Machine): ReadonlyArray<readonly [string, string]
 }
 
 export function approveMachine(machine: Machine): OperationDef {
-  const field = nameField('Friendly name', false, 'Shown instead of the host name. Optional.')
+  // A pending machine is approved under a name (the service refuses an empty one); re-pinning the key of an already trusted machine needs none.
+  const named = machine.status === 'pending'
+  const field = nameField('Friendly name', named, named ? 'Shown instead of the host name.' : 'Shown instead of the host name. Optional.')
 
   return {
     key: 'machine-approve',
@@ -176,6 +178,7 @@ export function approveMachine(machine: Machine): OperationDef {
     initial: { name: machine.friendlyName ?? '' },
     prepare: (values) => {
       const name = text(values, 'name')
+      if (named && !name) return { errors: { name: 'Enter a friendly name.' } }
       if (name.length > 40) return { errors: { name: 'Use at most 40 characters.' } }
       const parameters: Record<string, ParameterValue> = { fingerprint: machine.fingerprint, ...(name ? { name } : {}) }
 

@@ -68,12 +68,12 @@ export function safeLink(link: string | null | undefined): string | null {
   }
 }
 
-function sameParameters(requested: Prepared, got: Authorization): boolean {
-  if (got.operation !== requested.operation) return false
-  const asked = Object.entries(requested.parameters).map(([name, value]) => [name, String(value)] as const)
-  if (asked.length !== got.parameters.length) return false
-
-  return asked.every(([name, value]) => got.parameters.some((item) => item.name === name && item.value === value))
+/**
+ * The service answers with the authorization it made: its operation must be the one that was asked. Its parameters are what the passkey signs (the service may add what it derived, for
+ * example the full fingerprint or the host name), so they are shown to the person, not compared: the service itself refuses the mutation unless it repeats exactly what was authorized.
+ */
+function sameOperation(requested: Prepared, got: Authorization): boolean {
+  return got.operation === requested.operation
 }
 
 type Props = { def: OperationDef; onClose: () => void }
@@ -107,7 +107,7 @@ export function OperationDialog({ def, onClose }: Props) {
       .post('/api/v1/authorizations', { body: { operation: prepared.operation, parameters: prepared.parameters } })
       .then((made) => {
         if (!live) return
-        if (!sameParameters(prepared, made)) {
+        if (!sameOperation(prepared, made)) {
           dispatch({ type: 'failed', error: new ApiError(0, 'authorization-mismatch', 'Not the same operation', 'The service answered with an authorization for something other than what was asked. Nothing was done.') })
         } else {
           dispatch({ type: 'created', authorization: made })
@@ -232,8 +232,10 @@ export function OperationDialog({ def, onClose }: Props) {
     )
     footer = (
       <>
-        <Button onClick={onClose}>Cancel</Button>
-        <Button variant={confirmVariant} type="submit" form={formId}>
+        <Button key="cancel" onClick={onClose}>
+          Cancel
+        </Button>
+        <Button key="review" variant={confirmVariant} type="submit" form={formId}>
           Review
         </Button>
       </>
@@ -250,13 +252,15 @@ export function OperationDialog({ def, onClose }: Props) {
     )
     footer = (
       <>
-        <Button onClick={onClose}>Cancel</Button>
+        <Button key="cancel" onClick={onClose}>
+          Cancel
+        </Button>
         {def.fields?.length ? (
-          <Button disabled={busy} onClick={() => dispatch({ type: 'back', values: state.values })}>
+          <Button key="back" disabled={busy} onClick={() => dispatch({ type: 'back', values: state.values })}>
             Back
           </Button>
         ) : null}
-        <Button variant={confirmVariant} disabled={busy} onClick={() => dispatch({ type: 'asking' })} autoFocus>
+        <Button key="ask" variant={confirmVariant} disabled={busy} onClick={() => dispatch({ type: 'asking' })} autoFocus>
           {busy ? 'Asking...' : 'Ask for passkey authorization'}
         </Button>
       </>
@@ -266,7 +270,7 @@ export function OperationDialog({ def, onClose }: Props) {
       <>
         <p>This is exactly what your passkey signs. Check that the passkey page shows the same thing.</p>
         <blockquote className={styles.sentence}>{state.authorization.sentence}</blockquote>
-        <Authorizing prepared={state.prepared} />
+        <Authorizing prepared={state.prepared} signed={state.authorization.parameters} />
         {state.phase === 'waiting' ? (
           link ? (
             <>
@@ -288,7 +292,7 @@ export function OperationDialog({ def, onClose }: Props) {
       </>
     )
     footer = (
-      <Button onClick={onClose} disabled={state.phase === 'applying'}>
+      <Button key="cancel" onClick={onClose} disabled={state.phase === 'applying'}>
         Cancel
       </Button>
     )
@@ -314,7 +318,7 @@ export function OperationDialog({ def, onClose }: Props) {
       </>
     )
     footer = (
-      <Button variant="primary" onClick={onClose} autoFocus>
+      <Button key="close" variant="primary" onClick={onClose} autoFocus>
         Close
       </Button>
     )
@@ -327,9 +331,11 @@ export function OperationDialog({ def, onClose }: Props) {
     )
     footer = (
       <>
-        <Button onClick={onClose}>Close</Button>
+        <Button key="close" onClick={onClose}>
+          Close
+        </Button>
         {state.prepared ? (
-          <Button variant="primary" onClick={() => dispatch({ type: 'reviewed', prepared: state.prepared as Prepared, values: state.values })}>
+          <Button key="again" variant="primary" onClick={() => dispatch({ type: 'reviewed', prepared: state.prepared as Prepared, values: state.values })}>
             Start over
           </Button>
         ) : null}
@@ -357,12 +363,13 @@ function firstPrepared(def: OperationDef): Prepared {
 }
 
 /** The operation and every parameter, by name: what the authorization will be bound to. */
-function Authorizing({ prepared }: { prepared: Prepared }) {
-  const entries = Object.entries(prepared.parameters)
+function Authorizing({ prepared, signed }: { prepared: Prepared; signed?: ReadonlyArray<{ name: string; value: string }> }) {
+  // After the service has made the authorization, its own list (what the passkey signs) is shown; before, the parameters this page will ask for.
+  const entries: Array<[string, string]> = signed ? signed.map((item) => [item.name, item.value]) : Object.entries(prepared.parameters).map(([name, value]) => [name, String(value)])
 
   return (
     <div className={styles.authorizing}>
-      <h3>What will be authorized</h3>
+      <h3>{signed ? 'What your passkey authorizes' : 'What will be authorized'}</h3>
       <p className={styles.summary}>{prepared.summary}</p>
       <dl className={styles.params}>
         <div>
@@ -375,7 +382,7 @@ function Authorizing({ prepared }: { prepared: Prepared }) {
           <div key={name}>
             <dt>{name}</dt>
             <dd>
-              <code>{String(value)}</code>
+              <code>{value}</code>
             </dd>
           </div>
         ))}

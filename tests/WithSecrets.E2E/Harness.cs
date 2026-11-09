@@ -193,10 +193,30 @@ internal sealed class Ctx : IAsyncDisposable
     {
         try
         {
-            string status = await Page.Locator("#status").TextContentAsync(new() { Timeout = 1000 }) ?? "";
+            string status = "";
+            try
+            {
+                status = await Page.Locator("#status").TextContentAsync(new() { Timeout = 500 }) ?? "";
+            }
+            catch (Exception)
+            {
+                // The administration application has no #status element.
+            }
+
             string buttons = string.Join(",", await Page.EvaluateAsync<string[]>("() => [...document.querySelectorAll('button')].map(b => b.id + (b.hidden ? '(h)' : '') + (b.disabled ? '(d)' : '') + '=' + b.textContent)"));
 
-            return "    page: " + await Page.TitleAsync() + " | " + Regex.Replace(Page.Url, "/[A-Za-z0-9_-]{20,}", "/<token>") + " | buttons " + buttons + " | status: " + status + " | console: " + string.Join(" // ", Console);
+            string dialog = "";
+            try
+            {
+                // The administration application: what an open dialog says (an error shows here).
+                dialog = " | dialog: " + Regex.Replace((await Page.Locator("dialog[open]").First.TextContentAsync(new() { Timeout = 500 }) ?? "").Trim(), @"\s+", " ");
+            }
+            catch (Exception)
+            {
+                // No dialog.
+            }
+
+            return "    page: " + await Page.TitleAsync() + " | " + Regex.Replace(Page.Url, "/[A-Za-z0-9_-]{20,}", "/<token>") + " | buttons " + buttons + " | status: " + status + dialog + " | console: " + string.Join(" // ", Console);
         }
         catch (Exception e)
         {
