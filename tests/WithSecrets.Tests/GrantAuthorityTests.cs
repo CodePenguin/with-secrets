@@ -986,9 +986,13 @@ internal static class GrantAuthorityTests
         public int Announced { get; set; }
 
         public string Html { get; set; } = "";
+
+        public string Url { get; set; } = "";
+
+        public string Proof { get; set; } = "";
     }
 
-    private static async Task<PageResult> RunGrantAdmin(Fixture fx, StateDatabase db, CliCommand.GrantAdmin command, TestAuthenticator? signer, Action? beforeTap = null)
+    private static async Task<PageResult> RunGrantAdmin(Fixture fx, StateDatabase db, CliCommand.GrantAdmin command, TestAuthenticator? signer, Action? beforeTap = null, bool userVerified = true, Func<byte[], byte[]>? changeChallenge = null)
     {
         using HttpClient client = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(20) };
         TaskCompletionSource<string> line = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1009,7 +1013,9 @@ internal static class GrantAuthorityTests
             Uri link = new(line.Task.Result[line.Task.Result.IndexOf("http", StringComparison.Ordinal)..]);
             string url = "http://127.0.0.1:" + link.Port + link.AbsolutePath;
             (_, page.Html) = TestState.Get(client, url);
-            (page.Status, _) = TestState.Approve(client, url, "http://localhost:" + link.Port, "localhost", signer);
+            (page.Status, _) = TestState.Approve(client, url, "http://localhost:" + link.Port, "localhost", signer, userVerified: userVerified, changeChallenge: changeChallenge);
+            page.Url = url;
+            page.Proof = TestState.LastProofBody;
         }
 
         Task done = await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(20)));
@@ -1034,7 +1040,21 @@ internal static class GrantAuthorityTests
         check(none.Result is { Code: RunCommand.Denied } && fx.Store.FindGrant(id) is { Revision: 1 }, "admin grant extend: with no passkey answer nothing changes (" + none.Result?.Detail + ")");
         PageResult wrong = await RunGrantAdmin(fx, db, Cmd(GrantAdminAction.Extend, 30), phone);
         check(wrong.Result is { Code: RunCommand.Denied } && wrong.Status == 403 && fx.Store.FindGrant(id) is { Revision: 1 }, "admin grant extend: a key that is not an admin key is refused (403), nothing changes");
+        // Sensitive operation: no user verification, a signature over another challenge, or no answer each change nothing (fail closed).
+        PageResult noUv = await RunGrantAdmin(fx, db, Cmd(GrantAdminAction.Extend, 30), laptop, userVerified: false);
+        PageResult otherChallenge = await RunGrantAdmin(fx, db, Cmd(GrantAdminAction.Extend, 30), laptop, changeChallenge: challenge => SHA256.HashData(challenge));
+        check(noUv.Result is { Code: RunCommand.Denied } && otherChallenge.Result is { Code: RunCommand.Denied } && fx.Store.FindGrant(id) is { Revision: 1 }, "admin grant extend: an assertion without user verification, or a signature over another challenge, changes nothing");
+        PageResult noUvRevoke = await RunGrantAdmin(fx, db, Cmd(GrantAdminAction.Revoke), laptop, userVerified: false);
+        PageResult wrongRevoke = await RunGrantAdmin(fx, db, Cmd(GrantAdminAction.Revoke), phone);
+        check(noUvRevoke.Result is { Code: RunCommand.Denied } && wrongRevoke.Result is { Code: RunCommand.Denied } && fx.Store.FindGrant(id) is { Status: "active", Revision: 1 }, "admin grant revoke: no user verification, or a key that is not an admin key, revokes nothing");
         PageResult ok = await RunGrantAdmin(fx, db, Cmd(GrantAdminAction.Extend, 30, grant: id[..6]), laptop);
+        using (HttpClient replayClient = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(20) })
+        {
+            // Replay: the proof of that extension sent again to its page, and the same signed change presented to the authority again, extend nothing more.
+            TestState.Post(replayClient, ok.Url + "/proof", ok.Proof);
+            check(fx.Store.FindGrant(id) is { Revision: 2 }, "admin grant extend: replaying the proof does not extend it again");
+        }
+
         string text = WebUtility.HtmlDecode(ok.Html);
         check(ok.Result is { Code: 0 } && fx.Store.FindGrant(id) is { Revision: 2 } extended && extended.Expires == fx.Clock.GetUtcNow().AddMinutes(90), "admin grant extend: the admin key's tap extends it (found by a prefix of its id) (" + ok.Result?.Detail + string.Join(" | ", fx.Store.Audit().Where(e => e.Event.StartsWith("grant", StringComparison.Ordinal)).Select(e => e.Event + ":" + e.Detail)) + ")");
         check(text.Contains("extend this grant by 30 minutes", StringComparison.Ordinal) && text.Contains(id, StringComparison.Ordinal) && text.Contains(KeyIdentity.Display(fx.Fingerprint), StringComparison.Ordinal) && text.Contains(fx.Machine.HostName, StringComparison.Ordinal), "admin grant extend: the page (which the passkey signs) shows the action, the grant, the machine's fingerprint and host name");

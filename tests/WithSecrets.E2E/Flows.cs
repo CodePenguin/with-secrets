@@ -49,7 +49,7 @@ internal static class Cmds
         {
             // The machine is enrolled and approved through AdminActions (what `admin approve` does after the passkey tap), with software keys.
             E2EMachine machine = rig.Machine;
-            using HostService service = HostService.Start(new HostServiceOptions { State = rig.State, Store = rig.Store, Grants = rig.Grants, Deployment = machine.Deployment, Port = 0, TimeLimit = timeLimit });
+            using HostService service = HostService.Start(new HostServiceOptions { Lock = AuthorityLock.UnlockedForTests(), State = rig.State, Store = rig.Store, Grants = rig.Grants, Deployment = machine.Deployment, Port = 0, TimeLimit = timeLimit });
 
             return LaunchClient.RunAsync(run.Args, rig.Work, service.Port, port, o, e, machine.Trust).GetAwaiter().GetResult();
         });

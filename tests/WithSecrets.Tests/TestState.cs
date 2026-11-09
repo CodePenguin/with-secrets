@@ -122,7 +122,7 @@ internal static class TestState
     /// challenge when the page signs a new state, else over "approve once". When the page asks for the PRF output (it has a
     /// prfKey) the proof carries it sealed to the page's key, as the page script does, except as <paramref name="prf" /> says.
     /// </summary>
-    public static (int Status, string Body) Approve(HttpClient client, string pageUrl, string origin, string rpId, TestAuthenticator signer, PrfMode prf = PrfMode.Normal, TestAuthenticator? other = null)
+    public static (int Status, string Body) Approve(HttpClient client, string pageUrl, string origin, string rpId, TestAuthenticator signer, PrfMode prf = PrfMode.Normal, TestAuthenticator? other = null, bool userVerified = true, Func<byte[], byte[]>? changeChallenge = null)
     {
         (_, string page) = Get(client, pageUrl);
         const string open = "<script type=\"application/json\" id=\"start\">";
@@ -138,7 +138,12 @@ internal static class TestState
         byte[] challenge = start.RootElement.TryGetProperty("manifest", out JsonElement manifest)
             ? Manifest.Challenge(bind, manifest.GetString()!)
             : ReuseBinding.Challenge(bind, 0);
-        string body = ReuseTests.Body(0, signer.Assert(challenge, origin, rpId, NextCount()));
+        if (changeChallenge is not null)
+        {
+            challenge = changeChallenge(challenge);
+        }
+
+        string body = ReuseTests.Body(0, signer.Assert(challenge, origin, rpId, NextCount(), userVerified));
         if (start.RootElement.TryGetProperty("prfKey", out JsonElement prfKey) && prf != PrfMode.Missing)
         {
             body = body[..^1] + ",\"prf\":" + PrfMember(start.RootElement, prfKey.GetString()!, bind, signer, prf, other) + "}";

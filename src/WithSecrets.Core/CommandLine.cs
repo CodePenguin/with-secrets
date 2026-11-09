@@ -18,6 +18,9 @@ public abstract record CliCommand
     /// <summary>service [--port N]: run the host service in the foreground (loopback only).</summary>
     public sealed record Service : CliCommand;
 
+    /// <summary>admin (no further words): go to the authority's admin web app, where status, lock and unlock, the unlock policy and the rest of the administration live.</summary>
+    public sealed record AdminApp : CliCommand;
+
     /// <summary>admin ACTION ...: a person manages the machines that may use secrets (and the authority key). See <see cref="AdminAction" />.</summary>
     public sealed record Admin(AdminAction Action, string? Fingerprint = null, string? Name = null) : CliCommand;
 
@@ -193,6 +196,11 @@ public static class CliArgs
 
         if (args.Count > 0 && args[0] == "admin")
         {
+            if (args.Count == 1 || args[1].StartsWith("--", StringComparison.Ordinal))
+            {
+                return ParseAdminApp(args, out error);
+            }
+
             if (args.Count > 1 && args[1] == "audit")
             {
                 return ParseAuditAdmin(args, out error);
@@ -437,6 +445,34 @@ public static class CliArgs
         error = "";
 
         return new CliCommand.GrantAdmin(action.Value, positional.Count == 1 ? positional[0] : null, minutes, indefinite) { Port = port, Debug = debug };
+    }
+
+    /// <summary>admin [--service-port N] [--debug]: the admin web app has no verbs; the port is where the service listens.</summary>
+    private static CliCommand? ParseAdminApp(IReadOnlyList<string> args, out string error)
+    {
+        int? port = null;
+        bool debug = false;
+        for (int index = 1; index < args.Count; index++)
+        {
+            if (args[index] == "--debug")
+            {
+                debug = true;
+            }
+            else if (args[index] == "--service-port" && index + 1 < args.Count && int.TryParse(args[++index], NumberStyles.None, CultureInfo.InvariantCulture, out int parsed) && parsed is >= 1 and <= ToolSettings.MaxPort)
+            {
+                port = parsed;
+            }
+            else
+            {
+                error = "Usage: with-secrets admin [--service-port N] [--debug]   (opens nothing itself: it prints the link of the authority's admin web app)";
+
+                return null;
+            }
+        }
+
+        error = "";
+
+        return new CliCommand.AdminApp { ServicePort = port, Debug = debug };
     }
 
     private const string AdminUsage = "Usage: with-secrets admin machines | approve FINGERPRINT --name NAME | disable FINGERPRINT | enable FINGERPRINT | untrust FINGERPRINT | trust FINGERPRINT (all 64 digits) | rename FINGERPRINT NAME | approve-host-change FINGERPRINT | rotate-authority-key | recover-authority  [--port N] [--debug]";

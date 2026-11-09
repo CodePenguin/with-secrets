@@ -45,13 +45,24 @@ public sealed partial class AuthorityStore
         return Read(connection => connection is null ? DefaultAuditRetentionDays : ReadRetention(connection, null));
     }
 
-    /// <summary>Sets the retention (0 keeps everything); recorded in the authority's own audit history.</summary>
-    public void SetAuditRetentionDays(int days, string actor)
+    /// <summary>The operation name and parameters an authorization for <see cref="SetAuditRetentionDays" /> must carry.</summary>
+    public static (string Operation, IReadOnlyList<(string Name, string Value)> Parameters) RetentionOperation(int days) => ("set-audit-retention", [("days", days.ToString(CultureInfo.InvariantCulture))]);
+
+    /// <summary>Sets the retention (0 keeps everything); recorded in the authority's own audit history. A security setting: it needs the administrator's fresh passkey authorization of exactly this change.</summary>
+    public void SetAuditRetentionDays(int days, VerifiedAdmin admin)
     {
         if (days is < 0 or > MaxAuditRetentionDays)
         {
             throw new ArgumentOutOfRangeException(nameof(days), "retention is 0 to " + MaxAuditRetentionDays + " days");
         }
+
+        (string operation, IReadOnlyList<(string Name, string Value)> parameters) = RetentionOperation(days);
+        if (!admin.Consume(operation, AdminAuthorizer.Canonical(parameters)))
+        {
+            throw new UnauthorizedAccessException("the retention change was not authorized by a fresh administrator passkey tap for exactly this change");
+        }
+
+        string actor = admin.Actor;
 
         Write((connection, transaction) =>
         {

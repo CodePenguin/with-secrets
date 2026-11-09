@@ -37,6 +37,11 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
     /// <summary>The store key material held for one grant after its approving tap (see <see cref="StoreKeyHolder" />). Dropped by <see cref="SweepKey" /> whenever what justified holding it is gone.</summary>
     public StoreKeyHolder Keys { get; } = new();
 
+    /// <summary>The authority's lock when this host and the authority are one service. While it is locked this host authorizes nothing, uses no grant and lends no key (the service also refuses the request before it gets here).</summary>
+    public AuthorityLock? LockState { get; set; }
+
+    private bool Locked => LockState?.IsLocked == true;
+
     /// <summary>
     /// Drops the held key unless this host still vouches for its grant: the grant is synchronized and has not ended, and the lease runs (a revision
     /// change or a disable forgets every grant, which ends here). Called wherever one of those can change, and before a key is lent.
@@ -77,6 +82,11 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
     {
         lock (_lock)
         {
+            if (Locked)
+            {
+                return null;
+            }
+
             SweepKey();
 
             return Keys.Borrow(grantId, scopeKey);
@@ -159,6 +169,22 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
         }
     }
 
+    /// <summary>
+    /// The authority locked: forget everything that lets this host authorize a run without asking the authority again. The held store key is zeroed and dropped, the
+    /// offline lease and the synchronized grants are cleared, saved approvals end, and every launch that has not committed is cancelled. Nothing is restored by unlocking: the
+    /// host checks in again and the next run that needs a key taps again.
+    /// </summary>
+    public void Discard(string reason)
+    {
+        lock (_lock)
+        {
+            ForgetSaved();
+            _knownRevision = null;
+            Keys.Drop(reason);
+            gate.Invalidate();
+        }
+    }
+
     /// <summary>Forgets every saved approval (in this host and in the store behind <c>clearSaved</c>), every synchronized grant and the offline lease. Called with the lock held.</summary>
     private void ForgetSaved()
     {
@@ -191,6 +217,10 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
     public async Task<AuthorizationOutcome> AuthorizeAsync(LaunchRequest launch, Func<ApprovalDecision> present, CancellationToken cancel)
     {
         AuthorizationOutcome Deny(string code, string message) => new(ApprovalDecision.Deny(message), message, code);
+        if (Locked)
+        {
+            return Deny("authority-locked", AuthorityLock.LockedMessage);
+        }
 
         HostConfigLoad load = config.Load();
         if (load.Problem is not null)
@@ -581,6 +611,10 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
     public async Task<GrantUse> TryUseGrantAsync(LaunchRequest launch, string scopeKey, CancellationToken cancel)
     {
         GrantUse NoGrant() => new(GrantUseKind.NoGrant, "");
+        if (Locked)
+        {
+            return new GrantUse(GrantUseKind.Denied, AuthorityLock.LockedMessage);
+        }
 
         HostConfigLoad load = config.Load();
         if (load.Problem is not null || load.Config?.Authority is null || load.Config.MachineFingerprint != Fingerprint)
@@ -695,6 +729,10 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
     public async Task<GrantApproval> ApproveGrantAsync(LaunchRequest launch, string scopeKey, Func<ApprovalDecision> present, CancellationToken cancel)
     {
         GrantApproval Deny(string message, string code) => new(false, message, code, null);
+        if (Locked)
+        {
+            return Deny(AuthorityLock.LockedMessage, "authority-locked");
+        }
 
         HostConfigLoad load = config.Load();
         if (load.Problem is not null)

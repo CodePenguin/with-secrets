@@ -12,6 +12,14 @@ namespace WithSecrets.Tests;
 /// </summary>
 internal static class AuditTrailTests
 {
+    /// <summary>A token as a fresh passkey tap for exactly this retention change would give (the authorizer itself is tested in AuthorityLockTests).</summary>
+    private static VerifiedAdmin RetentionAdmin(int days)
+    {
+        (string operation, IReadOnlyList<(string Name, string Value)> parameters) = AuthorityStore.RetentionOperation(days);
+
+        return VerifiedAdmin.ForTests(operation, AdminAuthorizer.Canonical(parameters), "test admin");
+    }
+
     private static readonly TimeSpan Fast = TimeSpan.FromMilliseconds(40);
 
     private sealed class TestClock : TimeProvider
@@ -404,9 +412,9 @@ internal static class AuditTrailTests
         AuthorityStore store = machine.Deployment.Store;
         HostAuditOutbox outbox = HostAuditOutbox.InFolder(machine.Folder, machine.MachineKey, clock);
         check(store.AuditRetentionDays() == AuthorityStore.DefaultAuditRetentionDays && AuthorityStore.DefaultAuditRetentionDays == 365, "retention: the authority keeps a year of events unless it is told otherwise");
-        store.SetAuditRetentionDays(30, "test admin");
+        store.SetAuditRetentionDays(30, RetentionAdmin(30));
         check(store.AuditRetentionDays() == 30 && store.Audit().Any(entry => entry.Event == "audit-retention-changed" && entry.Detail.Contains("365 to 30", StringComparison.Ordinal)), "retention: the authority sets it, and the change is in its audit history");
-        check(Catch<ArgumentOutOfRangeException>(() => store.SetAuditRetentionDays(-1, "x")) is not null && Catch<ArgumentOutOfRangeException>(() => store.SetAuditRetentionDays(AuthorityStore.MaxAuditRetentionDays + 1, "x")) is not null && store.AuditRetentionDays() == 30, "retention: a negative or absurd value is refused");
+        check(Catch<ArgumentOutOfRangeException>(() => store.SetAuditRetentionDays(-1, RetentionAdmin(-1))) is not null && Catch<ArgumentOutOfRangeException>(() => store.SetAuditRetentionDays(AuthorityStore.MaxAuditRetentionDays + 1, RetentionAdmin(AuthorityStore.MaxAuditRetentionDays + 1))) is not null && store.AuditRetentionDays() == 30, "retention: a negative or absurd value is refused");
 
         AuditEvent old = outbox.Append(Facts());
         clock.Advance(TimeSpan.FromDays(40));
@@ -430,7 +438,7 @@ internal static class AuditTrailTests
         check(store.AuditHistory(new AuditQuery()) is [{ } only] && only.Event.EventId == later.EventId, "retention: an upload prunes what the retention no longer keeps");
 
         // 0 keeps everything; the outbox never prunes on its own.
-        store.SetAuditRetentionDays(0, "test admin");
+        store.SetAuditRetentionDays(0, RetentionAdmin(0));
         clock.Advance(TimeSpan.FromDays(5000));
         check(store.PruneAuditEvents() == 0 && store.AuditHistory(new AuditQuery()).Count == 1, "retention: 0 keeps everything");
         int waiting = outbox.Count("pending");

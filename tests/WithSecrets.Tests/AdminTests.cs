@@ -23,6 +23,7 @@ internal static class AdminTests
         {
             Parsing(check);
             await Page(check, root);
+            await Sensitive(check, root);
             await KeyCommands(check, root);
             await ReviewFixes(check, root);
             Listing(check, root);
@@ -73,9 +74,13 @@ internal static class AdminTests
         public int Announced { get; set; }
 
         public string Html { get; set; } = "";
+
+        public string Url { get; set; } = "";
+
+        public string Proof { get; set; } = "";
     }
 
-    private static async Task<PageResult> RunAdmin(TestMachine machine, StateDatabase db, CliCommand.Admin command, TestAuthenticator? signer)
+    private static async Task<PageResult> RunAdmin(TestMachine machine, StateDatabase db, CliCommand.Admin command, TestAuthenticator? signer, bool userVerified = true, Func<byte[], byte[]>? changeChallenge = null)
     {
         using HttpClient client = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(20) };
         TaskCompletionSource<string> line = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -95,7 +100,9 @@ internal static class AdminTests
             Uri link = new(line.Task.Result[line.Task.Result.IndexOf("http", StringComparison.Ordinal)..]);
             string url = "http://127.0.0.1:" + link.Port + link.AbsolutePath;
             (_, page.Html) = TestState.Get(client, url);
-            (page.Status, _) = TestState.Approve(client, url, "http://localhost:" + link.Port, "localhost", signer);
+            (page.Status, _) = TestState.Approve(client, url, "http://localhost:" + link.Port, "localhost", signer, userVerified: userVerified, changeChallenge: changeChallenge);
+            page.Url = url;
+            page.Proof = TestState.LastProofBody;
         }
 
         Task done = await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(20)));
@@ -189,6 +196,78 @@ internal static class AdminTests
         TestState.Approve(client, "http://127.0.0.1:" + link.Port + link.AbsolutePath, "http://localhost:" + link.Port, "localhost", laptop);
         (int code, string detail) = await pending;
         check(code == RunCommand.Denied && store.Find(fp) is { Status: MachineStatus.Disabled } stale && stale.SecurityRevision == revisionBefore, "admin: a machine that changed while the page was open is not changed again by the stale tap (" + detail + ")");
+    }
+
+    /// <summary>What an administrator change could touch: machine state and the active authority key.</summary>
+    private static string Snapshot(AuthorityStore store, string fp)
+    {
+        MachineRecord m = store.Find(fp)!;
+
+        return string.Join('|', m.Status, m.SecurityRevision, m.FriendlyName, m.HostName, m.PendingHostName, store.ActiveKey()?.Fingerprint, store.Machines().Count);
+    }
+
+    /// <summary>
+    /// Every machine and key operation of the admin commands is a sensitive administrator operation: a fresh single-use passkey tap with user verification on a page whose
+    /// signed text is the operation and its parameters. For each: a key that is not an admin key, an assertion without user verification, a signature over another challenge,
+    /// no passkey answer at all, and a replay of an earlier proof each leave the authority exactly as it was (fail closed, no fallback); the genuine tap applies it.
+    /// </summary>
+    private static async Task Sensitive(Action<bool, string> check, string root)
+    {
+        using TestAuthenticator laptop = TestAuthenticator.ES256();
+        using TestAuthenticator phone = TestAuthenticator.ES256();
+        StateDatabase db = StateDatabase.InFolder(Path.Combine(root, "sens-state"));
+        DateTimeOffset created = new(2026, 11, 1, 10, 0, 0, TimeSpan.Zero);
+        TestState.Add(db, laptop.Record("localhost", "laptop") with { Created = created });
+        TestState.Add(db, phone.Record("localhost", "phone") with { Created = created });
+        using TestMachine machine = new(Path.Combine(root, "sens-machine"), trusted: false);
+        machine.Deployment.EnrollAsync().GetAwaiter().GetResult();
+        AuthorityStore store = machine.Deployment.Store;
+        string fp = machine.Fingerprint;
+        CliCommand.Admin Cmd(AdminAction action, string? fingerprint = null, string? name = null) => new(action, fingerprint ?? fp, name);
+        int refusals = 0;
+
+        async Task Operation(string label, CliCommand.Admin command)
+        {
+            string before = Snapshot(store, fp);
+            (string Name, TestAuthenticator? Who, bool Uv, Func<byte[], byte[]>? Change)[] variants =
+            [
+                ("a key that is not an admin key", phone, true, null),
+                ("an assertion without user verification", laptop, false, null),
+                ("a signature over another challenge", laptop, true, challenge => System.Security.Cryptography.SHA256.HashData(challenge)),
+                ("no passkey answer", null, true, null),
+            ];
+            foreach ((string name, TestAuthenticator? who, bool uv, Func<byte[], byte[]>? change) in variants)
+            {
+                PageResult denied = await RunAdmin(machine, db, command, who, uv, change);
+                refusals++;
+                check(denied.Result is { Code: RunCommand.Denied } && Snapshot(store, fp) == before, $"sensitive {label}: {name} changes nothing and is refused (fail closed)");
+            }
+
+            PageResult done = await RunAdmin(machine, db, command, laptop);
+            check(done.Result is { Code: 0 } && Snapshot(store, fp) != before, $"sensitive {label}: the genuine fresh tap applies it");
+
+            // The proof of that tap, sent again to its page, changes nothing.
+            string settled = Snapshot(store, fp);
+            if (done.Url.Length > 0)
+            {
+                using HttpClient client = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(20) };
+                TestState.Post(client, done.Url + "/proof", done.Proof);
+            }
+
+            check(Snapshot(store, fp) == settled, $"sensitive {label}: replaying the proof changes nothing");
+        }
+
+        await Operation("approve", Cmd(AdminAction.Approve, fp[..16], "sens machine"));
+        await Operation("rename", Cmd(AdminAction.Rename, fp[..20], "renamed again"));
+        await Operation("disable", Cmd(AdminAction.Disable, fp[..20]));
+        await Operation("enable", Cmd(AdminAction.Enable, fp[..20]));
+        await Operation("untrust", Cmd(AdminAction.Untrust, fp[..20]));
+        await Operation("trust", Cmd(AdminAction.Trust, fp));
+        store.RecordHostMismatch(fp, "moved-host");
+        await Operation("approve-host-change", Cmd(AdminAction.ApproveHostChange, fp[..20]));
+        await Operation("rotate-authority-key", new CliCommand.Admin(AdminAction.RotateAuthorityKey));
+        await Operation("recover-authority", new CliCommand.Admin(AdminAction.RecoverAuthority));
+        check(refusals == 36, "sensitive: nine operations, four refusals each (" + refusals + ")");
     }
 
     private static async Task KeyCommands(Action<bool, string> check, string root)

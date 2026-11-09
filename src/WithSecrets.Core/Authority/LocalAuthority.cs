@@ -16,6 +16,9 @@ public sealed class AuthorityKeyRing(AuthorityStore store, Func<int, ISigningKey
     private readonly Lock _lock = new();
     private readonly Dictionary<string, ISigningKey> _opened = new(StringComparer.Ordinal);
 
+    /// <summary>While this is locked no key is used, made or replaced: <see cref="Current" />, <see cref="Rotate" /> and <see cref="Recover" /> throw <see cref="AuthorityLockedException" />. The public record is still readable.</summary>
+    public AuthorityLock? LockState { get; set; }
+
     /// <summary>The active key's record, making the first key when there is none.</summary>
     public AuthorityKeyRecord CurrentRecord()
     {
@@ -25,6 +28,8 @@ public sealed class AuthorityKeyRing(AuthorityStore store, Func<int, ISigningKey
             {
                 return active;
             }
+
+            LockState?.EnsureUnlocked();
 
             ISigningKey first = open(1);
             AuthorityKeyRecord recorded = store.RecordFirstKey(first.PublicKey, "authority");
@@ -37,6 +42,7 @@ public sealed class AuthorityKeyRing(AuthorityStore store, Func<int, ISigningKey
     /// <summary>The active key, ready to sign.</summary>
     public ISigningKey Current()
     {
+        LockState?.EnsureUnlocked();
         lock (_lock)
         {
             return Open(CurrentRecord());
@@ -65,6 +71,7 @@ public sealed class AuthorityKeyRing(AuthorityStore store, Func<int, ISigningKey
     /// <summary>Routine rotation: a new key, introduced by a transition that the current key signs. Hosts that pinned the current key accept the new one through that transition.</summary>
     public KeyTransition Rotate(string actor)
     {
+        LockState?.EnsureUnlocked();
         lock (_lock)
         {
             AuthorityKeyRecord active = CurrentRecord();
@@ -81,6 +88,7 @@ public sealed class AuthorityKeyRing(AuthorityStore store, Func<int, ISigningKey
     /// <summary>Recovery after the current key was lost or must not be trusted: a new key with no transition. Hosts accept it only after an explicit administrator action (<see cref="HostConfigFile.Pin" />).</summary>
     public AuthorityKeyRecord Recover(string actor)
     {
+        LockState?.EnsureUnlocked();
         lock (_lock)
         {
             AuthorityKeyRecord active = store.ActiveKey() ?? CurrentRecord();

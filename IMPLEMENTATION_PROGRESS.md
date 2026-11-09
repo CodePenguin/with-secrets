@@ -4,7 +4,7 @@ Worktree `C:\Users\codep\Projects\with-secrets-impl`, branch `impl/host-service`
 
 ## Current phase
 
-Phase 0 (extract contracts, preserve behaviour): done, reviewed. Phase 1 (local host service and shared API): done, pending review. Phase 2 (machine identity and local authority): done, pending review. Phase 3 (the independent parts: grants, offline lease, startup reconciliation, plus the maintainer's decision to hold the store key in service memory for a grant's life): done, reviewed (fix round 1 applied). Phase 4 (durable audit trail): done, pending review. Next: Phase 5 onward.
+Phase 0 (extract contracts, preserve behaviour): done, reviewed. Phase 1 (local host service and shared API): done, pending review. Phase 2 (machine identity and local authority): done, pending review. Phase 3 (the independent parts: grants, offline lease, startup reconciliation, plus the maintainer's decision to hold the store key in service memory for a grant's life): done, reviewed (fix round 1 applied). Phase 4 (durable audit trail): done, pending review. Phase 4b (authority lock, admin web app, sensitive operations): done, pending review. Next: Phase 5 onward.
 
 ## Commands
 
@@ -223,6 +223,40 @@ Brief: `.superpowers/sdd/2026-11-01-web-approval-passkey/task-p4-brief.md`. New 
 ### Mutation evidence (applied, `WS_ONLY=AuditTrail`, reverted)
 
 (a) The page path no longer fails the run when the authorization event cannot be committed: 4 failures ("fails closed ... canary decrypt count is 0", "next run ... numbered from 1", damaged outbox file, folder in place of the file). (b) The uploader ignores the result of the acknowledgement verification: 5 failures (replayed, wrong-key, other-events acknowledgements; the genuine one; the service-level wrong-key ack). (c) The authority no longer records a missing range: 6 failures (gap records, shrink/split/close, `admin audit --gaps`, end-to-end lost event).
+
+## Phase 4b: authority lock, admin web app, sensitive operations (done, pending review)
+
+Merged origin/main (e40d969, clean: its accepted text is kept verbatim; our boundary notes follow it). Maintainer corrections applied: lock, unlock and the unlock policy are NOT CLI verbs; they are done on the authority's admin web app, and `with-secrets admin` has no new subcommands (bare `admin` prints the app link and the public status).
+
+### What was built
+
+- `Authority/AuthorityLock.cs`: `AuthorityLock` (starts locked; `OnLock` discards), `UnlockPolicy`, `IUnlockProtection` with `DpapiUnlockProtection` (Windows, current user) and `NoUnlockProtection` (other platforms: the option is refused with a message), `UnattendedUnlock.TryUnlock`.
+- Gates: `AuthorityKeyRing.LockState` (Current/Rotate/Recover refuse), `HostService` (423 on run/approve, `/v1/status` running+locked, pump idle, unlock then re-check-in), `HostAuthorization.LockState`/`Discard` (key zeroed, lease, grants, saved approvals, gate invalidated).
+- `Authority/AdminAuthorization.cs`: `AdminAuthorizer` (one-use page with `Operation:`/`Parameter` lines; re-verifies admin signature, exact text, freshness, single use of the nonce; audits attempts and outcomes; fails closed, including when the audit cannot be written), `VerifiedAdmin` (single-use token required by `SetUnlockPolicy` and `SetAuditRetentionDays`), `IAdminAsker`/`TargetAdminAsker`.
+- `Authority/AdminService.cs`: admin web app on the service port: `GET /admin` (status, mode), `GET /admin/audit` (read-only), `POST /admin/op` (unlock, lock, policy-manual, policy-unattended; same-origin only, CSP with nonce, no framing). Route table `AdminService.Pages` is the Phase 6 extension point.
+- `AuthorityStore.Settings.cs`: unlock policy, sealed material and hash in `authority_settings`; `RecordAdminAttempt` (`admin-operation` audit rows).
+- CLI: bare `admin` (`AdminAppCommand`), exit code 8 for a locked authority, service start prints the unlock mode (weaker one by name), the lock state and the admin page link.
+- Docs: README (section "The authority lock and the admin web app"), architecture 10.2 current-implementation notes (lock, app, authorizer, audit table of sensitive operations, unlock mode, key hierarchy, backup and recovery procedure), exit code 8, file map.
+
+### Decisions (the design leaves them open)
+
+1. The lock is a process-level gate, not encryption: the authority key stays CNG-protected. Simplest mechanism that gates every secret path (the signing key is needed by every authority answer).
+2. Lock itself needs a passkey tap (maintainer: each a fresh operation-bound tap). Killing the process also locks.
+3. Unattended material is random 32 bytes sealed with DPAPI plus its SHA-256; it decides only whether to unlock. Weaker, documented.
+4. Exit code 8 (7 was taken). Locked status is 423.
+5. Test seam: `HostServiceOptions.Lock = AuthorityLock.UnlockedForTests()` (a library object; no command, setting or variable reaches it); `VerifiedAdmin.ForTests` for store-guard tests. E2E and the suites use the first.
+6. `SetAuditRetentionDays` took an actor string with no proof (a gap): it now needs a `VerifiedAdmin`.
+
+### Open items / limits
+
+- The existing CLI admin verbs run in their own process, verify their tap there, and are not gated by the service lock; they move into the app later (then under `AdminAuthorizer`).
+- Zeroing is best effort. Phase 4 audit is merged in this branch, so the authority audit history is the durable record.
+- Key wrapping/backup of the authority key (non-exportable CNG) and a restore test on a second machine remain; the written procedure covers what exists.
+- BLOCKER: none. Ambiguity noted: whether `Lock` should need a tap (implemented as the maintainer said).
+
+### Tests and mutation evidence
+
+Suite `AuthorityLock` (196 checks; `WS_ONLY=AuthorityLock`), plus new checks in `Admin` (every machine/key operation x non-admin key, no UV, other challenge, no answer, replay) and `GrantAuthority` (grant extend/revoke: no UV, other challenge, replay). Mutations applied, suite run, reverted: (a) `if (false && Lock.IsLocked)` in the run route: 4 failures (runs, approve, client exit 8, grant use while locked); (b) user-verified check removed in `WebAuthn.VerifyAssertion`: 7 failures; (c) unattended unlock applies lock/policy operations without a tap: 2 failures.
 
 ## Reconnaissance: who owns what today
 

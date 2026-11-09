@@ -13,4 +13,23 @@ public static class ServiceStartup
 
         return [$"with-secrets service: machine {ApprovalSummary.Clean(hostName)}, identity {KeyIdentity.Display(fingerprint)}", state];
     }
+
+    /// <summary>
+    /// The lines about the authority's lock: whether it is locked, the unlock mode (the weaker unattended mode is always named), what an unattended start came to, and where
+    /// to unlock. The admin page link is public and carries nothing.
+    /// </summary>
+    public static IReadOnlyList<string> LockLines(bool locked, UnlockPolicy policy, string? unattendedNote, string adminPageUrl)
+    {
+        List<string> lines = ["with-secrets service: unlock mode: " + UnlockPolicies.Describe(policy)];
+        if (unattendedNote is not null)
+        {
+            lines.Add("with-secrets service: " + unattendedNote + ".");
+        }
+
+        lines.Add(locked
+            ? "with-secrets service: the authority is LOCKED; runs are refused until an administrator unlocks it. Unlock at: " + adminPageUrl
+            : "with-secrets service: the authority is unlocked. Admin page: " + adminPageUrl);
+
+        return lines;
+    }
 }

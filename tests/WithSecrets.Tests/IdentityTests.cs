@@ -277,7 +277,7 @@ internal static class IdentityTests
                 await host.AuthorizeAsync(Sample("scan-3", now), () => ApprovalDecision.Allow(), CancellationToken.None);
                 HostAuthorization broken = new(new ThrowingAuthority(), machine, "scan-host", deployment.HostConfig, gate, deployment.Authority.Offer);
                 await broken.AuthorizeAsync(Sample("scan-4", now), () => ApprovalDecision.Allow(), CancellationToken.None);
-                using HostService service = HostService.Start(new HostServiceOptions { State = StateDatabase.InFolder(folder), Store = new MemoryStore(new Dictionary<string, string>()), Deployment = deployment, Port = 0 });
+                using HostService service = HostService.Start(new HostServiceOptions { Lock = AuthorityLock.UnlockedForTests(), State = StateDatabase.InFolder(folder), Store = new MemoryStore(new Dictionary<string, string>()), Deployment = deployment, Port = 0 });
                 using HttpClient client = new(new SocketsHttpHandler { UseProxy = false });
                 string challenge = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
                 using HttpResponseMessage identity = await client.PostAsync("http://127.0.0.1:" + service.Port + "/v1/identity", new StringContent("{\"challenge\":\"" + challenge + "\"}", Encoding.UTF8, "application/json"));

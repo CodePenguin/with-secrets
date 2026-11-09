@@ -47,6 +47,12 @@ internal static class Program
             return await RunThroughService(run, run.Args, approve: false);
         }
 
+        // admin (no verbs): the authority's admin web app. Nothing is opened or changed here; the link and the service's public status are printed.
+        if (command is CliCommand.AdminApp app)
+        {
+            return await AdminAppCommand.RunAsync(app.ServicePort, Console.Out);
+        }
+
         // approve takes the same road to the service: the service shows the page and the authority records the grant; nothing is launched.
         if (command is CliCommand.Approve approve)
         {
@@ -212,6 +218,11 @@ internal static class Program
             };
             Console.CancelKeyPress += handler;
             foreach (string line in ServiceStartup.Lines(deployment.HostName, deployment.Fingerprint, enrolled))
+            {
+                TerminalPrompt.Line(line);
+            }
+
+            foreach (string line in ServiceStartup.LockLines(service.Lock.IsLocked, deployment.Store.GetUnlockPolicy(), service.StartupUnlockNote, service.Admin.PageUrl))
             {
                 TerminalPrompt.Line(line);
             }

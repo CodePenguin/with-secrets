@@ -108,7 +108,7 @@ internal static class HostServiceTests
         private readonly string _dir;
         private int _ids;
 
-        public Rig(string parent, Dictionary<string, string>? values = null, Func<IApprover>? approver = null, TimeSpan? bodyTimeout = null, Action<PreparedChild>? afterPrepare = null, Action? afterCommit = null, bool trusted = true, TestMachine? machine = null, TestAuthenticator? savedApprovalSigner = null, bool needsUnlock = false, Func<IApprover, IStoreKeyProvider>? keyProvider = null, IMonotonicClock? monotonic = null, TestAuthenticator? enrolled = null, TimeSpan? auditInterval = null)
+        public Rig(string parent, Dictionary<string, string>? values = null, Func<IApprover>? approver = null, TimeSpan? bodyTimeout = null, Action<PreparedChild>? afterPrepare = null, Action? afterCommit = null, bool trusted = true, TestMachine? machine = null, TestAuthenticator? savedApprovalSigner = null, bool needsUnlock = false, Func<IApprover, IStoreKeyProvider>? keyProvider = null, IMonotonicClock? monotonic = null, TestAuthenticator? enrolled = null, TimeSpan? auditInterval = null, bool startLocked = false, IUnlockProtection? protection = null, Func<Action<string>, IAdminAsker>? adminAskers = null)
         {
             _dir = Path.Combine(parent, "svc-" + Guid.NewGuid().ToString("N")[..8]);
             Work = Path.Combine(_dir, "work");
@@ -130,6 +130,9 @@ internal static class HostServiceTests
             Approvers = [];
             Service = HostService.Start(new HostServiceOptions
             {
+                Lock = startLocked ? null : AuthorityLock.UnlockedForTests(),
+                UnlockProtection = protection,
+                AdminAskerFactory = adminAskers,
                 State = State,
                 Store = Store,
                 Grants = savedApprovalSigner is null ? null : new GrantStore(State),
@@ -463,7 +466,7 @@ internal static class HostServiceTests
         check((await rig.Http.GetAsync(rig.Url("/v1/secrets"))).StatusCode == HttpStatusCode.NotFound && (await rig.Http.GetAsync(rig.Url("/"))).StatusCode == HttpStatusCode.NotFound, "service: there is no route that lists or returns secrets");
 
         string status = await rig.Http.GetStringAsync(rig.Url("/v1/status"));
-        check(status == "{\"protocolVersion\":1}", "service: /v1/status returns the version only (" + status + ")");
+        check(status == "{\"protocolVersion\":1,\"running\":true,\"locked\":false}", "service: /v1/status returns the version, running and the lock state only (" + status + ")");
         if (Socket.OSSupportsIPv6)
         {
             try
@@ -863,7 +866,7 @@ internal static class HostServiceTests
                 throw new InvalidOperationException(problem);
             }
 
-            using HostService service = HostService.Start(new HostServiceOptions { State = db, Store = store, Deployment = machine.Deployment, Port = 0, TimeLimit = TimeSpan.FromSeconds(30) });
+            using HostService service = HostService.Start(new HostServiceOptions { Lock = AuthorityLock.UnlockedForTests(), State = db, Store = store, Deployment = machine.Deployment, Port = 0, TimeLimit = TimeSpan.FromSeconds(30) });
             using HttpClient client = new(new SocketsHttpHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(60) };
             DateTimeOffset now = DateTimeOffset.UtcNow;
             LaunchRequest request = new(LaunchProtocol.Version, "http-" + Guid.NewGuid().ToString("N")[..8], now, now.AddMinutes(5), "bm9uY2UtMDAwMDAwMDEx" + Guid.NewGuid().ToString("N")[..6], ["TOKEN"], [new LaunchMapping("TOKEN", "TOKEN")], "approval over http", "./" + program, [], work, [], [], new Dictionary<string, string>(), Env());
@@ -1078,7 +1081,7 @@ internal static class HostServiceTests
             SecretStore store = new(db, new CountingCipher());
             SecretStoreTests.Put(store, new Dictionary<string, string> { ["TOKEN"] = Value });
             using TestMachine machine = new(Path.GetDirectoryName(db.FilePath)!);
-            using HostService service = HostService.Start(new HostServiceOptions { State = db, Store = store, Deployment = machine.Deployment, Port = 0, TimeLimit = TimeSpan.FromSeconds(60) });
+            using HostService service = HostService.Start(new HostServiceOptions { Lock = AuthorityLock.UnlockedForTests(), State = db, Store = store, Deployment = machine.Deployment, Port = 0, TimeLimit = TimeSpan.FromSeconds(60) });
             using HttpClient client = new(new SocketsHttpHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(60) };
             string program = OperatingSystem.IsWindows() ? "p.cmd" : "p.sh";
             File.WriteAllText(Path.Combine(folder, "work", program), OperatingSystem.IsWindows() ? "@echo off\r\necho hi\r\n" : "#!/bin/sh\necho hi\n");
