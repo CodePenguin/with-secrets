@@ -32,6 +32,7 @@ internal static class ApiTests
             await Pending(check, root);
             await LockedState(check, root);
             await VersionsAndFallback(check, root);
+            await WebApplication(check, root);
             await OpenApiDocument(check, root);
             await ProblemsAndCanaries(check, root);
             await VerbsAreGone(check);
@@ -754,7 +755,7 @@ internal static class ApiTests
 
     private static async Task VersionsAndFallback(Action<bool, string> check, string root)
     {
-        using AdminApp app = new(root);
+        using AdminApp app = new(root, web: new AdminWebAssets([]));
         AdminBrowser b = app.Browser();
         foreach (string path in new[] { "/api/v2/status", "/api/v0/status", "/api/v10/machines", "/api/V1/status", "/api/v2/", "/api/v2" })
         {
@@ -788,6 +789,101 @@ internal static class ApiTests
         (int patch, _) = await b.SendAsync(HttpMethod.Patch, "/api/v1/machines", "{}");
         check(del == 405 && patch == 405, "fallback: DELETE and PATCH where the API has none are 405");
         check(app.Service.Admin.Api.Routes.All(route => route.Template.StartsWith("/api/v1/", StringComparison.Ordinal)), "versions: every route is under /api/v1/");
+    }
+
+    // ---- the administration web application (single-page application) ----
+
+    private static async Task WebApplication(Action<bool, string> check, string root)
+    {
+        const string index = "<!doctype html><html><head><title>t</title><script type=\"module\" src=\"/admin/assets/app.js\"></script></head><body><div id=\"root\"></div></body></html>";
+        static KeyValuePair<string, byte[]> File(string name, string content) => new(name, Encoding.UTF8.GetBytes(content));
+        AdminWebAssets assets = new([File("index.html", index), File("assets/app.js", "console.log(1)"), File("assets/app.css", "body{margin:0}"), File("version.json", "{\"version\":\"9.9.9\"}")]);
+        using AdminApp app = new(root, web: assets);
+        AdminBrowser b = app.Browser();
+
+        // Every application route is the one page; the router of the page reads the address.
+        foreach (string path in new[] { "/admin", "/admin/", "/admin/machines", "/admin/grants", "/admin/audit/changes", "/admin/deep/er/route" })
+        {
+            (int status, string body, HttpResponseMessage response) = await b.GetAsync(path);
+            string csp = response.Headers.TryGetValues("Content-Security-Policy", out IEnumerable<string>? values) ? string.Join(";", values) : "";
+            check(status == 200 && (response.Content.Headers.ContentType?.MediaType ?? "") == "text/html" && body == index, "spa: " + path + " is the page (200 text/html)");
+            check(csp == AdminWebAssets.ContentSecurityPolicy && csp.Contains("script-src 'self'", StringComparison.Ordinal) && csp.Contains("frame-ancestors 'none'", StringComparison.Ordinal)
+                && !csp.Contains("unsafe-inline", StringComparison.Ordinal) && !csp.Contains("unsafe-eval", StringComparison.Ordinal) && !csp.Contains("http:", StringComparison.Ordinal) && !csp.Contains("https:", StringComparison.Ordinal) && !csp.Contains('*', StringComparison.Ordinal)
+                && response.Headers.Contains("X-Frame-Options") && response.Headers.GetValues("Referrer-Policy").Single() == "no-referrer" && response.Headers.GetValues("X-Content-Type-Options").Single() == "nosniff" && response.Headers.CacheControl?.NoStore == true,
+                "spa: " + path + " carries a strict policy (same origin only, no inline script or style, no frames), no-store, nosniff and no referrer");
+        }
+
+        // A file is answered only if it exists; a missing file is never answered with the page.
+        (int js, string jsBody, HttpResponseMessage jsResponse) = await b.GetAsync("/admin/assets/app.js");
+        (int css, _, HttpResponseMessage cssResponse) = await b.GetAsync("/admin/assets/app.css");
+        (int version, string versionBody, _) = await b.GetAsync("/admin/version.json");
+        check(js == 200 && jsBody == "console.log(1)" && jsResponse.Content.Headers.ContentType?.MediaType == "text/javascript" && css == 200 && cssResponse.Content.Headers.ContentType?.MediaType == "text/css" && version == 200 && versionBody.Contains("9.9.9", StringComparison.Ordinal),
+            "spa: the files are served with their types");
+        foreach (string path in new[] { "/admin/assets/nope.js", "/admin/nope.png", "/admin/assets/app.js.map", "/admin/assets/%2e%2e/%2e%2e/api/v1/status", "/admin/..%2fapi/v1/status.json", "/admin/assets/..%5c..%5cindex.html" })
+        {
+            (int status, string body, _) = await b.GetAsync(path);
+            check(status != 200 || (!body.Contains("<div id", StringComparison.Ordinal) && !body.Contains("openapi", StringComparison.Ordinal)), "spa: " + path + " is not the page and leaks nothing (" + status + ")");
+        }
+
+        (int missing, string missingBody, _) = await b.GetAsync("/admin/assets/nope.js");
+        check(missing == 404 && missingBody.Length == 0, "spa: a missing file is a 404 with no body (never the page)");
+
+        // The API never falls through to the page.
+        (int api404, string api404Body, HttpResponseMessage api404Response) = await b.GetAsync("/api/v1/does-not-exist");
+        check(api404 == 404 && ContentType(api404Response) == "application/problem+json" && !api404Body.Contains("<div", StringComparison.Ordinal), "spa: an unknown /api path is a JSON 404, never the page");
+        (int sibling, _, HttpResponseMessage siblingResponse) = await b.GetAsync("/administrator");
+        check(!(sibling == 200 && siblingResponse.Content.Headers.ContentType?.MediaType == "text/html"), "spa: /administrator is not an application route (only /admin and below)");
+
+        // Methods, HEAD, Host.
+        using (HttpRequestMessage post = new(HttpMethod.Post, b.Base + "/admin/machines") { Content = new StringContent("{}", Encoding.UTF8, "application/json") })
+        {
+            using HttpResponseMessage answer = await app.Http.SendAsync(post);
+            check((int)answer.StatusCode == 405 && answer.Content.Headers.Allow.Contains("GET") && answer.Content.Headers.Allow.Contains("HEAD"), "spa: POST to the page is 405 (GET and HEAD only)");
+        }
+
+        using (HttpRequestMessage head = new(HttpMethod.Head, b.Base + "/admin/machines"))
+        {
+            using HttpResponseMessage answer = await app.Http.SendAsync(head);
+            check(answer.IsSuccessStatusCode && answer.Content.Headers.ContentLength == index.Length && (await answer.Content.ReadAsStringAsync()).Length == 0, "spa: HEAD answers the headers and no body");
+        }
+
+        (int rebound, _, _) = await b.GetAsync("/admin", host: "evil.example");
+        check(rebound == 421, "spa: a request with a Host that is not a loopback name is refused (DNS rebinding) before the page");
+        check(app.Service.Admin.Api.Routes.All(route => !route.Template.StartsWith("/admin", StringComparison.Ordinal)), "spa: no API route lives under /admin");
+
+        // The files embedded in this assembly (the build puts the frontend's output there).
+        AdminWebAssets real = AdminWebAssets.FromAssembly();
+        if (!real.Available)
+        {
+            check(true, "embedded: (skipped: this assembly was built without the frontend, so no application is embedded; build with Node.js to check the embedded files)");
+
+            return;
+        }
+
+        using AdminApp embedded = new(root);
+        AdminBrowser e = embedded.Browser();
+        (int status200, string page, HttpResponseMessage pageResponse) = await e.GetAsync("/admin/machines");
+        check(status200 == 200 && pageResponse.Content.Headers.ContentType?.MediaType == "text/html" && page.Contains("<div id=\"root\">", StringComparison.Ordinal), "embedded: the service serves the built page from the assembly");
+        check(!System.Text.RegularExpressions.Regex.IsMatch(page, @"<script(?![^>]*\bsrc=)", System.Text.RegularExpressions.RegexOptions.IgnoreCase) && !page.Contains(" style=", StringComparison.OrdinalIgnoreCase) && !page.Contains("<style", StringComparison.OrdinalIgnoreCase)
+            && !System.Text.RegularExpressions.Regex.IsMatch(page, @"\son[a-z]+=", System.Text.RegularExpressions.RegexOptions.IgnoreCase) && !page.Contains("http://", StringComparison.OrdinalIgnoreCase) && !page.Contains("https://", StringComparison.OrdinalIgnoreCase),
+            "embedded: the page has no inline script, style or handler and names no external address");
+        List<string> referenced = [.. System.Text.RegularExpressions.Regex.Matches(page, "(?:src|href)=\"(/admin/[^\"]+)\"").Select(match => match.Groups[1].Value)];
+        bool allThere = referenced.Count >= 2;
+        foreach (string path in referenced)
+        {
+            (int fileStatus, string fileBody, _) = await e.GetAsync(path);
+            allThere &= fileStatus == 200 && fileBody.Length > 0;
+            if (path.EndsWith(".css", StringComparison.Ordinal))
+            {
+                allThere &= !fileBody.Contains("@import", StringComparison.Ordinal) && !System.Text.RegularExpressions.Regex.IsMatch(fileBody, @"url\(\s*['""]?(https?:)?//", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            }
+        }
+
+        check(allThere, "embedded: the script and stylesheet the page names are embedded, and the stylesheet loads nothing from elsewhere (" + referenced.Count + " files)");
+        (_, string embeddedVersion, _) = await e.GetAsync("/admin/version.json");
+        check(real.FrontendVersion == AdminService.Version && embeddedVersion.Contains(AdminService.Version, StringComparison.Ordinal), "embedded: the frontend was built with the backend's version (" + AdminService.Version + ")");
+        (_, string statusBody, _) = await e.GetAsync("/api/v1/status");
+        check(statusBody.Contains("\"version\":\"" + AdminService.Version + "\"", StringComparison.Ordinal), "embedded: /api/v1/status reports the same version as the embedded frontend");
     }
 
     // ---- the OpenAPI document ----

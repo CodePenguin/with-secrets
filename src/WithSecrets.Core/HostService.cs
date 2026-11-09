@@ -93,6 +93,9 @@ public sealed class HostServiceOptions
     /// <summary>The passkey administration of the admin app (add and remove a passkey). Default: the enrollment pages over this user's state.</summary>
     public Func<IPasskeyAdmin>? PasskeyAdminFactory { get; init; }
 
+    /// <summary>For tests: the files of the administration web application (default: the ones embedded in this assembly).</summary>
+    internal AdminWebAssets? WebAssets { get; init; }
+
     /// <summary>A request whose body has not fully arrived by then is answered 408.</summary>
     public TimeSpan BodyTimeout { get; init; } = TimeSpan.FromSeconds(15);
 
@@ -129,6 +132,7 @@ public sealed class HostService : IDisposable
 
     private readonly HostServiceOptions _options;
     private readonly WebApplication _app;
+    private readonly AdminWebAssets _web;
     private readonly Dictionary<string, CancellationTokenSource> _active = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTimeOffset> _seen = new(StringComparer.Ordinal);
     private readonly Lock _lock = new();
@@ -145,6 +149,7 @@ public sealed class HostService : IDisposable
     private HostService(HostServiceOptions options, WebApplication app, int port)
     {
         _options = options;
+        _web = options.WebAssets ?? AdminWebAssets.FromAssembly();
         _app = app;
         Port = port;
         // The authority believes a grant only when a person's passkey assertion backs it: it checks those against the keys of the signed manifest.
@@ -358,10 +363,11 @@ public sealed class HostService : IDisposable
             return;
         }
 
-        // The administration web application (the SPA) is not part of this build yet: its address answers a JSON 404 that says where the API is, never an HTML page.
-        if (path == "/admin" || path.StartsWith("/admin/", StringComparison.Ordinal))
+        // The administration web application (the single-page application) under /admin: its built files from this assembly, the page for an application route, never for /api.
+        // Built without the frontend, its address answers a JSON 404 that says where the API is.
+        if (AdminWebAssets.IsApplicationPath(path))
         {
-            await Admin.Api.NotBuiltAsync(context);
+            await _web.ServeAsync(context, Admin.Api.NotBuiltAsync);
 
             return;
         }
@@ -639,7 +645,7 @@ public sealed class HostService : IDisposable
     }
 
     /// <summary>The locked refusal of a run: one clear line naming where to unlock (public; nothing secret).</summary>
-    public string LockedRefusal => "the authority is locked, so nothing was asked or run. Unlock it at the authority: " + Admin.PageUrl + " (a passkey tap)";
+    public string LockedRefusal => "the authority is locked, so nothing was asked or run. Unlock it in the administration web app: " + Admin.PageUrl + " (one passkey tap; no sign-in is needed to unlock)";
 
     private async Task Launch(HttpContext context, bool approve)
     {

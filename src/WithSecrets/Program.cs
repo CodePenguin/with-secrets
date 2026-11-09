@@ -23,6 +23,12 @@ internal static class Program
 
     private static async Task<int> Execute(string[] args)
     {
+        // The release check on the published program (see SelfCheck): a throwaway service, software keys, no user state.
+        if (args is ["--self-check"])
+        {
+            return await SelfCheck.RunAsync(Console.Out);
+        }
+
         CliCommand? command = CliArgs.Parse(args, out string error);
         if (command is null)
         {

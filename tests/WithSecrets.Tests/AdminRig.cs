@@ -56,9 +56,11 @@ internal sealed class AdminApp : IDisposable
     private readonly Func<Action<string>, IAdminAsker> _askers;
     private readonly IPasskeyAdmin? _passkeys;
     private readonly IUnlockProtection? _protection;
+    private readonly AdminWebAssets? _web;
 
-    public AdminApp(string root, bool trusted = true, bool unlocked = true, int askSeconds = 4, FakePasskeys? passkeys = null, bool protection = false)
+    public AdminApp(string root, bool trusted = true, bool unlocked = true, int askSeconds = 4, FakePasskeys? passkeys = null, bool protection = false, AdminWebAssets? web = null)
     {
+        _web = web;
         Clock = new AppClock();
         Machine = new TestMachine(Path.Combine(root, "app-" + Guid.NewGuid().ToString("N")[..8]), trusted, clock: Clock);
         if (!trusted)
@@ -154,6 +156,7 @@ internal sealed class AdminApp : IDisposable
             UnlockProtection = _protection,
             AdminAskerFactory = _askers,
             PasskeyAdminFactory = _passkeys is null ? null : () => _passkeys,
+            WebAssets = _web,
         });
     }
 

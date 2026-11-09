@@ -27,8 +27,8 @@ public static class ServiceStartup
         }
 
         lines.Add(locked
-            ? "with-secrets service: the authority is LOCKED; runs are refused until an administrator unlocks it. Unlock at: " + adminPageUrl
-            : "with-secrets service: the authority is unlocked. Admin page: " + adminPageUrl);
+            ? "with-secrets service: the authority is LOCKED; runs are refused until an administrator unlocks it. Unlock it in the administration web app (one passkey tap, no sign-in needed): " + adminPageUrl
+            : "with-secrets service: the authority is unlocked. Administration web app: " + adminPageUrl);
 
         return lines;
     }

@@ -176,6 +176,8 @@ public static class CliArgs
 
         --debug (with any command, before --) shows diagnostic lines on the terminal (connections, requests, proof sizes and verdicts) and writes them to the log file; WITH_SECRETS_DEBUG=1 does the same for every call. Normally the terminal shows none of them. Warnings and errors always go to the log file, %USERPROFILE%\.with-secrets\logs\with-secrets-YYYYMMDD.log (1 MB per file, 7 files kept). The log holds route words, sizes, seconds and error type names, never a value, a code, a key or a link.
 
+        --self-check (alone) is the release check: it starts a throwaway service (software keys, a temporary folder, a free loopback port; no user state, no Windows key), asks it for the administration web app and the API, and prints one JSON line with the backend version, the frontend version and the embedded files. Exit code 0 only when the web app is embedded, served from the one origin, and its version is the backend's.
+
         --audit prints the admin keys' fingerprints, then the newest audit entries (default 20; --last N, 1 to 1000; --secret NAME for one secret): time, event,
         secret names, program, outcome and key name. Never values. --verify also checks the hash chain (exit 4 if broken).
         """;

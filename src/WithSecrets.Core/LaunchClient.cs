@@ -36,7 +36,7 @@ public static class LaunchClient
     /// <summary>Exit code: what answers on the service port is not this machine's host service, or no identity is pinned yet (nothing was sent).</summary>
     public const int ServiceNotAuthenticated = 7;
 
-    /// <summary>Exit code: the authority is locked (nothing was asked or run). Unlock it at the authority's admin page, whose link the line names.</summary>
+    /// <summary>Exit code: the authority is locked (nothing was asked or run). Unlock it in the administration web app, whose link the line names.</summary>
     public const int AuthorityLocked = 8;
 
     /// <summary>How long the service has to answer the identity check.</summary>
