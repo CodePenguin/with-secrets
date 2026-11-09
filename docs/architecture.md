@@ -1217,6 +1217,8 @@ The web application is a human interface, not an authority or execution boundary
 - Include automated accessibility tests and manual keyboard/screen-reader checks.
 - Verify the published Windows artifact is one self-contained EXE with matching frontend/backend versions and no runtime frontend dependencies.
 
+**Current implementation (Phase 6b-2).** The SPA is `src/WithSecrets.Admin.Web` (feature folders status, machines, grants, audit, settings, passkeys; CSS Modules over custom properties; TanStack Query; React Router with basename `/admin`). The TypeScript types are generated from `docs/api/openapi.json` (`npm run api:generate`; `api:check` fails a build when they are stale). The session is read-only: the anti-forgery value from `GET /session` is held in memory and sent as `X-Admin-Token`; nothing is kept in `localStorage` or `sessionStorage`. Each mutation opens one dialog that shows the operation and its parameters, asks the service for an authorization, offers the one-use passkey page as a link (new tab, `noopener`), polls until verified, then performs the mutation carrying the authorization id. The dialog shows the parameters the service returned (what the passkey signs) and refuses to continue if the operation differs. The exe serves the embedded files at `/admin` (`AdminWebAssets`): an extension-less path gets `index.html`, a path with an extension is served only if it exists, GET and HEAD only, `/api` is never a fallback target, and every answer carries a CSP without inline script or style (`default-src 'none'; script-src 'self'; ...; frame-ancestors 'none'`), `nosniff`, `no-store` and no referrer. Not applicable (no such resources): provider, mount and write-only credential screens. Accessibility: automated axe-core checks run in the component tests and in the browser scenarios (viewports to 320 px, dark scheme, reduced motion, keyboard path); the manual keyboard and screen-reader checklist is in `IMPLEMENTATION_PROGRESS.md` for the maintainer.
+
 ## 11. Where is it in the code
 
 | Concept | File (`src/WithSecrets.Core` unless noted) |
@@ -1245,6 +1247,11 @@ The web application is a human interface, not an authority or execution boundary
 | Authority lock, unattended-unlock policy and platform protection (`IUnlockProtection`, DPAPI) | `Authority/AuthorityLock.cs` |
 | Sensitive administrator operations (`AdminAuthorizer`, `VerifiedAdmin`) and the authority settings | `Authority/AdminAuthorization.cs`, `Authority/AuthorityStore.Settings.cs` |
 | Admin API (`/api/v1`): sessions, operations as plans, views, HTTP side; `with-secrets admin` (link and status) | `Authority/AdminSessions.cs`, `Authority/AdminService.cs`, `Authority/AdminService.Plans.cs`, `Authority/AdminViews.cs`, `Authority/AdminService.Authorizations.cs`, `Authority/Api/AdminApi*.cs`, `Authority/Api/ApiSchema.cs`, `Authority/AdminAppCommand.cs`, `HostService.cs` |
+| Administration web app (React, TypeScript, Vite; generated API client; per-operation authorization dialog) | `src/WithSecrets.Admin.Web/` (`src/api`, `src/features/*`, `src/components`) |
+| Embedded web app assets, SPA fallback for application routes, strict CSP | `Authority/AdminWebAssets.cs` |
+| Build integration (Node check, `npm ci`, `npm run build`, embed `dist` as `admin-web/*`) | `WithSecrets.Core.csproj` (targets `AdminWeb*`) |
+| `with-secrets --self-check` (versions, embedded files, from a throwaway service) | `SelfCheck.cs` |
+| Single-EXE publish and its verification | `scripts/publish-win-x64.ps1`, `scripts/verify-publish.ps1` |
 | Final launch commit against invalidation | `LaunchGate.cs` |
 | CLI client of a run (reads `.env`, sends the request, prints events, exit code 6 without a service) | `LaunchClient.cs` |
 | Launch events (NDJSON: approval, output, result) | `LaunchEvents.cs` |

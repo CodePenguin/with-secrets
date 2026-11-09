@@ -378,6 +378,35 @@ Maintainer decisions followed: `with-secrets admin` has no verbs (it checks the 
 - Mutation evidence: see `task-p6b1-report.md`.
 - Not applicable, recorded: provider/mount/credential endpoint (no such resources in the app; item 5 stays open for a later phase), grant creation and passkey replace (not app operations), cookie lifetime (session cookie, no Max-Age).
 
+## Phase 6b-2: administration SPA and single-EXE packaging (done, pending review)
+
+- SPA in `src/WithSecrets.Admin.Web` (React 19, TypeScript strict, Vite, CSS Modules, TanStack Query, React Router). API client types generated from `docs/api/openapi.json` with a stale check (`npm run api:check`, part of `npm run build` and `verify`).
+- Security UX: read-only session, `X-Admin-Token` in memory only, no browser storage, one fresh passkey authorization dialog per mutation naming the operation and the parameters the service will sign, passkey page opened in a new tab (`noopener`, loopback http only), strict CSP.
+- Hosting: assets embedded as `admin-web/*` (`Authority/AdminWebAssets.cs`); SPA fallback for extension-less paths under `/admin` only; `/api` never falls back; the old 404 `not-built` remains only when no assets are embedded.
+- Build: MSBuild targets in `WithSecrets.Core.csproj`; plain `dotnet build` stays at 0 warnings with or without Node (`AdminWebRequired=true` makes Node mandatory; the publish script sets it). Choice: Node is a build prerequisite for the app, not for running it.
+- Version: `Version 0.1.0` moved to `Directory.Build.props` and is passed to the frontend as `WS_VERSION`; `--self-check` exists because the real service cannot be relocated by environment (.NET ignores `USERPROFILE` for the profile folder), so a throwaway software-key service is started.
+- Publish: `scripts/publish-win-x64.ps1` then `scripts/verify-publish.ps1`. Result: OK, one file `with-secrets.exe` (108.6 MB), 4 embedded frontend files, backend 0.1.0 = frontend 0.1.0, app and API from one origin.
+- Tests: vitest and testing-library (39), axe-core in jsdom (contrast disabled there) and in the real browser; E2E i1 to i7 and j1 drive the SPA (sign-in, approve with a fresh tap, grant revoke, audit search, lock and unlock, settings, refusal without authorization, accessibility); the old API-driven i1 to i4 browser scenarios are replaced, the API tests (suite `Api`) are kept.
+- Mutation evidence: see `task-p6b2-report.md`.
+- Not applicable, recorded: providers, mounts, write-only credential screens (no such resources; item 5 of the 6b-1 gap list stays open).
+- Pinned: TypeScript 5.9 and eslint 9 (peer dependency limits of the lint plugins). `npm audit` reports moderate findings in dev tooling only; nothing from them ships.
+
+### Manual keyboard and screen-reader checklist (maintainer-owned, not yet done)
+
+Run against the published exe with a screen reader (NVDA or Narrator) and keyboard only, light and dark scheme, 200% and 400% zoom.
+
+- [ ] Skip link is the first Tab stop and moves focus to the main content.
+- [ ] Each navigation changes the page title, moves focus to the page heading and the heading is announced.
+- [ ] Main navigation announces the current page; every link and button has a clear name.
+- [ ] Sign in: the page announces what happens; after the tap in the other tab the Overview is announced.
+- [ ] Operation dialog: opens with focus inside, Tab and Shift+Tab stay inside, Escape closes, focus returns to the button that opened it, each step change is announced.
+- [ ] The review step reads the operation and every parameter in order; the waiting step says a tap is needed and where.
+- [ ] Errors (refused, expired, network) are announced and keep the form values.
+- [ ] Tables and lists (machines, grants, audit) are navigable by row and header; status is conveyed by words, not colour only.
+- [ ] Audit search: the result count is announced after searching.
+- [ ] 400% zoom and 320 px width: no loss of content or two-direction scrolling; targets at least 44 px.
+- [ ] Reduced motion and forced colors (high contrast) remain usable.
+
 ### Gap list after 6b-1 (against architecture 10.5)
 
 1. JSON API and OpenAPI: DONE (TypeScript client generation remains for 6b-2).
