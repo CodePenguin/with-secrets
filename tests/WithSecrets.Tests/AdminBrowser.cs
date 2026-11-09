@@ -11,15 +11,23 @@ namespace WithSecrets.Tests;
 internal sealed record Tapped(int PostStatus, string? Link, string? Error, int ApproveStatus, string PageUrl, string ProofBody, string Page = "", string? AuthorizationId = null, int MutationStatus = 0, string MutationBody = "");
 
 /// <summary>
-/// A browser, for tests of the administration API: it keeps cookies, reads the anti-forgery value from <c>GET /api/v1/session</c> and sends it back, sends the Origin a page sends, and acts as the
-/// person on the passkey pages with a software authenticator. Each of those can be left out or changed to test the refusals.
+/// A browser, for tests of the administration API: it keeps cookies, keeps (as the page does, in memory) the secret that <c>POST /api/v1/browser</c> gives before a session and the one that
+/// <c>POST /api/v1/session/claim</c> gives for the session, sends the right one as the header, sends the Origin a page sends, and acts as the person on the passkey pages with a software authenticator.
+/// Each of those can be left out or changed to test the refusals.
 /// </summary>
 internal sealed class AdminBrowser(HostService service, HttpClient http)
 {
     private readonly Dictionary<string, string> _cookies = new(StringComparer.Ordinal);
     private readonly HttpClient _web = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false, UseCookies = false }) { Timeout = TimeSpan.FromSeconds(60) };
 
-    public string? Csrf { get; private set; }
+    /// <summary>The secret given once with the browser's pre-session cookie (<c>POST /browser</c>).</summary>
+    public string? BrowserToken { get; set; }
+
+    /// <summary>The session's own secret, given once by <c>POST /session/claim</c>.</summary>
+    public string? SessionToken { get; set; }
+
+    /// <summary>What the page sends as X-Admin-Token: the session's secret while it has one, else the browser's.</summary>
+    public string? Csrf => SessionToken ?? BrowserToken;
 
     public string Base => "http://127.0.0.1:" + service.Port;
 
@@ -72,12 +80,17 @@ internal sealed class AdminBrowser(HostService service, HttpClient http)
         LastHeaders = string.Join("\n", response.Headers.Select(header => header.Key + ": " + string.Join(",", header.Value)).Concat(response.Content.Headers.Select(header => header.Key + ": " + string.Join(",", header.Value))));
     }
 
-    public async Task<(int Status, string Html, HttpResponseMessage Response)> GetAsync(string path, string? origin = null, bool withCookies = true, string? host = null)
+    public async Task<(int Status, string Html, HttpResponseMessage Response)> GetAsync(string path, string? origin = null, bool withCookies = true, string? host = null, string? token = "page")
     {
         using HttpRequestMessage request = new(HttpMethod.Get, Base + path);
         if (origin is not null)
         {
             request.Headers.Add("Origin", origin);
+        }
+
+        if ((token == "page" ? Csrf : token) is { } header)
+        {
+            request.Headers.Add(AdminApi.TokenHeader, header);
         }
 
         if (host is not null)
@@ -96,7 +109,11 @@ internal sealed class AdminBrowser(HostService service, HttpClient http)
         if (path == "/api/v1/session" && response.IsSuccessStatusCode)
         {
             using JsonDocument session = JsonDocument.Parse(body);
-            Csrf = session.RootElement.GetProperty("antiForgery").GetString();
+            if (!session.RootElement.GetProperty("authenticated").GetBoolean())
+            {
+                // The page learns it is signed out and drops the session's secret.
+                SessionToken = null;
+            }
         }
 
         Seen.Add(LastHeaders + "\n" + body);
@@ -183,8 +200,43 @@ internal sealed class AdminBrowser(HostService service, HttpClient http)
         return (new HttpMethod(route.Method), path, JsonSerializer.Serialize(body));
     }
 
-    /// <summary>Loads the session resource (cookies and the anti-forgery value).</summary>
-    public async Task<string> LoadAsync(string path = "/api/v1/session") => (await GetAsync(path)).Html;
+    /// <summary>What the page does on load: reads the session resource (and drops the session's secret when it is signed out) and makes the browser's identity when it has none.</summary>
+    public async Task<string> LoadAsync(string path = "/api/v1/session")
+    {
+        string html = (await GetAsync(path)).Html;
+        if (!_cookies.ContainsKey(AdminSessions.BrowserCookie) || BrowserToken is null)
+        {
+            await StartBrowserAsync();
+        }
+
+        return html;
+    }
+
+    /// <summary>Makes the browser's identity: the cookie, and the secret (kept here, as the page keeps it in memory) that is given once.</summary>
+    public async Task<string> StartBrowserAsync()
+    {
+        (int status, string body) = await SendAsync(HttpMethod.Post, "/api/v1/browser", "{}", token: null);
+        if (status == 201)
+        {
+            using JsonDocument doc = JsonDocument.Parse(body);
+            BrowserToken = doc.RootElement.GetProperty("antiForgery").GetString();
+        }
+
+        return body;
+    }
+
+    /// <summary>Asks the service to claim the session of the sign-in this browser began; keeps the session's secret when it was given.</summary>
+    public async Task<(int Status, string Body)> ClaimAsync()
+    {
+        (int status, string body) = await PostAsync("/api/v1/session/claim", "{}");
+        if (status == 201)
+        {
+            using JsonDocument doc = JsonDocument.Parse(body);
+            SessionToken = doc.RootElement.GetProperty("antiForgery").GetString();
+        }
+
+        return (status, body);
+    }
 
     private async Task<Tapped> Tap(int status, string body, TestAuthenticator? signer, bool userVerified, Func<byte[], byte[]>? change)
     {
@@ -263,21 +315,42 @@ internal sealed class AdminBrowser(HostService service, HttpClient http)
 
     public Task<Tapped> OpAsyncWithoutMutation(string op, TestAuthenticator? signer, params (string Name, string Value)[] args) => OpAsyncWithoutMutation(op, signer, true, args);
 
-    /// <summary>The sign-in: the login request, one tap on its page, and the browser's return to the app, which claims the session. True when a session started.</summary>
+    /// <summary>The sign-in: the login request, one tap on its page, and the page's return, which asks until the login is ready and claims the session. True when a session started.</summary>
     public async Task<bool> SignInAsync(TestAuthenticator signer, bool userVerified = true, Func<byte[], byte[]>? change = null)
     {
-        await LoadAsync();
-        (int status, string body) = await PostAsync("/api/v1/session", "{}");
-        Tapped tapped = await Tap(status, body, signer, userVerified, change);
+        Tapped tapped = await StartSignInAsync(signer, userVerified, change);
         if (tapped.ApproveStatus != 200)
         {
             return false;
         }
 
-        await Task.Delay(150);
-        await LoadAsync();
+        return await FinishSignInAsync();
+    }
 
-        return HasSession;
+    /// <summary>The first half of a sign-in: the login request and, with a signer, the tap. Without a signer only the login is asked for (the passkey page waits).</summary>
+    public async Task<Tapped> StartSignInAsync(TestAuthenticator? signer = null, bool userVerified = true, Func<byte[], byte[]>? change = null)
+    {
+        await LoadAsync();
+        (int status, string body) = await PostAsync("/api/v1/session", "{}");
+
+        return await Tap(status, body, signer, userVerified, change);
+    }
+
+    /// <summary>The second half of a sign-in: asks the session resource until the login is ready (the service verifies the tap a moment after the page says Approved), then claims the session.</summary>
+    public async Task<bool> FinishSignInAsync()
+    {
+        for (int i = 0; i < 40; i++)
+        {
+            (_, string state, _) = await GetAsync("/api/v1/session");
+            if (state.Contains("\"ready\"", StringComparison.Ordinal) || state.Contains("\"failed\"", StringComparison.Ordinal))
+            {
+                break;
+            }
+        }
+
+        (int claimed, _) = await ClaimAsync();
+
+        return claimed == 201 && HasSession;
     }
 
     /// <summary>The text of a passkey page (what the person reads, and the passkey signs), decoded.</summary>

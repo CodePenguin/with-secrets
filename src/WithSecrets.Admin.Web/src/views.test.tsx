@@ -1,6 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
+import { setBrowserSecret } from './api/client'
 import { authorization, installFakeApi, machine, problem, session, signedIn, status, violations } from './test/fakeApi'
 import { renderApp } from './test/render'
 
@@ -81,13 +82,21 @@ describe('sign-in', () => {
     const user = userEvent.setup()
     let tapped = false
     let started = false
+    let claimed = false
+    setBrowserSecret(null)
     const fake = installFakeApi({
       'GET /api/v1/status': { body: status() },
-      'GET /api/v1/session': () => ({ body: tapped ? session() : started ? { ...signedOut(), login: { state: 'waiting', problem: null } } : signedOut() }),
+      'GET /api/v1/session': () => ({ body: claimed ? session() : tapped ? { ...signedOut(), login: { state: 'ready', problem: null } } : started ? { ...signedOut(), login: { state: 'waiting', problem: null } } : signedOut() }),
+      'POST /api/v1/browser': { status: 201, body: { antiForgery: 'browser-secret-1' } },
       'POST /api/v1/session': () => {
         started = true
 
         return { status: 202, body: { link: 'http://localhost:54321/login-page-token' } }
+      },
+      'POST /api/v1/session/claim': () => {
+        claimed = true
+
+        return { status: 201, body: { antiForgery: 'session-secret-1', session: session() } }
       },
       'GET /api/v1/machines': { body: { items: [machine({ status: 'trusted', actions: ['rename'] })] } },
       'GET /api/v1/grants': { body: { items: [] } },
@@ -96,11 +105,14 @@ describe('sign-in', () => {
     await user.click(await screen.findByRole('button', { name: 'Sign in' }))
     const open = await screen.findByRole('link', { name: /open the passkey page/i })
     expect(open).toHaveAttribute('href', 'http://localhost:54321/login-page-token')
-    expect(fake.calls.find((call) => call.method === 'POST')?.headers['X-Admin-Token']).toBe('csrf-token-1')
+    expect(fake.calls.find((call) => call.method === 'POST' && call.path === '/api/v1/session')?.headers['X-Admin-Token']).toBe('browser-secret-1')
     tapped = true
 
     expect(await screen.findByRole('heading', { level: 1, name: 'Machines' }, { timeout: 4000 })).toBeInTheDocument()
     expect(await screen.findByRole('heading', { name: 'build-host' })).toBeInTheDocument()
+    // The claim is a POST made by the page (the read of the session claims nothing), and from then on every request carries the session's own secret.
+    expect(fake.calls.some((call) => call.method === 'POST' && call.path === '/api/v1/session/claim')).toBe(true)
+    expect(fake.calls.filter((call) => call.path === '/api/v1/machines').every((call) => call.headers['X-Admin-Token'] === 'session-secret-1')).toBe(true)
   })
 
   it('does not accept a link that is not on this machine', async () => {
@@ -108,6 +120,7 @@ describe('sign-in', () => {
     installFakeApi({
       'GET /api/v1/status': { body: status() },
       'GET /api/v1/session': { body: signedOut() },
+      'POST /api/v1/browser': { status: 201, body: { antiForgery: 'browser-secret-1' } },
       'POST /api/v1/session': { status: 202, body: { link: 'https://evil.example/login' } },
     })
     renderApp('/')
@@ -131,7 +144,7 @@ describe('sign-in', () => {
     await user.click(await screen.findByRole('button', { name: 'Sign out' }))
 
     expect(await screen.findByRole('heading', { level: 1, name: 'Sign in' })).toBeInTheDocument()
-    expect(fake.calls.find((call) => call.method === 'DELETE')?.headers['X-Admin-Token']).toBe('csrf-token-1')
+    expect(fake.calls.find((call) => call.method === 'DELETE')?.headers['X-Admin-Token']).toBe('session-secret-1')
   })
 
   it('shows the sign-in when a view answers 401 (the session ended)', async () => {

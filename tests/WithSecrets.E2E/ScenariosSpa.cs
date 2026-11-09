@@ -35,7 +35,8 @@ internal static class ScenariosSpa
         await Spa.Axe(c, s, "overview");
 
         s.Check(!(await c.Page.EvaluateAsync<string>("() => document.cookie")).Contains(AdminSessions.SessionCookie, StringComparison.Ordinal), "script cannot read the session cookie (HttpOnly)");
-        s.Check(await c.Page.EvaluateAsync<bool>("() => localStorage.length === 0 && sessionStorage.length === 0"), "nothing is kept in localStorage or sessionStorage");
+        s.Check(await c.Page.EvaluateAsync<bool>("() => localStorage.length === 0 && Object.keys(sessionStorage).every((key) => key === 'ws.session-secret' || key === 'ws.browser-secret')"), "nothing is kept in localStorage, and sessionStorage holds only the two secrets the service gave once");
+        s.Check(!(await c.Page.ContentAsync()).Contains((await c.Page.EvaluateAsync<string>("() => sessionStorage.getItem('ws.session-secret') ?? ''")), StringComparison.Ordinal), "the secret is in no page text");
         IReadOnlyList<BrowserContextCookiesResult> cookies = await c.Context.CookiesAsync();
         BrowserContextCookiesResult? session = cookies.FirstOrDefault(cookie => cookie.Name == AdminSessions.SessionCookie);
         s.Check(session is { HttpOnly: true, Path: "/api/v1", SameSite: SameSiteAttribute.Strict }, "the session cookie is HttpOnly, SameSite=Strict and scoped to /api/v1");
@@ -363,15 +364,15 @@ internal static class ScenariosSpa
         await dialog.WaitForAsync(new() { State = WaitForSelectorState.Detached });
         s.Check(store.Find(fp)!.Status == MachineStatus.Pending && !mutations.Any(item => item.Contains("/approve", StringComparison.Ordinal)), "cancelling changes nothing");
 
-        // At the server: a script in the page (as a compromised page would) with the session, the anti-forgery value and the right Origin, but no tap.
+        // At the server: a script in the page (as a compromised page would) with the session, its secret and the right Origin, but no tap.
         c.Ignore("403");
         c.Ignore("400");
         c.Ignore("Content Security Policy");
         string result = await c.Page.EvaluateAsync<string>("""
             async (fingerprint) => {
-              const who = await (await fetch('/api/v1/session')).json();
+              const secret = sessionStorage.getItem('ws.session-secret');
               const send = async (path, body) => {
-                const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Token': who.antiForgery }, body: JSON.stringify(body) });
+                const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Token': secret }, body: JSON.stringify(body) });
                 const j = await r.json();
                 return r.status + ' ' + j.code;
               };

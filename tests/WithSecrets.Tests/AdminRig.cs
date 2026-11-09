@@ -17,7 +17,7 @@ internal sealed class FakePasskeys : IPasskeyAdmin
 
     public IReadOnlyList<EnrolledEntry> List() => [];
 
-    public ApprovalDecision Enroll(Action<string> announce)
+    public ApprovalDecision Enroll(Action<string> announce, Func<string?> stopReason)
     {
         Calls.Add("enroll");
         announce("open http://127.0.0.1:1/enroll-page to add the passkey");
@@ -25,13 +25,43 @@ internal sealed class FakePasskeys : IPasskeyAdmin
         return ApprovalDecision.Allow("passkey added");
     }
 
-    public ApprovalDecision Unenroll(string name, Action<string> announce)
+    public ApprovalDecision Unenroll(string name, Action<string> announce, Func<string?> stopReason)
     {
         Calls.Add("unenroll " + name);
         announce("open http://127.0.0.1:1/unenroll-page to remove the passkey");
 
         return ApprovalDecision.Allow("passkey removed");
     }
+}
+
+/// <summary>A passkey administration whose pages wait until the service says the change must stop (the request was cancelled, the authority locked), as real pages wait for their taps.</summary>
+internal sealed class StoppablePasskeys : IPasskeyAdmin
+{
+    private readonly TaskCompletionSource<string> _stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public Task<string> Stopped => _stopped.Task;
+
+    public IReadOnlyList<EnrolledEntry> List() => [];
+
+    public ApprovalDecision Enroll(Action<string> announce, Func<string?> stopReason)
+    {
+        announce("open http://127.0.0.1:1/enroll-page to add the passkey");
+        for (int i = 0; i < 300; i++)
+        {
+            if (stopReason() is { } reason)
+            {
+                _stopped.TrySetResult(reason);
+
+                return ApprovalDecision.Deny("nothing was changed: " + reason);
+            }
+
+            Thread.Sleep(20);
+        }
+
+        return ApprovalDecision.Allow("passkey added");
+    }
+
+    public ApprovalDecision Unenroll(string name, Action<string> announce, Func<string?> stopReason) => Enroll(announce, stopReason);
 }
 
 /// <summary>Reversible protection for the unattended-unlock tests.</summary>
@@ -58,7 +88,7 @@ internal sealed class AdminApp : IDisposable
     private readonly IUnlockProtection? _protection;
     private readonly AdminWebAssets? _web;
 
-    public AdminApp(string root, bool trusted = true, bool unlocked = true, int askSeconds = 4, FakePasskeys? passkeys = null, bool protection = false, AdminWebAssets? web = null)
+    public AdminApp(string root, bool trusted = true, bool unlocked = true, int askSeconds = 4, IPasskeyAdmin? passkeys = null, bool protection = false, AdminWebAssets? web = null)
     {
         _web = web;
         Clock = new AppClock();

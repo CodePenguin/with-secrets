@@ -10,7 +10,11 @@ public sealed record StatusDto(bool Running, bool Locked, string UnlockMode, str
 
 public sealed record LoginDto(string State, string? Problem);
 
-public sealed record SessionDto(bool Authenticated, string? Admin, DateTimeOffset? Started, DateTimeOffset? IdleExpires, DateTimeOffset? AbsoluteExpires, string AntiForgery, LoginDto? Login, IReadOnlyList<string> Recent);
+public sealed record SessionDto(bool Authenticated, string? Admin, DateTimeOffset? Started, DateTimeOffset? IdleExpires, DateTimeOffset? AbsoluteExpires, LoginDto? Login, IReadOnlyList<string> Recent);
+
+public sealed record BrowserDto(string AntiForgery);
+
+public sealed record ClaimDto(string AntiForgery, SessionDto Session);
 
 public sealed record MachineDto(string Fingerprint, string Display, string Status, int Revision, string HostName, string? PendingHostName, string? FriendlyName, DateTimeOffset Created, DateTimeOffset Updated, bool ThisMachine, IReadOnlyList<string> Actions);
 

@@ -62,7 +62,7 @@ describe('an administrative change', () => {
 
     await waitFor(() => expect(fake.count(approvePath)).toBe(1))
     expect(fake.calls.find((call) => call.path.endsWith('/approve'))?.body).toEqual({ authorization: 'auth-id-0001', name: 'ci box' })
-    expect(fake.calls.find((call) => call.path.endsWith('/approve'))?.headers['X-Admin-Token']).toBe('csrf-token-1')
+    expect(fake.calls.find((call) => call.path.endsWith('/approve'))?.headers['X-Admin-Token']).toBe('session-secret-1')
     expect(await within(dialog).findByText(/Approve machine ab12 cd34 ef56 ab12 as "ci box"\./)).toBeInTheDocument()
     expect(within(dialog).getByRole('button', { name: 'Close' })).toBeInTheDocument()
   })

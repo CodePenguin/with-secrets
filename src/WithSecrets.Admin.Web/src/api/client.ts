@@ -2,8 +2,10 @@ import type { paths } from './schema'
 
 /**
  * The thin typed fetch wrapper over the generated types (schema.ts). It knows nothing about screens.
- * - Same origin only (relative URLs), cookies of this origin only, nothing is stored in the browser.
- * - The anti-forgery value of GET /session is kept in memory and sent as X-Admin-Token on every request that is not a GET.
+ * - Same origin only (relative URLs), cookies of this origin only.
+ * - A session is its cookie AND a secret that the service gives once (POST /session/claim; before a session POST /browser gives the browser's). The cookie is sent to every localhost port by the browser, the
+ *   secret is not: it is kept in this tab's sessionStorage (per origin, so per port; gone when the tab closes; never localStorage) so that a reload stays signed in, and is sent as X-Admin-Token on every
+ *   request, reads included. The service never gives it a second time. It is the only thing the application keeps in browser storage.
  * - Every refusal becomes an ApiError that carries only what the problem document says (a safe sentence and a code).
  */
 
@@ -40,14 +42,60 @@ export class ApiError extends Error {
   }
 }
 
-let antiForgery: string | null = null
+const BROWSER_PATH = '/api/v1/browser'
 
-export function setAntiForgery(value: string | null): void {
-  antiForgery = value
+const SESSION_KEY = 'ws.session-secret'
+const BROWSER_KEY = 'ws.browser-secret'
+
+function read(key: string): string | null {
+  try {
+    // eslint-disable-next-line no-restricted-globals -- the one place the application uses browser storage: the two secrets, for this tab only
+    return sessionStorage.getItem(key)
+  } catch {
+    return null
+  }
 }
 
-export function getAntiForgery(): string | null {
-  return antiForgery
+function write(key: string, value: string | null): void {
+  try {
+    // eslint-disable-next-line no-restricted-globals -- see read()
+    if (value === null) sessionStorage.removeItem(key)
+    // eslint-disable-next-line no-restricted-globals -- see read()
+    else sessionStorage.setItem(key, value)
+  } catch {
+    // Storage is not available: the secret is then lost on reload, and the page signs in again.
+  }
+}
+
+/** The session's own secret (given once by the claim), or null. */
+export function setSessionSecret(value: string | null): void {
+  write(SESSION_KEY, value)
+}
+
+/** The browser's secret (given once by POST /browser, before a session), or null. */
+export function setBrowserSecret(value: string | null): void {
+  write(BROWSER_KEY, value)
+}
+
+/** What is sent as the header: the session's secret while there is one, else the browser's. */
+export function currentSecret(): string | null {
+  return read(SESSION_KEY) ?? read(BROWSER_KEY)
+}
+
+let making: Promise<void> | null = null
+
+/** Makes the browser's identity (its pre-session cookie) and keeps the secret that comes with it. Once at a time. */
+function ensureBrowser(): Promise<void> {
+  making ??= (async () => {
+    try {
+      const made = (await send('post', BROWSER_PATH, { body: {} })) as { antiForgery: string }
+      setBrowserSecret(made.antiForgery)
+    } finally {
+      making = null
+    }
+  })()
+
+  return making
 }
 
 const MAX_DETAIL = 400
@@ -71,14 +119,17 @@ function search(query: Record<string, unknown> | undefined): string {
   return text ? '?' + text : ''
 }
 
-async function send(method: Method, template: string, init: { path?: unknown; query?: unknown; body?: unknown; signal?: AbortSignal }): Promise<unknown> {
+async function send(method: Method, template: string, init: { path?: unknown; query?: unknown; body?: unknown; signal?: AbortSignal }, retried = false): Promise<unknown> {
   const headers: Record<string, string> = { Accept: 'application/json, application/problem+json' }
   let body: string | undefined
   if (method !== 'get') {
-    if (antiForgery) headers[ANTI_FORGERY_HEADER] = antiForgery
+    // A change needs an identity: a browser with no secret yet (a new tab) makes its own first.
+    if (template !== BROWSER_PATH && currentSecret() === null) await ensureBrowser()
     body = JSON.stringify(init.body ?? {})
     headers['Content-Type'] = 'application/json'
   }
+  const secret = currentSecret()
+  if (secret && template !== BROWSER_PATH) headers[ANTI_FORGERY_HEADER] = secret
   const url = expand(template, init.path as Record<string, unknown> | undefined) + search(init.query as Record<string, unknown> | undefined)
 
   let response: Response
@@ -100,6 +151,14 @@ async function send(method: Method, template: string, init: { path?: unknown; qu
   }
   if (!response.ok) {
     const problem = (data ?? {}) as Record<string, unknown>
+    if (method !== 'get' && template !== BROWSER_PATH && !retried && response.status === 403 && problem.code === 'anti-forgery') {
+      // The secret is not (any longer) the cookie's: forget what is kept, make the browser's identity again and try once more.
+      setSessionSecret(null)
+      setBrowserSecret(null)
+      await ensureBrowser()
+
+      return send(method, template, init, true)
+    }
     throw new ApiError(response.status, safe(problem.code, 'error'), safe(problem.title, 'The request was refused'), safe(problem.detail, 'The service refused the request.'))
   }
   if (data === null) throw new ApiError(response.status, 'unexpected-response', 'Unexpected answer', 'The service answered in a form this page does not understand.')

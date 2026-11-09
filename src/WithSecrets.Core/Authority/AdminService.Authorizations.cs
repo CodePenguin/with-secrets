@@ -34,11 +34,20 @@ public sealed partial class AdminService
     /// <summary>How long a verified authorization may wait for its mutation.</summary>
     public static readonly TimeSpan AuthorizationLifetime = TimeSpan.FromMinutes(2);
 
-    /// <summary>The most authorizations held at once (pending, verified and not yet spent).</summary>
+    /// <summary>The most authorizations held at once (pending, verified and not yet spent), Lock apart: Lock has its own room (<see cref="MaxLockAuthorizations" />) that nothing else uses up.</summary>
     public const int MaxAuthorizations = 32;
 
-    private sealed class AuthorizationRecord(string id, object owner, string operation, string argumentsKey, AdminPlan plan, DateTimeOffset created)
+    /// <summary>The most Lock authorizations a signed-in session's callers hold at once (anonymous ones have <see cref="MaxLockPages" /> and push the oldest out when full).</summary>
+    public const int MaxLockAuthorizations = 64;
+
+    /// <summary>The most of <see cref="MaxAuthorizations" /> that callers without a session (the unlock) may hold.</summary>
+    public const int MaxAnonymousAuthorizations = 16;
+
+    private sealed class AuthorizationRecord(string id, object owner, string operation, string argumentsKey, AdminPlan plan, DateTimeOffset created, int epoch)
     {
+        /// <summary>The lock count from before the plan was made: a lock since then ends this authorization.</summary>
+        public int Epoch { get; } = epoch;
+
         public string Id { get; } = id;
 
         public object Owner { get; } = owner;
@@ -140,16 +149,18 @@ public sealed partial class AdminService
     internal async Task<(AuthorizationView? View, AdminStart Start)> BeginAuthorizationAsync(object owner, string op, IReadOnlyDictionary<string, string> args, CancellationToken cancel)
     {
         bool isSession = owner is AdminSession;
+        string caller = CallerOf(owner);
+        int epoch = Volatile.Read(ref _epoch);
         if (!isSession && !NeedsNoSession(op))
         {
-            Refused(op, "no administrator session");
+            Refused(op, "no administrator session", caller);
 
             return (null, new AdminStart(null, "sign in first: this needs an administrator session", 401));
         }
 
-        if (!TakeStart(isSession ? 1 : 0))
+        if (!TakeStart((op == OpLock ? "L" : "") + caller))
         {
-            Refused(op, "too many requests");
+            Refused(op, "too many requests", caller);
 
             return (null, new AdminStart(null, "too many requests; wait a minute", 429));
         }
@@ -157,24 +168,46 @@ public sealed partial class AdminService
         AdminPlan? plan = Plan(op, args, out string? refusal, out int refusalStatus);
         if (plan is null)
         {
-            Refused(op, refusal ?? "refused");
+            Refused(op, refusal ?? "refused", caller);
 
             return (null, new AdminStart(null, refusal, refusalStatus));
         }
 
+        AfterPlanForTests?.Invoke();
+
         string id = Convert.ToBase64String(RandomNumberGenerator.GetBytes(18)).Replace('+', '-').Replace('/', '_');
-        AuthorizationRecord record = new(id, owner, op, ArgumentsKey(args), plan, _clock.GetUtcNow());
+        AuthorizationRecord record = new(id, owner, op, ArgumentsKey(args), plan, _clock.GetUtcNow(), epoch);
         lock (_authorizationGate)
         {
             SweepAuthorizations();
-            if (_authorizations.Values.Count(Active) >= MaxAuthorizations)
+            if (Volatile.Read(ref _epoch) != epoch)
             {
-                if (plan.Material is not null)
-                {
-                    CryptographicOperations.ZeroMemory(plan.Material);
-                }
+                // A lock came between planning and keeping this: it ends here, so no page is made and nothing is held.
+                Release(record);
+                Refused(op, "the authority was locked", caller);
 
-                Refused(op, "too many authorizations waiting");
+                return (null, new AdminStart(null, "the authority was locked while this was being started", 423));
+            }
+
+            List<AuthorizationRecord> active = [.. _authorizations.Values.Where(Active)];
+            if (op == OpLock && !isSession)
+            {
+                // The anonymous Lock room is full: the oldest of those ends to make room, so a new Lock request is never refused for it.
+                List<AuthorizationRecord> anonymous = [.. active.Where(item => item.Operation == OpLock && item.Owner is string).OrderBy(item => item.Created)];
+                for (int i = 0; anonymous.Count - i >= MaxLockPages; i++)
+                {
+                    anonymous[i].State = AuthorizationState.Expired;
+                    Release(anonymous[i]);
+                }
+            }
+
+            bool full = op == OpLock
+                ? isSession && active.Count(item => item.Operation == OpLock && item.Owner is AdminSession) >= MaxLockAuthorizations
+                : active.Count(item => item.Operation != OpLock) >= MaxAuthorizations || (!isSession && active.Count(item => item.Operation != OpLock && item.Owner is string) >= MaxAnonymousAuthorizations);
+            if (full)
+            {
+                Release(record);
+                Refused(op, "too many authorizations waiting", caller);
 
                 return (null, new AdminStart(null, "too many authorizations are waiting; wait for them to end", 429));
             }
@@ -186,7 +219,7 @@ public sealed partial class AdminService
         {
             lock (_authorizationGate)
             {
-                if (record.State != AuthorizationState.Pending || !_authorizations.ContainsKey(id))
+                if (record.State != AuthorizationState.Pending || !_authorizations.ContainsKey(id) || Volatile.Read(ref _epoch) != epoch)
                 {
                     return;
                 }
@@ -203,7 +236,7 @@ public sealed partial class AdminService
         }
 
         AdminPlan asked = plan with { OnRefused = reason => Complete(new AdminAuthorization(null, reason)) };
-        AdminStart started = await Run(asked, isSession, cancel, (item, asker, announce, token) =>
+        AdminStart started = await Run(asked, caller, epoch, cancel, (item, asker, announce, token) =>
         {
             AdminAuthorization result = _p.Authorizer.Authorize(asker, Heading, item.Sentence, item.Operation, item.Parameters, token);
             Complete(result);
@@ -232,7 +265,8 @@ public sealed partial class AdminService
     }
 
     private AuthorizationView View(AuthorizationRecord record) => new(record.Id, record.Operation, record.State, record.Detail, record.State == AuthorizationState.Pending ? record.Link : null,
-        AdminAuthorizer.PageText(record.Plan.Sentence, record.Plan.Operation, record.Plan.Parameters), record.Plan.Parameters, record.Created, record.Created.AddMinutes(ApprovalSettings.MaxTimeoutMinutes + 5));
+        AdminAuthorizer.PageText(record.Plan.Sentence, record.Plan.Operation, record.Plan.Parameters), record.Plan.Parameters, record.Created,
+        record.State == AuthorizationState.Verified && record.VerifiedAt is { } verified ? verified + AuthorizationLifetime : record.Created.AddMinutes(ApprovalSettings.MaxTimeoutMinutes + 5));
 
     /// <summary>The state of an authorization, for the caller it was made for; null for an unknown one or another caller's.</summary>
     internal AuthorizationView? FindAuthorization(object owner, string id)
@@ -253,6 +287,7 @@ public sealed partial class AdminService
     {
         AuthorizationRecord? record = null;
         (int Status, string Code, string Detail)? refusal = null;
+        string caller = CallerOf(owner);
         lock (_authorizationGate)
         {
             SweepAuthorizations();
@@ -282,6 +317,13 @@ public sealed partial class AdminService
                 refusal = (403, "authorization-used", "this authorization was already used");
                 record = null;
             }
+            else if (record.Epoch != Volatile.Read(ref _epoch))
+            {
+                refusal = (423, "authority-locked", "the authority was locked after this authorization was made; make a new one");
+                record.State = AuthorizationState.Consumed;
+                Release(record);
+                record = null;
+            }
             else if (record.Operation != op || record.ArgumentsKey != ArgumentsKey(args))
             {
                 refusal = (403, "authorization-mismatch", "this authorization was made for another operation or other parameters");
@@ -297,7 +339,7 @@ public sealed partial class AdminService
 
         if (refusal is { } refused)
         {
-            Refused(op, refused.Code.Replace('-', ' '));
+            Refused(op, refused.Code.Replace('-', ' '), caller);
 
             return new MutationResult(refused.Status, refused.Code, refused.Detail);
         }
@@ -308,7 +350,7 @@ public sealed partial class AdminService
         {
             if (_p.Lock.IsLocked && op != OpUnlock)
             {
-                Refused(op, "the authority is locked");
+                Refused(op, "the authority is locked", caller);
 
                 return new MutationResult(423, "authority-locked", "the authority is locked; unlock it first");
             }
@@ -316,7 +358,7 @@ public sealed partial class AdminService
             if (plan.Delegated is not null)
             {
                 // The passkey pages of the operation are its own taps (each binds its own text and checks user verification); the authorization above is what let it start.
-                AdminStart started = await Run(plan, owner is AdminSession, cancel);
+                AdminStart started = await Run(plan, caller, record.Epoch, cancel);
 
                 return started.Link is not null ? new MutationResult(202, null, null, started.Link) : new MutationResult(started.Status, "operation-refused", started.Error);
             }

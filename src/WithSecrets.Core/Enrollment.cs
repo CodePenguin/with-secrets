@@ -52,6 +52,27 @@ public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget 
     private IProofMethod Method => command.Method;
 
     /// <summary>
+    /// Asked after each passkey page of a change has answered and before the new state is made: a non-null answer (the request was cancelled, the authority was locked) stops the change and nothing is
+    /// saved. Null for the command line, where nothing can stop it from outside.
+    /// </summary>
+    public Func<string?>? StopReason { get; init; }
+
+    private ApprovalDecision? Stopped() => StopReason?.Invoke() is { } reason ? ApprovalDecision.Deny("nothing was changed: " + reason) : null;
+
+    /// <summary>The admin's signature over the new state, unless the change must stop: asked before the page and again when it answered, because the answer is what lets the state be saved.</summary>
+    private ManifestApproval Guarded(Func<ManifestApproval> ask)
+    {
+        if (Stopped() is { } early)
+        {
+            return new ManifestApproval(early, null);
+        }
+
+        ManifestApproval asked = ask();
+
+        return Stopped() is { } late ? new ManifestApproval(late, null) : asked;
+    }
+
+    /// <summary>
     /// Asks first with what is enrolled, when anything is. Then the method's own setup runs, where the person chooses the
     /// name (the page suggests <see cref="DefaultName" />, or one not taken yet). A refusal or failure is recorded in the
     /// audit log (event change-denied) when one is given.
@@ -114,10 +135,15 @@ public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget 
                     return asked;
                 }
 
+                if (Stopped() is { } stopped)
+                {
+                    return stopped;
+                }
+
                 PageFlow.Plan("a", approval.Approver.Settings);
 
                 return Method.Enroll(Suggest(entries.Select(item => item.Name)), announce,
-                    manifest => approval.Approver.AskManifest(new ApprovalPrompt(Heading, SignText(manifest, entries)), manifest), asked.Unlock);
+                    manifest => Guarded(() => approval.Approver.AskManifest(new ApprovalPrompt(Heading, SignText(manifest, entries)), manifest)), asked.Unlock);
             }
             finally
             {
@@ -226,7 +252,7 @@ public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget 
 
             string text = $"Remove the {Method.Id} named \"{stored}\"";
 
-            return Method.Unenroll(stored, manifest => approval.Approver.AskManifest(new ApprovalPrompt(Heading, text), manifest));
+            return Method.Unenroll(stored, manifest => Guarded(() => approval.Approver.AskManifest(new ApprovalPrompt(Heading, text), manifest)));
         }
         catch (ProofUnavailableException failure)
         {

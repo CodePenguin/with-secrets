@@ -1,5 +1,5 @@
 import { QueryCache, QueryClient, useQuery } from '@tanstack/react-query'
-import { ApiError, api, setAntiForgery } from './client'
+import { ApiError, api, setSessionSecret } from './client'
 import type { paths } from './schema'
 
 export const keys = {
@@ -50,11 +50,19 @@ export function useSession() {
     queryKey: keys.session,
     queryFn: async () => {
       const session = await api.get('/api/v1/session')
-      setAntiForgery(session.antiForgery)
+      if (session.authenticated) return session
+      setSessionSecret(null)
+      if (session.login?.state === 'ready') {
+        // The tap was verified: this browser claims its session (a POST). The answer carries the session's secret, once.
+        const claimed = await api.post('/api/v1/session/claim', { body: {} })
+        setSessionSecret(claimed.antiForgery)
+
+        return claimed.session
+      }
 
       return session
     },
-    // While a sign-in waits for its tap the session resource is asked again (that is what claims the session once the tap is verified).
+    // While a sign-in waits for its tap the session resource is asked again (once the tap is verified the login is ready and the page claims the session).
     refetchInterval: (query) => (query.state.data?.login?.state === 'waiting' ? 1_000 : query.state.data?.authenticated ? 30_000 : false),
   })
 }

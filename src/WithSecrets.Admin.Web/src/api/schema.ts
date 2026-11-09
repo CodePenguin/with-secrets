@@ -34,6 +34,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/browser": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Make this browser's pre-session cookie and give its anti-forgery value (once, in this answer: keep it in the page and send it as X-Admin-Token). Needed before a sign-in or an unlock. Changes nothing in the authority. */
+        post: operations["startBrowser"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/session": {
         parameters: {
             query?: never;
@@ -41,13 +58,30 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Who is signed in (a read-only session), the anti-forgery value for requests that change something, and how a sign-in in progress stands. Claims the session of a sign-in whose tap was verified. */
+        /** Who is signed in (a read-only session) and how a sign-in in progress stands. Read-only: it claims nothing and sets no cookie; a session is recognized only with its cookie AND its own secret (X-Admin-Token). */
         get: operations["getSession"];
         put?: never;
-        /** Start a sign-in: answers the link of the one-use passkey page whose tap (user verification) starts a read-only session for this browser. Then GET /session. */
+        /** Start a sign-in: answers the link of the one-use passkey page whose tap (user verification) starts a read-only session for this browser. Then GET /session until the login is ready, then POST /session/claim. */
         post: operations["startSession"];
         /** Sign out: ends the session now. */
         delete: operations["endSession"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/session/claim": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Claim the session of the sign-in this browser began, once its tap was verified. The answer carries the session's own secret (antiForgery), once: keep it in the page and send it as X-Admin-Token with every request. */
+        post: operations["claimSession"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -636,7 +670,7 @@ export interface components {
         };
         Login: {
             /** @enum {string} */
-            state: "waiting" | "failed";
+            state: "waiting" | "ready" | "failed";
             problem: string | null;
         };
         Session: {
@@ -649,10 +683,17 @@ export interface components {
             idleExpires: string | null;
             /** Format: date-time */
             absoluteExpires: string | null;
-            /** @description Send this as the X-Admin-Token header with every request that is not a GET. */
-            antiForgery: string;
             login: components["schemas"]["Login"] | null;
             recent: string[];
+        };
+        Browser: {
+            /** @description Keep this in the page (not in a cookie) and send it as the X-Admin-Token header with every request. It is given once, here, and never again. */
+            antiForgery: string;
+        };
+        Claim: {
+            /** @description The session's own secret, given once, here. Send it as the X-Admin-Token header with every request: the session cookie alone is not enough. */
+            antiForgery: string;
+            session: components["schemas"]["Session"];
         };
         LoginStarted: {
             /** @description The one-use passkey page to open. The tap there starts the session. */
@@ -924,6 +965,84 @@ export interface operations {
             };
         };
     };
+    startBrowser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description Success. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Browser"];
+                };
+            };
+            /** @description The request is not valid (invalid-request, invalid-json). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is too large (payload-too-large). */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is not application/json (unsupported-media-type). */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The Host is not a loopback name (host-not-allowed). */
+            421: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request failed (internal-error). Nothing the response does not say was changed. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     getSession: {
         parameters: {
             query?: never;
@@ -995,15 +1114,6 @@ export interface operations {
             };
             /** @description The request is not valid (invalid-request, invalid-json). */
             400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description No administrator session (session-required). */
-            401: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1096,6 +1206,84 @@ export interface operations {
             };
             /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The Host is not a loopback name (host-not-allowed). */
+            421: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request failed (internal-error). Nothing the response does not say was changed. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    claimSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description Success. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Claim"];
+                };
+            };
+            /** @description The request is not valid (invalid-request, invalid-json). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is too large (payload-too-large). */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is not application/json (unsupported-media-type). */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };

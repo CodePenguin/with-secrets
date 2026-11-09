@@ -1,5 +1,6 @@
 import axe from 'axe-core'
 import { vi } from 'vitest'
+import { setSessionSecret } from '../api/client'
 import type { Authorization, Grant, Machine, Session, Settings, Status } from '../api/types'
 
 export type Call = { method: string; path: string; query: URLSearchParams; body: Record<string, unknown> | null; headers: Record<string, string> }
@@ -53,7 +54,6 @@ export const session = (extra: Partial<Session> = {}): Session => ({
   started: '2026-11-09T10:00:00Z',
   idleExpires: '2026-11-09T10:15:00Z',
   absoluteExpires: '2026-11-09T18:00:00Z',
-  antiForgery: 'csrf-token-1',
   login: null,
   recent: [],
   ...extra,
@@ -122,7 +122,12 @@ export const authorization = (extra: Partial<Authorization> = {}): Authorization
 })
 
 /** The usual signed-in state of the service. */
+/** A page that was signed in earlier in its life: it holds the session's secret (given once by the claim). */
+export const SESSION_SECRET = 'session-secret-1'
+
 export function signedIn(extra: Record<string, Handler> = {}): FakeApi {
+  setSessionSecret(SESSION_SECRET)
+
   return installFakeApi({
     'GET /api/v1/status': { body: status() },
     'GET /api/v1/session': { body: session() },

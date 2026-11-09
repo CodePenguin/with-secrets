@@ -3,7 +3,7 @@
   "info": {
     "title": "with-secrets authority administration API",
     "version": "1.0.0",
-    "description": "The administration API of the with-secrets authority on the Windows host service\u0027s loopback port (same origin as the administration web application). JSON only. A browser session is READ-ONLY (an HttpOnly, SameSite=Strict cookie, in service memory only). Every change needs its own fresh passkey authorization (POST /api/v1/authorizations, then the tap, then the mutation carrying the authorization id), bound to the operation and its parameters, single use and time limited. There is no CORS. Changes within v1 are additive; a breaking change is a new major version. Another version number (/api/v2/...) is answered with 400 and the problem code unsupported-api-version listing supportedVersions; an unknown path under /api is 404 route-not-found; /api never falls through to the web application. Every response carries X-Api-Version. No answer contains a secret value, a credential, a private key or recovery material."
+    "description": "The administration API of the with-secrets authority on the Windows host service\u0027s loopback port (same origin as the administration web application). JSON only. A browser session is READ-ONLY (an HttpOnly, SameSite=Strict cookie plus a secret given once, in service memory only). Every change needs its own fresh passkey authorization (POST /api/v1/authorizations, then the tap, then the mutation carrying the authorization id), bound to the operation and its parameters, single use and time limited. There is no CORS. Changes within v1 are additive; a breaking change is a new major version. Another version number (/api/v2/...) is answered with 400 and the problem code unsupported-api-version listing supportedVersions; an unknown path under /api is 404 route-not-found; /api never falls through to the web application. Every response carries X-Api-Version; a request may carry it too (X-Api-Version: 1) and another value is refused with unsupported-api-version. No answer contains a secret value, a credential, a private key or recovery material."
   },
   "servers": [
     {
@@ -148,14 +148,108 @@
         }
       }
     },
-    "/api/v1/session": {
-      "get": {
-        "operationId": "getSession",
-        "summary": "Who is signed in (a read-only session), the anti-forgery value for requests that change something, and how a sign-in in progress stands. Claims the session of a sign-in whose tap was verified.",
+    "/api/v1/browser": {
+      "post": {
+        "operationId": "startBrowser",
+        "summary": "Make this browser\u0027s pre-session cookie and give its anti-forgery value (once, in this answer: keep it in the page and send it as X-Admin-Token). Needed before a sign-in or an unlock. Changes nothing in the authority.",
         "tags": [
           "session"
         ],
-        "x-access": "public",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "responses": {
+          "201": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Browser"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/session": {
+      "get": {
+        "operationId": "getSession",
+        "summary": "Who is signed in (a read-only session) and how a sign-in in progress stands. Read-only: it claims nothing and sets no cookie; a session is recognized only with its cookie AND its own secret (X-Admin-Token).",
+        "tags": [
+          "session"
+        ],
+        "x-access": "caller",
         "responses": {
           "200": {
             "description": "Success.",
@@ -201,7 +295,7 @@
       },
       "post": {
         "operationId": "startSession",
-        "summary": "Start a sign-in: answers the link of the one-use passkey page whose tap (user verification) starts a read-only session for this browser. Then GET /session.",
+        "summary": "Start a sign-in: answers the link of the one-use passkey page whose tap (user verification) starts a read-only session for this browser. Then GET /session until the login is ready, then POST /session/claim.",
         "tags": [
           "session"
         ],
@@ -241,16 +335,6 @@
           },
           "403": {
             "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
-            "content": {
-              "application/problem\u002Bjson": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "No administrator session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -312,6 +396,7 @@
         },
         "security": [
           {
+            "browserCookie": [],
             "antiForgery": []
           }
         ]
@@ -383,6 +468,106 @@
         ]
       }
     },
+    "/api/v1/session/claim": {
+      "post": {
+        "operationId": "claimSession",
+        "summary": "Claim the session of the sign-in this browser began, once its tap was verified. The answer carries the session\u0027s own secret (antiForgery), once: keep it in the page and send it as X-Admin-Token with every request.",
+        "tags": [
+          "session"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "responses": {
+          "201": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Claim"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "browserCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
     "/api/v1/machines": {
       "get": {
         "operationId": "listMachines",
@@ -445,7 +630,8 @@
         },
         "security": [
           {
-            "sessionCookie": []
+            "sessionCookie": [],
+            "antiForgery": []
           }
         ]
       }
@@ -545,7 +731,8 @@
         },
         "security": [
           {
-            "sessionCookie": []
+            "sessionCookie": [],
+            "antiForgery": []
           }
         ]
       }
@@ -612,7 +799,8 @@
         },
         "security": [
           {
-            "sessionCookie": []
+            "sessionCookie": [],
+            "antiForgery": []
           }
         ]
       }
@@ -712,7 +900,8 @@
         },
         "security": [
           {
-            "sessionCookie": []
+            "sessionCookie": [],
+            "antiForgery": []
           }
         ]
       }
@@ -885,7 +1074,8 @@
         },
         "security": [
           {
-            "sessionCookie": []
+            "sessionCookie": [],
+            "antiForgery": []
           }
         ]
       }
@@ -1058,7 +1248,8 @@
         },
         "security": [
           {
-            "sessionCookie": []
+            "sessionCookie": [],
+            "antiForgery": []
           }
         ]
       }
@@ -1147,7 +1338,8 @@
         },
         "security": [
           {
-            "sessionCookie": []
+            "sessionCookie": [],
+            "antiForgery": []
           }
         ]
       }
@@ -1214,7 +1406,8 @@
         },
         "security": [
           {
-            "sessionCookie": []
+            "sessionCookie": [],
+            "antiForgery": []
           }
         ]
       }
@@ -1281,7 +1474,8 @@
         },
         "security": [
           {
-            "sessionCookie": []
+            "sessionCookie": [],
+            "antiForgery": []
           }
         ]
       },
@@ -1442,6 +1636,10 @@
           {
             "sessionCookie": [],
             "antiForgery": []
+          },
+          {
+            "browserCookie": [],
+            "antiForgery": []
           }
         ]
       }
@@ -1589,6 +1787,10 @@
         "security": [
           {
             "sessionCookie": [],
+            "antiForgery": []
+          },
+          {
+            "browserCookie": [],
             "antiForgery": []
           }
         ]
@@ -1827,6 +2029,10 @@
           {
             "sessionCookie": [],
             "antiForgery": []
+          },
+          {
+            "browserCookie": [],
+            "antiForgery": []
           }
         ]
       }
@@ -1978,6 +2184,10 @@
         "security": [
           {
             "sessionCookie": [],
+            "antiForgery": []
+          },
+          {
+            "browserCookie": [],
             "antiForgery": []
           }
         ]
@@ -2140,6 +2350,10 @@
           {
             "sessionCookie": [],
             "antiForgery": []
+          },
+          {
+            "browserCookie": [],
+            "antiForgery": []
           }
         ]
       }
@@ -2298,6 +2512,10 @@
         "security": [
           {
             "sessionCookie": [],
+            "antiForgery": []
+          },
+          {
+            "browserCookie": [],
             "antiForgery": []
           }
         ]
@@ -2465,6 +2683,10 @@
           {
             "sessionCookie": [],
             "antiForgery": []
+          },
+          {
+            "browserCookie": [],
+            "antiForgery": []
           }
         ]
       }
@@ -2617,6 +2839,10 @@
           {
             "sessionCookie": [],
             "antiForgery": []
+          },
+          {
+            "browserCookie": [],
+            "antiForgery": []
           }
         ]
       }
@@ -2768,6 +2994,10 @@
         "security": [
           {
             "sessionCookie": [],
+            "antiForgery": []
+          },
+          {
+            "browserCookie": [],
             "antiForgery": []
           }
         ]
@@ -2950,6 +3180,10 @@
           {
             "sessionCookie": [],
             "antiForgery": []
+          },
+          {
+            "browserCookie": [],
+            "antiForgery": []
           }
         ]
       }
@@ -3124,6 +3358,10 @@
         "security": [
           {
             "sessionCookie": [],
+            "antiForgery": []
+          },
+          {
+            "browserCookie": [],
             "antiForgery": []
           }
         ]
@@ -3300,6 +3538,10 @@
           {
             "sessionCookie": [],
             "antiForgery": []
+          },
+          {
+            "browserCookie": [],
+            "antiForgery": []
           }
         ]
       }
@@ -3474,6 +3716,10 @@
         "security": [
           {
             "sessionCookie": [],
+            "antiForgery": []
+          },
+          {
+            "browserCookie": [],
             "antiForgery": []
           }
         ]
@@ -3655,6 +3901,10 @@
         "security": [
           {
             "sessionCookie": [],
+            "antiForgery": []
+          },
+          {
+            "browserCookie": [],
             "antiForgery": []
           }
         ]
@@ -3838,6 +4088,10 @@
           {
             "sessionCookie": [],
             "antiForgery": []
+          },
+          {
+            "browserCookie": [],
+            "antiForgery": []
           }
         ]
       }
@@ -4012,6 +4266,10 @@
         "security": [
           {
             "sessionCookie": [],
+            "antiForgery": []
+          },
+          {
+            "browserCookie": [],
             "antiForgery": []
           }
         ]
@@ -4198,6 +4456,10 @@
           {
             "sessionCookie": [],
             "antiForgery": []
+          },
+          {
+            "browserCookie": [],
+            "antiForgery": []
           }
         ]
       }
@@ -4383,6 +4645,10 @@
           {
             "sessionCookie": [],
             "antiForgery": []
+          },
+          {
+            "browserCookie": [],
+            "antiForgery": []
           }
         ]
       }
@@ -4557,6 +4823,10 @@
         "security": [
           {
             "sessionCookie": [],
+            "antiForgery": []
+          },
+          {
+            "browserCookie": [],
             "antiForgery": []
           }
         ]
@@ -4743,6 +5013,10 @@
           {
             "sessionCookie": [],
             "antiForgery": []
+          },
+          {
+            "browserCookie": [],
+            "antiForgery": []
           }
         ]
       }
@@ -4754,13 +5028,19 @@
         "type": "apiKey",
         "in": "cookie",
         "name": "ws_session",
-        "description": "A read-only administrator session (HttpOnly, SameSite=Strict, path /api/v1)."
+        "description": "A read-only administrator session (HttpOnly, SameSite=Strict, path /api/v1). The value is bound to the service port. Alone it is not enough: the request must also carry the session\u0027s own secret (antiForgery)."
+      },
+      "browserCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "ws_pre",
+        "description": "The browser\u0027s pre-session cookie (HttpOnly, SameSite=Strict, path /api/v1), made by POST /browser; with it, the anti-forgery value of POST /browser."
       },
       "antiForgery": {
         "type": "apiKey",
         "in": "header",
         "name": "X-Admin-Token",
-        "description": "The antiForgery value of GET /session, for every request that is not a GET."
+        "description": "A secret given once, in the answer that made the cookie it belongs to: POST /browser (before a session) or POST /session/claim (the session). Kept in the page, never in a cookie; the page\u0027s origin (with its port) is what keeps it from other programs that are sent the cookies."
       }
     },
     "schemas": {
@@ -4865,6 +5145,7 @@
             "type": "string",
             "enum": [
               "waiting",
+              "ready",
               "failed"
             ]
           },
@@ -4915,10 +5196,6 @@
             ],
             "format": "date-time"
           },
-          "antiForgery": {
-            "type": "string",
-            "description": "Send this as the X-Admin-Token header with every request that is not a GET."
-          },
           "login": {
             "oneOf": [
               {
@@ -4943,9 +5220,38 @@
           "started",
           "idleExpires",
           "absoluteExpires",
-          "antiForgery",
           "login",
           "recent"
+        ]
+      },
+      "Browser": {
+        "type": "object",
+        "properties": {
+          "antiForgery": {
+            "type": "string",
+            "description": "Keep this in the page (not in a cookie) and send it as the X-Admin-Token header with every request. It is given once, here, and never again."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "antiForgery"
+        ]
+      },
+      "Claim": {
+        "type": "object",
+        "properties": {
+          "antiForgery": {
+            "type": "string",
+            "description": "The session\u0027s own secret, given once, here. Send it as the X-Admin-Token header with every request: the session cookie alone is not enough."
+          },
+          "session": {
+            "$ref": "#/components/schemas/Session"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "antiForgery",
+          "session"
         ]
       },
       "LoginStarted": {

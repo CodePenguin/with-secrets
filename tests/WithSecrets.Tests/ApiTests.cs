@@ -35,6 +35,7 @@ internal static class ApiTests
             await WebApplication(check, root);
             await OpenApiDocument(check, root);
             await ProblemsAndCanaries(check, root);
+            await ApiHardeningTests.Run(check, root);
             await VerbsAreGone(check);
         }
         finally
@@ -121,14 +122,14 @@ internal static class ApiTests
 
         check(app.Service.Admin.Sessions.Count == 0, "session: after refused sign-ins the service holds no session");
         string whoamiBefore = (await b.GetAsync("/api/v1/session")).Html;
-        string browserToken = Member(whoamiBefore, "antiForgery")!;
+        string browserToken = b.BrowserToken!;
         check(Member(whoamiBefore, "authenticated") == "false", "session: whoami says there is no session before the tap");
         check(await b.SignInAsync(app.Laptop) && b.HasSession, "session: the admin key's tap (with user verification) starts one");
         string cookie = b.LastSetCookie.Split('\n').FirstOrDefault(line => line.StartsWith(AdminSessions.SessionCookie + "=", StringComparison.Ordinal)) ?? "";
         string token = b.Cookies[AdminSessions.SessionCookie];
         check(cookie.Length == 0 || (cookie.Contains("httponly", StringComparison.OrdinalIgnoreCase) && cookie.Contains("samesite=strict", StringComparison.OrdinalIgnoreCase) && cookie.Contains("path=/api/v1", StringComparison.OrdinalIgnoreCase)), "session: the cookie (when set) is HttpOnly, SameSite=Strict and scoped to /api/v1");
         (int whoStatus, string whoami, HttpResponseMessage whoResponse) = await b.GetAsync("/api/v1/session");
-        check(whoStatus == 200 && Member(whoami, "authenticated") == "true" && Member(whoami, "admin") == "laptop" && Member(whoami, "antiForgery") != browserToken && Member(whoami, "idleExpires") is { Length: > 10 } && Member(whoami, "absoluteExpires") is { Length: > 10 } && !whoami.Contains(token, StringComparison.Ordinal), "session: whoami names the key that tapped, when it ends, has a new anti-forgery value and never the token");
+        check(whoStatus == 200 && Member(whoami, "authenticated") == "true" && Member(whoami, "admin") == "laptop" && !whoami.Contains("antiForgery", StringComparison.OrdinalIgnoreCase) && b.SessionToken != browserToken && !whoami.Contains(b.SessionToken!, StringComparison.Ordinal) && Member(whoami, "idleExpires") is { Length: > 10 } && Member(whoami, "absoluteExpires") is { Length: > 10 } && !whoami.Contains(token, StringComparison.Ordinal), "session: whoami names the key that tapped, when it ends, never the token or any secret (the session secret is given once, by the claim)");
         _ = whoResponse;
         string seen = string.Join("\n", b.Seen);
         check(!seen.Contains(token, StringComparison.Ordinal) || seen.Split('\n').Where(line => line.Contains(token, StringComparison.Ordinal)).All(line => line.StartsWith("Set-Cookie", StringComparison.OrdinalIgnoreCase)), "session: the token is in the Set-Cookie header only, in no body");
@@ -211,7 +212,7 @@ internal static class ApiTests
         check(lockTap.MutationStatus == 200 && app.Service.Lock.IsLocked, "lock: the admin key's fresh tap locks");
         check(app.Service.Admin.Sessions.Count == 0 && (await one.GetAsync("/api/v1/machines")).Status == 401 && (await two.GetAsync("/api/v1/grants")).Status == 401, "lock: it destroys every session at once");
         // M4: with the authority locked the key operations (and every other change) are refused before any page, and the refusal is audited.
-        AdminSession forged = new("t", "laptop", app.Clock.GetUtcNow());
+        AdminSession forged = new("t", "laptop", app.Clock.GetUtcNow(), "c");
         string keyBefore = app.Store.ActiveKey()?.Fingerprint ?? "";
         int askedLocked = app.Asked;
         List<AdminStart> lockedAnswers = [];
@@ -276,7 +277,7 @@ internal static class ApiTests
                 ("no anti-forgery value", () => b.PostAsync(path, body, token: null), 403),
                 ("a wrong anti-forgery value", () => b.PostAsync(path, body, token: "AAAA"), 403),
                 ("another browser's anti-forgery value", () => b.PostAsync(path, body, token: other.Csrf), 403),
-                ("the anti-forgery value of the time before the session", () => b.PostAsync(path, body, token: browserToken), 403),
+                ("the anti-forgery value of the time before the session (the browser's, not the session's)", () => b.PostAsync(path, body, token: browserToken), 401),
                 ("a valid value but no cookies (a script that stole the value, not the cookie)", () => b.PostAsync(path, body, withCookies: false), 403),
                 ("a Host that is not a loopback name (DNS rebinding)", () => b.PostAsync(path, body, host: "evil.example:" + app.Service.Port), 421),
                 ("a body that is not JSON", () => b.PostAsync(path, "op=lock", contentType: "text/plain"), 415),
@@ -705,13 +706,13 @@ internal static class ApiTests
         Tapped pendingRename = await b.OpAsync("machine-rename", null, true, null, true, ("fingerprint", fp), ("name", "will not happen"));
         Tapped lockPage = await b.OpAsync(AdminService.OpLock, null);
         check(lockPage.Link is not null, "pending: the lock page is made even while another page is waiting");
-        (int pendingStatus, _) = TestState.Approve(app.Http, pendingRename.PageUrl, "http://localhost:" + new Uri(pendingRename.Link!).Port, "localhost", app.Laptop);
-        check(pendingStatus != 200 && app.Store.Find(app.Fingerprint)!.FriendlyName != "will not happen", "pending: the waiting page was closed by the newer request and its tap changes nothing");
         (int lockStatus, _) = TestState.Approve(app.Http, lockPage.PageUrl, "http://localhost:" + new Uri(lockPage.Link!).Port, "localhost", app.Laptop);
         await b.WaitAuthorizationAsync(lockPage.AuthorizationId!);
         (HttpMethod lm, string lp, string lj) = b.MutationRequest(AdminService.OpLock, lockPage.AuthorizationId);
         (int lockMutation, _) = await b.SendAsync(lm, lp, lj);
         check(lockStatus == 200 && lockMutation == 200 && app.Service.Lock.IsLocked, "pending: the lock still goes through");
+        (int pendingStatus, _) = TestState.Approve(app.Http, pendingRename.PageUrl, "http://localhost:" + new Uri(pendingRename.Link!).Port, "localhost", app.Laptop);
+        check(pendingStatus != 200 && app.Store.Find(app.Fingerprint)!.FriendlyName != "will not happen", "pending: the page that was waiting when the lock came was closed by it, and its tap changes nothing");
 
         // M1: locking while a passkey page waits closes it; the tap that comes after changes nothing.
         using AdminApp second = new(root, askSeconds: 20);
@@ -742,7 +743,7 @@ internal static class ApiTests
         check(loginStatus == 423 && Code(loginBody) == "authority-locked" && app.Asked == 0, "locked: a sign-in is refused (423) and asks for no passkey");
         (int lockStatus, _) = await b.PostAsync("/api/v1/lock", "{\"authorization\":\"AAAAAAAAAAAA\"}");
         (int policyStatus, _) = await b.PostAsync("/api/v1/authorizations", AdminBrowser.AuthorizationBody("policy-unattended"));
-        check(lockStatus == 401 && policyStatus == 401 && app.Asked == 0, "locked: nothing but the unlock can be asked for without a session");
+        check(lockStatus == 403 && policyStatus == 401 && app.Asked == 0, "locked: nothing but the unlock (and a lock, which needs its own authorization) can be asked for without a session");
         Tapped bad = await b.OpAsync(AdminService.OpUnlock, app.Phone);
         check(bad.ApproveStatus == 403 && app.Service.Lock.IsLocked, "locked: a non-admin key cannot unlock");
         Tapped unlock = await b.OpAsync(AdminService.OpUnlock, app.Laptop);

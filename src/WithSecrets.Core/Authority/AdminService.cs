@@ -41,19 +41,41 @@ public sealed partial class AdminService
     /// <summary>How long a new operation waits for the page it replaces to close.</summary>
     private static readonly TimeSpan CloseWait = TimeSpan.FromSeconds(5);
 
-    /// <summary>The most operations a caller may start per minute: a local program cannot flood the audit history or the passkey prompts. Session callers and others count apart, so one cannot use up the other's.</summary>
+    /// <summary>The most operations one caller (a session, or a browser's pre-session cookie) may start per minute: a local program cannot flood the passkey prompts. Every caller has its own count, and Lock has its own too.</summary>
     public const int MaxStartsPerMinute = 30;
+
+    /// <summary>The most passkey pages that callers without a session may have waiting at once (one each). A further caller is refused; no waiting page is ever closed by another caller.</summary>
+    public const int MaxAnonymousPages = 32;
+
+    /// <summary>
+    /// The most Lock pages that callers without a session may have waiting at once. Lock has lanes of its own, so no other kind of request (and no other caller's page) can use them up or close them; when the
+    /// anonymous lane is full a new Lock request is NOT refused: the oldest anonymous Lock page is closed instead, so a flood of identities can only push an older page out, never keep a newer one from being made.
+    /// A signed-in administrator's Lock page is in a lane no anonymous caller can touch.
+    /// </summary>
+    public const int MaxLockPages = 8;
+
+    /// <summary>The most refusal rows one caller may have written per minute; refusals beyond it are counted and written as one summary row.</summary>
+    public const int MaxRefusalRowsPerCaller = 20;
+
+    private const int MaxRefusalRowsAll = 200;
 
     private readonly AdminServiceParts _p;
     private readonly TimeProvider _clock;
     private readonly Lock _gate = new();
-    private readonly Pending?[] _slots = new Pending?[2];
-    private readonly Queue<DateTimeOffset>[] _starts = [new(), new()];
+    private readonly Dictionary<string, Pending> _slots = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Queue<DateTimeOffset>> _starts = new(StringComparer.Ordinal);
+    private int _epoch;
+
+    /// <summary>A test seam (internal): runs between a plan being made and its authorization or page being kept, where a lock can come in.</summary>
+    internal Action? AfterPlanForTests { get; set; }
+    private static long _order;
     private readonly ConcurrentQueue<string> _recent = new();
 
     private sealed class Pending(CancellationTokenSource cancel)
     {
         public CancellationTokenSource Cancel { get; } = cancel;
+
+        public long Order { get; } = Interlocked.Increment(ref _order);
 
         public TaskCompletionSource Done { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
@@ -71,6 +93,7 @@ public sealed partial class AdminService
         // A lock ends every session and every unclaimed login, and closes every passkey page that is waiting.
         parts.Lock.OnLock(_ =>
         {
+            Interlocked.Increment(ref _epoch);
             Sessions.DestroyAll();
             ClearAuthorizations();
             CancelPending();
@@ -84,31 +107,99 @@ public sealed partial class AdminService
     internal AdminApi Api => _api ??= new AdminApi(this, _p.Port);
 
     private AdminApi? _api;
-    private readonly Queue<DateTimeOffset> _refusalRows = new();
+    private sealed class RefusalWindow
+    {
+        public Queue<DateTimeOffset> Rows { get; } = new();
+
+        public int Dropped { get; set; }
+    }
+
+    private readonly Dictionary<string, RefusalWindow> _refusals = new(StringComparer.Ordinal);
+    private readonly Queue<DateTimeOffset> _refusalRowsAll = new();
 
     /// <summary>
-    /// Audits a refused request (no session, no anti-forgery value, an operation that does not apply). At most 20 rows a minute, so a program that keeps sending bad requests cannot flood the
-    /// audit history; a refusal is a refusal whether or not it was written.
+    /// Audits a refused request (no session, no anti-forgery value, an operation that does not apply). Each caller may have 20 rows a minute written (and the whole service 200), so a program that keeps
+    /// sending bad requests cannot flood the audit history, and what it does cannot hide another caller's refusals: what is not written is counted and written as one summary row per caller.
     /// </summary>
-    internal void Refused(string operation, string reason)
+    internal void Refused(string operation, string reason, string? caller = null)
     {
+        int dropped = 0;
+        bool write = true;
+        List<int> flushed = [];
         lock (_gate)
         {
             DateTimeOffset now = _clock.GetUtcNow();
-            while (_refusalRows.Count > 0 && now - _refusalRows.Peek() > TimeSpan.FromMinutes(1))
+            TimeSpan minute = TimeSpan.FromMinutes(1);
+            while (_refusalRowsAll.Count > 0 && now - _refusalRowsAll.Peek() > minute)
             {
-                _refusalRows.Dequeue();
+                _refusalRowsAll.Dequeue();
             }
 
-            if (_refusalRows.Count >= 20)
+            foreach ((string key, RefusalWindow window) in _refusals.ToList())
             {
-                return;
+                while (window.Rows.Count > 0 && now - window.Rows.Peek() > minute)
+                {
+                    window.Rows.Dequeue();
+                }
+
+                if (window.Rows.Count == 0 && key != (caller ?? "anonymous"))
+                {
+                    if (window.Dropped > 0)
+                    {
+                        flushed.Add(window.Dropped);
+                    }
+
+                    _refusals.Remove(key);
+                }
             }
 
-            _refusalRows.Enqueue(now);
+            string own = caller ?? "anonymous";
+            if (!_refusals.TryGetValue(own, out RefusalWindow? current))
+            {
+                current = new RefusalWindow();
+                _refusals[own] = current;
+            }
+
+            if (current.Rows.Count >= MaxRefusalRowsPerCaller || _refusalRowsAll.Count >= MaxRefusalRowsAll)
+            {
+                current.Dropped++;
+                write = false;
+            }
+            else
+            {
+                current.Rows.Enqueue(now);
+                _refusalRowsAll.Enqueue(now);
+                dropped = current.Dropped;
+                current.Dropped = 0;
+            }
         }
 
-        _p.Authorizer.RecordRefusal(operation.Length > 40 ? operation[..40] : operation, reason);
+        if (write)
+        {
+            if (dropped > 0)
+            {
+                _p.Authorizer.RecordRefusal("refusals", dropped.ToString(CultureInfo.InvariantCulture) + " earlier refusals from this caller were not written one by one (too many in a minute)");
+            }
+
+            _p.Authorizer.RecordRefusal(operation.Length > 40 ? operation[..40] : operation, reason);
+        }
+
+        foreach (int count in flushed)
+        {
+            _p.Authorizer.RecordRefusal("refusals", count.ToString(CultureInfo.InvariantCulture) + " refusals from one caller were not written one by one (too many in a minute)");
+        }
+    }
+
+    /// <summary>The caller an authorization or sign-in belongs to, for rate limits and waiting pages: a session, or a browser's pre-session cookie. Never the cookie itself.</summary>
+    internal static string CallerOf(object owner) => owner is AdminSession session ? "s:" + session.Id : AdminSessions.BrowserCaller((string)owner);
+
+    /// <summary>Writes the end of the sessions that ran out (idle or absolute timeout) since the last time. Called at the start of every API request.</summary>
+    internal void RecordEndedSessions()
+    {
+        foreach ((AdminSession session, string how) in Sessions.TakeEnded())
+        {
+            RecordSessionEnd(session, how);
+        }
     }
 
     internal AdminAuthorizer Authorizer => _p.Authorizer;
@@ -133,15 +224,15 @@ public sealed partial class AdminService
         }
     }
 
-    /// <summary>True for the operation a browser without a session may ask for: unlock (the only thing a locked authority allows). Everything else needs a session.</summary>
-    public static bool NeedsNoSession(string op) => op == OpUnlock;
+    /// <summary>True for the operations a browser without a session may ask for (each still needs its own fresh passkey tap): unlock (the only thing a locked authority allows) and Lock (which only restricts, so an emergency lock cannot be starved by a missing or blocked sign-in). Everything else needs a session.</summary>
+    public static bool NeedsNoSession(string op) => op is OpUnlock or OpLock;
 
-    /// <summary>Closes every passkey page that is waiting (a lock does this, and so does a new request from the admin app).</summary>
+    /// <summary>Closes every passkey page that is waiting (a lock does this).</summary>
     public void CancelPending()
     {
         lock (_gate)
         {
-            foreach (Pending? pending in _slots)
+            foreach (Pending pending in _slots.Values)
             {
                 CancelQuietly(pending);
             }
@@ -160,13 +251,28 @@ public sealed partial class AdminService
         }
     }
 
-    private bool TakeStart(int slot)
+    /// <summary>One start for <paramref name="key" /> (a caller, or the Lock lane of a caller); false when that caller already started 30 in the last minute. Other callers are not affected.</summary>
+    private bool TakeStart(string key)
     {
         lock (_gate)
         {
             DateTimeOffset now = _clock.GetUtcNow();
-            Queue<DateTimeOffset> queue = _starts[slot];
-            while (queue.Count > 0 && now - queue.Peek() > TimeSpan.FromMinutes(1))
+            TimeSpan minute = TimeSpan.FromMinutes(1);
+            if (_starts.Count > 256)
+            {
+                foreach (string stale in _starts.Where(item => item.Value.Count == 0 || now - item.Value.Peek() > minute && now - item.Value.Last() > minute).Select(item => item.Key).ToList())
+                {
+                    _starts.Remove(stale);
+                }
+            }
+
+            if (!_starts.TryGetValue(key, out Queue<DateTimeOffset>? queue))
+            {
+                queue = new Queue<DateTimeOffset>();
+                _starts[key] = queue;
+            }
+
+            while (queue.Count > 0 && now - queue.Peek() > minute)
             {
                 queue.Dequeue();
             }
@@ -182,26 +288,58 @@ public sealed partial class AdminService
         }
     }
 
-    private async Task<AdminStart> Run(AdminPlan plan, bool isSession, CancellationToken cancel, Func<AdminPlan, IAdminAsker, Action<string>, CancellationToken, string>? execute = null, bool keepMaterial = false)
+    /// <summary>
+    /// Shows one passkey page for <paramref name="caller" />. Each caller has one waiting page (a new request from the same caller replaces its own earlier page, never another caller's) and the callers
+    /// without a session share a limited number (a further one is refused, nothing waiting is closed). Lock pages have a lane of their own that nothing else uses up. <paramref name="epoch" /> is the lock
+    /// count from before the plan was made: a lock since then ends the request.
+    /// </summary>
+    private async Task<AdminStart> Run(AdminPlan plan, string caller, int epoch, CancellationToken cancel, Func<AdminPlan, IAdminAsker, Action<string>, CancellationToken, string>? execute = null, bool keepMaterial = false)
     {
-        int slot = isSession ? 1 : 0;
+        bool lockLane = plan.Operation == "lock-authority";
+        string slot = (lockLane ? "L" : "") + caller;
         CancellationTokenSource source = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken.None);
         Pending pending = new(source);
-        Pending?[] before;
+        Pending? before;
+        AdminStart? refused = null;
         lock (_gate)
         {
-            before = plan.Operation == "lock-authority" ? [.. _slots] : [_slots[slot]];
-            foreach (Pending? old in before)
+            _slots.TryGetValue(slot, out before);
+            if (Volatile.Read(ref _epoch) != epoch)
             {
-                CancelQuietly(old);
+                refused = new AdminStart(null, "the authority was locked while this was being started", 423);
             }
+            else if (before is null && !lockLane && caller.StartsWith("b:", StringComparison.Ordinal) && _slots.Keys.Count(key => key.StartsWith("b:", StringComparison.Ordinal)) >= MaxAnonymousPages)
+            {
+                refused = new AdminStart(null, "too many passkey pages are waiting for browsers that are not signed in; wait for them to end", 429);
+            }
+            else
+            {
+                CancelQuietly(before);
+                if (before is null && lockLane && caller.StartsWith("b:", StringComparison.Ordinal))
+                {
+                    // The anonymous Lock lane is full: the oldest page there makes room (a new Lock request is never the one refused).
+                    List<KeyValuePair<string, Pending>> lane = [.. _slots.Where(item => item.Key.StartsWith("Lb:", StringComparison.Ordinal)).OrderBy(item => item.Value.Order)];
+                    for (int i = 0; lane.Count - i >= MaxLockPages; i++)
+                    {
+                        CancelQuietly(lane[i].Value);
+                        _slots.Remove(lane[i].Key);
+                    }
+                }
 
-            _slots[slot] = pending;
+                _slots[slot] = pending;
+            }
         }
 
-        foreach (Pending? old in before.Where(item => item is not null))
+        if (refused is not null)
         {
-            await Task.WhenAny(old!.Done.Task, Task.Delay(CloseWait, cancel));
+            source.Dispose();
+
+            return refused;
+        }
+
+        if (before is not null)
+        {
+            await Task.WhenAny(before.Done.Task, Task.Delay(CloseWait, cancel));
         }
 
         TaskCompletionSource<string> link = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -229,7 +367,7 @@ public sealed partial class AdminService
             {
                 AppLog.Warn("an administrator operation failed unexpectedly: {Type}", error.GetType().Name);
                 plan.OnRefused?.Invoke("the operation failed");
-                link.TrySetResult("done: the operation failed (" + error.GetType().Name + ")");
+                link.TrySetResult("done: the operation failed");
             }
             finally
             {
@@ -240,9 +378,9 @@ public sealed partial class AdminService
 
                 lock (_gate)
                 {
-                    if (ReferenceEquals(_slots[slot], pending))
+                    if (_slots.TryGetValue(slot, out Pending? held) && ReferenceEquals(held, pending))
                     {
-                        _slots[slot] = null;
+                        _slots.Remove(slot);
                     }
                 }
 
@@ -282,7 +420,7 @@ public sealed partial class AdminService
                 return "the audit history cannot be written, so nothing was started";
             }
 
-            (bool ok, string detail, string actor) = delegated(announce);
+            (bool ok, string detail, string actor) = delegated(announce, () => cancel.IsCancellationRequested ? "the request was cancelled" : _p.Lock.IsLocked ? "the authority is locked" : null);
             _p.Authorizer.Record(plan.Operation, ok ? "applied" : "refused: " + ApprovalSummary.Clean(detail), ok ? actor : "", AdminAuthorizer.Canonical(plan.Parameters));
             Note(plan.Operation + (ok ? ": applied" : ": refused"));
 
@@ -325,7 +463,8 @@ public sealed partial class AdminService
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
-            failure = error is AuthorityDatabaseException ? error.Message : "the change failed (" + error.GetType().Name + ")";
+            AppLog.Warn("an administrator change failed: {Type}", error.GetType().Name);
+            failure = error is AuthorityDatabaseException ? "the authority database could not be written" : "the change failed";
         }
 
         _p.Authorizer.Outcome(admin, failure is null ? "applied" : "failed: " + ApprovalSummary.Clean(failure));
@@ -340,23 +479,33 @@ public sealed partial class AdminService
     /// Starts a login for a browser: the tap (one fresh passkey page whose signed text names this login) proves an administrator is here, and the browser that began the login then claims its
     /// session (<see cref="AdminSessions.Claim" />). Refused while the authority is locked (it can only be unlocked).
     /// </summary>
-    public async Task<(AdminStart Start, string? Ticket)> BeginLoginAsync(CancellationToken cancel)
+    public async Task<(AdminStart Start, string? Ticket)> BeginLoginAsync(string browserId, CancellationToken cancel)
     {
-        if (!TakeStart(0))
+        string caller = AdminSessions.BrowserCaller(browserId);
+        int epoch = Volatile.Read(ref _epoch);
+        if (!TakeStart(caller))
         {
-            Refused(OpLogin, "too many requests");
+            Refused(OpLogin, "too many requests", caller);
 
             return (new AdminStart(null, "too many requests; wait a minute", 429), null);
         }
 
         if (_p.Lock.IsLocked)
         {
-            Refused(OpLogin, "the authority is locked");
+            Refused(OpLogin, "the authority is locked", caller);
 
             return (new AdminStart(null, "the authority is locked: unlock it first (no session starts on a locked authority)", 423), null);
         }
 
-        (string ticket, string code) = Sessions.BeginLogin();
+        if (Sessions.BeginLogin(browserId) is not { } begun)
+        {
+            Refused(OpLogin, "too many sign-ins waiting", caller);
+
+            return (new AdminStart(null, "too many sign-ins are waiting; wait for them to end", 429), null);
+        }
+
+        (string ticket, string code) = begun;
+        AfterPlanForTests?.Invoke();
         (int idle, int absolute) = _p.Store.SessionTimeouts();
         AdminPlan plan = new("admin-session", "start an administrator session on the admin web app. Only tap if you just chose to sign in there yourself. The session lets this browser READ (status, machines, grants, audit, settings) for up to "
             + absolute.ToString(CultureInfo.InvariantCulture) + " minutes, ending after " + idle.ToString(CultureInfo.InvariantCulture) + " minutes without use; it changes nothing and every change still needs its own passkey tap",
@@ -368,7 +517,11 @@ public sealed partial class AdminService
                 return null;
             },
             OnRefused: reason => Sessions.CompleteLogin(code, null, reason));
-        AdminStart started = await Run(plan, false, cancel);
+        AdminStart started = await Run(plan, caller, epoch, cancel);
+        if (started.Link is null)
+        {
+            Sessions.Forget(ticket, browserId);
+        }
 
         return (started, started.Link is not null ? ticket : null);
     }
@@ -388,4 +541,4 @@ public sealed partial class AdminService
 
 /// <summary>One operation as it will be asked and applied: its name, the sentence the person reads, its parameters (all of them are signed), and what runs after the verified tap.</summary>
 internal sealed record AdminPlan(string Operation, string Sentence, IReadOnlyList<(string Name, string Value)> Parameters, Func<AdminAuthorization, string?> Apply, byte[]? Material = null,
-    Func<Action<string>, (bool Ok, string Detail, string Actor)>? Delegated = null, Action<string>? OnRefused = null);
+    Func<Action<string>, Func<string?>, (bool Ok, string Detail, string Actor)>? Delegated = null, Action<string>? OnRefused = null);

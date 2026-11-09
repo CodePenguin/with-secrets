@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { api, setAntiForgery } from '../../api/client'
+import { api, setSessionSecret } from '../../api/client'
 import { keys, useSession, useStatus } from '../../api/queries'
 import { Badge } from '../../components/Card'
 import { Button } from '../../components/Button'
@@ -45,7 +45,7 @@ export function Shell() {
   const signOut = useMutation({
     mutationFn: () => api.delete('/api/v1/session', { body: undefined }),
     onSettled: () => {
-      setAntiForgery(null)
+      setSessionSecret(null)
       queryClient.clear()
       void queryClient.invalidateQueries({ queryKey: keys.session })
     },

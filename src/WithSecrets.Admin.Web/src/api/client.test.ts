@@ -1,19 +1,45 @@
 import { describe, expect, it } from 'vitest'
-import { ApiError, api, setAntiForgery } from './client'
+import { ApiError, api, setBrowserSecret, setSessionSecret } from './client'
 import { installFakeApi, problem } from '../test/fakeApi'
 
 describe('api client', () => {
-  it('sends the anti-forgery value only on requests that are not a GET, and never stores it in the browser', async () => {
+  it('sends the secret it was given on every request, reads included, and keeps it only in this tab (never localStorage)', async () => {
     const fake = installFakeApi({ 'GET /api/v1/status': { body: {} }, 'POST /api/v1/lock': { body: { operation: 'lock', outcome: 'applied', link: null } } })
-    setAntiForgery('csrf-abc')
+    setSessionSecret('session-secret-abc')
     await api.get('/api/v1/status')
     await api.post('/api/v1/lock', { body: { authorization: 'AAAAAAAA' } })
 
-    expect(fake.calls[0]?.headers['X-Admin-Token']).toBeUndefined()
-    expect(fake.calls[1]?.headers['X-Admin-Token']).toBe('csrf-abc')
+    expect(fake.calls[0]?.headers['X-Admin-Token']).toBe('session-secret-abc')
+    expect(fake.calls[1]?.headers['X-Admin-Token']).toBe('session-secret-abc')
     expect(fake.calls[1]?.body).toEqual({ authorization: 'AAAAAAAA' })
     expect(localStorage.length).toBe(0)
-    expect(sessionStorage.length).toBe(0)
+    expect(JSON.stringify(Object.entries(sessionStorage))).toContain('session-secret-abc')
+  })
+
+  it('makes the browser identity first when a change is sent with no secret, and keeps what it is given', async () => {
+    setBrowserSecret(null)
+    const fake = installFakeApi({
+      'POST /api/v1/browser': { status: 201, body: { antiForgery: 'browser-secret-1' } },
+      'POST /api/v1/unlock': { body: { operation: 'unlock', outcome: 'applied', link: null } },
+    })
+    await api.post('/api/v1/unlock', { body: { authorization: 'AAAAAAAA' } })
+
+    expect(fake.calls.map((call) => call.method + ' ' + call.path)).toEqual(['POST /api/v1/browser', 'POST /api/v1/unlock'])
+    expect(fake.calls[0]?.headers['X-Admin-Token']).toBeUndefined()
+    expect(fake.calls[1]?.headers['X-Admin-Token']).toBe('browser-secret-1')
+  })
+
+  it('makes the identity again once when the service says the secret is not the cookie, and then asks no more', async () => {
+    let answers = 0
+    const fake = installFakeApi({
+      'POST /api/v1/browser': { status: 201, body: { antiForgery: 'browser-secret-2' } },
+      'POST /api/v1/unlock': () => (++answers === 1 ? problem(403, 'anti-forgery', 'reload the page') : { body: { operation: 'unlock', outcome: 'applied', link: null } }),
+    })
+    setBrowserSecret('stale')
+    await api.post('/api/v1/unlock', { body: { authorization: 'AAAAAAAA' } })
+
+    expect(fake.calls.map((call) => call.method + ' ' + call.path)).toEqual(['POST /api/v1/unlock', 'POST /api/v1/browser', 'POST /api/v1/unlock'])
+    expect(fake.calls[2]?.headers['X-Admin-Token']).toBe('browser-secret-2')
   })
 
   it('stays on the same origin with its cookies and no referrer', async () => {

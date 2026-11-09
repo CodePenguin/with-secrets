@@ -47,7 +47,20 @@ internal sealed partial class AdminApi
 
     private static CookieOptions Options(bool expire = false) => new() { HttpOnly = true, SameSite = SameSiteMode.Strict, Path = Prefix, IsEssential = true, MaxAge = expire ? TimeSpan.Zero : null };
 
-    private static string? Cookie(HttpRequest request, string name) => request.Cookies.TryGetValue(name, out string? value) && value.Length <= 128 ? value : null;
+    /// <summary>
+    /// Cookie values are bound to this service's port ("PORT.value"): another service on another localhost port that sets or is sent these names is not mistaken for this one. Cookies are still sent to every
+    /// port of localhost (browsers do not isolate them by port), which is why a cookie alone never gives a session (see <see cref="AdminSession.Csrf" />).
+    /// </summary>
+    private string? Cookie(HttpRequest request, string name)
+    {
+        string prefix = _port.ToString(CultureInfo.InvariantCulture) + ".";
+
+        return request.Cookies.TryGetValue(name, out string? value) && value.Length <= 128 && value.StartsWith(prefix, StringComparison.Ordinal) && value.Length > prefix.Length ? value[prefix.Length..] : null;
+    }
+
+    private void SetCookie(HttpResponse response, string name, string value) => response.Cookies.Append(name, _port.ToString(CultureInfo.InvariantCulture) + "." + value, Options());
+
+    private static void DropCookie(HttpResponse response, string name) => response.Cookies.Delete(name, Options(expire: true));
 
     private static string Title(int status) => status switch
     {
@@ -195,6 +208,12 @@ internal sealed partial class AdminApi
             return new ApiProblem(400, "unsupported-api-version", "this service speaks API version " + Version + " only (" + Prefix + "/)", [Version]);
         }
 
+        // A client may also say which version it speaks (X-Api-Version: 1); another value is the same documented error as another version in the path.
+        if (request.Headers.TryGetValue(VersionHeader, out Microsoft.Extensions.Primitives.StringValues asked) && (asked.Count != 1 || asked[0] is not ("1" or "v1")))
+        {
+            return new ApiProblem(400, "unsupported-api-version", "this service speaks API version " + Version + " only (" + Prefix + "/)", [Version]);
+        }
+
         // Defence in depth: the service already refuses a Host that is not a loopback name; the API does not rely on that.
         if (request.Host.Host is not ("localhost" or "127.0.0.1" or "[::1]" or "::1"))
         {
@@ -237,11 +256,17 @@ internal sealed partial class AdminApi
             return new ApiProblem(404, "route-not-found", "there is no such route; see " + Prefix + "/openapi.json");
         }
 
-        // Reading the status or the document is not a use of a session (so polling them keeps no session alive).
+        // Reading the status or the document is not a use of a session (so polling them keeps no session alive). A session is its cookie AND its own secret (the X-Admin-Token header): a cookie that is
+        // presented alone (another program on another localhost port is sent it too) finds no session, renews nothing and gets no answer a session would get.
         string? token = Cookie(request, AdminSessions.SessionCookie);
-        AdminSession? session = route.OperationId is "getStatus" or "getOpenApi" ? null : admin.Sessions.Validate(token);
-        string? browser = Cookie(request, AdminSessions.BrowserCookie);
         string? presented = request.Headers.TryGetValue(TokenHeader, out Microsoft.Extensions.Primitives.StringValues presentedValues) && presentedValues.Count == 1 ? presentedValues[0] : null;
+        AdminSession? session = route.OperationId is "getStatus" or "getOpenApi" or "startBrowser" ? null : admin.Sessions.Validate(token, presented);
+        admin.RecordEndedSessions();
+        string? browserCookie = Cookie(request, AdminSessions.BrowserCookie);
+
+        // The pre-session cookie is an identity only together with its own anti-forgery value (given once, by POST /browser).
+        string? browser = browserCookie is not null && admin.Sessions.AntiForgeryMatches("browser", browserCookie, presented) ? browserCookie : null;
+        string caller = session is not null ? "s:" + session.Id : browser is not null ? AdminSessions.BrowserCaller(browser) : "anonymous";
         string name = route.OperationId;
 
         if (route.Access is ApiAccess.Public or ApiAccess.Owner)
@@ -253,10 +278,7 @@ internal sealed partial class AdminApi
                 return null;
             }
 
-            ApiResult result = await route.Handle(new ApiCall(context, values, null, session, browser, token));
-            await WriteJson(response, result.Status, result.Body);
-
-            return null;
+            return await Respond(response, route, new ApiCall(context, values, null, session, browser, token));
         }
 
         if (route.Access == ApiAccess.Read)
@@ -272,31 +294,37 @@ internal sealed partial class AdminApi
         // Everything below changes (or starts) something: it needs a same-origin request that a page of this browser made.
         if (!request.Headers.ContainsKey("Origin"))
         {
-            admin.Refused(name, "no Origin (not the admin page)");
+            admin.Refused(name, "no Origin (not the admin page)", caller);
 
             return new ApiProblem(403, "origin-required", "this request must come from the administration page: it carries no Origin");
         }
 
-        bool forgery = session is not null ? admin.Sessions.AntiForgeryMatches("session", token, presented) : admin.Sessions.AntiForgeryMatches("browser", browser, presented);
-        if (!forgery)
+        if (route.Access != ApiAccess.Open && session is null && browser is null)
         {
-            admin.Refused(name, "anti-forgery value missing or wrong");
+            admin.Refused(name, "anti-forgery value missing or wrong", caller);
 
             return new ApiProblem(403, "anti-forgery", "this request did not come from a page served to this browser; reload the page and try again");
         }
 
         bool needsSession = route.Access is ApiAccess.Logout or ApiAccess.Authorize or ApiAccess.Mutation;
-        bool unlock = route.Operation == AdminService.OpUnlock;
-        if (needsSession && session is null && !unlock && route.Access != ApiAccess.Authorize)
+        bool noSessionOperation = route.Operation is AdminService.OpUnlock or AdminService.OpLock;
+        if (needsSession && session is null && !noSessionOperation && route.Access != ApiAccess.Authorize)
         {
-            admin.Refused(name, "no administrator session");
+            admin.Refused(name, "no administrator session", caller);
 
             return new ApiProblem(401, "session-required", "this needs an administrator session; sign in with a passkey (POST " + Prefix + "/session)");
         }
 
-        if (route.Access == ApiAccess.Login && session is not null)
+        if (route.Access is ApiAccess.Login or ApiAccess.Claim && session is not null)
         {
             return new ApiProblem(409, "already-signed-in", "this browser already has a session");
+        }
+
+        if (route.Access is ApiAccess.Login or ApiAccess.Claim && browser is null)
+        {
+            admin.Refused(name, "no browser identity", caller);
+
+            return new ApiProblem(403, "anti-forgery", "this request did not come from a page served to this browser; reload the page and try again");
         }
 
         JsonElement? body = null;
@@ -305,6 +333,8 @@ internal sealed partial class AdminApi
             (JsonElement? parsed, ApiProblem? problem) = await ReadBody(request, route.Request, context.RequestAborted);
             if (problem is not null)
             {
+                admin.Refused(name, "invalid request: " + problem.Code, caller);
+
                 return problem;
             }
 
@@ -405,78 +435,107 @@ internal sealed partial class AdminApi
         _ => "operation-refused",
     }, ApprovalSummary.Clean(start.Error ?? "refused"));
 
+    private Task<ApiResult> StartBrowserAsync(ApiCall call)
+    {
+        string browser = AdminSessions.NewBrowserId();
+        SetCookie(call.Context.Response, AdminSessions.BrowserCookie, browser);
+
+        // The one time the value is given: from now on it exists only in the page that asked.
+        return Task.FromResult(new ApiResult(201, new BrowserDto(admin.Sessions.AntiForgery("browser", browser))));
+    }
+
+    /// <summary>Who is signed in, and how this browser's sign-in stands. It only reads: it claims no session, sets no cookie and writes nothing.</summary>
     private async Task<ApiResult> GetSessionAsync(ApiCall call)
     {
         HttpContext context = call.Context;
-        HttpRequest request = context.Request;
-        HttpResponse response = context.Response;
         AdminSession? session = call.Session;
-        string? token = call.Token;
-        string? ticket = Cookie(request, AdminSessions.LoginCookie);
         LoginDto? login = null;
-        if (session is null && ticket is not null)
+        if (session is null && call.Browser is { } browser && Cookie(context.Request, AdminSessions.LoginCookie) is { } ticket)
         {
-            // The browser that began a login comes back: when the tap was verified its session starts now.
-            (LoginState state, string? problem) = admin.Sessions.LoginStatus(ticket);
+            (LoginState state, string? problem) = admin.Sessions.LoginStatus(ticket, browser);
             for (int wait = 0; state == LoginState.Waiting && wait < 30 && !context.RequestAborted.IsCancellationRequested; wait++)
             {
                 // The tap was just made: the service verifies it a moment after the page says Approved.
                 await Task.Delay(50, CancellationToken.None);
-                (state, problem) = admin.Sessions.LoginStatus(ticket);
+                (state, problem) = admin.Sessions.LoginStatus(ticket, browser);
             }
 
-            if (state == LoginState.Ready && !admin.Status().Locked && admin.Sessions.Claim(ticket) is { } claimed)
+            login = state switch
             {
-                session = claimed;
-                token = claimed.Token;
-                response.Cookies.Append(AdminSessions.SessionCookie, claimed.Token, Options());
-                response.Cookies.Delete(AdminSessions.LoginCookie, Options(expire: true));
-                admin.RecordSessionStart(claimed);
-            }
-            else if (state == LoginState.Failed)
-            {
-                login = new LoginDto("failed", ApprovalSummary.Clean(problem ?? "the passkey was refused"));
-                admin.Sessions.Forget(ticket);
-                response.Cookies.Delete(AdminSessions.LoginCookie, Options(expire: true));
-            }
-            else if (state == LoginState.Unknown)
-            {
-                response.Cookies.Delete(AdminSessions.LoginCookie, Options(expire: true));
-            }
-            else if (state == LoginState.Waiting)
-            {
-                login = new LoginDto("waiting", null);
-            }
+                LoginState.Waiting => new LoginDto("waiting", null),
+                LoginState.Ready => new LoginDto("ready", null),
+                LoginState.Failed => new LoginDto("failed", ApprovalSummary.Clean(problem ?? "the passkey was refused")),
+                _ => null,
+            };
         }
 
-        string? browser = call.Browser;
-        if (browser is null)
-        {
-            browser = AdminSessions.NewBrowserId();
-            response.Cookies.Append(AdminSessions.BrowserCookie, browser, Options());
-        }
-
-        string csrf = session is not null ? admin.Sessions.AntiForgery("session", token!) : admin.Sessions.AntiForgery("browser", browser);
-        SessionDto dto;
         if (session is null)
         {
-            dto = new SessionDto(false, null, null, null, null, csrf, login, []);
-        }
-        else
-        {
-            (DateTimeOffset idle, DateTimeOffset absolute) = admin.SessionEnds(session);
-            dto = new SessionDto(true, ApprovalSummary.Clean(session.Admin), session.Started, idle, absolute, csrf, null, admin.Recent);
+            return new ApiResult(200, new SessionDto(false, null, null, null, null, login, []));
         }
 
-        return new ApiResult(200, dto);
+        (DateTimeOffset idle, DateTimeOffset absolute) = admin.SessionEnds(session);
+
+        return new ApiResult(200, new SessionDto(true, ApprovalSummary.Clean(session.Admin), session.Started, idle, absolute, null, admin.Recent));
+    }
+
+    /// <summary>
+    /// The browser that began a sign-in comes back (a POST, with its browser identity and its login cookie): when the tap was verified the session is made now and its own secret is given, once, in this
+    /// answer. A program that was only sent the cookies has neither the browser's anti-forgery value nor can it make this request.
+    /// </summary>
+    private async Task<ApiResult> ClaimSessionAsync(ApiCall call)
+    {
+        HttpResponse response = call.Context.Response;
+        string? ticket = Cookie(call.Context.Request, AdminSessions.LoginCookie);
+        string browser = call.Browser!;
+        (LoginState state, string? problem) = admin.Sessions.LoginStatus(ticket, browser);
+        for (int wait = 0; state == LoginState.Waiting && wait < 30 && !call.Context.RequestAborted.IsCancellationRequested; wait++)
+        {
+            await Task.Delay(50, CancellationToken.None);
+            (state, problem) = admin.Sessions.LoginStatus(ticket, browser);
+        }
+
+        switch (state)
+        {
+            case LoginState.Unknown:
+                DropCookie(response, AdminSessions.LoginCookie);
+
+                return new ApiResult(404, new ApiProblem(404, "no-sign-in", "this browser has no sign-in waiting; start one (POST " + Prefix + "/session)"));
+
+            case LoginState.Waiting:
+                return new ApiResult(409, new ApiProblem(409, "sign-in-pending", "the passkey tap for this sign-in has not been made yet"));
+
+            case LoginState.Failed:
+                admin.Sessions.Forget(ticket, browser);
+                DropCookie(response, AdminSessions.LoginCookie);
+
+                return new ApiResult(409, new ApiProblem(409, "sign-in-failed", ApprovalSummary.Clean(problem ?? "the passkey was refused")));
+        }
+
+        if (admin.Status().Locked)
+        {
+            return new ApiResult(423, new ApiProblem(423, "authority-locked", "the authority is locked: unlock it first (no session starts on a locked authority)"));
+        }
+
+        if (admin.Sessions.Claim(ticket, browser) is not { } claimed)
+        {
+            return new ApiResult(409, new ApiProblem(409, "no-sign-in", "this sign-in cannot be claimed"));
+        }
+
+        SetCookie(response, AdminSessions.SessionCookie, claimed.Token);
+        DropCookie(response, AdminSessions.LoginCookie);
+        admin.RecordSessionStart(claimed);
+        (DateTimeOffset idle, DateTimeOffset absolute) = admin.SessionEnds(claimed);
+
+        return new ApiResult(201, new ClaimDto(claimed.Csrf, new SessionDto(true, ApprovalSummary.Clean(claimed.Admin), claimed.Started, idle, absolute, null, admin.Recent)));
     }
 
     private async Task<ApiResult> StartSessionAsync(ApiCall call)
     {
-        (AdminStart start, string? ticket) = await admin.BeginLoginAsync(call.Context.RequestAborted);
+        (AdminStart start, string? ticket) = await admin.BeginLoginAsync(call.Browser!, call.Context.RequestAborted);
         if (ticket is not null)
         {
-            call.Context.Response.Cookies.Append(AdminSessions.LoginCookie, ticket, Options());
+            SetCookie(call.Context.Response, AdminSessions.LoginCookie, ticket);
         }
 
         return start.Link is not null ? new ApiResult(202, new { link = start.Link }) : new ApiResult(start.Status, FromStart(start));
@@ -486,7 +545,7 @@ internal sealed partial class AdminApi
     {
         admin.Sessions.Destroy(call.Token);
         admin.RecordSessionEnd(call.Session!, "ended: sign out");
-        call.Context.Response.Cookies.Delete(AdminSessions.SessionCookie, Options(expire: true));
+        DropCookie(call.Context.Response, AdminSessions.SessionCookie);
 
         return Task.FromResult(new ApiResult(200, new { ok = true }));
     }
@@ -546,9 +605,9 @@ internal sealed partial class AdminApi
         {
             return Task.FromResult(new ApiResult(200, new { items = admin.AuditEventsView(query) }));
         }
-        catch (AuthorityDatabaseException failure)
+        catch (AuthorityDatabaseException)
         {
-            return Task.FromResult(new ApiResult(503, new ApiProblem(503, "audit-unavailable", ApprovalSummary.Clean(failure.Message))));
+            return Task.FromResult(new ApiResult(503, new ApiProblem(503, "audit-unavailable", "the audit history could not be read")));
         }
     }
 
@@ -564,9 +623,9 @@ internal sealed partial class AdminApi
         {
             return Task.FromResult(new ApiResult(200, new { items = admin.AuditChangesView(query) }));
         }
-        catch (AuthorityDatabaseException failure)
+        catch (AuthorityDatabaseException)
         {
-            return Task.FromResult(new ApiResult(503, new ApiProblem(503, "audit-unavailable", ApprovalSummary.Clean(failure.Message))));
+            return Task.FromResult(new ApiResult(503, new ApiProblem(503, "audit-unavailable", "the audit history could not be read")));
         }
     }
 
@@ -582,9 +641,9 @@ internal sealed partial class AdminApi
         {
             return Task.FromResult(new ApiResult(200, new { items = admin.AuditGapsView(query.MachinePrefix) }));
         }
-        catch (AuthorityDatabaseException failure)
+        catch (AuthorityDatabaseException)
         {
-            return Task.FromResult(new ApiResult(503, new ApiProblem(503, "audit-unavailable", ApprovalSummary.Clean(failure.Message))));
+            return Task.FromResult(new ApiResult(503, new ApiProblem(503, "audit-unavailable", "the audit history could not be read")));
         }
     }
 
@@ -668,9 +727,9 @@ internal sealed partial class AdminApi
             return new ApiResult(401, new ApiProblem(401, "session-required", "this needs an administrator session"));
         }
 
-        if (call.Session is null && op != AdminService.OpUnlock)
+        if (call.Session is null && !AdminService.NeedsNoSession(op))
         {
-            admin.Refused(op, "no administrator session");
+            admin.Refused(op, "no administrator session", AdminService.CallerOf(owner));
 
             return new ApiResult(401, new ApiProblem(401, "session-required", "this needs an administrator session"));
         }

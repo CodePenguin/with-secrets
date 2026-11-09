@@ -1,7 +1,7 @@
 import '@testing-library/jest-dom/vitest'
 import { cleanup } from '@testing-library/react'
-import { afterEach } from 'vitest'
-import { setAntiForgery } from '../api/client'
+import { afterEach, beforeEach } from 'vitest'
+import { setBrowserSecret, setSessionSecret } from '../api/client'
 
 // jsdom has no showModal/close on <dialog>: a faithful enough stand-in (open attribute, close event).
 if (!HTMLDialogElement.prototype.showModal) {
@@ -13,7 +13,13 @@ if (!HTMLDialogElement.prototype.showModal) {
   }
 }
 
+// Every test starts as a page that has already made its browser identity (the tests of that step clear it).
+beforeEach(() => {
+  setBrowserSecret('test-browser-secret')
+})
+
 afterEach(() => {
   cleanup()
-  setAntiForgery(null)
+  setSessionSecret(null)
+  setBrowserSecret(null)
 })

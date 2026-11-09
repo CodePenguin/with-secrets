@@ -117,7 +117,7 @@ public sealed class AdminAuthorizer(AuthorityStore store, IApprovalVerifier veri
         catch (Exception error) when (error is not OutOfMemoryException)
         {
             // An asker that fails is a refusal, whatever it throws.
-            return Refuse(operation, "the passkey page could not be shown (" + error.GetType().Name + ")", parameterText);
+            return Refuse(operation, "the passkey page could not be shown", parameterText);
         }
 
         if (!asked.Approved)

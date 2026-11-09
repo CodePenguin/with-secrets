@@ -8,16 +8,25 @@ public interface IPasskeyAdmin
 {
     IReadOnlyList<EnrolledEntry> List();
 
-    /// <summary>Adds a passkey: the pages announce their link through <paramref name="announce" />. Approved only after the admin passkey's taps on those pages.</summary>
-    ApprovalDecision Enroll(Action<string> announce);
+    /// <summary>
+    /// Adds a passkey: the pages announce their link through <paramref name="announce" />. Approved only after the admin passkey's taps on those pages. <paramref name="stopReason" /> answers null while
+    /// the change may go on and a short reason once it must not (the request was cancelled or the authority was locked): the change is then not made, however far the pages got.
+    /// </summary>
+    ApprovalDecision Enroll(Action<string> announce, Func<string?> stopReason);
 
-    ApprovalDecision Unenroll(string name, Action<string> announce);
+    ApprovalDecision Unenroll(string name, Action<string> announce, Func<string?> stopReason);
 }
 
 /// <summary>Every operation of the admin app, as a plan: what is asked of the person (the sentence and the parameters the passkey signs) and what runs after the verified tap. A plan is made, and refused, before any page exists.</summary>
 public sealed partial class AdminService
 {
     private string CurrentKey() => _p.Store.ActiveKey()?.Fingerprint is { } fingerprint ? KeyIdentity.Display(fingerprint) : "(none yet)";
+
+    /// <summary>
+    /// The authority key was part of what the administrator signed ("Current key: K1"). When the key is another one by the time the change is applied (a rotation or recovery in between), it is refused:
+    /// the tap was for the other key.
+    /// </summary>
+    private string? KeyMoved(string signed) => CurrentKey() == signed ? null : "the authority key changed after this was authorized (it was " + signed + "); ask again";
 
     private static string? Arg(IReadOnlyDictionary<string, string> args, string name) => args.TryGetValue(name, out string? value) ? value : null;
 
@@ -56,6 +65,11 @@ public sealed partial class AdminService
                     [("authority-key", key)],
                     _ =>
                     {
+                        if (KeyMoved(key) is { } moved)
+                        {
+                            return moved;
+                        }
+
                         _p.Lock.Unlock(UnlockMethod.Manual);
                         _p.OnUnlocked();
 
@@ -68,6 +82,11 @@ public sealed partial class AdminService
                     [("authority-key", key)],
                     _ =>
                     {
+                        if (KeyMoved(key) is { } moved)
+                        {
+                            return moved;
+                        }
+
                         _p.Lock.Lock("locked by an administrator");
 
                         return null;
@@ -110,7 +129,7 @@ public sealed partial class AdminService
                 catch (Exception error) when (error is CryptographicException or InvalidOperationException)
                 {
                     CryptographicOperations.ZeroMemory(material);
-                    refusal = "the platform could not protect the unlock material (" + error.GetType().Name + ")";
+                    refusal = "the platform could not protect the unlock material";
 
                     return null;
                 }
@@ -121,6 +140,11 @@ public sealed partial class AdminService
                     [("authority-key", key)],
                     a =>
                     {
+                        if (KeyMoved(key) is { } moved)
+                        {
+                            return moved;
+                        }
+
                         _p.Keys.Rotate(a.Admin!.Actor);
 
                         return null;
@@ -132,6 +156,11 @@ public sealed partial class AdminService
                     [("authority-key", key)],
                     a =>
                     {
+                        if (KeyMoved(key) is { } moved)
+                        {
+                            return moved;
+                        }
+
                         AdminActions.RecoverAuthority(_p.Keys, _p.HostConfig, _p.LocalFingerprint, a.Admin!.Actor);
 
                         return null;
@@ -185,9 +214,9 @@ public sealed partial class AdminService
                 }
 
                 return new AdminPlan("enroll-passkey", "add a passkey that can approve runs (and, if you choose on its page, administer). The next pages ask an admin passkey for approval, make the new passkey and have an admin sign the new state", [],
-                    _ => null, null, announce =>
+                    _ => null, null, (announce, stop) =>
                     {
-                        ApprovalDecision decision = enrolling.Enroll(announce);
+                        ApprovalDecision decision = enrolling.Enroll(announce, stop);
 
                         return (decision.Approved, decision.Detail, "admin passkey");
                     });
@@ -212,9 +241,9 @@ public sealed partial class AdminService
                 string removeName = name!.Trim();
 
                 return new AdminPlan("remove-passkey", $"remove the passkey named \"{ApprovalSummary.Clean(removeName)}\" (any key but the last admin key). Its page asks an admin passkey to sign the new state", [("name", removeName)],
-                    _ => null, null, announce =>
+                    _ => null, null, (announce, stop) =>
                     {
-                        ApprovalDecision decision = removing.Unenroll(removeName, announce);
+                        ApprovalDecision decision = removing.Unenroll(removeName, announce, stop);
 
                         return (decision.Approved, decision.Detail, "admin passkey");
                     });
@@ -324,10 +353,11 @@ public sealed partial class AdminService
         string fingerprint = machine.Fingerprint;
         int revision = machine.SecurityRevision;
         string display = KeyIdentity.Display(fingerprint);
+        string pinKey = CurrentKey();
         string trimmed = name?.Trim() ?? "";
         string what = kind switch
         {
-            "approve" when repin => $"re-pin the authority key for this machine, which is already Trusted (nothing else changes; the friendly name is not changed). The key to pin: {CurrentKey()}",
+            "approve" when repin => $"re-pin the authority key for this machine, which is already Trusted (nothing else changes; the friendly name is not changed). The key to pin: {pinKey}",
             "approve" => $"approve this machine (it may then ask for secrets) with the friendly name \"{ApprovalSummary.Clean(trimmed)}\"",
             "disable" => "disable this machine (it is denied until enabled; its grants end)",
             "enable" => "enable this machine (it starts clean: no earlier grants or cache)",
@@ -352,6 +382,11 @@ public sealed partial class AdminService
 
         return new AdminPlan(kind + "-machine", sentence, parameters, a =>
         {
+            if (kind == "approve" && repin && KeyMoved(pinKey) is { } moved)
+            {
+                return moved;
+            }
+
             string actor = a.Admin!.Actor;
             TransitionResult result = kind switch
             {
@@ -496,17 +531,38 @@ public sealed partial class AdminService
 /// <summary>The passkey administration over this user's state: the same enrollment pages as <c>--enroll</c> and <c>--unenroll</c>. The confirmation code that a new passkey's page shows is typed in the terminal that runs the service.</summary>
 public sealed class StatePasskeyAdmin(StateDatabase state) : IPasskeyAdmin
 {
-    private Enrollment Make(Action<string> announce)
+    private Enrollment Make(Action<string> announce, Func<string?>? stopReason = null)
     {
         ApprovalSettings settings = ApprovalSettings.Load(state, out _);
-        (EnrollmentTarget primary, EnrollmentTarget local) = CommandWiring.Targets(state, settings, announce, CommandWiring.CodeReader("If the page says nothing was added, press Ctrl+C."));
+        Func<string?> reader = CommandWiring.CodeReader("If the page says nothing was added, press Ctrl+C.");
+        // A code typed after the request ended (or the authority locked) counts as no code, so the new passkey is not stored.
+        Func<string?> guarded = () => stopReason?.Invoke() is not null ? null : reader() is { } code && stopReason?.Invoke() is null ? code : null;
+        (EnrollmentTarget primary, EnrollmentTarget local) = CommandWiring.Targets(state, settings, announce, guarded);
 
-        return new Enrollment(primary, local, announce, new AuditLog(state));
+        return new Enrollment(primary, local, announce, new AuditLog(state)) { StopReason = stopReason };
+    }
+
+    /// <summary>
+    /// Runs a flow that cannot be interrupted from inside (its pages wait for their own taps) so that the request is free to end when <paramref name="stopReason" /> says so. What the flow does after that
+    /// changes nothing: <see cref="Enrollment.StopReason" /> is asked before the new state is made.
+    /// </summary>
+    private static ApprovalDecision Watch(Func<ApprovalDecision> flow, Func<string?> stopReason)
+    {
+        Task<ApprovalDecision> task = Task.Run(flow);
+        while (!task.Wait(TimeSpan.FromMilliseconds(200)))
+        {
+            if (stopReason() is { } reason)
+            {
+                return ApprovalDecision.Deny("nothing was changed: " + reason);
+            }
+        }
+
+        return task.Result;
     }
 
     public IReadOnlyList<EnrolledEntry> List() => Make(_ => { }).List();
 
-    public ApprovalDecision Enroll(Action<string> announce) => Make(announce).Enroll();
+    public ApprovalDecision Enroll(Action<string> announce, Func<string?> stopReason) => Watch(() => Make(announce, stopReason).Enroll(), stopReason);
 
-    public ApprovalDecision Unenroll(string name, Action<string> announce) => Make(announce).Unenroll(name);
+    public ApprovalDecision Unenroll(string name, Action<string> announce, Func<string?> stopReason) => Watch(() => Make(announce, stopReason).Unenroll(name), stopReason);
 }

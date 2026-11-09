@@ -8,16 +8,25 @@ internal enum ApiAccess
     /// <summary>Anyone on this machine's loopback: no session, nothing sensitive in the answer.</summary>
     Public,
 
-    /// <summary>A read: needs a session.</summary>
+    /// <summary>
+    /// Makes this browser's pre-session cookie and gives its anti-forgery value, once: a same-origin request (an Origin) and nothing else. It changes nothing in the authority and a program may make as many
+    /// identities as it likes; each is its own caller with its own limits.
+    /// </summary>
+    Open,
+
+    /// <summary>A read: needs a session (its cookie and its own secret).</summary>
     Read,
 
-    /// <summary>Only for the caller a thing was made for (its session, or for the unlock its browser): an authorization's state. Needs no session itself, because the unlock is asked for without one.</summary>
+    /// <summary>Only for the caller a thing was made for (its session, or for the unlock its browser, each with its secret): an authorization's state, or the session's own state. Needs no session itself, because the unlock is asked for without one, and never changes anything.</summary>
     Owner,
 
-    /// <summary>Start a sign-in: a same-origin request with the anti-forgery value of the browser; no session yet.</summary>
+    /// <summary>Start a sign-in: a same-origin request with the anti-forgery value of the browser (its pre-session cookie); no session yet.</summary>
     Login,
 
-    /// <summary>Sign out: a session and its anti-forgery value.</summary>
+    /// <summary>Claim the session of a sign-in whose tap was verified: a same-origin request with the anti-forgery value of the browser that began it and its login cookie. The answer carries the session's own secret, once.</summary>
+    Claim,
+
+    /// <summary>Sign out: a session (its cookie and its own secret).</summary>
     Logout,
 
     /// <summary>Ask for an authorization: a session (but for the unlock), the anti-forgery value, a body. Authorizes nothing by itself.</summary>
@@ -106,8 +115,10 @@ internal sealed partial class AdminApi
         [
             new("GET", Prefix + "/openapi.json", "getOpenApi", "The OpenAPI 3.1 document of this API (public; it carries no secret).", "meta", ApiAccess.Public, 200, null, null, [], null, _ => Task.FromResult(new ApiResult(200, null))),
             new("GET", Prefix + "/status", "getStatus", "Whether the service is running, locked or unlocked, the unlock mode and the versions (public).", "status", ApiAccess.Public, 200, "Status", null, [], null, _ => Task.FromResult(new ApiResult(200, admin.StatusView()))),
-            new("GET", Prefix + "/session", "getSession", "Who is signed in (a read-only session), the anti-forgery value for requests that change something, and how a sign-in in progress stands. Claims the session of a sign-in whose tap was verified.", "session", ApiAccess.Public, 200, "Session", null, [], null, GetSessionAsync),
-            new("POST", Prefix + "/session", "startSession", "Start a sign-in: answers the link of the one-use passkey page whose tap (user verification) starts a read-only session for this browser. Then GET /session.", "session", ApiAccess.Login, 202, "LoginStarted", S.Obj([]), [], null, StartSessionAsync),
+            new("POST", Prefix + "/browser", "startBrowser", "Make this browser's pre-session cookie and give its anti-forgery value (once, in this answer: keep it in the page and send it as X-Admin-Token). Needed before a sign-in or an unlock. Changes nothing in the authority.", "session", ApiAccess.Open, 201, "Browser", S.Obj([]), [], null, StartBrowserAsync),
+            new("GET", Prefix + "/session", "getSession", "Who is signed in (a read-only session) and how a sign-in in progress stands. Read-only: it claims nothing and sets no cookie; a session is recognized only with its cookie AND its own secret (X-Admin-Token).", "session", ApiAccess.Owner, 200, "Session", null, [], null, GetSessionAsync),
+            new("POST", Prefix + "/session", "startSession", "Start a sign-in: answers the link of the one-use passkey page whose tap (user verification) starts a read-only session for this browser. Then GET /session until the login is ready, then POST /session/claim.", "session", ApiAccess.Login, 202, "LoginStarted", S.Obj([]), [], null, StartSessionAsync),
+            new("POST", Prefix + "/session/claim", "claimSession", "Claim the session of the sign-in this browser began, once its tap was verified. The answer carries the session's own secret (antiForgery), once: keep it in the page and send it as X-Admin-Token with every request.", "session", ApiAccess.Claim, 201, "Claim", S.Obj([]), [], null, ClaimSessionAsync),
             new("DELETE", Prefix + "/session", "endSession", "Sign out: ends the session now.", "session", ApiAccess.Logout, 200, "Done", null, [], null, EndSessionAsync),
             new("GET", Prefix + "/machines", "listMachines", "The machines and where each stands (read-only session).", "machines", ApiAccess.Read, 200, "MachineList", null, [], null, _ => Task.FromResult(new ApiResult(200, new { items = admin.MachinesView() }))),
             new("GET", Prefix + "/machines/{fingerprint}", "getMachine", "One machine, by its fingerprint or an unambiguous start of it (read-only session).", "machines", ApiAccess.Read, 200, "Machine", null, [], null, GetMachineAsync),

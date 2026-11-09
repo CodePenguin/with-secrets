@@ -34,7 +34,7 @@ internal sealed partial class AdminApi
                 ("version", S.Str()),
                 ("protocolVersion", S.Int()),
             ]),
-            ["Login"] = S.Obj([("state", S.Str(values: ["waiting", "failed"])), ("problem", S.Str(nullable: true))]),
+            ["Login"] = S.Obj([("state", S.Str(values: ["waiting", "ready", "failed"])), ("problem", S.Str(nullable: true))]),
             ["Session"] = S.Obj(
             [
                 ("authenticated", S.Bool()),
@@ -42,10 +42,11 @@ internal sealed partial class AdminApi
                 ("started", S.Time(nullable: true)),
                 ("idleExpires", S.Time(nullable: true)),
                 ("absoluteExpires", S.Time(nullable: true)),
-                ("antiForgery", S.Str(description: "Send this as the X-Admin-Token header with every request that is not a GET.")),
                 ("login", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("Login"), new JsonObject { ["type"] = "null" }) }),
                 ("recent", S.Arr(S.Str())),
             ]),
+            ["Browser"] = S.Obj([("antiForgery", S.Str(description: "Keep this in the page (not in a cookie) and send it as the X-Admin-Token header with every request. It is given once, here, and never again."))]),
+            ["Claim"] = S.Obj([("antiForgery", S.Str(description: "The session's own secret, given once, here. Send it as the X-Admin-Token header with every request: the session cookie alone is not enough.")), ("session", S.Ref("Session"))]),
             ["LoginStarted"] = S.Obj([("link", S.Str(description: "The one-use passkey page to open. The tap there starts the session."))]),
             ["Machine"] = S.Obj(
             [
@@ -229,7 +230,7 @@ internal sealed partial class AdminApi
             }
 
             responses["403"] = ProblemResponse("Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).");
-            if (route.Access is not (ApiAccess.Public or ApiAccess.Owner))
+            if (route.Access is not (ApiAccess.Public or ApiAccess.Owner or ApiAccess.Open or ApiAccess.Login or ApiAccess.Claim))
             {
                 responses["401"] = ProblemResponse("No administrator session (session-required).");
             }
@@ -259,11 +260,13 @@ internal sealed partial class AdminApi
 
             responses["500"] = ProblemResponse("The request failed (internal-error). Nothing the response does not say was changed.");
             operation["responses"] = responses;
-            if (route.Access is not (ApiAccess.Public or ApiAccess.Owner))
+            if (route.Access is not (ApiAccess.Public or ApiAccess.Owner or ApiAccess.Open))
             {
-                operation["security"] = route.Access is ApiAccess.Read ? new JsonArray(new JsonObject { ["sessionCookie"] = new JsonArray() })
-                    : route.Access is ApiAccess.Login ? new JsonArray(new JsonObject { ["antiForgery"] = new JsonArray() })
-                    : new JsonArray(new JsonObject { ["sessionCookie"] = new JsonArray(), ["antiForgery"] = new JsonArray() });
+                JsonObject session = new() { ["sessionCookie"] = new JsonArray(), ["antiForgery"] = new JsonArray() };
+                JsonObject browser = new() { ["browserCookie"] = new JsonArray(), ["antiForgery"] = new JsonArray() };
+                operation["security"] = route.Access is ApiAccess.Read or ApiAccess.Logout ? new JsonArray(session)
+                    : route.Access is ApiAccess.Login or ApiAccess.Claim ? new JsonArray(browser)
+                    : new JsonArray(session, browser);
             }
 
             item[route.Method.ToLowerInvariant()] = operation;
@@ -284,9 +287,9 @@ internal sealed partial class AdminApi
                 ["title"] = "with-secrets authority administration API",
                 ["version"] = "1.0.0",
                 ["description"] = "The administration API of the with-secrets authority on the Windows host service's loopback port (same origin as the administration web application). JSON only. "
-                    + "A browser session is READ-ONLY (an HttpOnly, SameSite=Strict cookie, in service memory only). Every change needs its own fresh passkey authorization (POST /api/v1/authorizations, then the tap, then the mutation carrying the authorization id), "
+                    + "A browser session is READ-ONLY (an HttpOnly, SameSite=Strict cookie plus a secret given once, in service memory only). Every change needs its own fresh passkey authorization (POST /api/v1/authorizations, then the tap, then the mutation carrying the authorization id), "
                     + "bound to the operation and its parameters, single use and time limited. There is no CORS. Changes within v1 are additive; a breaking change is a new major version. Another version number (/api/v2/...) is answered with 400 and the problem code "
-                    + "unsupported-api-version listing supportedVersions; an unknown path under /api is 404 route-not-found; /api never falls through to the web application. Every response carries X-Api-Version. No answer contains a secret value, a credential, a private key or recovery material.",
+                    + "unsupported-api-version listing supportedVersions; an unknown path under /api is 404 route-not-found; /api never falls through to the web application. Every response carries X-Api-Version; a request may carry it too (X-Api-Version: 1) and another value is refused with unsupported-api-version. No answer contains a secret value, a credential, a private key or recovery material.",
             },
             ["servers"] = new JsonArray(new JsonObject { ["url"] = "/", ["description"] = "The service's own origin (http://localhost:PORT)." }),
             ["tags"] = new JsonArray([.. routes.Select(route => route.Tag).Distinct().Select(tag => (JsonNode?)new JsonObject { ["name"] = tag })]),
@@ -295,8 +298,9 @@ internal sealed partial class AdminApi
             {
                 ["securitySchemes"] = new JsonObject
                 {
-                    ["sessionCookie"] = new JsonObject { ["type"] = "apiKey", ["in"] = "cookie", ["name"] = AdminSessions.SessionCookie, ["description"] = "A read-only administrator session (HttpOnly, SameSite=Strict, path " + Prefix + ")." },
-                    ["antiForgery"] = new JsonObject { ["type"] = "apiKey", ["in"] = "header", ["name"] = TokenHeader, ["description"] = "The antiForgery value of GET /session, for every request that is not a GET." },
+                    ["sessionCookie"] = new JsonObject { ["type"] = "apiKey", ["in"] = "cookie", ["name"] = AdminSessions.SessionCookie, ["description"] = "A read-only administrator session (HttpOnly, SameSite=Strict, path " + Prefix + "). The value is bound to the service port. Alone it is not enough: the request must also carry the session's own secret (antiForgery)." },
+                    ["browserCookie"] = new JsonObject { ["type"] = "apiKey", ["in"] = "cookie", ["name"] = AdminSessions.BrowserCookie, ["description"] = "The browser's pre-session cookie (HttpOnly, SameSite=Strict, path " + Prefix + "), made by POST /browser; with it, the anti-forgery value of POST /browser." },
+                    ["antiForgery"] = new JsonObject { ["type"] = "apiKey", ["in"] = "header", ["name"] = TokenHeader, ["description"] = "A secret given once, in the answer that made the cookie it belongs to: POST /browser (before a session) or POST /session/claim (the session). Kept in the page, never in a cookie; the page's origin (with its port) is what keeps it from other programs that are sent the cookies." },
                 },
                 ["schemas"] = Components(),
             },
