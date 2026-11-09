@@ -47,9 +47,11 @@ internal static class Cmds
         // talks to it over HTTP. The page listens on the port the harness chose (the --port of the run).
         return new Cmd<int>((port, o, e) =>
         {
-            using HostService service = HostService.Start(new HostServiceOptions { State = rig.State, Store = rig.Store, Grants = rig.Grants, Port = 0, TimeLimit = timeLimit });
+            // The machine is enrolled and approved through AdminActions (what `admin approve` does after the passkey tap), with software keys.
+            E2EMachine machine = rig.Machine;
+            using HostService service = HostService.Start(new HostServiceOptions { State = rig.State, Store = rig.Store, Grants = rig.Grants, Deployment = machine.Deployment, Port = 0, TimeLimit = timeLimit });
 
-            return LaunchClient.RunAsync(run.Args, rig.Work, service.Port, port, o, e).GetAwaiter().GetResult();
+            return LaunchClient.RunAsync(run.Args, rig.Work, service.Port, port, o, e, machine.Trust).GetAwaiter().GetResult();
         });
     }
 

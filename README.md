@@ -18,7 +18,7 @@ While a passkey prompt is open, the button you tapped reads **Cancel**; if the p
 6. If the proof is good, the program decrypts **only the named secrets** (with the Dotenvx crypto library), passes them to the program as environment variables, and redacts them from the output. Give a comma-separated list (`--secrets DB_URL,API_KEY`) to inject several secrets in one run, or declare them in the project's `.env` (see [Project `.env` declarations](#project-env-declarations)). There is no `--all`: every name must be written out.
 7. It writes an audit line (names, command, result, and a hash of any script file in the command; never values).
 
-Deny, a wrong proof, an error, or no answer before the time limit all deny the run (exit code 3). The link works once. A run needs the host service (exit code 6 when it is not running; see [The host service](#the-host-service)).
+Deny, a wrong proof, an error, or no answer before the time limit all deny the run (exit code 3). The link works once. A run needs the host service (exit code 6 when it is not running, exit code 7 when what answers is not this machine's service or no identity is pinned yet; see [The host service](#the-host-service)).
 
 ## Install
 
@@ -39,11 +39,31 @@ Do steps 1 and 2 in **your own terminal** (an ssh session or a separate window),
 2. `with-secrets --set DB_URL`. Open the link, type the value in the browser, and approve with your passkey (one page, one tap: the first `--set` is the same as any other, and needs no PRF). The terminal never sees the value. Nothing is asked in the terminal, and no key file is written. The secrets are stored in `%USERPROFILE%\.with-secrets\state.db` (see [The secret store](#the-secret-store)).
 3. Give the agent the run command (see above) and tell it which secret names it may use.
 
+## Machine identity and admin commands
+
+The host service has a **machine identity**: an ECDSA P-256 key made on first start (`with-secrets service`) and kept by Windows CNG as a non-exportable key, in the Platform Crypto Provider (TPM) when there is one and otherwise silently in the software provider. Its **fingerprint** is the SHA-256 of the public key (shown as 16 groups of 4 hex digits). The service prints only the fingerprint and the host name. A separate **authority signing key** signs the authority's answers; its public key is pinned in `host.json` in the store folder (public data only) when this machine is first approved, and the host rejects an answer signed by any other key. The state of machines lives in `authority.db` in the store folder (separate from `state.db`; schema 1; if it reports another schema, delete `authority.db` and enroll again).
+
+**First run.** 1. Run `with-secrets service`; it enrolls this machine as **Pending** and prints its fingerprint. 2. In another terminal run `with-secrets admin machines` to see it. 3. Compare the fingerprint, then run `with-secrets admin approve FINGERPRINT --name NAME`; a page shows the action and the full fingerprint and you tap an **admin passkey**. This also pins the authority key in `host.json`. Until then every run is denied with one line naming that command. 4. A run (the CLI) first asks the service to prove its identity (the fingerprint pinned in `host.json`); a program that merely holds the port cannot, and the run stops with exit code **7** before anything is sent. With nothing pinned yet the CLI prints the fingerprint the service claims and refuses until `admin approve` has pinned it.
+
+| Command | What it does |
+| --- | --- |
+| `admin machines` | List fingerprint, status, security revision, host name and friendly name. No passkey |
+| `admin approve FP --name NAME` | Pending to Trusted, with a friendly name; pins the authority key for this machine |
+| `admin disable FP` / `admin enable FP` | Trusted to Disabled (the revision goes up, grants end) / Disabled to Trusted (starts clean) |
+| `admin untrust FP` / `admin trust FP` | Withdraw trust (revision up) / trust again; `trust` needs the **full** 64-digit fingerprint as the confirmation |
+| `admin rename FP NAME` | Change the friendly name (display only; revision unchanged) |
+| `admin approve-host-change FP` | Accept the host name a Trusted machine started using; until then it is denied and the change is recorded |
+
+`FP` is the full fingerprint or any prefix of 12 or more digits (except `trust`). Every admin command is for a person in a terminal (it refuses redirected input or output) and each change needs a one-use page and an admin passkey tap; the page text, which the passkey signs, names the action and the machine's full fingerprint, so a tap cannot be reused for another change. A non-admin key, no answer, or a machine that changed meanwhile changes nothing. Only a **Trusted** machine is ever shown an approval or decrypts anything; Pending, Disabled and Untrusted machines are denied, nobody is asked, and nothing is decrypted.
+
+**Authority key rotation and recovery.** A routine rotation is a signed transition (the new key signed by the current one); the host follows it by itself and moves its pin. If the authority key is lost or not trusted there is no transition: recovery is an explicit administrator action, `with-secrets admin recover-authority`, that makes a new key and pins it for this machine; other hosts must be enrolled again. `with-secrets admin rotate-authority-key` is the routine rotation. Both need an admin passkey tap like every other admin change. Limits: `host.json` can be written by any process of the same user, so this is no protection against a hostile same-user process; the CLI's identity check is not bound to the connection, so a relaying impostor on the port could still read the request it relays; CNG exists on Windows only, so `service` and `admin` (except `machines`) refuse elsewhere.
+
 ## Commands
 
 | Command | What it does | Who |
 | --- | --- | --- |
 | `with-secrets [--secrets A,B] --reason TEXT [-f FILE]... -- PROGRAM [ARGS...]` | Run a program with the named secrets, and the secrets the project's `.env` declares (see [Project `.env` declarations](#project-env-declarations)), after approval. `--secrets` is optional when the `.env` has `secret://` references | Agent |
+| `admin machines`, `admin approve FP --name NAME`, `admin disable\|enable\|untrust\|trust FP`, `admin rename FP NAME`, `admin approve-host-change FP` | Machines and their status (see [Machine identity and admin commands](#machine-identity-and-admin-commands)); each change needs an admin passkey | Person, in a terminal you own |
 | `service [--port N]` | Run the **host service** in the foreground (see [The host service](#the-host-service)). A run goes through it | Person, in a terminal of its own |
 | `--needs [-f FILE]...` | Print what the current project would ask for: the `.env` files used, the ordinary variable names, and each `VARIABLE <- secret NAME` with `in store` or `NOT IN STORE`. Names only; no approval, no passkey, no decrypt, no terminal needed. Exit 2 on a bad `.env`; exit 4 when the store fails verification | Agent |
 | `--list` | Print the secret names (never values); exit 4 when the store fails verification | Anyone |

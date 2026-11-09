@@ -47,7 +47,7 @@ internal static class Program
             return await RunThroughService(run);
         }
 
-        string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), StoreFolder);
+        string folder = StorePath();
         StateDatabase state = StateDatabase.InFolder(folder);
         SecretStore store = new(state);
 
@@ -113,7 +113,10 @@ internal static class Program
                 return CommandWiring.Config(state, command.Port);
 
             case CliCommand.Service:
-                return RunService(command, state, store, grants);
+                return RunService(command, state, store, grants, folder);
+
+            case CliCommand.Admin admin:
+                return CommandWiring.Admin(admin, state, folder, command.Port);
         }
 
         return RunCommand.Usage;
@@ -129,16 +132,21 @@ internal static class Program
             return RunCommand.Usage;
         }
 
+        // The service must prove it is this machine's host service (the identity pinned in host.json) before anything is sent to it.
+        ServiceTrust trust = ServiceTrust.From(HostConfigFile.InFolder(StorePath()));
+
         using Stream stdout = Console.OpenStandardOutput();
         using Stream stderr = Console.OpenStandardError();
         using StreamWriter outWriter = new(stdout, new UTF8Encoding(false)) { AutoFlush = true };
         using StreamWriter errWriter = new(stderr, new UTF8Encoding(false)) { AutoFlush = true };
 
-        return await LaunchClient.RunAsync(command.Args, Directory.GetCurrentDirectory(), port.Value, command.Port, outWriter, errWriter);
+        return await LaunchClient.RunAsync(command.Args, Directory.GetCurrentDirectory(), port.Value, command.Port, outWriter, errWriter, trust);
     }
 
     /// <summary>The host service in the foreground, until Ctrl+C. Windows service installation and start at logon come later.</summary>
-    private static int RunService(CliCommand command, StateDatabase state, SecretStore store, GrantStore grants)
+    private static string StorePath() => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), StoreFolder);
+
+    private static int RunService(CliCommand command, StateDatabase state, SecretStore store, GrantStore grants, string folder)
     {
         int? port = ServiceEndpoint.Resolve(command.ServicePort, Environment.GetEnvironmentVariable, out string? portError);
         if (port is null)
@@ -148,10 +156,32 @@ internal static class Program
             return RunCommand.Usage;
         }
 
+        if (!OperatingSystem.IsWindows())
+        {
+            TerminalPrompt.Final("with-secrets: the machine identity needs Windows CNG for now; the host service cannot start on this system.");
+
+            return RunCommand.StoreError;
+        }
+
+        LocalDeployment deployment;
+        EnrollmentResult enrolled;
+        try
+        {
+            // The machine identity key is made on the first start (non-exportable, kept by Windows) and never leaves it.
+            deployment = LocalDeployment.OpenProduction(folder);
+            enrolled = deployment.EnrollAsync().GetAwaiter().GetResult();
+        }
+        catch (Exception failure) when (failure is AuthorityDatabaseException or System.Security.Cryptography.CryptographicException)
+        {
+            TerminalPrompt.Final("with-secrets: the machine identity or the authority cannot be used: " + failure.Message);
+
+            return RunCommand.StoreError;
+        }
+
         HostService service;
         try
         {
-            service = HostService.Start(new HostServiceOptions { State = state, Store = store, Grants = grants, Port = port.Value });
+            service = HostService.Start(new HostServiceOptions { State = state, Store = store, Grants = grants, Port = port.Value, Deployment = deployment });
         }
         catch (Exception failure)
         {
@@ -169,10 +199,17 @@ internal static class Program
                 stop.Set();
             };
             Console.CancelKeyPress += handler;
+            foreach (string line in ServiceStartup.Lines(deployment.HostName, deployment.Fingerprint, enrolled))
+            {
+                TerminalPrompt.Line(line);
+            }
+
             TerminalPrompt.Line($"with-secrets service: listening on 127.0.0.1 and [::1], port {service.Port} (this machine only). Press Ctrl+C to stop.");
             stop.Wait();
             Console.CancelKeyPress -= handler;
         }
+
+        deployment.Dispose();
 
         return 0;
     }

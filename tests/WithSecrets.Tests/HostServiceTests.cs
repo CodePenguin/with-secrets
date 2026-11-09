@@ -17,7 +17,7 @@ internal static class HostServiceTests
     private const string Other = "Canary-Other-9001337";
 
     /// <summary>A secret source in memory that counts decryptions.</summary>
-    private sealed class CountingStore(Dictionary<string, string> values) : ISecretSource
+    internal sealed class CountingStore(Dictionary<string, string> values) : ISecretSource
     {
         private int _reads;
 
@@ -36,7 +36,7 @@ internal static class HostServiceTests
     }
 
     /// <summary>An approver that waits for the test: it says when it was asked and answers when released.</summary>
-    private sealed class WaitingApprover(bool approve = true) : IApprover
+    internal sealed class WaitingApprover(bool approve = true) : IApprover
     {
         public ManualResetEventSlim Asked { get; } = new(false);
 
@@ -52,7 +52,7 @@ internal static class HostServiceTests
     }
 
     /// <summary>An approver that waits and honours the cancellation token, as the page approver does.</summary>
-    private sealed class CancelAwareApprover : IApprover
+    internal sealed class CancelAwareApprover : IApprover
     {
         public ManualResetEventSlim Asked { get; } = new(false);
 
@@ -82,23 +82,25 @@ internal static class HostServiceTests
         public ApprovalDecision Request(ApprovalRequest request) => throw new InvalidOperationException("approver failed");
     }
 
-    private sealed class Rig : IDisposable
+    internal sealed class Rig : IDisposable
     {
         private readonly string _dir;
         private int _ids;
 
-        public Rig(string parent, Dictionary<string, string>? values = null, Func<IApprover>? approver = null, TimeSpan? bodyTimeout = null, Action<PreparedChild>? afterPrepare = null, Action? afterCommit = null)
+        public Rig(string parent, Dictionary<string, string>? values = null, Func<IApprover>? approver = null, TimeSpan? bodyTimeout = null, Action<PreparedChild>? afterPrepare = null, Action? afterCommit = null, bool trusted = true, TestMachine? machine = null)
         {
             _dir = Path.Combine(parent, "svc-" + Guid.NewGuid().ToString("N")[..8]);
             Work = Path.Combine(_dir, "work");
             Directory.CreateDirectory(Work);
             State = StateDatabase.InFolder(Path.Combine(_dir, "state"));
+            Machine = machine ?? new TestMachine(Path.Combine(_dir, "state"), trusted);
             Store = new CountingStore(values ?? new Dictionary<string, string> { ["TOKEN"] = Value, ["OTHER_KEY"] = Other });
             Approvers = [];
             Service = HostService.Start(new HostServiceOptions
             {
                 State = State,
                 Store = Store,
+                Deployment = Machine.Deployment,
                 Port = 0,
                 BodyTimeout = bodyTimeout ?? TimeSpan.FromSeconds(15),
                 ApproverFactory = (_, _) =>
@@ -117,6 +119,8 @@ internal static class HostServiceTests
         public string Work { get; }
 
         public StateDatabase State { get; }
+
+        public TestMachine Machine { get; }
 
         public CountingStore Store { get; }
 
@@ -154,10 +158,11 @@ internal static class HostServiceTests
         {
             Http.Dispose();
             Service.Dispose();
+            Machine.Deployment.Dispose();
         }
     }
 
-    private sealed record Raw(HttpStatusCode Status, string Body, List<string> Lines, List<LaunchEvent> Events)
+    internal sealed record Raw(HttpStatusCode Status, string Body, List<string> Lines, List<LaunchEvent> Events)
     {
         public LaunchEvent? Result => Events.LastOrDefault(item => item.Kind == LaunchEvent.ResultKind);
 
@@ -166,7 +171,7 @@ internal static class HostServiceTests
         public string Stderr => string.Concat(Events.Where(item => item.Stream == "stderr").Select(item => item.Text));
     }
 
-    private static IReadOnlyDictionary<string, string> Env(params (string Name, string Value)[] extra)
+    internal static IReadOnlyDictionary<string, string> Env(params (string Name, string Value)[] extra)
     {
         Dictionary<string, string> map = new(LaunchClient.CurrentEnvironment(), StringComparer.Ordinal);
         map.Remove("WS_TEST_SERVICE_ONLY");
@@ -178,7 +183,7 @@ internal static class HostServiceTests
         return map;
     }
 
-    private static LaunchRequest Req(Rig rig, string program, string[]? args = null, (string Variable, string Secret)[]? pairs = null, IReadOnlyDictionary<string, string>? environment = null, Dictionary<string, string>? ordinary = null, string? id = null)
+    internal static LaunchRequest Req(Rig rig, string program, string[]? args = null, (string Variable, string Secret)[]? pairs = null, IReadOnlyDictionary<string, string>? environment = null, Dictionary<string, string>? ordinary = null, string? id = null)
     {
         (string Variable, string Secret)[] mapped = pairs ?? [("TOKEN", "TOKEN")];
         Dictionary<string, string> variables = ordinary ?? [];
@@ -202,7 +207,7 @@ internal static class HostServiceTests
             environment ?? Env());
     }
 
-    private static async Task<Raw> Post(Rig rig, LaunchRequest request, Action<LaunchEvent>? onEvent = null, CancellationToken cancel = default, Action<HttpRequestMessage>? tweak = null, string? body = null, string? digest = null, string path = "/v1/launch")
+    internal static async Task<Raw> Post(Rig rig, LaunchRequest request, Action<LaunchEvent>? onEvent = null, CancellationToken cancel = default, Action<HttpRequestMessage>? tweak = null, string? body = null, string? digest = null, string path = "/v1/launch")
     {
         using HttpRequestMessage message = new(HttpMethod.Post, rig.Url(path))
         {
@@ -235,7 +240,7 @@ internal static class HostServiceTests
         return new Raw(response.StatusCode, all.ToString(), lines, events);
     }
 
-    private static async Task<bool> WaitFor(Func<bool> condition, int seconds = 20)
+    internal static async Task<bool> WaitFor(Func<bool> condition, int seconds = 20)
     {
         DateTime end = DateTime.UtcNow.AddSeconds(seconds);
         while (DateTime.UtcNow < end)
@@ -589,7 +594,7 @@ internal static class HostServiceTests
         check(thrown.Result is { Outcome: LaunchOutcome.Denied, ExitCode: RunCommand.Denied } && boom.Store.Reads == 0 && !Directory.GetFiles(boom.Work, "*.marker.txt").Any(), "local API alone does not authorize: an internal error is a denial that decrypts nothing (" + thrown.Result + ")");
     }
 
-    private static string Marker(Rig rig) => Directory.GetFiles(rig.Work, "*.marker.txt").FirstOrDefault() ?? "";
+    internal static string Marker(Rig rig) => Directory.GetFiles(rig.Work, "*.marker.txt").FirstOrDefault() ?? "";
 
     private static async Task Cancellation(Action<bool, string> check, string parent)
     {
@@ -813,6 +818,7 @@ internal static class HostServiceTests
         {
             StateDatabase db = StateDatabase.InFolder(Path.Combine(folder, "state-" + Guid.NewGuid().ToString("N")[..6]));
             new PasskeyStore(db).Add(laptop.Record("localhost", "laptop"));
+            using TestMachine machine = new(Path.GetDirectoryName(db.FilePath)!);
             CountingCipher cipher = new();
             SecretStore store = new(db, cipher);
             if (SecretStoreTests.Put(store, new Dictionary<string, string> { ["TOKEN"] = Value }) is { } problem)
@@ -820,7 +826,7 @@ internal static class HostServiceTests
                 throw new InvalidOperationException(problem);
             }
 
-            using HostService service = HostService.Start(new HostServiceOptions { State = db, Store = store, Port = 0, TimeLimit = TimeSpan.FromSeconds(30) });
+            using HostService service = HostService.Start(new HostServiceOptions { State = db, Store = store, Deployment = machine.Deployment, Port = 0, TimeLimit = TimeSpan.FromSeconds(30) });
             using HttpClient client = new(new SocketsHttpHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(60) };
             DateTimeOffset now = DateTimeOffset.UtcNow;
             LaunchRequest request = new(LaunchProtocol.Version, "http-" + Guid.NewGuid().ToString("N")[..8], now, now.AddMinutes(5), "bm9uY2UtMDAwMDAwMDEx" + Guid.NewGuid().ToString("N")[..6], ["TOKEN"], [new LaunchMapping("TOKEN", "TOKEN")], "approval over http", "./" + program, [], work, [], [], new Dictionary<string, string>(), Env());
@@ -1034,7 +1040,8 @@ internal static class HostServiceTests
             new PasskeyStore(db).Add(key.Record("localhost", "laptop"));
             SecretStore store = new(db, new CountingCipher());
             SecretStoreTests.Put(store, new Dictionary<string, string> { ["TOKEN"] = Value });
-            using HostService service = HostService.Start(new HostServiceOptions { State = db, Store = store, Port = 0, TimeLimit = TimeSpan.FromSeconds(60) });
+            using TestMachine machine = new(Path.GetDirectoryName(db.FilePath)!);
+            using HostService service = HostService.Start(new HostServiceOptions { State = db, Store = store, Deployment = machine.Deployment, Port = 0, TimeLimit = TimeSpan.FromSeconds(60) });
             using HttpClient client = new(new SocketsHttpHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(60) };
             string program = OperatingSystem.IsWindows() ? "p.cmd" : "p.sh";
             File.WriteAllText(Path.Combine(folder, "work", program), OperatingSystem.IsWindows() ? "@echo off\r\necho hi\r\n" : "#!/bin/sh\necho hi\n");
@@ -1108,7 +1115,7 @@ internal static class HostServiceTests
         StringWriter stdout = new();
         StringWriter stderr = new();
         RunArgs args = CliArgs.ParseRun(["--secrets", "TOKEN", "--reason", "no service", "--", "anything"], out _)!;
-        int code = await LaunchClient.RunAsync(args, parent, free, null, stdout, stderr);
+        int code = await LaunchClient.RunAsync(args, parent, free, null, stdout, stderr, new ServiceTrust(null));
         check(code == LaunchClient.ServiceNotRunning && LaunchClient.ServiceNotRunning == 6, "client: with no service the exit code is 6 (" + code + ")");
         check(stderr.ToString().Trim() == "with-secrets: the host service is not running. Start it with: with-secrets service" && stdout.ToString().Length == 0, "client: with no service one clear line is printed and nothing else (" + stderr.ToString().Trim() + ")");
 
@@ -1118,18 +1125,18 @@ internal static class HostServiceTests
         StringWriter outText = new();
         StringWriter errText = new();
         RunArgs run = CliArgs.ParseRun(["--secrets", "TOKEN", "--reason", "via client", "--", show], out _)!;
-        int exit = await LaunchClient.RunAsync(run, rig.Work, rig.Service.Port, null, outText, errText);
+        int exit = await LaunchClient.RunAsync(run, rig.Work, rig.Service.Port, null, outText, errText, rig.Machine.Trust);
         check(exit == 9 && outText.ToString().Contains("t=[REDACTED]", StringComparison.Ordinal) && errText.ToString().Contains("e=[REDACTED]", StringComparison.Ordinal), "client: output goes to the same streams and the exit code passes through (" + exit + ")");
         check(errText.ToString().Contains("with-secrets: waiting for the user to approve this request...", StringComparison.Ordinal) && !outText.ToString().Contains(Value, StringComparison.Ordinal) && !errText.ToString().Contains(Value, StringComparison.Ordinal), "client: the terminal shows the usual waiting line and no value");
 
         // The client has no store: a request for an unknown secret is refused by the service.
         StringWriter unknownErr = new();
-        int unknown = await LaunchClient.RunAsync(CliArgs.ParseRun(["--secrets", "GHOST", "--reason", "x", "--", show], out _)!, rig.Work, rig.Service.Port, null, new StringWriter(), unknownErr);
+        int unknown = await LaunchClient.RunAsync(CliArgs.ParseRun(["--secrets", "GHOST", "--reason", "x", "--", show], out _)!, rig.Work, rig.Service.Port, null, new StringWriter(), unknownErr, rig.Machine.Trust);
         check(unknown == RunCommand.Usage && unknownErr.ToString().Contains("Unknown secret: GHOST", StringComparison.Ordinal), "client: an unknown secret is refused by the service with the usual message and exit 2");
 
         // The usual client-side usage errors are unchanged.
         StringWriter usageErr = new();
-        int usage = await LaunchClient.RunAsync(CliArgs.ParseRun(["--reason", "x", "--", show], out _)!, rig.Work, rig.Service.Port, null, new StringWriter(), usageErr);
+        int usage = await LaunchClient.RunAsync(CliArgs.ParseRun(["--reason", "x", "--", show], out _)!, rig.Work, rig.Service.Port, null, new StringWriter(), usageErr, rig.Machine.Trust);
         check(usage == RunCommand.Usage && usageErr.ToString().Contains("Name the secrets with --secrets", StringComparison.Ordinal), "client: a run that names no secret fails as before");
 
         // Command line.

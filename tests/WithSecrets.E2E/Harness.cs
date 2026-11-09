@@ -51,6 +51,11 @@ internal sealed class Rig : IDisposable
     public SecretStore Store => new(State);
     public GrantStore Grants => new(State);
 
+    private E2EMachine? _machine;
+
+    /// <summary>The machine of this rig: enrolled and approved once, kept for every run of the rig.</summary>
+    public E2EMachine Machine => _machine ??= new E2EMachine(Folder);
+
     public Rig() => Directory.CreateDirectory(Work);
 
     public static int FreePort()
@@ -66,6 +71,7 @@ internal sealed class Rig : IDisposable
     public void Dispose()
     {
         Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        _machine?.Dispose();
         foreach (string dir in new[] { Folder, Work })
         {
             try { Directory.Delete(dir, true); } catch { }

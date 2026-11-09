@@ -35,6 +35,52 @@ public static class CommandWiring
         return change.Code;
     }
 
+    /// <summary>
+    /// admin ACTION: lists the machines, or, for every other action, shows the change on a one-use page and applies it after an admin passkey
+    /// approved there. The terminal shows only the link and the result.
+    /// </summary>
+    public static int Admin(CliCommand.Admin command, StateDatabase state, string folder, int? port, TextWriter? output = null)
+    {
+        output ??= Console.Out;
+        AuthorityStore store = AuthorityStore.InFolder(folder);
+        if (command.Action == AdminAction.Machines)
+        {
+            try
+            {
+                AdminCommand.List(store, output);
+
+                return 0;
+            }
+            catch (AuthorityDatabaseException failure)
+            {
+                TerminalPrompt.Final("with-secrets: " + failure.Message);
+
+                return RunCommand.StoreError;
+            }
+        }
+
+        ApprovalSettings? settings = LoadSettings(state, port);
+        if (settings is null)
+        {
+            return RunCommand.StoreError;
+        }
+
+        if (!OperatingSystem.IsWindows())
+        {
+            TerminalPrompt.Final("with-secrets: the machine identity needs Windows CNG for now; admin commands cannot run on this system.");
+
+            return RunCommand.StoreError;
+        }
+
+        (EnrollmentTarget primary, EnrollmentTarget local) = Targets(state, settings, TerminalPrompt.Line, null);
+        AuthorityKeyRing keys = LocalDeployment.ProductionKeyRing(store);
+        string? localFingerprint = LocalDeployment.ExistingMachineFingerprint();
+        (int code, string detail) = AdminCommand.Run(command, new AdminContext(store, keys, HostConfigFile.InFolder(folder), localFingerprint, primary, local, new AuditLog(state), output));
+        TerminalPrompt.Final(code == 0 ? detail : "with-secrets: " + detail);
+
+        return code;
+    }
+
     /// <summary>--revoke: an admin passkey approves on a web page, then every saved approval ends.</summary>
     public static int Revoke(StateDatabase state, GrantStore grants, int? port)
     {

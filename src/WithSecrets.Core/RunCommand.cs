@@ -29,6 +29,12 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
     /// </summary>
     public async Task<int> ExecuteAsync(LaunchRequest launch, LaunchContext context)
     {
+        // A request over the API is never launched on the host's own say-so: it needs an authority to answer for it.
+        if (context.Authorization is null)
+        {
+            return await Fail(Denied, "no authority is configured for this host service. Nothing was run.");
+        }
+
         string? invalid = launch.Validate(DateTimeOffset.UtcNow);
         if (invalid is not null)
         {
@@ -260,6 +266,18 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
 
             if (saved.Grant is { } grant)
             {
+                // A saved approval stands in for the page, not for the authority: the machine must still be Trusted.
+                if (context.Authorization is { } reusedHost && context.Request is { } reusedLaunch)
+                {
+                    AuthorizationOutcome reused = await reusedHost.AuthorizeAsync(reusedLaunch, () => ApprovalDecision.Allow("saved approval"), context.Cancel);
+                    if (!reused.Decision.Approved)
+                    {
+                        audit.TryWrite("denied", request, reused.Decision.Detail, files: fingerprint.Files);
+
+                        return context.Cancel.IsCancellationRequested ? await Cancelled() : await Fail(Denied, reused.AuthorityMessage ?? $"The user did not approve ({reused.Decision.Detail}). Do not retry. Ask the user.");
+                    }
+                }
+
                 DateTimeOffset now = DateTimeOffset.UtcNow;
                 string detail = $"approval by passkey {grant.KeyName} from {grant.Approved:O}, ends {grant.Expires:O}";
                 await stderr.WriteLineAsync($"with-secrets: reusing the approval for this exact request ({Math.Max(0, (int)(grant.Expires - now).TotalMinutes)} min left).");
@@ -270,10 +288,28 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             }
             else
             {
-                await stderr.WriteLineAsync("with-secrets: waiting for the user to approve this request...");
-                await stderr.WriteLineAsync(ApprovalSummary.BuildMessage(request, showValues: false));
+                ApprovalDecision decision;
+                string? authorityMessage = null;
+                if (context.Authorization is { } host && context.Request is { } launched)
+                {
+                    // The authority decides whether this machine may ask at all; only then is the person asked, for exactly this request.
+                    AuthorizationOutcome outcome = await host.AuthorizeAsync(launched, () =>
+                    {
+                        stderr.WriteLine("with-secrets: waiting for the user to approve this request...");
+                        stderr.WriteLine(ApprovalSummary.BuildMessage(request, showValues: false));
 
-                ApprovalDecision decision = approver.Request(request, context.Cancel);
+                        return approver.Request(request, context.Cancel);
+                    }, context.Cancel);
+                    decision = outcome.Decision;
+                    authorityMessage = outcome.AuthorityMessage;
+                }
+                else
+                {
+                    await stderr.WriteLineAsync("with-secrets: waiting for the user to approve this request...");
+                    await stderr.WriteLineAsync(ApprovalSummary.BuildMessage(request, showValues: false));
+                    decision = approver.Request(request, context.Cancel);
+                }
+
                 unlock = decision.Unlock;
                 if (!decision.Approved && context.Cancel.IsCancellationRequested)
                 {
@@ -294,7 +330,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
 
                 if (!decision.Approved)
                 {
-                    return await Fail(Denied, $"The user did not approve ({decision.Detail}). Do not retry. Ask the user.");
+                    return await Fail(Denied, authorityMessage ?? $"The user did not approve ({decision.Detail}). Do not retry. Ask the user.");
                 }
 
                 // A script can change while the prompt is open. The person approved what they saw, so run only that.
@@ -612,6 +648,9 @@ public sealed class LaunchContext
 
     /// <summary>The environment the child inherits (null: the environment of this process).</summary>
     public IReadOnlyDictionary<string, string>? Environment { get; init; }
+
+    /// <summary>The host's side of the authority protocol. A launch that came over the API asks the authority through it before anything is decrypted; null only for the in-process runs of tests.</summary>
+    public HostAuthorization? Authorization { get; init; }
 
     /// <summary>The request that came over the API, when it did; the approval is checked against it.</summary>
     public LaunchRequest? Request { get; internal set; }

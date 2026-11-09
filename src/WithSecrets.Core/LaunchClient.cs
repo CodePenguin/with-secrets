@@ -8,6 +8,21 @@ using System.Text.Json;
 namespace WithSecrets;
 
 /// <summary>
+/// What the CLI knows about the service it may talk to: the machine fingerprint pinned in <c>host.json</c> (null: nothing is pinned yet,
+/// because the machine was not approved), or why <c>host.json</c> cannot be used.
+/// </summary>
+public sealed record ServiceTrust(string? PinnedFingerprint, string? Problem = null)
+{
+    /// <summary>The pin in <c>host.json</c>. A file that cannot be read is a refusal, never "nothing pinned".</summary>
+    public static ServiceTrust From(HostConfigFile file)
+    {
+        HostConfigLoad load = file.Load();
+
+        return load.Problem is not null ? new ServiceTrust(null, load.Problem) : new ServiceTrust(load.Config?.Authority is null ? null : load.Config.MachineFingerprint);
+    }
+}
+
+/// <summary>
 /// The client side of a run: reads the .env files once, sends the immutable plan to the host service as a
 /// <see cref="LaunchRequest" />, prints what the service streams back (the approval link, the redacted output) and ends with the
 /// exit code the service reports. It never opens the secret store, never decrypts and never starts the program: the final
@@ -18,13 +33,19 @@ public static class LaunchClient
     /// <summary>Exit code: the host service is not running (nothing was asked, nothing ran).</summary>
     public const int ServiceNotRunning = 6;
 
+    /// <summary>Exit code: what answers on the service port is not this machine's host service, or no identity is pinned yet (nothing was sent).</summary>
+    public const int ServiceNotAuthenticated = 7;
+
+    /// <summary>How long the service has to answer the identity check.</summary>
+    public static readonly TimeSpan IdentityTimeout = TimeSpan.FromSeconds(5);
+
     public const string NotRunningMessage = "with-secrets: the host service is not running. Start it with: with-secrets service";
 
     /// <summary>
     /// Runs the request through the service on 127.0.0.1:<paramref name="servicePort" />. <paramref name="environment" /> is the
     /// environment the program inherits (this process's own when null); <paramref name="pagePort" /> is the --port of the run.
     /// </summary>
-    public static async Task<int> RunAsync(RunArgs args, string workingDirectory, int servicePort, int? pagePort, TextWriter stdout, TextWriter stderr, IReadOnlyDictionary<string, string>? environment = null, HttpMessageHandler? handler = null, CancellationToken cancel = default)
+    public static async Task<int> RunAsync(RunArgs args, string workingDirectory, int servicePort, int? pagePort, TextWriter stdout, TextWriter stderr, ServiceTrust trust, IReadOnlyDictionary<string, string>? environment = null, HttpMessageHandler? handler = null, CancellationToken cancel = default)
     {
         environment ??= CurrentEnvironment();
         Func<string, string?> lookup = name => environment.FirstOrDefault(item => string.Equals(item.Key, name, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) is { Key: not null } found ? found.Value : null;
@@ -74,6 +95,13 @@ public static class LaunchClient
             ? new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false })
             : new HttpClient(handler, false);
         client.Timeout = Timeout.InfiniteTimeSpan;
+
+        // Before anything is sent: is this the host service of this machine? A program that merely holds the port is refused here.
+        if (await AuthenticateService(client, servicePort, trust, stderr, cancel) is { } refused)
+        {
+            return refused;
+        }
+
         string url = $"http://127.0.0.1:{servicePort}/v1/launch" + (pagePort is { } page ? "?pagePort=" + page : "");
         using HttpRequestMessage message = new(HttpMethod.Post, url)
         {
@@ -135,6 +163,96 @@ public static class LaunchClient
 
         return await Fail(stderr, RunCommand.StoreError, "the host service closed the connection before the program finished");
     }
+
+    /// <summary>
+    /// Asks the service for a signature over a fresh random challenge and checks that it is made by the machine identity key whose fingerprint
+    /// <paramref name="trust" /> pins. Null when the service is the pinned one. Otherwise the exit code, after the reason went to
+    /// <paramref name="stderr" />; nothing of the request was sent. This authenticates the service to the client (a program that only holds
+    /// the port cannot sign); it adds no credential of the client.
+    /// </summary>
+    private static async Task<int?> AuthenticateService(HttpClient client, int servicePort, ServiceTrust trust, TextWriter stderr, CancellationToken cancel)
+    {
+        if (trust.Problem is not null)
+        {
+            return await Fail(stderr, ServiceNotAuthenticated, trust.Problem);
+        }
+
+        string challenge = Base64Url(32);
+        using CancellationTokenSource limit = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+        limit.CancelAfter(IdentityTimeout);
+        try
+        {
+            using HttpRequestMessage message = new(HttpMethod.Post, $"http://127.0.0.1:{servicePort}/v1/identity")
+            {
+                Content = new StringContent("{\"challenge\":\"" + challenge + "\"}", new UTF8Encoding(false), new MediaTypeHeaderValue("application/json"))
+            };
+            using HttpResponseMessage response = await client.SendAsync(message, HttpCompletionOption.ResponseContentRead, limit.Token);
+            if (response.StatusCode != HttpStatusCode.OK)
+            {
+                return await Fail(stderr, ServiceNotAuthenticated, NotServiceMessage(servicePort, "it answered the identity check with HTTP " + (int)response.StatusCode));
+            }
+
+            string text = await response.Content.ReadAsStringAsync(limit.Token);
+            if (text.Length > 4096 || !CanonicalJson.Open(text, out JsonDocument? doc, out _))
+            {
+                return await Fail(stderr, ServiceNotAuthenticated, NotServiceMessage(servicePort, "its answer to the identity check is not valid"));
+            }
+
+            string? fingerprint;
+            byte[] publicKey;
+            byte[] signature;
+            using (doc)
+            {
+                ContractReader reader = new(doc!.RootElement, "protocolVersion", "fingerprint", "publicKey", "signature");
+                if (reader.Problem is not null || !reader.Int("protocolVersion", out int version) || version != LaunchProtocol.Version || !reader.Text("fingerprint", out fingerprint)
+                    || !reader.Text("publicKey", out string? keyText) || !reader.Text("signature", out string? signatureText))
+                {
+                    return await Fail(stderr, ServiceNotAuthenticated, NotServiceMessage(servicePort, "its answer to the identity check is not valid"));
+                }
+
+                try
+                {
+                    publicKey = Convert.FromBase64String(keyText!);
+                    signature = Convert.FromBase64String(signatureText!);
+                }
+                catch (FormatException)
+                {
+                    return await Fail(stderr, ServiceNotAuthenticated, NotServiceMessage(servicePort, "its answer to the identity check is not valid"));
+                }
+            }
+
+            // It must hold the private key of the fingerprint it names, for this very challenge.
+            if (KeyIdentity.Fingerprint(publicKey) != fingerprint || !KeyIdentity.Verify(publicKey, WireText.Bytes(WireText.IdentityDomain, challenge), signature))
+            {
+                return await Fail(stderr, ServiceNotAuthenticated, NotServiceMessage(servicePort, "it could not prove the identity it claims"));
+            }
+
+            if (trust.PinnedFingerprint is null)
+            {
+                return await Fail(stderr, ServiceNotAuthenticated, $"this machine is not approved yet, so no identity is pinned. The service says its fingerprint is {fingerprint}. If that is the fingerprint that the service printed in its own window, ask the administrator to run: with-secrets admin approve {fingerprint} --name NAME. Nothing was sent.");
+            }
+
+            if (!string.Equals(fingerprint, trust.PinnedFingerprint, StringComparison.Ordinal))
+            {
+                return await Fail(stderr, ServiceNotAuthenticated, NotServiceMessage(servicePort, $"its identity {fingerprint} is not the pinned one {trust.PinnedFingerprint}"));
+            }
+
+            return null;
+        }
+        catch (HttpRequestException)
+        {
+            await stderr.WriteLineAsync(NotRunningMessage);
+
+            return ServiceNotRunning;
+        }
+        catch (OperationCanceledException) when (limit.IsCancellationRequested && !cancel.IsCancellationRequested)
+        {
+            return await Fail(stderr, ServiceNotAuthenticated, NotServiceMessage(servicePort, "it did not answer the identity check in time"));
+        }
+    }
+
+    private static string NotServiceMessage(int port, string why) =>
+        $"the program that answers on port {port} is not this machine's host service ({why}). Nothing was sent. Stop that program, or start the service on another port (with-secrets service --port N, and --service-port N for a run).";
 
     /// <summary>The environment of this process, as a map.</summary>
     public static IReadOnlyDictionary<string, string> CurrentEnvironment()

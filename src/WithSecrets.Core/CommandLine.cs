@@ -18,6 +18,9 @@ public abstract record CliCommand
     /// <summary>service [--port N]: run the host service in the foreground (loopback only).</summary>
     public sealed record Service : CliCommand;
 
+    /// <summary>admin ACTION ...: a person manages the machines that may use secrets (and the authority key). See <see cref="AdminAction" />.</summary>
+    public sealed record Admin(AdminAction Action, string? Fingerprint = null, string? Name = null) : CliCommand;
+
     /// <summary>--list: print the secret names.</summary>
     public sealed record List : CliCommand;
 
@@ -114,6 +117,14 @@ public static class CliArgs
         and a reference to one, or to PATH, is refused. Dotenvx encrypted values and ${} expansion are not supported yet.
         --needs [-f PATH]... prints what the current project would ask for (names only) and whether each secret is in the store.
 
+        Machines. Every host service has a machine identity (an ECDSA P-256 key that Windows keeps and nobody can read out; its
+        fingerprint is the SHA-256 of the public key). The first time the service runs on a machine, the machine is Pending: it
+        cannot get secrets until an administrator approves it. The administrator's commands, each approved on a web page with an
+        admin passkey and each for a person in a terminal: with-secrets admin machines (list), admin approve FINGERPRINT --name NAME,
+        admin disable | enable | untrust FINGERPRINT, admin trust FINGERPRINT (the full fingerprint, for an Untrusted machine),
+        admin rename FINGERPRINT NAME, admin approve-host-change FINGERPRINT, admin rotate-authority-key, admin recover-authority.
+        FINGERPRINT is the 64 hex digits that the service prints, or the first 12 or more (not for trust). Add --port N for the page.
+
         A person changes the settings with --config: the terminal shows only a link, the page shows every setting, and a
         passkey approves the change. With nothing enrolled, --config is the first-time setup: it also creates the first
         passkey, stored only after the person types the code from the page in the terminal. --config --show prints the
@@ -154,6 +165,11 @@ public static class CliArgs
             return ParseService(args, out error);
         }
 
+        if (args.Count > 0 && args[0] == "admin")
+        {
+            return ParseAdmin(args, out error);
+        }
+
         CliCommand? command = ParseCommand(args, out int? port, out bool debug, out error, out int? servicePort);
         if (command is null)
         {
@@ -181,6 +197,94 @@ public static class CliArgs
         }
 
         return command with { Port = port };
+    }
+
+    private const string AdminUsage = "Usage: with-secrets admin machines | approve FINGERPRINT --name NAME | disable FINGERPRINT | enable FINGERPRINT | untrust FINGERPRINT | trust FINGERPRINT (all 64 digits) | rename FINGERPRINT NAME | approve-host-change FINGERPRINT | rotate-authority-key | recover-authority  [--port N] [--debug]";
+
+    /// <summary>admin ACTION [FINGERPRINT] [NAME | --name NAME] [--port N] [--debug].</summary>
+    private static CliCommand? ParseAdmin(IReadOnlyList<string> args, out string error)
+    {
+        error = AdminUsage;
+        if (args.Count < 2)
+        {
+            return null;
+        }
+
+        AdminAction? action = args[1] switch
+        {
+            "machines" => AdminAction.Machines,
+            "approve" => AdminAction.Approve,
+            "disable" => AdminAction.Disable,
+            "enable" => AdminAction.Enable,
+            "untrust" => AdminAction.Untrust,
+            "trust" => AdminAction.Trust,
+            "rename" => AdminAction.Rename,
+            "approve-host-change" => AdminAction.ApproveHostChange,
+            "rotate-authority-key" => AdminAction.RotateAuthorityKey,
+            "recover-authority" => AdminAction.RecoverAuthority,
+            _ => null,
+        };
+        if (action is null)
+        {
+            return null;
+        }
+
+        int? port = null;
+        bool debug = false;
+        string? name = null;
+        List<string> positional = [];
+        for (int index = 2; index < args.Count; index++)
+        {
+            if (args[index] == "--debug")
+            {
+                debug = true;
+            }
+            else if (args[index] == "--port" && index + 1 < args.Count)
+            {
+                if (!int.TryParse(args[++index], NumberStyles.None, CultureInfo.InvariantCulture, out int parsed) || parsed < 1 || parsed > ToolSettings.MaxPort)
+                {
+                    error = $"--port takes a number from 1 to {ToolSettings.MaxPort}.";
+
+                    return null;
+                }
+
+                port = parsed;
+            }
+            else if (args[index] == "--name" && index + 1 < args.Count && name is null)
+            {
+                name = args[++index];
+            }
+            else if (args[index].StartsWith("--", StringComparison.Ordinal))
+            {
+                return null;
+            }
+            else
+            {
+                positional.Add(args[index]);
+            }
+        }
+
+        bool needsFingerprint = action is not (AdminAction.Machines or AdminAction.RotateAuthorityKey or AdminAction.RecoverAuthority);
+        int expected = (needsFingerprint ? 1 : 0) + (action == AdminAction.Rename ? 1 : 0);
+        if (positional.Count != expected || (name is not null && action != AdminAction.Approve) || (action == AdminAction.Approve && name is null)
+            || (action == AdminAction.Machines && port is not null))
+        {
+            return null;
+        }
+
+        string? fingerprint = needsFingerprint ? positional[0] : null;
+        if (fingerprint is not null && KeyIdentity.ParseHex(fingerprint, action == AdminAction.Trust) is null)
+        {
+            error = action == AdminAction.Trust
+                ? "trust needs the machine's full fingerprint: 64 hex digits (spaces allowed). See: with-secrets admin machines"
+                : "FINGERPRINT is hex digits (spaces allowed), at least 12. See: with-secrets admin machines";
+
+            return null;
+        }
+
+        error = "";
+
+        return new CliCommand.Admin(action.Value, fingerprint, action == AdminAction.Rename ? positional[1] : name) { Port = port, Debug = debug };
     }
 
     /// <summary>service [--port N] [--debug]: nothing else.</summary>
@@ -468,7 +572,7 @@ public static class CliArgs
     /// </summary>
     public static bool NeedsTerminal(CliCommand command)
     {
-        return command is CliCommand.Revoke or CliCommand.Enroll or CliCommand.Enrolled or CliCommand.Unenroll or CliCommand.Config { Show: false } or CliCommand.Recover or CliCommand.RotateKey;
+        return command is CliCommand.Revoke or CliCommand.Enroll or CliCommand.Enrolled or CliCommand.Unenroll or CliCommand.Config { Show: false } or CliCommand.Recover or CliCommand.RotateKey or CliCommand.Admin;
     }
 
     /// <summary>What a command that needs a terminal says when it has none.</summary>

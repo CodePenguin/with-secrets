@@ -546,7 +546,7 @@ internal static partial class WebApprovalTests
 
         check(CliArgs.Parse(["--help"], out _) is CliCommand.Help { Text: var help }
             && help.Contains("--enroll", StringComparison.Ordinal) && help.Contains("--enrolled", StringComparison.Ordinal)
-            && help.Contains("--unenroll", StringComparison.Ordinal) && !help.Contains("--name", StringComparison.Ordinal), "cli: --help lists --enroll, --enrolled and --unenroll, and no --name");
+            && help.Contains("--unenroll", StringComparison.Ordinal) && !help.Replace("--name NAME", "", StringComparison.Ordinal).Contains("--name", StringComparison.Ordinal), "cli: --help lists --enroll, --enrolled and --unenroll, and no --name (only `admin approve` takes one)");
         check(CliArgs.Parse(["--help"], out _) is CliCommand.Help { Text: var described }
             && described.Contains("A person adds a passkey with --enroll (its name, and whether it is also an admin, are chosen on the page)", StringComparison.Ordinal), "cli: the description names --enroll, --enrolled and --unenroll");
         check(CliArgs.Parse(["--secrets", ""], out string nothing) is null && nothing.StartsWith("Nothing to do.", StringComparison.Ordinal)

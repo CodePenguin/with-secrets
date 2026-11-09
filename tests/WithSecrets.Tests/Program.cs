@@ -351,6 +351,21 @@ internal static class Program
             HostServiceTests.Run(Check).GetAwaiter().GetResult();
         }
 
+        if (Wants("Identity"))
+        {
+            IdentityTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("Authority"))
+        {
+            AuthorityTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("Admin"))
+        {
+            AdminTests.Run(Check).GetAwaiter().GetResult();
+        }
+
         if (Wants("LaunchContract"))
         {
             LaunchContractTests.Run(Check).GetAwaiter().GetResult();

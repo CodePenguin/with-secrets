@@ -52,6 +52,12 @@ public sealed class HostServiceOptions
 
     public GrantStore? Grants { get; init; }
 
+    /// <summary>This machine's identity, the authority and <c>host.json</c>. Every launch is answered for by the authority; there is no way to start the service without one.</summary>
+    public required LocalDeployment Deployment { get; init; }
+
+    /// <summary>How often the service asks the authority for invalidations of this machine that it has not applied (a launch also asks before it begins).</summary>
+    public TimeSpan InvalidationPoll { get; init; } = TimeSpan.FromSeconds(1);
+
     /// <summary>The port on 127.0.0.1 and [::1]. 0 picks a free one (tests).</summary>
     public int Port { get; init; } = ServiceEndpoint.DefaultPort;
 
@@ -102,6 +108,8 @@ public sealed class HostService : IDisposable
     private readonly Lock _lock = new();
     private int _disposed;
     private bool _stopping;
+    private readonly CancellationTokenSource _stop = new();
+    private Task _pump = Task.CompletedTask;
 
     /// <summary>The most launches in progress at once; each holds an approval page and a thread.</summary>
     public const int MaxConcurrentLaunches = 8;
@@ -111,7 +119,11 @@ public sealed class HostService : IDisposable
         _options = options;
         _app = app;
         Port = port;
+        Authorization = options.Deployment.CreateAuthorization(options.Gate);
     }
+
+    /// <summary>The host's side of the authority protocol: signs requests, verifies answers, applies invalidations.</summary>
+    public HostAuthorization Authorization { get; }
 
     public int Port { get; }
 
@@ -149,6 +161,7 @@ public sealed class HostService : IDisposable
                 service = new HostService(options, app, port);
                 app.Run(service.Handle);
                 app.StartAsync().GetAwaiter().GetResult();
+                service._pump = Task.Run(service.PumpLoop);
 
                 return service;
             }
@@ -233,6 +246,20 @@ public sealed class HostService : IDisposable
             return;
         }
 
+        if (path == "/v1/identity")
+        {
+            if (!HttpMethods.IsPost(request.Method))
+            {
+                await Refuse(response, 405, "use POST");
+
+                return;
+            }
+
+            await Identity(context);
+
+            return;
+        }
+
         if (path == "/v1/launch")
         {
             if (!HttpMethods.IsPost(request.Method))
@@ -295,6 +322,106 @@ public sealed class HostService : IDisposable
         StringBuilder text = new("{\"error\":");
         ToolSettings.QuoteJson(text, message);
         await response.WriteAsync(text.Append('}').ToString());
+    }
+
+    /// <summary>
+    /// <c>POST /v1/identity</c> with <c>{"challenge":"..."}</c> (16 to 64 random bytes, base64url): answers with this machine's public key and
+    /// fingerprint and a signature of the machine identity key over the challenge, so a client can tell this service from another program
+    /// that holds the port before it sends anything. It authenticates the service to the client; it authenticates nobody.
+    /// </summary>
+    private async Task Identity(HttpContext context)
+    {
+        HttpRequest request = context.Request;
+        HttpResponse response = context.Response;
+        if (request.ContentType is not { } contentType || !contentType.Split(';')[0].Trim().Equals("application/json", StringComparison.OrdinalIgnoreCase))
+        {
+            await Refuse(response, 415, "the body must be application/json");
+
+            return;
+        }
+
+        if (request.ContentLength > 1024)
+        {
+            await Refuse(response, 413, "the body is over 1 KB");
+
+            return;
+        }
+
+        byte[] body;
+        Task<byte[]> reading = ReadBody(request.Body, context.RequestAborted);
+        try
+        {
+            if (await Task.WhenAny(reading, Task.Delay(_options.BodyTimeout, context.RequestAborted)) != reading)
+            {
+                _ = reading.ContinueWith(task => task.Exception, TaskContinuationOptions.OnlyOnFaulted);
+                response.Headers.Connection = "close";
+                await Refuse(response, 408, "the body did not arrive in time");
+
+                return;
+            }
+
+            body = await reading;
+        }
+        catch (Exception error) when (error is OperationCanceledException or BodyTooLargeException or BadHttpRequestException)
+        {
+            return;
+        }
+
+        string? challenge = null;
+        try
+        {
+            using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(body);
+            ContractReader reader = new(doc.RootElement, "challenge");
+            if (reader.Problem is null && reader.Text("challenge", out string? text))
+            {
+                challenge = text;
+            }
+        }
+        catch (Exception error) when (error is System.Text.Json.JsonException or ArgumentException)
+        {
+            // Not JSON: refused below.
+        }
+
+        if (challenge is null || challenge.Length is < 22 or > 86 || !challenge.All(letter => char.IsAsciiLetterOrDigit(letter) || letter is '-' or '_'))
+        {
+            await Refuse(response, 400, "the challenge must be 22 to 86 characters of base64url (16 to 64 random bytes)");
+
+            return;
+        }
+
+        byte[] publicKey = _options.Deployment.MachineKey.PublicKey;
+        byte[] signature = _options.Deployment.MachineKey.Sign(WireText.Bytes(WireText.IdentityDomain, challenge));
+        StringBuilder answer = new("{\"protocolVersion\":" + LaunchProtocol.Version + ",\"fingerprint\":");
+        ToolSettings.QuoteJson(answer, KeyIdentity.Fingerprint(publicKey));
+        answer.Append(",\"publicKey\":");
+        ToolSettings.QuoteJson(answer, Convert.ToBase64String(publicKey));
+        answer.Append(",\"signature\":");
+        ToolSettings.QuoteJson(answer, Convert.ToBase64String(signature));
+        response.ContentType = "application/json";
+        await response.WriteAsync(answer.Append('}').ToString());
+    }
+
+    private async Task PumpLoop()
+    {
+        using PeriodicTimer timer = new(_options.InvalidationPoll);
+        try
+        {
+            while (await timer.WaitForNextTickAsync(_stop.Token))
+            {
+                try
+                {
+                    await Authorization.PumpAsync(_stop.Token);
+                }
+                catch (Exception error) when (error is not OperationCanceledException)
+                {
+                    AppLog.Warn("applying an invalidation failed: {Type}", error.GetType().Name);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // The service is stopping.
+        }
     }
 
     private async Task Launch(HttpContext context)
@@ -436,9 +563,20 @@ public sealed class HostService : IDisposable
             response.StatusCode = 200;
             response.ContentType = "application/x-ndjson";
             EventStream events = new(response.BodyWriter, context.RequestAborted);
+            // Invalidations the authority announced before this launch are applied first, so they cancel nothing that begins now.
+            try
+            {
+                await Authorization.PumpAsync(cancel.Token);
+            }
+            catch (Exception error) when (error is not OperationCanceledException)
+            {
+                AppLog.Warn("applying an invalidation failed: {Type}", error.GetType().Name);
+            }
+
             int revision = _options.Gate.Revision;
             LaunchContext launchContext = new()
             {
+                Authorization = Authorization,
                 Gate = _options.Gate,
                 Revision = revision,
                 Cancel = cancel.Token,
@@ -537,6 +675,7 @@ public sealed class HostService : IDisposable
             return;
         }
 
+        _stop.Cancel();
         CancellationTokenSource[] sources;
         lock (_lock)
         {

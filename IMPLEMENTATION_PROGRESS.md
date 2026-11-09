@@ -4,7 +4,7 @@ Worktree `C:\Users\codep\Projects\with-secrets-impl`, branch `impl/host-service`
 
 ## Current phase
 
-Phase 0 (extract contracts, preserve behaviour): done, reviewed. Phase 1 (local host service and shared API): done, pending review. Next: Phase 2 (machine identity and local authority).
+Phase 0 (extract contracts, preserve behaviour): done, reviewed. Phase 1 (local host service and shared API): done, pending review. Phase 2 (machine identity and local authority): done, pending review. Next: Phase 3 (grants).
 
 ## Commands
 
@@ -91,6 +91,41 @@ Gate unit checks and a 3000-race stress (commit first or invalidation first, nev
 - The CLI's environment block travels to the service and is bound into the digest; it is shown nowhere and not recorded in the audit row (the audit row is unchanged). It is treated as non-secret.
 - If the service is stopped while a launch runs, the child is not stopped (nothing touches the child after the commit); its output is lost.
 
+## Phase 2: machine identity and local authority (done, pending review)
+
+Result: `dotnet build with-secrets.slnx --no-incremental` 0 warnings, 0 errors; full suite 3499 passed, 0 failed; E2E ALL PASSED (57.7 s). New suites (alone with `WS_ONLY=Identity`, `WS_ONLY=Authority`, `WS_ONLY=Admin`): `IdentityTests.cs`, `AuthorityTests.cs`, `AdminTests.cs`; shared fixture `TestMachine.cs` (software keys; a machine is made Trusted through `AdminActions.ApproveMachine`, the code the admin command runs after the passkey tap, never through a shortcut in the program; E2E uses `E2EMachine.cs` the same way).
+
+### What was built (`src/WithSecrets.Core/Authority/`)
+
+- `Keys.cs`: `ISigningKey`, `KeyIdentity` (fingerprint = upper-case hex SHA-256 of the canonical SPKI, display in groups of 4, strict hex parsing, canonical P-256 check, verify), `SoftwareSigningKey` (tests), `CngSigningKey` (non-exportable, Platform Crypto Provider first then Software KSP, fixed key names).
+- `AuthorityProtocol.cs`: `MachineRequestEnvelope` (launch request + fingerprint + host name, signed by the machine key), `AuthorityResponse` (canonical JSON, signed by the authority key, strict `TryParse`), `EnrollmentRequest/Result`, `KeyTransition`, `PendingInvalidation`, `IAuthority`. Domain-separation prefixes on every signed message.
+- `AuthorityStore.cs`: `authority.db` (schema 1, WAL, one transaction per operation, fault-injection points, "delete authority.db" on another schema), the status table, history and audit rows, `processed_requests`, key history, pending invalidations.
+- `LocalAuthority.cs`: `AuthorityKeyRing`, `LocalAuthority` (decision, in-flight sharing, enrollment challenges, transitions, invalidations). `HostAuthorization.cs`: verification before any decryption. `HostConfig.cs`: `host.json`. `LocalDeployment.cs`, `ServiceStartup.cs`, `AdminCommand.cs`.
+- Edited: `RunCommand.cs` (the page and saved-approval branches go through `HostAuthorization`), `HostService.cs` (`/v1/identity`, invalidation pump, deployment option), `LaunchClient.cs` (identity check, exit 7), `CommandLine.cs`, `CommandWiring.cs`, `src/WithSecrets/Program.cs`.
+
+### Decisions made (inside the accepted design)
+
+1. One process, one interface: the host and the local authority talk only through `IAuthority` and signatures, as a remote authority will. The approval page is offered to the authority through `LocalAuthority.Offer(requestId, digest, present)`, local only; the unlock material the page releases goes from page to host, never in a response.
+2. Bumps: only Trusted to Disabled and Trusted to Untrusted raise the revision (as the architecture table says); Untrust from Pending or Disabled is allowed and changes nothing else; a rename and a host-name approval keep the revision.
+3. The authority decision, the machine status and revision it saw, the `processed_requests` row and the audit row are committed in one `BEGIN IMMEDIATE` transaction; the status is re-read inside it.
+4. Response lifetime 60 s (host rejects more than 5 min, an issue time in the future beyond 1 min skew, an expiry, a stale revision). A newer revision than the host knew clears the `LaunchGate` and refuses that launch once ("authorization changed, ask again"), the next starts from the new revision.
+5. Key rotation: signed `KeyTransition` chain; the host applies it by itself only if the pinned key signed it. Recovery: no transition; `admin recover-authority` (page + admin tap) pins the new key for this machine; other hosts re-enroll. A bug found by the rotation test and fixed: the transition's signed creation time was not the stored one (stored chain never verified); the store now keeps the signed time.
+6. Admin commands are terminal-only (`NeedsTerminal` includes every admin action, `machines` too); `machines` needs no passkey, every other action needs the page and an admin passkey tap; `trust` needs the full 64-digit fingerprint; others accept a prefix of 12 or more digits. The page text (signed by the passkey) names the action, the full fingerprint, host name, name and state; a change against a machine that changed meanwhile is refused (expected revision).
+7. The CLI authenticates the service (POST `/v1/identity`: signature over a fresh challenge by the machine key; fingerprint must equal the one in `host.json`), before the launch request is sent. New exit code **7** (`LaunchClient.ServiceNotAuthenticated`); a refused connection is still 6. `LaunchClient.RunAsync` now takes a required `ServiceTrust`. No client credential.
+8. `with-secrets service` and `admin` (except `machines`) refuse on non-Windows (CNG).
+
+### Residual risks and limits (also in README and architecture 10.2)
+
+- The identity check is not channel-bound: an impostor that relays to the real service could still read the request the CLI sends.
+- `host.json` and the key store are within the same-user trust limit.
+- An exact request replayed after a service restart within 60 s gets the stored Approved answer, but the host has no approval of its own, so it denies (fails closed).
+- Remote mode will need approval-page content (script contents) that is not in `LaunchRequest` (Phase 5). The envelope has no `TryParse` yet (Phase 5).
+- Retired authority private keys are not deleted. The real `with-secrets service` was not run in this session, to avoid creating the production-named CNG key; CNG tests use their own key names and delete them.
+
+### Mutation evidence (applied, run, reverted)
+
+(a) Host skips the response signature check: the `Authority` suite fails 9 of the tamper checks. (b) Authority treats a Pending machine as allowed: "a Pending machine (pinned) is denied..." fails. (c) Disable no longer raises the revision: 10+ checks fail (revision stays 1, grants and invalidations, "a newer revision clears the host's state").
+
 ## Reconnaissance: who owns what today
 
 | Responsibility | Owner today (file / type) | Notes |
@@ -139,7 +174,7 @@ Gate unit checks and a 3000-race stress (commit first or invalidation first, nev
 
 ## Remaining work
 
-- Phase 2 onward per `docs/implementation-plan.md` (Phase 1 is done, see above).
+- Phase 3 onward per `docs/implementation-plan.md` (Phases 1 and 2 are done, see above). Phase 2 leftovers: wire the `service` startup of the real CNG key on a Windows machine by hand once; decide whether retired authority keys should be deleted.
 
 ## Blockers requiring maintainer input (Phase 3)
 
