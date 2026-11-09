@@ -425,8 +425,109 @@ public static partial class EnvDeclarations
         return new EnvResult(new EnvPlan(used, mappings, ordinary, notes, links), null);
     }
 
+    /// <summary>
+    /// The plan of a launch request that came over the API, checked again with the rules that built it (the sender is not trusted
+    /// to have applied them): at most <see cref="MaxFiles" /> files, at most <see cref="MaxPairs" /> pairs, variable names of
+    /// the grammar and length, no secret given to a protected variable, ordinary variables without NUL, within the value limit and
+    /// not code-loading, no variable twice, and the listed ordinary names equal to the names of the values. The .env files are
+    /// not read again: the plan is what the sender read once. The link marks of the files (outside the working directory, a link)
+    /// are made here, from the paths, because the person must see them. An error names a variable or a limit, never a value.
+    /// </summary>
+    public static EnvResult FromRequest(LaunchRequest request)
+    {
+        StringComparer names = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        if (request.EnvFiles.Count > MaxFiles)
+        {
+            return Failure("at most " + MaxFiles + " env files at a time (" + request.EnvFiles.Count + " given)");
+        }
+
+        foreach (string file in request.EnvFiles)
+        {
+            if (file.Length == 0 || file.Contains('\0', StringComparison.Ordinal) || !Path.IsPathFullyQualified(file))
+            {
+                return Failure("an env file name is not a full path: " + ApprovalSummary.Clean(file));
+            }
+        }
+
+        if (request.Mappings.Count > MaxPairs)
+        {
+            return Failure("at most " + MaxPairs + " secrets at a time (" + request.Mappings.Count + " asked for)");
+        }
+
+        HashSet<string> variables = new(names);
+        List<SecretMapping> mappings = [];
+        foreach (LaunchMapping mapping in request.Mappings)
+        {
+            if (!VariableName().IsMatch(mapping.Variable) || mapping.Variable.Length > MaxVariableName)
+            {
+                return Failure("variable " + ApprovalSummary.Clean(mapping.Variable) + " is not a valid variable name (letters, digits and _, not starting with a digit, at most " + MaxVariableName + " characters)");
+            }
+
+            if (IsProtectedVariable(mapping.Variable))
+            {
+                return Failure("variable " + mapping.Variable + ": a secret cannot be given to this variable, because it changes which code runs");
+            }
+
+            if (!SecretNames.IsValid(mapping.Secret))
+            {
+                return Failure("variable " + mapping.Variable + ": " + "invalid secret name " + ApprovalSummary.Clean(mapping.Secret));
+            }
+
+            if (!variables.Add(mapping.Variable))
+            {
+                return Failure("variable " + mapping.Variable + " is given twice");
+            }
+
+            mappings.Add(new SecretMapping(mapping.Variable, mapping.Secret));
+        }
+
+        if (request.EnvVariables.Count > MaxOrdinary)
+        {
+            return Failure("at most " + MaxOrdinary + " ordinary variables from .env at a time (" + request.EnvVariables.Count + " given)");
+        }
+
+        foreach ((string name, string value) in request.EnvVariables)
+        {
+            if (!VariableName().IsMatch(name) || name.Length > MaxVariableName)
+            {
+                return Failure("variable " + ApprovalSummary.Clean(name) + " is not a valid variable name");
+            }
+
+            if (ChildRunner.IsCodeLoading(name, OperatingSystem.IsWindows()) || name.StartsWith("DOTENV_PRIVATE_KEY", StringComparison.OrdinalIgnoreCase))
+            {
+                return Failure("variable " + name + " is a code-loading variable and cannot be passed");
+            }
+
+            if (value.Length > MaxValue || value.Contains('\0', StringComparison.Ordinal))
+            {
+                return Failure("variable " + name + ": the value is longer than " + MaxValue + " characters or contains NUL");
+            }
+
+            if (!variables.Add(name))
+            {
+                return Failure("variable " + name + " is both a secret and an ordinary value");
+            }
+        }
+
+        if (!request.EnvNames.SequenceEqual(request.EnvVariables.Keys.Order(StringComparer.Ordinal), StringComparer.Ordinal))
+        {
+            return Failure("the listed ordinary variable names are not the names of the ordinary values");
+        }
+
+        List<string> links = [];
+        foreach (string file in request.EnvFiles)
+        {
+            if (FileMark(file, request.WorkingDirectory) is { } mark)
+            {
+                links.Add(mark);
+            }
+        }
+
+        return new EnvResult(new EnvPlan(request.EnvFiles, mappings, new Dictionary<string, string>(request.EnvVariables, names), [], links), null);
+    }
+
     /// <summary>A Link:-style mark when the file is outside the working directory or is a link (symlink, junction, reparse point), else null.</summary>
-    private static string? FileMark(string path, string workingDirectory)
+    internal static string? FileMark(string path, string workingDirectory)
     {
         try
         {

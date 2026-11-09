@@ -12,6 +12,12 @@ public abstract record CliCommand
     /// <summary>--debug (any command): diagnostic lines go to the terminal and the log file. Off by default.</summary>
     public bool Debug { get; init; }
 
+    /// <summary>--service-port N with a run, or --port N with <c>service</c>: the port of the host service. Null: WITH_SECRETS_PORT, then the default.</summary>
+    public int? ServicePort { get; init; }
+
+    /// <summary>service [--port N]: run the host service in the foreground (loopback only).</summary>
+    public sealed record Service : CliCommand;
+
     /// <summary>--list: print the secret names.</summary>
     public sealed record List : CliCommand;
 
@@ -70,6 +76,8 @@ public static class CliArgs
         Run a program with stored secrets, without showing the values to an agent.
 
         To run a program: with-secrets [--secrets NAME[,NAME...]] --reason "why" [-f .env] -- PROGRAM [ARGS...]
+        A run goes through the host service, which must be running (with-secrets service, in a terminal of its own); it listens on
+        127.0.0.1 and [::1] only, port 8765 or WITH_SECRETS_PORT or --service-port N (service: --port N). Without it a run exits 6.
         The user approves the request. Then PROGRAM runs with only those secrets as environment variables, and its output is
         redacted. Write -- before the program. Use --list to see the names.
 
@@ -141,13 +149,25 @@ public static class CliArgs
     /// <summary>Returns the command, or null and an error message when the arguments are wrong.</summary>
     public static CliCommand? Parse(IReadOnlyList<string> args, out string error)
     {
-        CliCommand? command = ParseCommand(args, out int? port, out bool debug, out error);
+        if (args.Count > 0 && args[0] == "service")
+        {
+            return ParseService(args, out error);
+        }
+
+        CliCommand? command = ParseCommand(args, out int? port, out bool debug, out error, out int? servicePort);
         if (command is null)
         {
             return null;
         }
 
-        command = command with { Debug = debug };
+        command = command with { Debug = debug, ServicePort = servicePort };
+        if (servicePort is not null && command is not CliCommand.Run)
+        {
+            error = "--service-port goes only with a run.";
+
+            return null;
+        }
+
         if (port is null)
         {
             return command;
@@ -163,8 +183,44 @@ public static class CliArgs
         return command with { Port = port };
     }
 
-    private static CliCommand? ParseCommand(IReadOnlyList<string> args, out int? portNumber, out bool debugRequested, out string error)
+    /// <summary>service [--port N] [--debug]: nothing else.</summary>
+    private static CliCommand? ParseService(IReadOnlyList<string> args, out string error)
     {
+        int? port = null;
+        bool debug = false;
+        for (int index = 1; index < args.Count; index++)
+        {
+            if (args[index] == "--debug")
+            {
+                debug = true;
+            }
+            else if (args[index] == "--port" && index + 1 < args.Count)
+            {
+                if (!int.TryParse(args[++index], NumberStyles.None, CultureInfo.InvariantCulture, out int parsed) || parsed < 1 || parsed > ToolSettings.MaxPort)
+                {
+                    error = $"--port takes a number from 1 to {ToolSettings.MaxPort}.";
+
+                    return null;
+                }
+
+                port = parsed;
+            }
+            else
+            {
+                error = "Usage: with-secrets service [--port N]. The service listens on 127.0.0.1 and [::1] only; N is 1 to 65535 (default " + ServiceEndpoint.DefaultPort + ", or WITH_SECRETS_PORT).";
+
+                return null;
+            }
+        }
+
+        error = "";
+
+        return new CliCommand.Service { ServicePort = port, Debug = debug };
+    }
+
+    private static CliCommand? ParseCommand(IReadOnlyList<string> args, out int? portNumber, out bool debugRequested, out string error, out int? servicePortNumber)
+    {
+        servicePortNumber = null;
         portNumber = null;
         debugRequested = false;
         int separator = IndexOfSeparator(args);
@@ -188,6 +244,7 @@ public static class CliArgs
         Option<bool> rotateKey = new("--rotate-key") { Description = "An admin makes a new store key and master key, keeps only the key tapped and shows a new recovery code. Removes the other keys (real terminal)." };
         Option<bool> show = new("--show") { Description = "With --config: print the settings and their values (anywhere)." };
         Option<string?> port = new("--port") { Description = "Where the one-use web page listens for this call, 1 to 65535, in place of the port setting (nothing is saved). If it is in use, the call fails. For ssh -L.", HelpName = "N" };
+        Option<string?> servicePort = new("--service-port") { Description = "With a run: the port of the host service on this machine, 1 to 65535. Default: WITH_SECRETS_PORT, then 8765.", HelpName = "N" };
         Option<bool> debug = new("--debug") { Description = "With any command: show diagnostic lines on the terminal and write them to the log file (WITH_SECRETS_DEBUG=1 does it for every call). Warnings always go to the log file." };
         Option<string[]> secrets = new("--secrets")
         {
@@ -222,6 +279,7 @@ public static class CliArgs
         root.Options.Add(rotateKey);
         root.Options.Add(show);
         root.Options.Add(port);
+        root.Options.Add(servicePort);
         root.Options.Add(debug);
         root.Options.Add(secrets);
         root.Options.Add(reason);
@@ -301,6 +359,18 @@ public static class CliArgs
             }
 
             portNumber = parsed;
+        }
+
+        if (result.GetValue(servicePort) is { } serviceText)
+        {
+            if (!int.TryParse(serviceText, NumberStyles.None, CultureInfo.InvariantCulture, out int parsedService) || parsedService < 1 || parsedService > ToolSettings.MaxPort)
+            {
+                error = $"--service-port takes a number from 1 to {ToolSettings.MaxPort}.";
+
+                return null;
+            }
+
+            servicePortNumber = parsedService;
         }
 
         int modes = (auditRequested ? 1 : 0) + (result.GetValue(list) ? 1 : 0) + (needsRequested ? 1 : 0) + (setName is not null ? 1 : 0) + (removeName is not null ? 1 : 0) + (result.GetValue(revoke) ? 1 : 0)

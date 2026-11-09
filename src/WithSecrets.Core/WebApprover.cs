@@ -40,6 +40,9 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
     internal ApprovalSettings Settings => settings;
 
     /// <summary>The same approver with another proof method.</summary>
+    /// <summary>The text before the link in the line the approver announces. The host service sends the link alone; the client puts this text back.</summary>
+    public const string LinkPrefix = "Approval needed. Ask the person to open: ";
+
     public WebApprover With(IProofMethod other) => new(other, settings, announce, approveDelay);
 
     public ApprovalDecision Request(ApprovalRequest request)
@@ -133,7 +136,7 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
             // A page reached from the step before is already open in the person's browser: no second link.
             if (!server.Reserved)
             {
-                announce($"Approval needed. Ask the person to open: {context.Origin}/a/{server.Token}");
+                announce($"{LinkPrefix}{context.Origin}/a/{server.Token}");
             }
 
             return session.Wait(PageFlow.Left(settings.Timeout));

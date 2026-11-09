@@ -346,6 +346,11 @@ internal static class Program
             WebApprovalTests.Run(Check).GetAwaiter().GetResult();
         }
 
+        if (Wants("HostService"))
+        {
+            HostServiceTests.Run(Check).GetAwaiter().GetResult();
+        }
+
         if (Wants("LaunchContract"))
         {
             LaunchContractTests.Run(Check).GetAwaiter().GetResult();

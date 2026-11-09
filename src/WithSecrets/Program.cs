@@ -41,6 +41,12 @@ internal static class Program
         // Diagnostics: warnings go to the log file always; --debug (or WITH_SECRETS_DEBUG=1) adds the Debug events, to the terminal too.
         AppLog.Configure(AppLog.DebugRequested(command.Debug));
 
+        // A run is a client of the host service: it opens no store and no state.db, decrypts nothing and starts nothing itself.
+        if (command is CliCommand.Run run)
+        {
+            return await RunThroughService(run);
+        }
+
         string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), StoreFolder);
         StateDatabase state = StateDatabase.InFolder(folder);
         SecretStore store = new(state);
@@ -105,14 +111,70 @@ internal static class Program
 
             case CliCommand.Config:
                 return CommandWiring.Config(state, command.Port);
+
+            case CliCommand.Service:
+                return RunService(command, state, store, grants);
         }
 
-        RunArgs parsed = ((CliCommand.Run)command).Args;
+        return RunCommand.Usage;
+    }
+
+    private static async Task<int> RunThroughService(CliCommand.Run command)
+    {
+        int? port = ServiceEndpoint.Resolve(command.ServicePort, Environment.GetEnvironmentVariable, out string? portError);
+        if (port is null)
+        {
+            TerminalPrompt.Final("with-secrets: " + portError);
+
+            return RunCommand.Usage;
+        }
+
         using Stream stdout = Console.OpenStandardOutput();
         using Stream stderr = Console.OpenStandardError();
         using StreamWriter outWriter = new(stdout, new UTF8Encoding(false)) { AutoFlush = true };
         using StreamWriter errWriter = new(stderr, new UTF8Encoding(false)) { AutoFlush = true };
-        return await CommandWiring.Run(state, store, grants, parsed, command.Port, outWriter, errWriter, Directory.GetCurrentDirectory());
+
+        return await LaunchClient.RunAsync(command.Args, Directory.GetCurrentDirectory(), port.Value, command.Port, outWriter, errWriter);
+    }
+
+    /// <summary>The host service in the foreground, until Ctrl+C. Windows service installation and start at logon come later.</summary>
+    private static int RunService(CliCommand command, StateDatabase state, SecretStore store, GrantStore grants)
+    {
+        int? port = ServiceEndpoint.Resolve(command.ServicePort, Environment.GetEnvironmentVariable, out string? portError);
+        if (port is null)
+        {
+            TerminalPrompt.Final("with-secrets: " + portError);
+
+            return RunCommand.Usage;
+        }
+
+        HostService service;
+        try
+        {
+            service = HostService.Start(new HostServiceOptions { State = state, Store = store, Grants = grants, Port = port.Value });
+        }
+        catch (Exception failure)
+        {
+            TerminalPrompt.Final($"with-secrets: the host service cannot listen on port {port} ({failure.GetType().Name}). Is it already running? Use --port N for another port.");
+
+            return RunCommand.StoreError;
+        }
+
+        using (service)
+        {
+            using ManualResetEventSlim stop = new(false);
+            ConsoleCancelEventHandler handler = (_, e) =>
+            {
+                e.Cancel = true;
+                stop.Set();
+            };
+            Console.CancelKeyPress += handler;
+            TerminalPrompt.Line($"with-secrets service: listening on 127.0.0.1 and [::1], port {service.Port} (this machine only). Press Ctrl+C to stop.");
+            stop.Wait();
+            Console.CancelKeyPress -= handler;
+        }
+
+        return 0;
     }
 }
 

@@ -18,6 +18,44 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
     public const int AuditError = 5;
     public const int NotFound = 127;
 
+    /// <summary>The outcome of the last run, for the service to report (a child may exit with any code, so the code alone does not say).</summary>
+    public LaunchOutcome Outcome { get; private set; } = LaunchOutcome.Failed;
+
+    /// <summary>
+    /// The run as the host service does it: the request (already parsed and checked for its digest, version and expiry) is
+    /// validated again here, the .env plan in it is checked with the same rules that built it, and the run goes on exactly as
+    /// <see cref="ExecuteAsync(RunArgs, string)" /> does it, except that the program starts only through the gate in
+    /// <paramref name="context" /> and the child gets the environment the request carries.
+    /// </summary>
+    public async Task<int> ExecuteAsync(LaunchRequest launch, LaunchContext context)
+    {
+        string? invalid = launch.Validate(DateTimeOffset.UtcNow);
+        if (invalid is not null)
+        {
+            return await Fail(Usage, "invalid request: " + invalid);
+        }
+
+        IReadOnlyList<string> available;
+        try
+        {
+            available = store.ListNames();
+        }
+        catch (Exception error)
+        {
+            return await Fail(StoreError, $"cannot read the secret store: {error.Message}");
+        }
+
+        EnvResult composed = EnvDeclarations.FromRequest(launch);
+        if (composed.Plan is not { } plan)
+        {
+            return await Fail(Usage, composed.Error!);
+        }
+
+        context.Request = launch;
+
+        return await RunPlan(launch.Program, launch.Arguments, launch.Reason, launch.WorkingDirectory, plan, available, context);
+    }
+
     public async Task<int> ExecuteAsync(RunArgs args, string workingDirectory)
     {
         IReadOnlyList<string> available;
@@ -43,6 +81,11 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             await stderr.WriteLineAsync("with-secrets: " + note);
         }
 
+        return await RunPlan(args.Program, args.Arguments, args.Reason, workingDirectory, plan, available, new LaunchContext());
+    }
+
+    private async Task<int> RunPlan(string program, IReadOnlyList<string> typedArguments, string reason, string workingDirectory, EnvPlan plan, IReadOnlyList<string> available, LaunchContext context)
+    {
         if (plan.Mappings.Count == 0)
         {
             return await Fail(Usage, "Name the secrets with --secrets NAME[,NAME...]. There is no option for all secrets.");
@@ -63,19 +106,22 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             return await Fail(Usage, $"Unknown secret: {string.Join(", ", missing)}. Names in the store: {have}. Ask the user to add a missing name.");
         }
 
-        string? refusal = Policy.Check(args.Program, args.Arguments);
+        string? refusal = Policy.Check(program, typedArguments);
         if (refusal is not null)
         {
             return await Fail(Usage, refusal);
         }
 
-        string? resolved = ProgramResolver.Resolve(args.Program, workingDirectory);
+        // A request that carries the sender's environment is resolved against that PATH, as the sender's own shell would.
+        string? resolved = context.Environment is { } senderEnvironment
+            ? ProgramResolver.Resolve(program, workingDirectory, EnvironmentValue(senderEnvironment, "PATH") ?? "", pathExt: EnvironmentValue(senderEnvironment, "PATHEXT") ?? "")
+            : ProgramResolver.Resolve(program, workingDirectory);
         if (resolved is null)
         {
-            return await Fail(NotFound, $"Program not found on PATH: {ApprovalSummary.Clean(args.Program)}. The working directory is not searched. Use ./name to run a file there.");
+            return await Fail(NotFound, $"Program not found on PATH: {ApprovalSummary.Clean(program)}. The working directory is not searched. Use ./name to run a file there.");
         }
 
-        string? alias = AppExecutionAlias(args.Program, resolved);
+        string? alias = AppExecutionAlias(program, resolved);
         if (alias is not null)
         {
             return await Fail(Usage, alias);
@@ -84,8 +130,8 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         // Write the program and the script as full paths. The prompt shows them, and they are what runs. What is checked and shown
         // is the expanded command, and it must read the same as the typed one.
         resolved = PathExpander.Full(resolved, workingDirectory);
-        IReadOnlyList<string> arguments = PathExpander.ExpandScript(args.Program, args.Arguments, workingDirectory);
-        string? expandedRefusal = Policy.CheckExpanded(args.Program, args.Arguments, arguments) ?? Policy.CheckBatchFile(resolved, arguments);
+        IReadOnlyList<string> arguments = PathExpander.ExpandScript(program, typedArguments, workingDirectory);
+        string? expandedRefusal = Policy.CheckExpanded(program, typedArguments, arguments) ?? Policy.CheckBatchFile(resolved, arguments);
         if (expandedRefusal is not null)
         {
             return await Fail(Usage, expandedRefusal);
@@ -98,17 +144,17 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         }
 
         // The index is the same in the typed and the expanded arguments (checked above).
-        int scriptIndex = PathExpander.ScriptArgumentIndex(args.Program, args.Arguments, workingDirectory);
+        int scriptIndex = PathExpander.ScriptArgumentIndex(program, typedArguments, workingDirectory);
 
         // A script that is too big to be hashed and shown is never run unseen.
-        string? oversized = OversizedScript(args.Program, resolved, args.Arguments, workingDirectory);
+        string? oversized = OversizedScript(program, resolved, typedArguments, workingDirectory);
         if (oversized is not null)
         {
             return await Fail(Usage, $"The script {ApprovalSummary.Clean(oversized)} is larger than 1 MB, which is more than the approval page can show. Split it into smaller files, or run a program that loads it. Nothing was run.");
         }
 
         // The script an interpreter is told to run must exist, so that the page can show it.
-        if (Policy.ScriptIndex(args.Program, args.Arguments) is { } named && named >= 0 && scriptIndex < 0)
+        if (Policy.ScriptIndex(program, typedArguments) is { } named && named >= 0 && scriptIndex < 0)
         {
             return await Fail(Usage, $"The script {ApprovalSummary.Clean(arguments[named])} does not exist, so the approval page cannot show it. Nothing was run.");
         }
@@ -129,7 +175,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         ScriptView? programFile = null;
         try
         {
-            script = scriptPath is null ? null : ScriptView.Read(scriptPath) with { Guessed = PathExpander.IsGuess(args.Program, args.Arguments) };
+            script = scriptPath is null ? null : ScriptView.Read(scriptPath) with { Guessed = PathExpander.IsGuess(program, typedArguments) };
             programFile = programPath is null ? null : ScriptView.Read(programPath) is { Text: not null } text ? text : null;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
@@ -144,7 +190,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                 return await Fail(Usage, $"The script {ApprovalSummary.Clean(script.Path)} is not text, so the approval page cannot show it. Binary scripts, zipapps and .pyc files are not allowed.");
             }
 
-            if (Path.GetFileNameWithoutExtension(args.Program).Equals("powershell", StringComparison.OrdinalIgnoreCase) && script.NonAscii && !script.Bom)
+            if (Path.GetFileNameWithoutExtension(program).Equals("powershell", StringComparison.OrdinalIgnoreCase) && script.NonAscii && !script.Bom)
             {
                 return await Fail(Usage, $"Windows PowerShell 5.1 reads the script {ApprovalSummary.Clean(script.Path)} in the ANSI code page when it has no byte order mark, so it would run other characters than the page shows. Save the script with a UTF-8 BOM or use only ASCII.");
             }
@@ -166,7 +212,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         // such a store never offers or uses saved approvals.
         ReuseOffer offer = !store.NeedsUnlock && grants is not null && reuse is { IsOn: true } ? reuse : ReuseOffer.Off;
         Dictionary<string, string> sources = names.ToDictionary(name => name, _ => store.Label, StringComparer.Ordinal);
-        ApprovalRequest request = new(args.Program, resolved, arguments, workingDirectory, args.Reason, names, offer.IsOn ? offer : null, args.Arguments, links, Sources: sources, Unlock: store.NeedsUnlock, Script: script, ProgramFile: programFile, Mappings: plan.Mappings, EnvFiles: plan.Files, EnvNames: [.. plan.Ordinary.Keys.Order(StringComparer.Ordinal)], EnvValues: plan.Ordinary);
+        ApprovalRequest request = new(program, resolved, arguments, workingDirectory, reason, names, offer.IsOn ? offer : null, typedArguments, links, Sources: sources, Unlock: store.NeedsUnlock, Script: script, ProgramFile: programFile, Mappings: plan.Mappings, EnvFiles: plan.Files, EnvNames: [.. plan.Ordinary.Keys.Order(StringComparer.Ordinal)], EnvValues: plan.Ordinary);
         Fingerprint fingerprint = RequestFingerprint.Compute(request);
 
         // What the page shows must be the file the fingerprint covers; a file that changed in between is not approved unseen.
@@ -176,6 +222,12 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             {
                 return await Fail(Usage, "The script changed while the request was being made, so nothing was run. Ask again.");
             }
+        }
+
+        // A request that came over the API must be the one that is approved and launched: nothing in it may differ from the page's data.
+        if (context.Request is { } launch && LaunchRequestBinding.Mismatch(launch, request) is { } mismatch)
+        {
+            return await Fail(Usage, "the launch request is not the request that would be approved (" + mismatch + "). Nothing was run.");
         }
 
         // The request id goes into the text the person signs, so a saved approval names the request it covers.
@@ -249,6 +301,12 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                 return await Fail(Denied, holdFailure);
             }
 
+            // A launch that was cancelled while the page was open (the client left, or the service is stopping) decrypts nothing.
+            if (context.Cancel.IsCancellationRequested)
+            {
+                return await Cancelled();
+            }
+
             // Only the approved names are decrypted. The bytes are zeroed when the program ends; the strings the redactor and the
             // child's environment need cannot be wiped (see SecretValues). The store key itself is opened inside, from what the
             // passkey released, and zeroed there.
@@ -271,8 +329,36 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             {
                 // The variable the program sees is the left side of the pair; the redactor gets every value.
                 Dictionary<string, string> injected = request.Mappings!.ToDictionary(mapping => mapping.Variable, mapping => secrets.Text(mapping.Secret), StringComparer.Ordinal);
-                exitCode = await ChildRunner.RunAsync(new ChildSpec(resolved, arguments, workingDirectory, injected, plan.Ordinary), stdout, stderr);
+
+                // Prepare the child and its environment, then commit through the gate: the process starts only if the launch was not
+                // cancelled and the local authorization did not change since it began. The loser of that race starts nothing and
+                // its prepared environment is thrown away. Once started, nothing here touches the child.
+                PreparedChild prepared = ChildRunner.Prepare(new ChildSpec(resolved, arguments, workingDirectory, injected, plan.Ordinary, context.Environment));
+                context.AfterPrepare?.Invoke(prepared);
+                System.Diagnostics.Process? process = null;
+                string? startFailure = null;
+                bool committed = context.Gate.TryCommit(context.Revision, context.Cancel, () => process = prepared.Start(out startFailure));
+                if (!committed)
+                {
+                    prepared.Discard();
+                    audit.TryWrite("finished", request, "cancelled before the program started", Denied, fingerprint.Files);
+
+                    return await Cancelled();
+                }
+
+                context.AfterCommit?.Invoke();
+                if (process is null)
+                {
+                    await stderr.WriteLineAsync(startFailure);
+                    exitCode = NotFound;
+                }
+                else
+                {
+                    exitCode = await prepared.WaitAsync(process, stdout, stderr);
+                }
             }
+
+            Outcome = LaunchOutcome.Exited;
 
             audit.TryWrite("finished", request, "", exitCode, fingerprint.Files);
 
@@ -419,10 +505,54 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
 
     private async Task<int> Fail(int code, string message)
     {
+        Outcome = code == Denied ? LaunchOutcome.Denied : LaunchOutcome.Failed;
         await stderr.WriteLineAsync("with-secrets: " + message);
 
         return code;
     }
+
+    /// <summary>The launch ended before the program started because it was cancelled or its authorization was invalidated.</summary>
+    private async Task<int> Cancelled()
+    {
+        await stderr.WriteLineAsync("with-secrets: the launch was cancelled before the program started. Nothing was run.");
+        Outcome = LaunchOutcome.Cancelled;
+
+        return Denied;
+    }
+
+    private static string? EnvironmentValue(IReadOnlyDictionary<string, string> environment, string name)
+    {
+        StringComparison comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
+        return environment.FirstOrDefault(item => string.Equals(item.Key, name, comparison)) is { Key: not null } found ? found.Value : null;
+    }
+}
+
+/// <summary>
+/// What a launch carries besides its request: the gate it commits through and the revision it began at, the token that cancels it,
+/// the environment for the child, and (for tests) two hooks. A run with no context starts at once, with the
+/// environment of this process.
+/// </summary>
+public sealed class LaunchContext
+{
+    public LaunchGate Gate { get; init; } = new();
+
+    /// <summary>The <see cref="LaunchGate.Revision" /> read when the launch began.</summary>
+    public int Revision { get; init; }
+
+    public CancellationToken Cancel { get; init; }
+
+    /// <summary>The environment the child inherits (null: the environment of this process).</summary>
+    public IReadOnlyDictionary<string, string>? Environment { get; init; }
+
+    /// <summary>The request that came over the API, when it did; the approval is checked against it.</summary>
+    public LaunchRequest? Request { get; internal set; }
+
+    /// <summary>Test hook: the child is prepared and not started, the gate is not yet taken.</summary>
+    internal Action<PreparedChild>? AfterPrepare { get; init; }
+
+    /// <summary>Test hook: the child was started (the gate is released).</summary>
+    internal Action? AfterCommit { get; init; }
 }
 
 /// <summary>

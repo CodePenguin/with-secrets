@@ -43,7 +43,14 @@ internal static class Cmds
     {
         CliCommand.Run run = (CliCommand.Run)Parse(["--secrets", secrets, "--reason", "e2e run", "--", .. program]);
 
-        return new Cmd<int>((port, o, e) => CommandWiring.Run(rig.State, rig.Store, rig.Grants, run.Args, port, o, e, rig.Work, timeLimit).GetAwaiter().GetResult());
+        // The run goes through the host service, as the program does: the service is in this process on a free port, and the CLI client
+        // talks to it over HTTP. The page listens on the port the harness chose (the --port of the run).
+        return new Cmd<int>((port, o, e) =>
+        {
+            using HostService service = HostService.Start(new HostServiceOptions { State = rig.State, Store = rig.Store, Grants = rig.Grants, Port = 0, TimeLimit = timeLimit });
+
+            return LaunchClient.RunAsync(run.Args, rig.Work, service.Port, port, o, e).GetAwaiter().GetResult();
+        });
     }
 
     public static Cmd<int> Set(Rig rig, params string[] names)

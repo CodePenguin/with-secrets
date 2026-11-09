@@ -147,22 +147,14 @@ public static class CommandWiring
     }
 
     /// <summary>
-    /// A run: the page is served at the first target where an enrolled passkey works. When none works, the primary approver gives
-    /// its own message (set up the first passkey with --config) and the run is denied. <paramref name="timeLimit" /> is for tests: it replaces the setting.
+    /// The approver of a run: the page is served at the first target where an enrolled passkey works. When none works, the primary
+    /// approver gives its own message (set up the first passkey with --config) and the run is denied.
     /// </summary>
-    public static async Task<int> Run(StateDatabase state, SecretStore store, GrantStore grants, RunArgs parsed, int? port, TextWriter stdout, TextWriter stderr, string workingDirectory, TimeSpan? timeLimit = null)
+    public static IApprover RunApprover(StateDatabase state, ApprovalSettings settings, Action<string> announce)
     {
-        ApprovalSettings? settings = LoadSettings(state, port);
-        if (settings is null)
-        {
-            return RunCommand.StoreError;
-        }
+        (EnrollmentTarget primary, EnrollmentTarget local) = Targets(state, settings, announce, null);
 
-        (EnrollmentTarget primary, EnrollmentTarget local) = Targets(state, timeLimit is { } limit ? settings with { Timeout = limit } : settings, line => stderr.WriteLine(line), null);
-        WebApprover approver = (EnrollmentTarget.FirstThatCanProve(primary, local) ?? primary).Approver;
-        RunCommand run = new(store, approver, new AuditLog(state), stdout, stderr, grants, ReuseSettings.Load(state));
-
-        return await run.ExecuteAsync(parsed, workingDirectory);
+        return (EnrollmentTarget.FirstThatCanProve(primary, local) ?? primary).Approver;
     }
 
     /// <summary>The approval settings, or null after printing why the settings in state.db cannot be used.</summary>
