@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 
 namespace WithSecrets;
@@ -79,6 +80,56 @@ public static class CommandWiring
         TerminalPrompt.Final(code == 0 ? detail : "with-secrets: " + detail);
 
         return code;
+    }
+
+    /// <summary>
+    /// admin audit: lists the audit history the authority holds (filtered), or the sequence gaps it found. Read-only: it needs no passkey and changes nothing. A person's command
+    /// in a terminal like the other admin commands; the admin web view of the same history is a later phase.
+    /// </summary>
+    public static int AdminAudit(CliCommand.AuditAdmin command, string folder, TextWriter? output = null)
+    {
+        output ??= Console.Out;
+        AuthorityStore store = AuthorityStore.InFolder(folder);
+        try
+        {
+            if (command.Gaps)
+            {
+                IReadOnlyList<AuditGap> gaps = store.AuditGaps(command.Query.MachinePrefix, openOnly: true);
+                foreach (AuditGap gap in gaps)
+                {
+                    output.WriteLine(string.Join('\t', gap.Detected.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture), KeyIdentity.Display(gap.Fingerprint)[..19], gap.Kind, gap.From == gap.To ? gap.From.ToString(CultureInfo.InvariantCulture) : gap.From.ToString(CultureInfo.InvariantCulture) + "-" + gap.To.ToString(CultureInfo.InvariantCulture)));
+                }
+
+                if (gaps.Count == 0)
+                {
+                    output.WriteLine("No open gaps in any machine's audit sequence.");
+                }
+
+                return 0;
+            }
+
+            IReadOnlyList<AuditHistoryRecord> records = store.AuditHistory(command.Query);
+            foreach (AuditHistoryRecord record in records)
+            {
+                AuditEvent item = record.Event;
+                string commandText = ApprovalSummary.Clean(item.Program + (item.Arguments.Count == 0 ? "" : " " + string.Join(' ', item.Arguments)));
+                output.WriteLine(string.Join('\t', item.Time.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture), KeyIdentity.Display(item.MachineFingerprint)[..19], item.Sequence.ToString(CultureInfo.InvariantCulture),
+                    item.Type, ApprovalSummary.Clean(item.Outcome), ApprovalSummary.Clean(item.Reason), ApprovalSummary.Clean(item.GrantId), item.ExitCode is { } code ? code.ToString(CultureInfo.InvariantCulture) : "", commandText, ApprovalSummary.Clean(item.Folder)));
+            }
+
+            if (records.Count == 0)
+            {
+                output.WriteLine("No audit events match.");
+            }
+
+            return 0;
+        }
+        catch (AuthorityDatabaseException failure)
+        {
+            TerminalPrompt.Final("with-secrets: " + failure.Message);
+
+            return RunCommand.StoreError;
+        }
     }
 
     /// <summary>admin grant ACTION: lists the grants, or shows the change on a one-use page and applies it after an admin passkey approved there.</summary>

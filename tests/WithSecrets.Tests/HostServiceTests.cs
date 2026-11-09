@@ -35,8 +35,12 @@ internal static class HostServiceTests
 
         public IReadOnlyList<string> ListNames() => [.. values.Keys];
 
+        /// <summary>For tests: called as a decryption begins, before anything is read.</summary>
+        public Action? OnRead { get; set; }
+
         public SecretValues GetValues(IReadOnlyCollection<string> names, Unlock? unlock)
         {
+            OnRead?.Invoke();
             Interlocked.Increment(ref _reads);
             if (unlock is not null && unlock.Output.Any(b => b != 0))
             {
@@ -104,7 +108,7 @@ internal static class HostServiceTests
         private readonly string _dir;
         private int _ids;
 
-        public Rig(string parent, Dictionary<string, string>? values = null, Func<IApprover>? approver = null, TimeSpan? bodyTimeout = null, Action<PreparedChild>? afterPrepare = null, Action? afterCommit = null, bool trusted = true, TestMachine? machine = null, TestAuthenticator? savedApprovalSigner = null, bool needsUnlock = false, Func<IApprover, IStoreKeyProvider>? keyProvider = null, IMonotonicClock? monotonic = null, TestAuthenticator? enrolled = null)
+        public Rig(string parent, Dictionary<string, string>? values = null, Func<IApprover>? approver = null, TimeSpan? bodyTimeout = null, Action<PreparedChild>? afterPrepare = null, Action? afterCommit = null, bool trusted = true, TestMachine? machine = null, TestAuthenticator? savedApprovalSigner = null, bool needsUnlock = false, Func<IApprover, IStoreKeyProvider>? keyProvider = null, IMonotonicClock? monotonic = null, TestAuthenticator? enrolled = null, TimeSpan? auditInterval = null)
         {
             _dir = Path.Combine(parent, "svc-" + Guid.NewGuid().ToString("N")[..8]);
             Work = Path.Combine(_dir, "work");
@@ -143,6 +147,8 @@ internal static class HostServiceTests
                 AfterCommit = () => afterCommit?.Invoke(),
                 KeyProviderFactory = keyProvider,
                 Monotonic = monotonic,
+                AuditUploadInterval = auditInterval ?? TimeSpan.FromSeconds(2),
+                AuditMaxBackoff = auditInterval is { } interval ? interval * 4 : TimeSpan.FromSeconds(60),
             });
             Http = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(60) };
         }

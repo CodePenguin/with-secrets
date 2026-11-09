@@ -40,19 +40,19 @@ public sealed record HistoryEntry(long Id, string Fingerprint, DateTimeOffset Ti
 public sealed record DecisionPlan(AuthorityResponse Response, string? HostMismatch, string AuditDetail, bool Store = true);
 
 /// <summary>
-/// <c>authority.db</c> in the store folder: the authority's durable state in SQLite (WAL, schema version 2): machines and their
+/// <c>authority.db</c> in the store folder: the authority's durable state in SQLite (WAL, schema version 4): machines and their
 /// status history, grants (scoped, with their expiry, revision and revocation) with the revocation notices for hosts and the stored
 /// results of grant requests, the public part of the authority signing keys and
 /// their rotation history, the authority-side audit history, processed request ids with their signed results (idempotency),
-/// and pending invalidation notifications. The authority signing private key is not here (see <see cref="CngSigningKey" />),
+/// pending invalidation notifications, and the audit events the hosts uploaded (signed events, the per-machine sequence state, recorded gaps, the retention setting; see AuthorityStore.AuditEvents.cs). The authority signing private key is not here (see <see cref="CngSigningKey" />),
 /// and no secret value is. Every operation is one transaction that takes the write lock first, so it commits whole or leaves
 /// nothing; a database of another schema version is never migrated, except versions 1 (Phase 2) and 2 (Phase 3 before grant evidence), whose
-/// grants tables are replaced (version 1 never had grants written; a version 2 grant has no approval evidence and would be ignored anyway): any other version: delete it and start over (machines then enroll again).
+/// grants tables are replaced (version 1 never had grants written; a version 2 grant has no approval evidence and would be ignored anyway), and 3 (Phase 3 fix round), which only gains the audit tables: any other version: delete it and start over (machines then enroll again).
 /// </summary>
-public sealed class AuthorityStore
+public sealed partial class AuthorityStore
 {
     public const string FileName = "authority.db";
-    public const int SchemaVersion = 3;
+    public const int SchemaVersion = 4;
 
     /// <summary>How long the stored answer of a durable grant request is kept for retries (much longer than an answer is valid).</summary>
     public static readonly TimeSpan ProcessedGrantRetention = TimeSpan.FromHours(1);
@@ -791,7 +791,7 @@ public sealed class AuthorityStore
                 found = -1;
             }
 
-            if (found is 1 or 2)
+            if (found is 1 or 2 or 3)
             {
                 Migrate(connection);
                 found = SchemaVersion;
@@ -818,15 +818,20 @@ public sealed class AuthorityStore
     {
         using SqliteTransaction transaction = connection.BeginTransaction(deferred: false);
         long from = Convert.ToInt64(StateDatabase.Scalar(connection, transaction, "SELECT version FROM schema_version"), CultureInfo.InvariantCulture);
-        if (from is not (1 or 2))
+        if (from is not (1 or 2 or 3))
         {
             // Another process migrated first.
             return;
         }
 
-        StateDatabase.Execute(connection, transaction, "DROP TABLE grants");
-        int start = Schema.IndexOf("CREATE TABLE grants (", StringComparison.Ordinal);
-        StateDatabase.Execute(connection, transaction, Schema[start..Schema.IndexOf(from == 1 ? "CREATE TABLE authority_keys (" : "CREATE TABLE grant_events (", StringComparison.Ordinal)]);
+        if (from is 1 or 2)
+        {
+            StateDatabase.Execute(connection, transaction, "DROP TABLE grants");
+            int start = Schema.IndexOf("CREATE TABLE grants (", StringComparison.Ordinal);
+            StateDatabase.Execute(connection, transaction, Schema[start..Schema.IndexOf(from == 1 ? "CREATE TABLE authority_keys (" : "CREATE TABLE grant_events (", StringComparison.Ordinal)]);
+        }
+
+        StateDatabase.Execute(connection, transaction, AuditSchema);
         StateDatabase.Execute(connection, transaction, "UPDATE schema_version SET version = $version", ("$version", SchemaVersion));
         transaction.Commit();
     }
@@ -843,6 +848,7 @@ public sealed class AuthorityStore
                 StateDatabase.Execute(connection, null, "PRAGMA journal_mode = WAL");
                 using SqliteTransaction transaction = connection.BeginTransaction(deferred: false);
                 StateDatabase.Execute(connection, transaction, Schema);
+                StateDatabase.Execute(connection, transaction, AuditSchema);
                 StateDatabase.Execute(connection, transaction, "INSERT INTO schema_version (version) VALUES ($version)", ("$version", SchemaVersion));
                 transaction.Commit();
             }

@@ -4,7 +4,7 @@ Worktree `C:\Users\codep\Projects\with-secrets-impl`, branch `impl/host-service`
 
 ## Current phase
 
-Phase 0 (extract contracts, preserve behaviour): done, reviewed. Phase 1 (local host service and shared API): done, pending review. Phase 2 (machine identity and local authority): done, pending review. Phase 3 (the independent parts: grants, offline lease, startup reconciliation, plus the maintainer's decision to hold the store key in service memory for a grant's life): done, pending review. Next: Phase 4 onward.
+Phase 0 (extract contracts, preserve behaviour): done, reviewed. Phase 1 (local host service and shared API): done, pending review. Phase 2 (machine identity and local authority): done, pending review. Phase 3 (the independent parts: grants, offline lease, startup reconciliation, plus the maintainer's decision to hold the store key in service memory for a grant's life): done, reviewed (fix round 1 applied). Phase 4 (durable audit trail): done, pending review. Next: Phase 5 onward.
 
 ## Commands
 
@@ -184,6 +184,46 @@ Parsing of `approve` and `admin grant` and `NeedsTerminal`; grant creation, no-t
 - M1: the key-holding tap page now has its own heading and a "KEY HELD" line (until the end, or restart for indefinite); the contradicting note is gone. L1: only a transport failure is "offline"; database errors deny. L2: use is evaluated every time, never stored or replayed. L3: an exception in check-in drops the lease and key. L4: pinned arrays, zeroed on drop (the array from the page's tap is the caller's and zeroed on dispose). L5: admin answers are verified (signature, id, digest), revision read inside the transaction. L6: processed answers pruned after 1 hour. L7: approve page headed "Create a GRANT".
 - Mutation evidence (applied, GrantAuthority run, reverted): UseGrant skipping `RowProblem`: 7 checks fail; `Scope` ignoring arguments past the first: 1 fails; `Borrow` ignoring the scope key: 2 fail.
 
+## Phase 4: durable audit trail (done, pending review)
+
+Brief: `.superpowers/sdd/2026-11-01-web-approval-passkey/task-p4-brief.md`. New suite `AuditTrailTests.cs` (`WS_ONLY=AuditTrail`, 262 checks). Results are in the report `task-p4-report.md` (same folder) and under "Final verification" at the end of this file.
+
+### What was built
+
+- `Authority/AuditEvents.cs`: `AuditEventTypes` (authorization, launch, execution), `AuditFacts`, `AuditEvent` (canonical JSON, domain "with-secrets audit event v1", ECDSA P-256 by the machine key, P1363 like Phase 2; strict `TryParse`; `Problem()` shape checks), `AuditBatch` (+digest), `AuditAck` (authority-signed, an `ISignedAnswer`, valid 60 s), `AuditStatus`, `IAuditSink`, `AuditQuery`, `AuditHistoryRecord`, `AuditGap`, `AuditRedaction`.
+- `Authority/HostAudit.cs`: `HostAuditOutbox` (`audit-outbox.db`, WAL, `synchronous=FULL`, schema 1, mismatch or damage = error naming the delete-it remedy; one write transaction = read counter, sign, insert, bump counter, so the sequence is monotonic and gapless and a failed commit uses no number), `AuditUploader` (batches of 50, removes an event only after a verified ack names it accepted/duplicate/expired; rejected ones are parked), `HostAudit` (`TryRecord` never throws and never waits for the upload; loop with a doubling pause up to 60 s, woken by each new event), `IHostAudit`.
+- `AuthorityStore` is now `partial`; `AuthorityStore.AuditEvents.cs` adds schema 4 tables (`audit_events`, `audit_machine_state`, `audit_gaps`, `authority_settings`; version 1 to 3 files are migrated in place, `IF NOT EXISTS`), `RecordAuditEvents` (one transaction: machine signature, shape, dedup by id, expiry, sequence tracking), gap shrink/split/reused, retention (`AuditRetentionDays`, `SetAuditRetentionDays`, `PruneAuditEvents`), `AuditHistory(AuditQuery)`, `AuditGaps`, `AuditHighestSequence`.
+- `LocalAuthority` implements `IAuditSink` (acknowledgement signed only after the commit); `LocalDeployment.AuditSink` (tests can swap it, like `Link`); `HostAuthorization.VerifyAnswerAsync` reuses the pinned-key/transition/validity checks for the ack.
+- `HostService`: creates the outbox beside `authority.db`, runs the upload loop (`AuditUploadInterval` 2 s, `AuditMaxBackoff` 60 s), passes `Audit` in the `LaunchContext`, waits briefly for the loop on dispose.
+- `RunCommand` (service path only, `context.Audit != null`): authorization event (approved, granted + online/offline-lease + grant id, reused, denied with the authority's code, grant-approved for `approve`) is REQUIRED to commit before the store is opened: failure = exit 5 (`AuditError`), no decryption, no launch. Launch events (started; failed/cancelled with codes: files-changed, files-not-held, decrypt-failed, key-not-released, start-failed, not-committed, authorization-invalidated, cancelled, request-expired) and execution events (exited + exit code, or failed/internal-error) are best effort after the fact.
+- CLI: `admin audit [--machine PREFIX] [--since T] [--until T] [--type T] [--outcome W] [--grant ID] [--folder S] [--text S] [--last N]` and `admin audit --gaps` (terminal-only, read-only, no passkey); help text; `CliCommand.AuditAdmin`, `CommandWiring.AdminAudit`.
+- `ContractReader.Long` added. Test support: `HostServiceTests.Rig(auditInterval)`, `CountingStore.OnRead`, `GrantAuthorityTests.Chooser`/`Show` made internal, the Phase 2 schema message test now says version 4.
+
+### Decisions (10.2 is silent unless stated)
+
+1. **Old and new audit coexist (provisional).** The existing `AuditLog` (rows and hash chain in `state.db`) is unchanged and still written by every run (including runs through the service) and by the human commands; `--audit` is unchanged. The new signed host/authority trail is written in addition, only for runs through the service, with no hash chain and no export (10.2). The two are not merged or cross-checked. Why: 10.2 says nothing about retiring the old log, the human commands still open `state.db` in the CLI, and removing it would change a prototype security property (the exit 5 rule and `--audit`) outside this phase. Open for the maintainer: when the service owns all commands, whether the old log should be dropped.
+2. **Which events gate a launch.** Only the authorization event must be committed before the launch (before any decryption). The launch and execution events happen after the fact (a launch outcome cannot be known before it); a failure to commit them is logged (exception type only) and the launch is not undone. Their numbers are not consumed when the commit fails, so the sequence stays gapless.
+3. **Non-secret commands.** None exist on this path: `RunPlan` refuses a run without secret names (exit 2). So every run through the service is secret-bearing and fails closed; nothing was relaxed. A denial or a failure to record a denial is best effort (nothing runs either way).
+4. **Argument redaction is a heuristic.** The host records the authorization event before it decrypts, so it cannot mask exact secret values; it masks values after secret-like names/flags, Authorization/Bearer/Basic/token values and URL passwords, cuts long arguments (512 chars, 256 arguments) and marks control characters. A secret typed bare into an argument is not recognizable (the agent is not given values). The old `state.db` rows still hold raw arguments (unchanged behaviour).
+5. **Reason and outcome words** are codes (authorization: approved, granted, reused, denied, grant-approved; reasons: the authority's reason codes, online, offline-lease, saved-approval, grant-check-failed, cancelled, reuse-not-offered). Free text from a person, a program or the store is never recorded.
+6. **Acknowledgement is signed** by the authority key (like every answer) so a forged ack cannot make the host drop its events; entries: accepted, duplicate, expired (older than the retention, acknowledged but not stored), rejected (kept apart in the outbox, never resent).
+7. **Sequence handling at the authority:** the next number advances; a skipped range is a `missing` gap (shrunk, split or closed by late events); a number used by a second, different event is accepted and recorded as `reused`; nothing is ever rejected for a sequence reason. Expired events move the sequence but never record `reused` (they may be events the authority already pruned). A deleted outbox restarts the numbering at 1: the authority sees `reused` numbers.
+8. **Retention** (authority setting, default 365 days, 0 keeps everything) removes only acknowledged events (all stored events are), on every upload and by `PruneAuditEvents`. Setting it needs a command with an admin tap: that is Phase 6 together with the admin web view; for now it is `AuthorityStore.SetAuditRetentionDays` (service-level API, audited in `audit_history`). The host's outbox has no pruning of its own: an unacknowledged event stays however old.
+9. **Event time** is the host's clock when the event is made. The batch is not signed (each event is); the ack binds the batch id and a digest over event ids, sequences and signatures.
+10. **Local authority mode and the sink:** the same `IAuditSink` interface a remote authority will implement; the local one is called in process. The uploader does not block launches.
+11. **Timing choices (not security properties):** batch 50 sent / 200 processed, ack valid 60 s, loop interval 2 s with doubling to 60 s.
+
+### Known limits
+
+- The outbox and `authority.db` have no integrity protection against a same-user writer; a compromised host can report untruthfully (10.2 says the protocol does not claim otherwise).
+- Pending (not yet approved) machines produce denial events that cannot be acknowledged until the machine is approved and the authority key is pinned (the host cannot verify an ack without a pin); they wait in the outbox.
+- `admin audit` reads `authority.db` directly (local authority); a remote authority will need the Phase 6 web view.
+- Logs: warnings in the new code name only exception types; no test reads the rolling log file.
+
+### Mutation evidence (applied, `WS_ONLY=AuditTrail`, reverted)
+
+(a) The page path no longer fails the run when the authorization event cannot be committed: 4 failures ("fails closed ... canary decrypt count is 0", "next run ... numbered from 1", damaged outbox file, folder in place of the file). (b) The uploader ignores the result of the acknowledgement verification: 5 failures (replayed, wrong-key, other-events acknowledgements; the genuine one; the service-level wrong-key ack). (c) The authority no longer records a missing range: 6 failures (gap records, shrink/split/close, `admin audit --gaps`, end-to-end lost event).
+
 ## Reconnaissance: who owns what today
 
 | Responsibility | Owner today (file / type) | Notes |
@@ -232,7 +272,7 @@ Parsing of `approve` and `admin grant` and `NeedsTerminal`; grant creation, no-t
 
 ## Remaining work
 
-- Phase 4 onward per `docs/implementation-plan.md` (Phases 1 to 3 are done, see above). Open: the cleaner mitigation for the held key (REVISIT later), the same-user check for grants, the M2 relay. Phase 2 leftovers: wire the `service` startup of the real CNG key on a Windows machine by hand once; decide whether retired authority keys should be deleted.
+- Phase 5 onward per `docs/implementation-plan.md` (Phases 1 to 4 are done, see above). Phase 6 owns the admin web view of the audit history and an administrator command (with a passkey tap) to set the audit retention. Open: the cleaner mitigation for the held key (REVISIT later), the same-user check for grants, the M2 relay. Phase 2 leftovers: wire the `service` startup of the real CNG key on a Windows machine by hand once; decide whether retired authority keys should be deleted.
 
 ## Blockers requiring maintainer input (Phase 3): resolved, see the Phase 3 section
 
@@ -254,3 +294,9 @@ Parsing of `approve` and `admin grant` and `NeedsTerminal`; grant creation, no-t
 - `dotnet build with-secrets.slnx --no-incremental`: 0 warnings, 0 errors.
 - Full unit suite: 3103 passed, 2 failed: "enroll: CSP is strict and the script has LF line ends" and "reuse page: the CSP hash is of the LF script as served". Both fail identically on the untouched base (checked with `git stash -u`, suites WebApproval and Reuse: 884 passed, 2 failed). Cause: this checkout has `core.autocrlf=true`, so page scripts embedded in the `.cs` sources have CRLF and the served script / CSP hash differ. Not related to Phase 0.
 - E2E (`tests\WithSecrets.E2E`, real browser available): 12 FAILED in 245 s, all with the same browser console error "Executing inline script violates ... script-src 'sha256-...'" (CSP hash mismatch from the same CRLF cause). Not compared against the base run; same root cause as the two unit failures. Suggested fix for the environment: `git config core.autocrlf false` (or `input`) in this worktree and re-checkout, then rerun both. Not done here (config change outside the task).
+
+### Phase 4 verification
+
+- `dotnet build with-secrets.slnx --no-incremental`: 0 warnings, 0 errors.
+- Full unit suite: 3890 passed, 0 failed (AuditTrail 262 checks). The CSP/CRLF failures noted above no longer occur in this run.
+- E2E (`tests\WithSecrets.E2E`): ALL PASSED in 56.6 s.

@@ -18,6 +18,9 @@ public sealed class LocalDeployment(AuthorityStore store, AuthorityKeyRing keys,
     /// <summary>What the host service talks to: the local authority itself. Tests put a link in its place that can go offline or alter answers.</summary>
     public IAuthority Link { get; set; } = authority;
 
+    /// <summary>Where the host sends its audit events: the local authority itself. Tests put a sink in its place that can fail, delay or answer wrongly.</summary>
+    public IAuditSink AuditSink { get; set; } = authority;
+
     public ISigningKey MachineKey => machineKey;
 
     public string HostName => hostName;

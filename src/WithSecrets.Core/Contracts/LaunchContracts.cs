@@ -580,6 +580,13 @@ internal sealed class ContractReader
         return _members[name] is { ValueKind: JsonValueKind.Number } element && element.TryGetInt32(out value) || Bad(name, "an integer");
     }
 
+    public bool Long(string name, out long value)
+    {
+        value = 0;
+
+        return _members[name] is { ValueKind: JsonValueKind.Number } element && element.TryGetInt64(out value) || Bad(name, "an integer");
+    }
+
     public bool OptionalInt(string name, out int? value)
     {
         value = null;

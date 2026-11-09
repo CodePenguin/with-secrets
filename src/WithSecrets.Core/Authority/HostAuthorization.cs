@@ -286,6 +286,9 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
         return Deny(response.ReasonCode, Message(response.ReasonCode));
     }
 
+    /// <summary>Checks any signed answer of the authority against the pinned key (and a rotation through its transitions), the request it answers and its validity. Null when it holds, else why not.</summary>
+    internal Task<string?> VerifyAnswerAsync(ISignedAnswer answer, string requestId, string requestDigest, CancellationToken cancel) => Verify(answer, requestId, requestDigest, cancel);
+
     private Task<string?> Verify(AuthorityResponse response, LaunchRequest launch, CancellationToken cancel) => Verify(response, launch.RequestId, launch.Digest(), cancel);
 
     private async Task<string?> Verify(ISignedAnswer response, string requestId, string requestDigest, CancellationToken cancel)

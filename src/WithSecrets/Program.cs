@@ -126,6 +126,9 @@ internal static class Program
 
             case CliCommand.GrantAdmin grantAdmin:
                 return CommandWiring.AdminGrants(grantAdmin, state, folder, command.Port);
+
+            case CliCommand.AuditAdmin auditAdmin:
+                return CommandWiring.AdminAudit(auditAdmin, folder);
         }
 
         return RunCommand.Usage;

@@ -1197,12 +1197,12 @@ internal static class GrantAuthorityTests
 
     // ---- through the real service ----
 
-    private static string Show(HostServiceTests.Rig rig) => rig.Script("show", "echo ran > \"%~dpn0.marker.txt\"\necho t=%TOKEN%", "echo ran > \"$0.marker.txt\"\necho \"t=$TOKEN\"");
+    internal static string Show(HostServiceTests.Rig rig) => rig.Script("show", "echo ran > \"%~dpn0.marker.txt\"\necho t=%TOKEN%", "echo ran > \"$0.marker.txt\"\necho \"t=$TOKEN\"");
 
     private static string Marker(HostServiceTests.Rig rig) => HostServiceTests.Marker(rig);
 
     /// <summary>Approves; chooses a grant time only while <see cref="Minutes" /> is set (as a person would on the approve page), and counts the asks.</summary>
-    private sealed class Chooser(int minutes, bool approve = true, bool unlock = false, TestAuthenticator? signer = null) : IApprover
+    internal sealed class Chooser(int minutes, bool approve = true, bool unlock = false, TestAuthenticator? signer = null) : IApprover
     {
         public int Minutes { get; set; } = minutes;
 

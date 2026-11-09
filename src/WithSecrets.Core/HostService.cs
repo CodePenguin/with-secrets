@@ -61,6 +61,11 @@ public sealed class HostServiceOptions
     /// <summary>For tests: the clock that measures the offline lease (default: the system's monotonic clock).</summary>
     public IMonotonicClock? Monotonic { get; init; }
 
+    /// <summary>How often the service sends its audit outbox to the authority when nothing wakes it (a new event always does). After a failure it waits longer, up to <see cref="AuditMaxBackoff" />.</summary>
+    public TimeSpan AuditUploadInterval { get; init; } = TimeSpan.FromSeconds(2);
+
+    public TimeSpan AuditMaxBackoff { get; init; } = TimeSpan.FromSeconds(60);
+
     /// <summary>The port on 127.0.0.1 and [::1]. 0 picks a free one (tests).</summary>
     public int Port { get; init; } = ServiceEndpoint.DefaultPort;
 
@@ -129,7 +134,16 @@ public sealed class HostService : IDisposable
         // The authority believes a grant only when a person's passkey assertion backs it: it checks those against the keys of the signed manifest.
         options.Deployment.Authority.Verifier ??= options.State is { } verifierState ? new ManifestApprovalVerifier(verifierState) : null;
         Authorization = options.Deployment.CreateAuthorization(options.Gate, () => options.Grants?.TryClear(), options.Monotonic);
+
+        // The host's audit: events are signed with the machine key and committed to the outbox (beside authority.db) before a run decrypts anything; the uploader sends them on its own.
+        HostAuditOutbox outbox = HostAuditOutbox.InFolder(Path.GetDirectoryName(options.Deployment.Store.FilePath)!, options.Deployment.MachineKey, options.Deployment.Clock);
+        Audit = new HostAudit(outbox, new AuditUploader(outbox, () => options.Deployment.AuditSink, (ack, id, digest, cancel) => Authorization.VerifyAnswerAsync(ack, id, digest, cancel), Authorization.Fingerprint));
     }
+
+    private Task _auditLoop = Task.CompletedTask;
+
+    /// <summary>The host's audit trail: the outbox and the uploader that sends it to the authority.</summary>
+    public HostAudit Audit { get; }
 
     private bool _ready;
 
@@ -179,6 +193,7 @@ public sealed class HostService : IDisposable
                 app.Run(service.Handle);
                 app.StartAsync().GetAwaiter().GetResult();
                 service._pump = Task.Run(service.PumpLoop);
+                service._auditLoop = Task.Run(() => service.Audit.RunAsync(options.AuditUploadInterval, options.AuditMaxBackoff, service._stop.Token));
 
                 return service;
             }
@@ -658,6 +673,7 @@ public sealed class HostService : IDisposable
             LaunchContext launchContext = new()
             {
                 Authorization = Authorization,
+                Audit = Audit,
                 Gate = _options.Gate,
                 Revision = revision,
                 Cancel = cancel.Token,
@@ -757,6 +773,15 @@ public sealed class HostService : IDisposable
         }
 
         _stop.Cancel();
+        try
+        {
+            _auditLoop.Wait(TimeSpan.FromSeconds(3));
+        }
+        catch (Exception error) when (error is AggregateException or OperationCanceledException)
+        {
+            // The loop was cancelled or failed; nothing more to wait for.
+        }
+
         Authorization.Keys.Dispose();
         CancellationTokenSource[] sources;
         lock (_lock)

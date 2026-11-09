@@ -100,8 +100,23 @@ public sealed class AuthorityKeyRing(AuthorityStore store, Func<int, ISigningKey
 /// in <c>authority.db</c> in one transaction, and answers with a response signed by the authority key. A retry of a request id
 /// returns the committed answer and asks nobody again. It never sees or returns a secret value.
 /// </summary>
-public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, TimeProvider? clock = null) : IAuthority
+public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, TimeProvider? clock = null) : IAuthority, IAuditSink
 {
+    /// <summary>How long an audit acknowledgement is valid after it was issued.</summary>
+    public static readonly TimeSpan AuditAckLifetime = TimeSpan.FromSeconds(60);
+
+    /// <summary>
+    /// Takes the events a host uploaded: each is checked and stored (or refused, or recognized as already stored) in one transaction, and only after that commit
+    /// is the acknowledgement signed and returned. A failure to commit throws and acknowledges nothing, so the host keeps its events and sends them again.
+    /// </summary>
+    public Task<AuditAck> UploadAsync(AuditBatch batch, CancellationToken cancel = default)
+    {
+        cancel.ThrowIfCancellationRequested();
+        IReadOnlyList<AuditAckEntry> entries = store.RecordAuditEvents(batch);
+
+        return Task.FromResult(AuditAck.Create(batch, entries, _clock.GetUtcNow(), AuditAckLifetime, keys.Current()));
+    }
+
     /// <summary>How long a response is valid after it was issued.</summary>
     public static readonly TimeSpan ResponseLifetime = TimeSpan.FromSeconds(60);
 

@@ -14,6 +14,12 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
 {
     private readonly IStoreKeyProvider _keys = keyProvider ?? new TapStoreKeyProvider(approver);
 
+    /// <summary>What the last <c>approve</c> came to, for its audit event: a reason code for a refusal, the grant's id for a grant.</summary>
+    private string _approveReason = "";
+    private string _approveGrant = "";
+
+    private const string AuditEventMessage = "cannot commit the signed audit event, so nothing was run.";
+
     public const int Usage = 2;
     public const int Denied = 3;
     public const int StoreError = 4;
@@ -257,10 +263,23 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         // command line never covers another. The saved-approval key above ignores the other arguments and is not used for grants.
         string? grantScope = context.Authorization is { } scopeHost ? GrantEvidence.Scope(scopeHost.Fingerprint, fingerprint.Key, arguments) : null;
 
+        // The host's signed audit trail (the new events; the state.db rows above stay for the human commands). Every run that gets here names secrets, so every one is
+        // secret-bearing: its authorization event is committed durably BEFORE anything is decrypted, and a run whose event cannot be committed does not go on. The later
+        // events (launch, execution) cannot be a condition of a launch that already happened, so a failure to record them is only logged. No value of any secret is
+        // recorded: the arguments are redacted, and the reasons are codes.
+        IHostAudit? hostAudit = context.Audit;
+        string auditProgram = resolved;
+        IReadOnlyList<string> auditArguments = hostAudit is null ? [] : AuditRedaction.Arguments(arguments);
+        string auditRequestId = context.Request?.RequestId ?? "";
+        bool Record(string type, string outcome, string reason, string grantId = "", int? exit = null) => hostAudit is null || hostAudit.TryRecord(new AuditFacts(type, outcome, reason, auditRequestId, workingDirectory, auditProgram, auditArguments, grantId, exit));
+
         // approve: the same validation and the human approval, but the result is a grant for this scope and nothing is launched.
         if (approveOnly)
         {
-            return await ApproveGrantOnly(request, fingerprint, context, grantScope);
+            int approved = await ApproveGrantOnly(request, fingerprint, context, grantScope);
+            Record(AuditEventTypes.Authorization, approved == 0 ? "grant-approved" : "denied", approved == 0 ? "" : _approveReason.Length > 0 ? _approveReason : "refused", _approveGrant);
+
+            return approved;
         }
 
         // A grant for exactly this request (the authority answers, or one this host synchronized, under a valid lease) stands in for the
@@ -272,6 +291,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             if (grantUse.Kind == GrantUseKind.Denied)
             {
                 audit.TryWrite("denied", request, grantUse.Message, files: fingerprint.Files);
+                Record(AuditEventTypes.Authorization, "denied", context.Cancel.IsCancellationRequested ? "cancelled" : "grant-check-failed");
 
                 return context.Cancel.IsCancellationRequested ? await Cancelled() : await Fail(Denied, grantUse.Message);
             }
@@ -291,6 +311,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         // when the values were read, and on every way out.
         Unlock? unlock = null;
         bool keyFromGrant = false;
+        string runGrant = grantUse is { Kind: GrantUseKind.Granted } usedGrant ? usedGrant.GrantId : "";
         try
         {
             if (saved.Rejected is not null)
@@ -307,11 +328,17 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                     return await Fail(AuditError, "cannot write the audit log, so nothing was run.");
                 }
 
+                if (!Record(AuditEventTypes.Authorization, "granted", granted.Offline ? "offline-lease" : "online", granted.GrantId))
+                {
+                    return await Fail(AuditError, AuditEventMessage);
+                }
+
                 // What the store needs to open comes from the key provider: a passkey tap, or the key the service holds for this grant since an earlier tap.
                 KeyRelease release = _keys.Obtain(store, request, context.Cancel, line => stderr.WriteLine(line), granted.GrantId, grantScope);
                 if (!release.Ok)
                 {
                     audit.TryWrite("denied", request, release.Detail, files: fingerprint.Files);
+                    Record(AuditEventTypes.Launch, context.Cancel.IsCancellationRequested ? "cancelled" : "failed", "key-not-released", runGrant);
 
                     return context.Cancel.IsCancellationRequested ? await Cancelled() : await Fail(Denied, release.Detail);
                 }
@@ -328,6 +355,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                     if (!reused.Decision.Approved)
                     {
                         audit.TryWrite("denied", request, reused.Decision.Detail, files: fingerprint.Files);
+                        Record(AuditEventTypes.Authorization, "denied", context.Cancel.IsCancellationRequested ? "cancelled" : reused.Code);
 
                         return context.Cancel.IsCancellationRequested ? await Cancelled() : await Fail(Denied, reused.AuthorityMessage ?? $"The user did not approve ({reused.Decision.Detail}). Do not retry. Ask the user.");
                     }
@@ -340,11 +368,17 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                 {
                     return await Fail(AuditError, "cannot write the audit log, so nothing was run.");
                 }
+
+                if (!Record(AuditEventTypes.Authorization, "reused", "saved-approval"))
+                {
+                    return await Fail(AuditError, AuditEventMessage);
+                }
             }
             else
             {
                 ApprovalDecision decision;
                 string? authorityMessage = null;
+                string? authorityCode = null;
                 HostAuthorization? savedRevisionHost = null;
                 if (context.Authorization is { } host && context.Request is { } launched)
                 {
@@ -358,6 +392,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                     }, context.Cancel);
                     decision = outcome.Decision;
                     authorityMessage = outcome.AuthorityMessage;
+                    authorityCode = outcome.Code;
                     savedRevisionHost = host;
                 }
                 else
@@ -371,6 +406,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                 if (!decision.Approved && context.Cancel.IsCancellationRequested)
                 {
                     audit.TryWrite("denied", request, "cancelled by the client", files: fingerprint.Files);
+                    Record(AuditEventTypes.Authorization, "denied", "cancelled");
 
                     return await Cancelled();
                 }
@@ -378,11 +414,19 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                 if (decision.Approved && !offer.Allows(decision.ReuseMinutes))
                 {
                     decision = ApprovalDecision.Deny("the approval named a reuse time that was not offered");
+                    authorityCode = "reuse-not-offered";
                 }
 
                 if (!audit.TryWrite(decision.Approved ? "approved" : "denied", request, decision.Detail, files: fingerprint.Files, reuseMinutes: decision.Approved ? decision.ReuseMinutes : null))
                 {
                     return await Fail(AuditError, "cannot write the audit log, so nothing was run.");
+                }
+
+                // The signed authorization event: for an approval it must be committed before anything is decrypted. A denial is recorded too (nothing runs either way).
+                string authorizationCode = authorityCode ?? (decision.Approved ? ReasonCodes.Approved : ReasonCodes.UserDenied);
+                if (!Record(AuditEventTypes.Authorization, decision.Approved ? "approved" : "denied", authorizationCode) && decision.Approved)
+                {
+                    return await Fail(AuditError, AuditEventMessage);
                 }
 
                 if (!decision.Approved)
@@ -393,6 +437,8 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                 // A script can change while the prompt is open. The person approved what they saw, so run only that.
                 if (RequestFingerprint.Compute(request).Key != fingerprint.Key)
                 {
+                    Record(AuditEventTypes.Launch, "failed", "files-changed", runGrant);
+
                     return await Fail(Denied, "A file named in the command changed while the prompt was open, so nothing was run. Ask again.");
                 }
 
@@ -411,6 +457,8 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             string? holdFailure = held.Hold(new[] { script, programFile }.OfType<ScriptView>().ToList());
             if (holdFailure is not null)
             {
+                Record(AuditEventTypes.Launch, "failed", "files-not-held", runGrant);
+
                 return await Fail(Denied, holdFailure);
             }
 
@@ -418,6 +466,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             if (context.StaleReason() is { } stale)
             {
                 audit.TryWrite("finished", request, "cancelled before the program started (" + stale + ")", Denied, fingerprint.Files);
+                Record(AuditEventTypes.Launch, "cancelled", stale.Replace(' ', '-'), runGrant);
 
                 return await Cancelled();
             }
@@ -436,6 +485,8 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                 {
                     _keys.Discard();
                 }
+
+                Record(AuditEventTypes.Launch, "failed", "decrypt-failed", runGrant);
 
                 return await Fail(StoreError, $"cannot decrypt the secret store: {error.Message}");
             }
@@ -473,6 +524,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                 if (!committed)
                 {
                     audit.TryWrite("finished", request, "cancelled before the program started", Denied, fingerprint.Files);
+                    Record(AuditEventTypes.Launch, "cancelled", "not-committed", runGrant);
 
                     return await Cancelled();
                 }
@@ -482,6 +534,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                     await stderr.WriteLineAsync(startFailure);
                     Outcome = LaunchOutcome.Failed;
                     audit.TryWrite("finished", request, "the program could not be started", NotFound, fingerprint.Files);
+                    Record(AuditEventTypes.Launch, "failed", "start-failed", runGrant);
 
                     return NotFound;
                 }
@@ -489,6 +542,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                 // The client's own cancel (Ctrl+C, a closed connection, the cancel route) ends the program and its children. An
                 // invalidation of the authorization never does: it is not this token.
                 System.Diagnostics.Process started = process;
+                Record(AuditEventTypes.Launch, "started", "", runGrant);
                 using CancellationTokenRegistration kill = context.Cancel.Register(() =>
                 {
                     try
@@ -519,6 +573,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                     AppLog.Warn("launch failed after the program started: {Type}", error.GetType().Name);
                     Outcome = LaunchOutcome.Failed;
                     audit.TryWrite("finished", request, "internal error after the program started", StoreError, fingerprint.Files);
+                    Record(AuditEventTypes.Execution, "failed", "internal-error", runGrant);
                     await stderr.WriteLineAsync("with-secrets: internal error after the program started; it may have run. Check its effects before retrying.");
 
                     return StoreError;
@@ -528,6 +583,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             Outcome = LaunchOutcome.Exited;
 
             audit.TryWrite("finished", request, "", exitCode, fingerprint.Files);
+            Record(AuditEventTypes.Execution, "exited", "", runGrant, exitCode);
 
             return exitCode;
         }
@@ -604,10 +660,12 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         if (!result.Granted)
         {
             audit.TryWrite("denied", request, result.Message, files: fingerprint.Files);
+            _approveReason = context.Cancel.IsCancellationRequested ? "cancelled" : result.Code;
 
             return context.Cancel.IsCancellationRequested ? await Cancelled() : await Fail(Denied, result.Message);
         }
 
+        _approveGrant = result.GrantId ?? "";
         string ends = result.Expires is { } at ? $"until {at.UtcDateTime:yyyy-MM-dd HH:mm} UTC" : "with no end";
         if (!audit.TryWrite("grant-approved", request, $"grant {result.GrantId} {ends}", files: fingerprint.Files))
         {
@@ -801,6 +859,12 @@ public sealed class LaunchContext
 
     /// <summary>The host's side of the authority protocol. A launch that came over the API asks the authority through it before anything is decrypted; null only for the in-process runs of tests.</summary>
     public HostAuthorization? Authorization { get; init; }
+
+    /// <summary>
+    /// The host's signed audit trail. A secret-bearing run must commit its authorization event here before anything is decrypted, and does not run when it cannot.
+    /// Null only for the in-process runs of tests, which then record nothing here.
+    /// </summary>
+    public IHostAudit? Audit { get; init; }
 
     /// <summary>The request that came over the API, when it did; the approval is checked against it.</summary>
     public LaunchRequest? Request { get; internal set; }
