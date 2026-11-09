@@ -56,7 +56,7 @@ internal static class Program
         // admin (no verbs): the authority's admin web app. Nothing is opened or changed here; the link and the service's public status are printed.
         if (command is CliCommand.AdminApp app)
         {
-            return await AdminAppCommand.RunAsync(app.ServicePort, Console.Out);
+            return await AdminAppCommand.RunAsync(app.ServicePort, Console.Out, Console.Error, ServiceTrust.From(HostConfigFile.InFolder(StorePath())), OpenInBrowser(app));
         }
 
         // approve takes the same road to the service: the service shows the page and the authority records the grant; nothing is launched.
@@ -132,18 +132,30 @@ internal static class Program
 
             case CliCommand.Service:
                 return RunService(command, state, store, grants, folder);
-
-            case CliCommand.Admin admin:
-                return CommandWiring.Admin(admin, state, folder, command.Port);
-
-            case CliCommand.GrantAdmin grantAdmin:
-                return CommandWiring.AdminGrants(grantAdmin, state, folder, command.Port);
-
-            case CliCommand.AuditAdmin auditAdmin:
-                return CommandWiring.AdminAudit(auditAdmin, folder);
         }
 
         return RunCommand.Usage;
+    }
+
+    /// <summary>Opens the admin link in the person's browser, only from a real terminal (never in an agent's redirected shell). Null when it should not.</summary>
+    private static Action<string>? OpenInBrowser(CliCommand command)
+    {
+        if (Console.IsInputRedirected || Console.IsOutputRedirected || !OperatingSystem.IsWindows())
+        {
+            return null;
+        }
+
+        return link =>
+        {
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(link) { UseShellExecute = true })?.Dispose();
+            }
+            catch (Exception error) when (error is System.ComponentModel.Win32Exception or InvalidOperationException)
+            {
+                // The link is printed anyway.
+            }
+        };
     }
 
     private static async Task<int> RunThroughService(CliCommand command, RunArgs args, bool approve)

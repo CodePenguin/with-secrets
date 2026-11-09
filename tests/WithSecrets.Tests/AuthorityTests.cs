@@ -312,7 +312,7 @@ internal static class AuthorityTests
         // The pin: no host.json, a damaged one, another machine's.
         using Fixture unpinned = new(parent, trusted: false);
         AuthorizationOutcome pending = await unpinned.Ask("pin-1");
-        check(!pending.Decision.Approved && pending.Code == ReasonCodes.MachinePending && pending.AuthorityMessage!.Contains("with-secrets admin approve " + unpinned.Fingerprint, StringComparison.Ordinal) && unpinned.Asked == 0, "pin: with nothing pinned the host refuses and names the admin approve command, and asks nobody");
+        check(!pending.Decision.Approved && pending.Code == ReasonCodes.MachinePending && pending.AuthorityMessage!.Contains(unpinned.Fingerprint, StringComparison.Ordinal) && pending.AuthorityMessage.Contains("admin web app", StringComparison.Ordinal) && unpinned.Asked == 0, "pin: with nothing pinned the host refuses and names the admin approve command, and asks nobody");
         File.WriteAllText(fx.Machine.Deployment.HostConfig.FilePath, "{ not json");
         AuthorizationOutcome damaged = await fx.Ask("pin-2");
         check(!damaged.Decision.Approved && damaged.AuthorityMessage!.Contains("host.json", StringComparison.Ordinal), "pin: a damaged host.json is a refusal, not 'nothing pinned' (" + damaged.AuthorityMessage + ")");
@@ -818,7 +818,7 @@ internal static class AuthorityTests
             mismatch = error;
         }
 
-        check(mismatch is not null && mismatch.Message.Contains("admin recover-authority", StringComparison.Ordinal), "keys: a key store whose key is not the one authority.db names is an error that names the recovery command");
+        check(mismatch is not null && mismatch.Message.Contains("recover", StringComparison.OrdinalIgnoreCase) && mismatch.Message.Contains("admin web app", StringComparison.Ordinal), "keys: a key store whose key is not the one authority.db names is an error that names the recovery command");
     }
 
 
@@ -971,7 +971,7 @@ internal static class AuthorityTests
 
             using HostServiceTests.Rig rig = new(parent, approver: () => never, machine: machine);
             HostServiceTests.Raw denied = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, Show(rig)));
-            check(denied.Result is { Outcome: LaunchOutcome.Denied, ExitCode: RunCommand.Denied } && rig.Store.Reads == 0 && never.Requests.Count == 0 && denied.Stderr.Contains("with-secrets admin approve " + machine.Fingerprint, StringComparison.Ordinal) && HostServiceTests.Marker(rig).Length == 0,
+            check(denied.Result is { Outcome: LaunchOutcome.Denied, ExitCode: RunCommand.Denied } && rig.Store.Reads == 0 && never.Requests.Count == 0 && denied.Stderr.Contains(machine.Fingerprint, StringComparison.Ordinal) && denied.Stderr.Contains("admin web app", StringComparison.Ordinal) && HostServiceTests.Marker(rig).Length == 0,
                 "service: a Pending machine (" + (pinned ? "pinned" : "not pinned") + ") is denied with the approve command, nobody is asked, nothing is decrypted (" + denied.Stderr.Trim() + ")");
         }
 
@@ -984,7 +984,7 @@ internal static class AuthorityTests
             using HostServiceTests.Rig rig = new(parent, approver: () => never, machine: machine);
             HostServiceTests.Raw denied = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, Show(rig)));
             MachineRecord record = machine.Deployment.Store.Find(machine.Fingerprint)!;
-            check(denied.Result is { Outcome: LaunchOutcome.Denied } && rig.Store.Reads == 0 && never.Requests.Count == 0 && denied.Stderr.Contains("admin approve-host-change " + machine.Fingerprint, StringComparison.Ordinal)
+            check(denied.Result is { Outcome: LaunchOutcome.Denied } && rig.Store.Reads == 0 && never.Requests.Count == 0 && denied.Stderr.Contains(machine.Fingerprint, StringComparison.Ordinal) && denied.Stderr.Contains("admin web app", StringComparison.Ordinal)
                 && record is { HostName: "host-a", PendingHostName: "host-b", Status: MachineStatus.Trusted, SecurityRevision: 1 }, "service: a host name that is not the bound one is rejected and recorded pending; the binding and status are unchanged (" + denied.Stderr.Trim() + ")");
             machine.Deployment.Store.ApproveHostChange(machine.Fingerprint, "test");
             HostServiceTests.Raw allowed = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, Show(rig)));

@@ -381,6 +381,11 @@ internal static class Program
             AuditTrailTests.Run(Check).GetAwaiter().GetResult();
         }
 
+        if (Wants("AdminApp"))
+        {
+            AdminAppTests.Run(Check).GetAwaiter().GetResult();
+        }
+
         if (Wants("Admin"))
         {
             AdminTests.Run(Check).GetAwaiter().GetResult();

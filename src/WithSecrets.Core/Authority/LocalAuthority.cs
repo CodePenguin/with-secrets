@@ -49,6 +49,18 @@ public sealed class AuthorityKeyRing(AuthorityStore store, Func<int, ISigningKey
         }
     }
 
+    /// <summary>
+    /// The active key's public part as the key store holds it (not as authority.db says), for checking what the key signed. It does not sign and is not a use of the key,
+    /// so it works while locked; null when there is no key yet. A key store that disagrees with authority.db is an error, as everywhere.
+    /// </summary>
+    public byte[]? ActivePublicKey()
+    {
+        lock (_lock)
+        {
+            return store.ActiveKey() is { } active ? Open(active).PublicKey : null;
+        }
+    }
+
     private ISigningKey Open(AuthorityKeyRecord record)
     {
         if (_opened.TryGetValue(record.Fingerprint, out ISigningKey? known))
@@ -60,7 +72,7 @@ public sealed class AuthorityKeyRing(AuthorityStore store, Func<int, ISigningKey
         if (!key.PublicKey.AsSpan().SequenceEqual(record.PublicKey))
         {
             key.Dispose();
-            throw new AuthorityDatabaseException("the authority signing key in the key store is not the one authority.db names (generation " + record.Generation + "). Recover with: with-secrets admin recover-authority");
+            throw new AuthorityDatabaseException("the authority signing key in the key store is not the one authority.db names (generation " + record.Generation + "). Recover the authority key in the admin web app (with-secrets admin prints its link)");
         }
 
         _opened[record.Fingerprint] = key;
@@ -120,9 +132,12 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
     public Task<AuditAck> UploadAsync(AuditBatch batch, CancellationToken cancel = default)
     {
         cancel.ThrowIfCancellationRequested();
+
+        // A locked authority stores, prunes and acknowledges nothing (the host keeps its events and sends them again after an unlock).
+        ISigningKey ackKey = keys.Current();
         IReadOnlyList<AuditAckEntry> entries = store.RecordAuditEvents(batch);
 
-        return Task.FromResult(AuditAck.Create(batch, entries, _clock.GetUtcNow(), AuditAckLifetime, keys.Current()));
+        return Task.FromResult(AuditAck.Create(batch, entries, _clock.GetUtcNow(), AuditAckLifetime, ackKey));
     }
 
     /// <summary>How long a response is valid after it was issued.</summary>
@@ -179,14 +194,14 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
     {
         LaunchRequest request = envelope.Request;
         string digest = request.Digest();
-        ISigningKey key = keys.Current();
+        keys.Current();
         DateTimeOffset now = _clock.GetUtcNow();
         AuthorityResponse Answer(AuthorityDecision decision, string reason, int revision)
         {
-            // Issued when it is signed (the approval may have taken minutes); the host checks the request's own expiry separately.
+            // Issued when it is signed (the approval may have taken minutes); the host checks the request's own expiry separately. The key is taken now, not at the start: a lock in between refuses.
             DateTimeOffset issued = _clock.GetUtcNow();
 
-            return AuthorityResponse.Create(request.RequestId, digest, envelope.MachineFingerprint, decision, reason, revision, issued, issued + ResponseLifetime, key);
+            return AuthorityResponse.Create(request.RequestId, digest, envelope.MachineFingerprint, decision, reason, revision, issued, issued + ResponseLifetime, keys.Current());
         }
 
         // Who is asking: a known machine, proved by its signature over exactly these fields. Nothing is stored for a stranger.
@@ -240,6 +255,8 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
 
         return store.RecordDecision(request.RequestId, digest, machine.Fingerprint, current =>
         {
+            // The approval may have taken minutes: a lock in that time stops the decision here, before anything is signed or stored.
+            keys.LockState?.EnsureUnlocked();
             if (current is null || Problem(current, envelope) is not null)
             {
                 return Refusal(current, envelope, Answer);
@@ -308,12 +325,12 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
     {
         LaunchRequest request = envelope.Request;
         string digest = request.Digest();
-        ISigningKey key = keys.Current();
+        keys.Current();
         GrantResponse Answer(string outcome, string reason, GrantInfo? grant, int revision)
         {
             DateTimeOffset issued = _clock.GetUtcNow();
 
-            return GrantResponse.Create(request.RequestId, digest, envelope.MachineFingerprint, envelope.Operation, outcome, reason, grant, revision, issued, issued + ResponseLifetime, key);
+            return GrantResponse.Create(request.RequestId, digest, envelope.MachineFingerprint, envelope.Operation, outcome, reason, grant, revision, issued, issued + ResponseLifetime, keys.Current());
         }
 
         GrantResponse Refuse(string reason, int revision) => Answer(GrantOps.Denied, reason, null, revision);
@@ -424,6 +441,8 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
 
         return store.ApplyGrant(request.RequestId, digest, machine.Fingerprint, (tx, current) =>
         {
+            // The approval may have taken minutes: a lock in that time stops the grant here, before a row is written or anything is signed.
+            keys.LockState?.EnsureUnlocked();
             if (current is null || Problem(current, envelope.HostName) is not null)
             {
                 return new AuthorityStore.GrantPlan(refuse(current is null ? ReasonCodes.UnknownMachine : Problem(current, envelope.HostName)!, current?.SecurityRevision ?? 0), null, "", false);
@@ -487,7 +506,7 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
     public GrantResponse AdminGrant(GrantAdminCommand command)
     {
         string digest = command.Digest();
-        ISigningKey key = keys.Current();
+        keys.Current();
         GrantRecord? first = store.FindGrant(command.GrantId);
         string fingerprint = first?.Fingerprint ?? "";
 
@@ -496,7 +515,7 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
         {
             DateTimeOffset issued = _clock.GetUtcNow();
 
-            return GrantResponse.Create(command.RequestId, digest, fingerprint, command.Operation, outcome, reason, info, revision, issued, issued + ResponseLifetime, key);
+            return GrantResponse.Create(command.RequestId, digest, fingerprint, command.Operation, outcome, reason, info, revision, issued, issued + ResponseLifetime, keys.Current());
         }
 
         GrantResponse Refuse(string reason) => Answer(GrantOps.Denied, reason, null, first is null ? 0 : store.Find(first.Fingerprint)?.SecurityRevision ?? 0);

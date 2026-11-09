@@ -21,17 +21,9 @@ public abstract record CliCommand
     /// <summary>relay [--port N] [--bind ADDRESS] [--cert FILE [--cert-password-env NAME]]: run the relay, an opaque in-memory router between host services and a remote authority.</summary>
     public sealed record Relay(int ListenPort, string Bind, string? CertificateFile, string? CertificatePasswordVariable) : CliCommand;
 
-    /// <summary>admin (no further words): go to the authority's admin web app, where status, lock and unlock, the unlock policy and the rest of the administration live.</summary>
+    /// <summary>admin (no further words): go to the authority's admin web app, where all administration lives (machines, grants, audit, settings, lock and unlock). It has no verbs.</summary>
     public sealed record AdminApp : CliCommand;
 
-    /// <summary>admin ACTION ...: a person manages the machines that may use secrets (and the authority key). See <see cref="AdminAction" />.</summary>
-    public sealed record Admin(AdminAction Action, string? Fingerprint = null, string? Name = null) : CliCommand;
-
-    /// <summary>admin grant list|extend|renew|revoke ID [--minutes N | --indefinite]: a person manages the grants that let a command run without a page decision.</summary>
-    public sealed record GrantAdmin(GrantAdminAction Action, string? Id = null, int? Minutes = null, bool Indefinite = false) : CliCommand;
-
-    /// <summary>admin audit [filters] [--gaps]: a person lists the audit history the authority holds (or the sequence gaps it found). Read-only.</summary>
-    public sealed record AuditAdmin(AuditQuery Query, bool Gaps = false) : CliCommand;
 
     /// <summary>approve --secrets ... --reason ... -- PROGRAM [ARGS...]: the approval of a run (same grammar), but it makes a grant for the request and launches nothing.</summary>
     public sealed record Approve(RunArgs Args) : CliCommand;
@@ -117,7 +109,7 @@ public static class CliArgs
         A later run of that request needs no approval page decision while the grant lasts, the machine is Trusted and the host service is
         in contact with its authority or holds the grant under its offline lease. A request the grant does not cover, or one after it ends or is
         revoked, goes through the page as before. A store whose key is released by a passkey tap still asks for that tap at each run. A
-        person changes a grant with: admin grant list | extend ID (--minutes N | --indefinite) | renew ID (--minutes N | --indefinite) | revoke ID.
+        person lists and changes grants in the admin web app (with-secrets admin prints its link).
 
         Saved approvals do not apply while the secret store is protected by a passkey PRF (the only kind of store): every run
         asks, and the approval page offers only Approve once. The rest of this paragraph applies only to a store without that
@@ -142,18 +134,17 @@ public static class CliArgs
 
         Machines. Every host service has a machine identity (an ECDSA P-256 key that Windows keeps and nobody can read out; its
         fingerprint is the SHA-256 of the public key). The first time the service runs on a machine, the machine is Pending: it
-        cannot get secrets until an administrator approves it. The administrator's commands, each approved on a web page with an
-        admin passkey and each for a person in a terminal: with-secrets admin machines (list), admin approve FINGERPRINT --name NAME,
-        admin disable | enable | untrust FINGERPRINT, admin trust FINGERPRINT (the full fingerprint, for an Untrusted machine),
-        admin rename FINGERPRINT NAME, admin approve-host-change FINGERPRINT, admin rotate-authority-key, admin recover-authority.
-        FINGERPRINT is the 64 hex digits that the service prints, or the first 12 or more (not for trust). Add --port N for the page.
+        cannot get secrets until an administrator approves it. All administration is in the authority's admin web app, not in commands:
+        with-secrets admin (no words) prints its link (http://localhost:8765/admin) and the service's status. Sign in there with one passkey tap
+        (a read-only session of 15 minutes idle, 8 hours at most); every change (approve, disable, enable, untrust, trust, rename or approve a host
+        name change of a machine; extend, renew or revoke a grant; passkeys; settings; the authority key; lock and unlock) is its own fresh
+        passkey tap on a one-use page that names that change. Add --service-port N when the service is not on the default port.
 
         Audit trail. The host service signs an audit event with the machine key for every run (the authorization decision, the launch
         outcome and the execution outcome are separate events, numbered per machine) and commits the authorization event to its own
         outbox BEFORE a secret is decrypted: if that cannot be done the run does not happen (exit 5). It sends the events to the authority
-        by itself and keeps them until the authority has them. A person lists what the authority holds with: with-secrets admin audit
-        [--machine FINGERPRINT-PREFIX] [--since TIME] [--until TIME] [--type authorization|launch|execution] [--outcome WORD] [--grant ID]
-        [--folder TEXT] [--text TEXT] [--last N], or the holes in a machine's numbering with admin audit --gaps. Arguments are recorded
+        by itself and keeps them until the authority has them. A person reads what the authority holds in the admin web app (Audit: filter by machine,
+        time, type, outcome, grant, folder or text; the sequence gaps of a machine's numbering). Arguments are recorded
         with values that look like secrets masked; no secret value, environment value or user name is recorded. (--audit is the older
         log of the human commands in state.db.)
 
@@ -209,12 +200,9 @@ public static class CliArgs
                 return ParseAdminApp(args, out error);
             }
 
-            if (args.Count > 1 && args[1] == "audit")
-            {
-                return ParseAuditAdmin(args, out error);
-            }
+            error = "admin has no subcommands: all administration is in the authority's admin web app. Run: with-secrets admin   (it prints the link and the service's status)";
 
-            return args.Count > 1 && args[1] == "grant" ? ParseGrantAdmin(args, out error) : ParseAdmin(args, out error);
+            return null;
         }
 
         if (args.Count > 0 && args[0] == "approve")
@@ -275,186 +263,6 @@ public static class CliArgs
         return null;
     }
 
-    private const string AuditAdminUsage = "Usage: with-secrets admin audit [--machine FINGERPRINT-PREFIX] [--since TIME] [--until TIME] [--type authorization|launch|execution] [--outcome WORD] [--grant ID] [--folder TEXT] [--text TEXT] [--last N] | admin audit --gaps [--machine FINGERPRINT-PREFIX]  [--debug]. TIME is ISO 8601, for example 2026-11-01 or 2026-11-01T09:30:00Z (UTC when no zone is given). N is 1 to 1000 (default 50).";
-
-    /// <summary>admin audit [filters] [--gaps] [--debug].</summary>
-    private static CliCommand? ParseAuditAdmin(IReadOnlyList<string> args, out string error)
-    {
-        error = AuditAdminUsage;
-        string? machine = null;
-        string? type = null;
-        string? outcome = null;
-        string? grant = null;
-        string? folder = null;
-        string? text = null;
-        DateTimeOffset? since = null;
-        DateTimeOffset? until = null;
-        int last = 50;
-        bool gaps = false;
-        bool debug = false;
-        for (int index = 2; index < args.Count; index++)
-        {
-            string name = args[index];
-            if (name == "--debug")
-            {
-                debug = true;
-            }
-            else if (name == "--gaps")
-            {
-                gaps = true;
-            }
-            else if (name is "--machine" or "--since" or "--until" or "--type" or "--outcome" or "--grant" or "--folder" or "--text" or "--last" && index + 1 < args.Count)
-            {
-                string value = args[++index];
-                switch (name)
-                {
-                    case "--machine":
-                        machine = value;
-                        break;
-                    case "--type":
-                        type = value;
-                        break;
-                    case "--outcome":
-                        outcome = value;
-                        break;
-                    case "--grant":
-                        grant = value;
-                        break;
-                    case "--folder":
-                        folder = value;
-                        break;
-                    case "--text":
-                        text = value;
-                        break;
-                    case "--last":
-                        if (!int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out last) || last < 1 || last > AuditQuery.MaxLimit)
-                        {
-                            error = "--last takes a number from 1 to " + AuditQuery.MaxLimit + ".";
-
-                            return null;
-                        }
-
-                        break;
-                    default:
-                        if (!DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out DateTimeOffset parsed))
-                        {
-                            error = name + " takes a time in ISO 8601 form, for example 2026-11-01 or 2026-11-01T09:30:00Z.";
-
-                            return null;
-                        }
-
-                        if (name == "--since")
-                        {
-                            since = parsed;
-                        }
-                        else
-                        {
-                            until = parsed;
-                        }
-
-                        break;
-                }
-            }
-            else
-            {
-                return null;
-            }
-        }
-
-        if (type is not null && !AuditEventTypes.All.Contains(type))
-        {
-            error = "--type is authorization, launch or execution.";
-
-            return null;
-        }
-
-        if (gaps && (since is not null || until is not null || type is not null || outcome is not null || grant is not null || folder is not null || text is not null))
-        {
-            error = "--gaps goes only with --machine.";
-
-            return null;
-        }
-
-        error = "";
-
-        return new CliCommand.AuditAdmin(new AuditQuery(machine, since, until, type, outcome, grant, folder, text, last), gaps) { Debug = debug };
-    }
-
-    private const string GrantAdminUsage = "Usage: with-secrets admin grant list | extend ID (--minutes N | --indefinite) | renew ID (--minutes N | --indefinite) | revoke ID  [--port N] [--debug]. ID is a grant id from the list (4 or more characters). N is 1 to 1440.";
-
-    /// <summary>admin grant ACTION [ID] [--minutes N | --indefinite] [--port N] [--debug].</summary>
-    private static CliCommand? ParseGrantAdmin(IReadOnlyList<string> args, out string error)
-    {
-        error = GrantAdminUsage;
-        GrantAdminAction? action = args.Count > 2 ? args[2] switch
-        {
-            "list" => GrantAdminAction.List,
-            "extend" => GrantAdminAction.Extend,
-            "renew" => GrantAdminAction.Renew,
-            "revoke" => GrantAdminAction.Revoke,
-            _ => null,
-        } : null;
-        if (action is null)
-        {
-            return null;
-        }
-
-        int? port = null;
-        int? minutes = null;
-        bool debug = false;
-        bool indefinite = false;
-        List<string> positional = [];
-        for (int index = 3; index < args.Count; index++)
-        {
-            if (args[index] == "--debug")
-            {
-                debug = true;
-            }
-            else if (args[index] == "--indefinite")
-            {
-                indefinite = true;
-            }
-            else if ((args[index] == "--port" || args[index] == "--minutes") && index + 1 < args.Count)
-            {
-                bool isPort = args[index] == "--port";
-                int limit = isPort ? ToolSettings.MaxPort : ReuseSettings.MaxMinutes;
-                if (!int.TryParse(args[++index], NumberStyles.None, CultureInfo.InvariantCulture, out int parsed) || parsed < 1 || parsed > limit)
-                {
-                    error = $"{(isPort ? "--port" : "--minutes")} takes a number from 1 to {limit}.";
-
-                    return null;
-                }
-
-                if (isPort)
-                {
-                    port = parsed;
-                }
-                else
-                {
-                    minutes = parsed;
-                }
-            }
-            else if (args[index].StartsWith("--", StringComparison.Ordinal))
-            {
-                return null;
-            }
-            else
-            {
-                positional.Add(args[index]);
-            }
-        }
-
-        bool timed = action is GrantAdminAction.Extend or GrantAdminAction.Renew;
-        if (positional.Count != (action == GrantAdminAction.List ? 0 : 1) || (timed ? (minutes is null) == !indefinite : minutes is not null || indefinite) || (action == GrantAdminAction.List && port is not null))
-        {
-            return null;
-        }
-
-        error = "";
-
-        return new CliCommand.GrantAdmin(action.Value, positional.Count == 1 ? positional[0] : null, minutes, indefinite) { Port = port, Debug = debug };
-    }
-
     /// <summary>admin [--service-port N] [--debug]: the admin web app has no verbs; the port is where the service listens.</summary>
     private static CliCommand? ParseAdminApp(IReadOnlyList<string> args, out string error)
     {
@@ -481,94 +289,6 @@ public static class CliArgs
         error = "";
 
         return new CliCommand.AdminApp { ServicePort = port, Debug = debug };
-    }
-
-    private const string AdminUsage = "Usage: with-secrets admin machines | approve FINGERPRINT --name NAME | disable FINGERPRINT | enable FINGERPRINT | untrust FINGERPRINT | trust FINGERPRINT (all 64 digits) | rename FINGERPRINT NAME | approve-host-change FINGERPRINT | rotate-authority-key | recover-authority  [--port N] [--debug]";
-
-    /// <summary>admin ACTION [FINGERPRINT] [NAME | --name NAME] [--port N] [--debug].</summary>
-    private static CliCommand? ParseAdmin(IReadOnlyList<string> args, out string error)
-    {
-        error = AdminUsage;
-        if (args.Count < 2)
-        {
-            return null;
-        }
-
-        AdminAction? action = args[1] switch
-        {
-            "machines" => AdminAction.Machines,
-            "approve" => AdminAction.Approve,
-            "disable" => AdminAction.Disable,
-            "enable" => AdminAction.Enable,
-            "untrust" => AdminAction.Untrust,
-            "trust" => AdminAction.Trust,
-            "rename" => AdminAction.Rename,
-            "approve-host-change" => AdminAction.ApproveHostChange,
-            "rotate-authority-key" => AdminAction.RotateAuthorityKey,
-            "recover-authority" => AdminAction.RecoverAuthority,
-            _ => null,
-        };
-        if (action is null)
-        {
-            return null;
-        }
-
-        int? port = null;
-        bool debug = false;
-        string? name = null;
-        List<string> positional = [];
-        for (int index = 2; index < args.Count; index++)
-        {
-            if (args[index] == "--debug")
-            {
-                debug = true;
-            }
-            else if (args[index] == "--port" && index + 1 < args.Count)
-            {
-                if (!int.TryParse(args[++index], NumberStyles.None, CultureInfo.InvariantCulture, out int parsed) || parsed < 1 || parsed > ToolSettings.MaxPort)
-                {
-                    error = $"--port takes a number from 1 to {ToolSettings.MaxPort}.";
-
-                    return null;
-                }
-
-                port = parsed;
-            }
-            else if (args[index] == "--name" && index + 1 < args.Count && name is null)
-            {
-                name = args[++index];
-            }
-            else if (args[index].StartsWith("--", StringComparison.Ordinal))
-            {
-                return null;
-            }
-            else
-            {
-                positional.Add(args[index]);
-            }
-        }
-
-        bool needsFingerprint = action is not (AdminAction.Machines or AdminAction.RotateAuthorityKey or AdminAction.RecoverAuthority);
-        int expected = (needsFingerprint ? 1 : 0) + (action == AdminAction.Rename ? 1 : 0);
-        if (positional.Count != expected || (name is not null && action != AdminAction.Approve) || (action == AdminAction.Approve && name is null)
-            || (action == AdminAction.Machines && port is not null))
-        {
-            return null;
-        }
-
-        string? fingerprint = needsFingerprint ? positional[0] : null;
-        if (fingerprint is not null && KeyIdentity.ParseHex(fingerprint, action == AdminAction.Trust) is null)
-        {
-            error = action == AdminAction.Trust
-                ? "trust needs the machine's full fingerprint: 64 hex digits (spaces allowed). See: with-secrets admin machines"
-                : "FINGERPRINT is hex digits (spaces allowed), at least 12. See: with-secrets admin machines";
-
-            return null;
-        }
-
-        error = "";
-
-        return new CliCommand.Admin(action.Value, fingerprint, action == AdminAction.Rename ? positional[1] : name) { Port = port, Debug = debug };
     }
 
     public const int DefaultRelayPort = 8780;
@@ -910,7 +630,7 @@ public static class CliArgs
     /// </summary>
     public static bool NeedsTerminal(CliCommand command)
     {
-        return command is CliCommand.Revoke or CliCommand.Enroll or CliCommand.Enrolled or CliCommand.Unenroll or CliCommand.Config { Show: false } or CliCommand.Recover or CliCommand.RotateKey or CliCommand.Admin or CliCommand.GrantAdmin or CliCommand.AuditAdmin;
+        return command is CliCommand.Revoke or CliCommand.Enroll or CliCommand.Enrolled or CliCommand.Unenroll or CliCommand.Config { Show: false } or CliCommand.Recover or CliCommand.RotateKey;
     }
 
     /// <summary>What a command that needs a terminal says when it has none.</summary>

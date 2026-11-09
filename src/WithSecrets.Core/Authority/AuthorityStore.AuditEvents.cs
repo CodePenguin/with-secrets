@@ -35,6 +35,7 @@ public sealed partial class AuthorityStore
             id INTEGER PRIMARY KEY AUTOINCREMENT, fingerprint TEXT NOT NULL, epoch TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, from_sequence INTEGER NOT NULL, to_sequence INTEGER NOT NULL,
             detected TEXT NOT NULL, resolved TEXT);
         CREATE TABLE IF NOT EXISTS authority_settings (name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS admin_spent_nonces (nonce TEXT PRIMARY KEY NOT NULL, expires TEXT NOT NULL);
         """;
 
     // ---- retention ----

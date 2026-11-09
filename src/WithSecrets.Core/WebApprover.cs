@@ -69,6 +69,12 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
         return Serve(prompt, reuse ?? ReuseOffer.Off, null, null, unlock).Decision;
     }
 
+    /// <summary>As <see cref="Ask(ApprovalPrompt, ReuseOffer?, bool)" />, and the page is closed and the request denied when <paramref name="cancel" /> is set.</summary>
+    public ApprovalDecision Ask(ApprovalPrompt prompt, CancellationToken cancel)
+    {
+        return Serve(prompt, ReuseOffer.Off, null, null, false, cancel: cancel).Decision;
+    }
+
     /// <summary>Asks to approve a new state: the proof signs <paramref name="manifest" /> (see <see cref="Manifest.Challenge" />).</summary>
     /// <remarks>An admin-only passkey method then offers (and accepts) only the admin keys that are admins in the new state too.</remarks>
     public ManifestApproval AskManifest(ApprovalPrompt prompt, string manifest) => AskManifest(prompt, manifest, null);

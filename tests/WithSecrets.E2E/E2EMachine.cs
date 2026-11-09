@@ -2,7 +2,7 @@ namespace WithSecrets.E2E;
 
 /// <summary>
 /// A machine identity and local authority for the browser tests, over software keys that live as long as the rig. The machine is made
-/// Trusted through <see cref="AdminActions.ApproveMachine" />, the operation `admin approve` runs after the passkey tap, never by a
+/// Trusted through <see cref="AdminActions.ApproveMachine" />, the operation the admin web app runs after the passkey tap, never by a
 /// shortcut in the program.
 /// </summary>
 internal sealed class E2EMachine : IDisposable

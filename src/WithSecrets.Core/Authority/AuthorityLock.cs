@@ -39,7 +39,7 @@ public sealed class AuthorityLock
     }
 
     /// <summary>The test seam: an already unlocked lock, passed in <see cref="HostServiceOptions.Lock" />. The program never makes one.</summary>
-    public static AuthorityLock UnlockedForTests()
+    internal static AuthorityLock UnlockedForTests()
     {
         AuthorityLock made = new();
         made.Unlock(UnlockMethod.Seam);
@@ -86,7 +86,7 @@ public sealed class AuthorityLock
         }
     }
 
-    public void Unlock(UnlockMethod how)
+    internal void Unlock(UnlockMethod how)
     {
         lock (_gate)
         {
@@ -263,10 +263,10 @@ public sealed class DpapiUnlockProtection : IUnlockProtection
 public static class UnattendedUnlock
 {
     /// <summary>Null when nothing was asked (manual policy); otherwise a one-line outcome, and the lock is unlocked only on success.</summary>
-    public static string? TryUnlock(AuthorityStore store, AuthorityLock lockState, IUnlockProtection protection)
+    public static string? TryUnlock(AuthorityStore store, AuthorityKeyRing keys, AuthorityLock lockState, IUnlockProtection protection)
     {
         UnlockPolicy policy;
-        (byte[] Sealed, string Verifier)? stored;
+        (byte[] Sealed, string Verifier, byte[]? Signature)? stored;
         try
         {
             policy = store.GetUnlockPolicy();
@@ -290,6 +290,20 @@ public static class UnattendedUnlock
         if (stored is not { } material)
         {
             return "unattended unlock is configured but its material is missing; the authority stays locked";
+        }
+
+        // The policy row must be one the authority key signed when an administrator tapped for it; a row planted by a plain write to authority.db has no such signature.
+        try
+        {
+            byte[]? publicKey = keys.ActivePublicKey();
+            if (publicKey is null || material.Signature is null || !KeyIdentity.Verify(publicKey, AuthorityStore.PolicySigningBytes(UnlockPolicy.Unattended, material.Sealed, material.Verifier), material.Signature))
+            {
+                return "unattended unlock is configured but the authority key did not sign the policy (a change made outside the admin app); the authority stays locked";
+            }
+        }
+        catch (Exception error) when (error is AuthorityDatabaseException or CryptographicException)
+        {
+            return "unattended unlock is configured but the policy signature could not be checked; the authority stays locked";
         }
 
         byte[]? opened;

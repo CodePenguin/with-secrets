@@ -9,7 +9,7 @@ public static class ServiceStartup
             ? $"with-secrets service: the authority did not accept this machine ({enrolled.Message}); launches are denied."
             : enrolled.Status == MachineStatus.Trusted
                 ? "with-secrets service: this machine is Trusted."
-                : $"with-secrets service: this machine is {enrolled.Status}; launches are denied. Ask the administrator to run: with-secrets admin approve {fingerprint} --name NAME";
+                : $"with-secrets service: this machine is {enrolled.Status}; launches are denied. Ask the administrator to approve fingerprint {fingerprint} in the authority's admin web app (with-secrets admin prints its link)";
 
         return [$"with-secrets service: machine {ApprovalSummary.Clean(hostName)}, identity {KeyIdentity.Display(fingerprint)}", state];
     }

@@ -82,13 +82,16 @@ public sealed class HostServiceOptions
     /// The authority's lock. Left null the service makes its own, LOCKED (the only way the program runs it). A test or tool that builds a service in code may pass one it
     /// unlocked (<see cref="AuthorityLock.UnlockedForTests" />); no command, setting or environment variable does.
     /// </summary>
-    public AuthorityLock? Lock { get; init; }
+    internal AuthorityLock? Lock { get; init; }
 
     /// <summary>How the unattended unlock material is protected on this platform (default: the platform's mechanism, or none with a clear message). Only used when the policy is unattended.</summary>
     public IUnlockProtection? UnlockProtection { get; init; }
 
     /// <summary>The asker for the admin page's operations: given where to announce the link of the one-use passkey page. Default: admin passkeys of this user's state, on the approval settings' page.</summary>
     public Func<Action<string>, IAdminAsker>? AdminAskerFactory { get; init; }
+
+    /// <summary>The passkey administration of the admin app (add and remove a passkey). Default: the enrollment pages over this user's state.</summary>
+    public Func<IPasskeyAdmin>? PasskeyAdminFactory { get; init; }
 
     /// <summary>A request whose body has not fully arrived by then is answered 408.</summary>
     public TimeSpan BodyTimeout { get; init; } = TimeSpan.FromSeconds(15);
@@ -156,6 +159,9 @@ public sealed class HostService : IDisposable
         {
             Volatile.Write(ref _ready, false);
             Authorization.Discard(reason);
+
+            // Every approval page that is open (a run, a grant) closes: nothing is decided, signed or granted after the lock.
+            CancelActive();
         });
         IApprovalVerifier verifier = options.Deployment.Authority.Verifier ?? new ManifestApprovalVerifier(options.State);
         Func<Action<string>, IAdminAsker> askers = options.AdminAskerFactory ?? (announce =>
@@ -165,7 +171,9 @@ public sealed class HostService : IDisposable
 
             return new TargetAdminAsker(primary, local);
         });
-        Admin = new AdminService(options.Deployment.Store, Lock, new AdminAuthorizer(options.Deployment.Store, verifier, options.Deployment.Clock), askers, options.UnlockProtection ?? UnlockProtections.ForThisPlatform(), AfterUnlock, port);
+        IPasskeyAdmin? passkeys = options.PasskeyAdminFactory?.Invoke() ?? (options.State is { } passkeyState ? new StatePasskeyAdmin(passkeyState) : null);
+        Admin = new AdminService(new AdminServiceParts(options.Deployment.Store, Lock, new AdminAuthorizer(options.Deployment.Store, verifier, options.Deployment.Clock), askers, options.UnlockProtection ?? UnlockProtections.ForThisPlatform(), AfterUnlock, port,
+            options.Deployment.Keys, options.Deployment.Authority, options.Deployment.HostConfig, options.Deployment.Fingerprint, passkeys, options.Deployment.Clock));
 
         // The host's audit: events are signed with the machine key and committed to the outbox (beside authority.db) before a run decrypts anything; the uploader sends them on its own.
         HostAuditOutbox outbox = HostAuditOutbox.InFolder(Path.GetDirectoryName(options.Deployment.Store.FilePath)!, options.Deployment.MachineKey, options.Deployment.Clock);
@@ -237,7 +245,7 @@ public sealed class HostService : IDisposable
                 service = new HostService(options, app, port);
                 // Locked by default; unattended unlock applies only when the administrator chose it. Before any request is accepted: check machine status, host name binding and security
                 // revision with the authority (it also issues the lease), which needs the authority unlocked.
-                service._startupUnlockNote = service.Lock.IsLocked ? UnattendedUnlock.TryUnlock(options.Deployment.Store, service.Lock, options.UnlockProtection ?? UnlockProtections.ForThisPlatform()) : null;
+                service._startupUnlockNote = service.Lock.IsLocked ? UnattendedUnlock.TryUnlock(options.Deployment.Store, options.Deployment.Keys, service.Lock, options.UnlockProtection ?? UnlockProtections.ForThisPlatform()) : null;
                 if (!service.Lock.IsLocked)
                 {
                     service.StartupReconcile();
@@ -335,10 +343,10 @@ public sealed class HostService : IDisposable
 
         string path = request.Path.Value ?? "";
 
-        // The admin page is for a person's browser. It answers a request only from its own origin (or a navigation, which has none); everything else is refused.
-        if (path == "/admin" || path == "/admin/op" || path.StartsWith("/admin/", StringComparison.Ordinal))
+        // The admin web app is for a person's browser (sessions, anti-forgery values and one-use passkey pages; see AdminWeb). It answers a request only from its own origin (or a navigation, which has none).
+        if (path == "/admin" || path.StartsWith("/admin/", StringComparison.Ordinal))
         {
-            await AdminRoute(context, path);
+            await Admin.Web.HandleAsync(context);
 
             return;
         }
@@ -449,110 +457,27 @@ public sealed class HostService : IDisposable
         await Refuse(response, 404, "not found");
     }
 
-    private async Task AdminRoute(HttpContext context, string path)
+    /// <summary>Cancels every launch or approval in progress (the authority locked): their pages close and nothing more is decided for them.</summary>
+    private void CancelActive()
     {
-        HttpRequest request = context.Request;
-        HttpResponse response = context.Response;
-        response.Headers["X-Frame-Options"] = "DENY";
-        response.Headers["Referrer-Policy"] = "no-referrer";
-
-        // A request from a page must come from this page: its Origin is exactly this service on a loopback name and this port. A request from any other site is refused.
-        if (request.Headers.TryGetValue("Origin", out Microsoft.Extensions.Primitives.StringValues origins)
-            && (origins.Count != 1 || !AllowedOrigins().Contains(origins[0]!, StringComparer.OrdinalIgnoreCase)))
+        CancellationTokenSource[] sources;
+        lock (_lock)
         {
-            await Refuse(response, 403, "requests from another web page are not accepted");
-
-            return;
+            sources = [.. _active.Values];
         }
 
-        if (path != "/admin/op")
+        foreach (CancellationTokenSource source in sources)
         {
-            if (!HttpMethods.IsGet(request.Method))
+            try
             {
-                await Refuse(response, 405, "use GET");
-
-                return;
+                source.Cancel();
             }
-
-            string nonce = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
-            response.Headers.ContentSecurityPolicy = $"default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-{nonce}'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'";
-            if (Admin.Page(path, nonce) is not { } page)
+            catch (ObjectDisposedException)
             {
-                await Refuse(response, 404, "not found");
-
-                return;
-            }
-
-            response.ContentType = "text/html; charset=utf-8";
-            await response.WriteAsync(page);
-
-            return;
-        }
-
-        if (!HttpMethods.IsPost(request.Method))
-        {
-            await Refuse(response, 405, "use POST");
-
-            return;
-        }
-
-        // Only the page itself starts an operation: a request with no Origin (a program) is not the page.
-        if (!request.Headers.ContainsKey("Origin"))
-        {
-            await Refuse(response, 403, "operations are started from the admin page");
-
-            return;
-        }
-
-        if (request.ContentType is not { } contentType || !contentType.Split(';')[0].Trim().Equals("application/json", StringComparison.OrdinalIgnoreCase) || request.ContentLength is null or > 256)
-        {
-            await Refuse(response, 415, "the body must be small application/json");
-
-            return;
-        }
-
-        string? op = null;
-        try
-        {
-            byte[] body = await ReadBody(request.Body, context.RequestAborted);
-            using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(body);
-            ContractReader reader = new(doc.RootElement, "op");
-            if (reader.Problem is null && reader.Text("op", out string? text))
-            {
-                op = text;
+                // The launch ended just now.
             }
         }
-        catch (Exception error) when (error is System.Text.Json.JsonException or ArgumentException or BodyTooLargeException or BadHttpRequestException)
-        {
-            // Refused below.
-        }
-
-        if (op is null)
-        {
-            await Refuse(response, 400, "the body is {\"op\":NAME}");
-
-            return;
-        }
-
-        AdminStart started = await Admin.StartAsync(op, context.RequestAborted);
-        response.StatusCode = started.Status;
-        response.ContentType = "application/json";
-        StringBuilder answer = new("{");
-        if (started.Link is not null)
-        {
-            answer.Append("\"link\":");
-            ToolSettings.QuoteJson(answer, started.Link);
-        }
-        else
-        {
-            answer.Append("\"error\":");
-            ToolSettings.QuoteJson(answer, started.Error ?? "not started");
-        }
-
-        await response.WriteAsync(answer.Append('}').ToString());
     }
-
-    private string[] AllowedOrigins() => [$"http://localhost:{Port}", $"http://127.0.0.1:{Port}", $"http://[::1]:{Port}"];
 
     private static async Task Refuse(HttpResponse response, int status, string message)
     {

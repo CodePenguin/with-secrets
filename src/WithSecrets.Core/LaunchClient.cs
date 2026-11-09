@@ -178,7 +178,7 @@ public static class LaunchClient
     /// <paramref name="stderr" />; nothing of the request was sent. This authenticates the service to the client (a program that only holds
     /// the port cannot sign); it adds no credential of the client.
     /// </summary>
-    private static async Task<int?> AuthenticateService(HttpClient client, int servicePort, ServiceTrust trust, TextWriter stderr, CancellationToken cancel)
+    internal static async Task<int?> AuthenticateService(HttpClient client, int servicePort, ServiceTrust trust, TextWriter stderr, CancellationToken cancel)
     {
         if (trust.Problem is not null)
         {
@@ -237,7 +237,7 @@ public static class LaunchClient
 
             if (trust.PinnedFingerprint is null)
             {
-                return await Fail(stderr, ServiceNotAuthenticated, $"this machine is not approved yet, so no identity is pinned. The service says its fingerprint is {fingerprint}. If that is the fingerprint that the service printed in its own window, ask the administrator to run: with-secrets admin approve {fingerprint} --name NAME. Nothing was sent.");
+                return await Fail(stderr, ServiceNotAuthenticated, $"this machine is not approved yet, so no identity is pinned. The service says its fingerprint is {fingerprint}. If that is the fingerprint that the service printed in its own window, ask the administrator to approve that fingerprint in the authority's admin web app (with-secrets admin prints its link). Nothing was sent.");
             }
 
             if (!string.Equals(fingerprint, trust.PinnedFingerprint, StringComparison.Ordinal))

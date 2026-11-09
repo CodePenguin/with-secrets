@@ -199,11 +199,11 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
     /// <summary>The one-line text for a reason code that stops a machine (names the command that fixes it).</summary>
     public string Message(string code) => code switch
     {
-        ReasonCodes.MachinePending => $"this machine is not approved yet. Ask the administrator to run: with-secrets admin approve {Fingerprint} --name NAME",
-        ReasonCodes.MachineDisabled => $"this machine is disabled. Ask the administrator to run: with-secrets admin enable {Fingerprint}",
-        ReasonCodes.MachineUntrusted => $"this machine is not trusted. Ask the administrator to run: with-secrets admin trust {Fingerprint}",
+        ReasonCodes.MachinePending => $"this machine is not approved yet. Ask the administrator to approve fingerprint {Fingerprint} in the authority's admin web app (with-secrets admin prints its link)",
+        ReasonCodes.MachineDisabled => $"this machine is disabled. Ask the administrator to enable fingerprint {Fingerprint} in the authority's admin web app (with-secrets admin prints its link)",
+        ReasonCodes.MachineUntrusted => $"this machine is not trusted. Ask the administrator to trust fingerprint {Fingerprint} again in the authority's admin web app (with-secrets admin prints its link)",
         ReasonCodes.UnknownMachine => "the authority does not know this machine. Start the service again (with-secrets service); it enrolls the machine",
-        ReasonCodes.HostNameMismatch => $"the host name {ApprovalSummary.Clean(hostName)} is not the one this machine was approved with. Ask the administrator to run: with-secrets admin approve-host-change {Fingerprint}",
+        ReasonCodes.HostNameMismatch => $"the host name {ApprovalSummary.Clean(hostName)} is not the one this machine was approved with. Ask the administrator to approve the host name change for fingerprint {Fingerprint} in the authority's admin web app (with-secrets admin prints its link)",
         ReasonCodes.AuthorizationChanged => "the machine's authorization changed while the request was open. Ask again",
         GrantReasons.NoEvidence or GrantReasons.BadEvidence => "the approval did not carry a passkey assertion that backs the grant, so none was made. Nothing was saved",
         GrantReasons.NoTime => "no grant time was chosen on the approval page (choose one of the times it offers). Nothing was saved",

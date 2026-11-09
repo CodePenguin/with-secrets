@@ -374,7 +374,7 @@ internal static class IdentityTests
         IReadOnlyList<string> pending = ServiceStartup.Lines("DEV-BOX", fingerprint, new EnrollmentResult(true, MachineStatus.Pending, fingerprint, "pending"));
         string all = string.Join("\n", pending);
         check(pending[0] == "with-secrets service: machine DEV-BOX, identity 8214 BFB0 18F0 AD24 6D52 C476 A58F A6C1 73F8 4B58 07F5 A16B C183 0ABB E9AE 0891", "startup: prints the host name and the fingerprint");
-        check(all.Contains("with-secrets admin approve " + fingerprint + " --name NAME", StringComparison.Ordinal) && all.Contains("Pending", StringComparison.Ordinal), "startup: a Pending machine is told the command that approves it");
+        check(all.Contains(fingerprint, StringComparison.Ordinal) && all.Contains("admin web app", StringComparison.Ordinal) && all.Contains("Pending", StringComparison.Ordinal), "startup: a Pending machine is told the command that approves it");
         check(!all.Contains(GoldenKey, StringComparison.Ordinal), "startup: no key material is printed");
         check(ServiceStartup.Lines("DEV-BOX", fingerprint, new EnrollmentResult(true, MachineStatus.Trusted, fingerprint, "Trusted"))[1] == "with-secrets service: this machine is Trusted.", "startup: a Trusted machine is told so");
         check(ServiceStartup.Lines("DEV-BOX", fingerprint, new EnrollmentResult(false, MachineStatus.Pending, fingerprint, "no"))[1].Contains("did not accept", StringComparison.Ordinal), "startup: a refused enrollment is told");

@@ -7,18 +7,23 @@ namespace WithSecrets;
 public interface IAdminAsker
 {
     ApprovalDecision Ask(ApprovalPrompt prompt);
+
+    /// <summary>As <see cref="Ask(ApprovalPrompt)" />; an asker that waits for a person closes its page and refuses when <paramref name="cancel" /> is set.</summary>
+    ApprovalDecision Ask(ApprovalPrompt prompt, CancellationToken cancel) => Ask(prompt);
 }
 
 /// <summary>An <see cref="IAdminAsker" /> over a page target: the first target where an enrolled admin passkey can prove (as the admin commands do).</summary>
 public sealed class TargetAdminAsker(EnrollmentTarget primary, EnrollmentTarget local) : IAdminAsker
 {
-    public ApprovalDecision Ask(ApprovalPrompt prompt)
+    public ApprovalDecision Ask(ApprovalPrompt prompt) => Ask(prompt, CancellationToken.None);
+
+    public ApprovalDecision Ask(ApprovalPrompt prompt, CancellationToken cancel)
     {
         EnrollmentTarget? target = EnrollmentTarget.FirstThatCanProve(primary.Admin(), local.Admin());
 
         return target is null
             ? ApprovalDecision.Deny(Enrollment.NoTargetMessage(primary.Admin().Method.Id, primary.Admin().Host, local.Admin().Host))
-            : target.Approver.Ask(prompt);
+            : target.Approver.Ask(prompt, cancel);
     }
 }
 
@@ -53,11 +58,11 @@ public sealed class VerifiedAdmin
     }
 
     /// <summary>For tests of a store method in isolation: a token as the authorizer would issue it. It exists in the library, as the lock's test seam does; no command or setting reaches it.</summary>
-    public static VerifiedAdmin ForTests(string operation, string parameters, string signer = "test admin") => new(operation, parameters, signer);
+    internal static VerifiedAdmin ForTests(string operation, string parameters, string signer = "test admin") => new(operation, parameters, signer);
 }
 
-/// <summary>What <see cref="AdminAuthorizer.Authorize" /> came to.</summary>
-public sealed record AdminAuthorization(VerifiedAdmin? Admin, string Detail)
+/// <summary>What <see cref="AdminAuthorizer.Authorize" /> came to. <see cref="Evidence" /> is the verified signed page, for an operation whose own authority re-checks it (a grant change).</summary>
+public sealed record AdminAuthorization(VerifiedAdmin? Admin, string Detail, ApprovalEvidence? Evidence = null)
 {
     public bool Ok => Admin is not null;
 }
@@ -73,9 +78,9 @@ public sealed class AdminAuthorizer(AuthorityStore store, IApprovalVerifier veri
     public const string OperationPrefix = "Operation: ";
     public const string ParameterPrefix = "Parameter ";
 
+    public const string TicketPrefix = "Ticket: ";
+
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
-    private readonly Lock _lock = new();
-    private readonly Dictionary<string, DateTimeOffset> _spentNonces = new(StringComparer.Ordinal);
 
     /// <summary>The canonical form of the parameters a token is bound to: <c>name=value</c> lines in the given order.</summary>
     public static string Canonical(IReadOnlyList<(string Name, string Value)> parameters) => string.Join('\n', parameters.Select(parameter => parameter.Name + "=" + parameter.Value));
@@ -93,7 +98,7 @@ public sealed class AdminAuthorizer(AuthorityStore store, IApprovalVerifier veri
         return text.ToString();
     }
 
-    public AdminAuthorization Authorize(IAdminAsker asker, string heading, string sentence, string operation, IReadOnlyList<(string Name, string Value)> parameters)
+    public AdminAuthorization Authorize(IAdminAsker asker, string heading, string sentence, string operation, IReadOnlyList<(string Name, string Value)> parameters, CancellationToken cancel = default)
     {
         string parameterText = Canonical(parameters);
         if (!Record(operation, "requested", "", parameterText))
@@ -102,10 +107,12 @@ public sealed class AdminAuthorizer(AuthorityStore store, IApprovalVerifier veri
             return new AdminAuthorization(null, "the audit history cannot be written, so nothing was started");
         }
 
+        // A value only this call knows is part of the signed text, so a proof made for another call (an earlier one, or one relayed from elsewhere) is not this call's answer.
+        string ticket = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(8));
         ApprovalDecision asked;
         try
         {
-            asked = asker.Ask(new ApprovalPrompt(heading, PageText(sentence, operation, parameters)));
+            asked = asker.Ask(new ApprovalPrompt(heading, PageText(sentence, operation, parameters) + "\n" + TicketPrefix + ticket), cancel);
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
@@ -124,6 +131,11 @@ public sealed class AdminAuthorizer(AuthorityStore store, IApprovalVerifier veri
         }
 
         DateTimeOffset now = _clock.GetUtcNow();
+        if (GrantEvidence.Line(evidence.Text, TicketPrefix) != ticket)
+        {
+            return Refuse(operation, "the signed page is not the page this call showed", parameterText);
+        }
+
         if (Check(evidence, now, operation, parameters) is { } problem)
         {
             return Refuse(operation, problem, parameterText);
@@ -135,25 +147,30 @@ public sealed class AdminAuthorizer(AuthorityStore store, IApprovalVerifier veri
             return Refuse(operation, "the approval was not signed by an enrolled admin key (" + check.Detail + ")", parameterText);
         }
 
-        lock (_lock)
+        // A proof is accepted once, and the record outlives a restart (it is kept in authority.db until the proof could no longer be fresh).
+        bool first;
+        try
         {
-            foreach (string old in _spentNonces.Where(item => item.Value < now).Select(item => item.Key).ToList())
-            {
-                _spentNonces.Remove(old);
-            }
+            first = store.TrySpendAdminNonce(evidence.Nonce, now.AddMinutes(ApprovalSettings.MaxTimeoutMinutes + 5));
+        }
+        catch (AuthorityDatabaseException)
+        {
+            return Refuse(operation, "the spent-proof record cannot be written, so nothing was applied", parameterText);
+        }
 
-            // A proof is accepted once.
-            if (!_spentNonces.TryAdd(evidence.Nonce, now.AddMinutes(ApprovalSettings.MaxTimeoutMinutes + 5)))
-            {
-                return Refuse(operation, "this approval was already used", parameterText);
-            }
+        if (!first)
+        {
+            return Refuse(operation, "this approval was already used", parameterText);
         }
 
         VerifiedAdmin admin = new(operation, parameterText, check.SignerName);
         Record(operation, "authorized", admin.Actor, parameterText);
 
-        return new AdminAuthorization(admin, "authorized");
+        return new AdminAuthorization(admin, "authorized", evidence);
     }
+
+    /// <summary>Records a request that was refused before any passkey page was made (no session, no anti-forgery value, an operation that does not apply). Best effort: a refusal needs no audit to stay a refusal.</summary>
+    public void RecordRefusal(string operation, string reason, string parameters = "") => Record(operation, "refused: " + ApprovalSummary.Clean(reason), "", parameters);
 
     /// <summary>Records how an authorized operation ended (applied, or failed after the tap).</summary>
     public void Outcome(VerifiedAdmin admin, string outcome) => Record(admin.Operation, outcome, admin.Actor, admin.Parameters);
@@ -197,7 +214,8 @@ public sealed class AdminAuthorizer(AuthorityStore store, IApprovalVerifier veri
         return new AdminAuthorization(null, reason);
     }
 
-    private bool Record(string operation, string outcome, string actor, string parameters)
+    /// <summary>Writes one row of the authority's audit history for an administrator operation (an attempt, an outcome). False when it cannot be written.</summary>
+    public bool Record(string operation, string outcome, string actor, string parameters)
     {
         try
         {

@@ -1,6 +1,6 @@
-using System.Net;
+using System.Collections.Concurrent;
+using System.Globalization;
 using System.Security.Cryptography;
-using System.Text;
 
 namespace WithSecrets;
 
@@ -10,86 +10,284 @@ public sealed record AuthorityStatus(bool Locked, UnlockMethod? How, UnlockPolic
 /// <summary>The answer to a request to start an operation: a link to the one-use passkey page, or why none was made.</summary>
 public sealed record AdminStart(string? Link, string? Error, int Status = 200);
 
+/// <summary>Who asks: a browser with an admin session, or one without (which may only ask for what needs no session: unlock and sign in).</summary>
+public sealed record AdminCaller(AdminSession? Session);
+
+/// <summary>What the service needs to run the administration of the authority.</summary>
+public sealed record AdminServiceParts(AuthorityStore Store, AuthorityLock Lock, AdminAuthorizer Authorizer, Func<Action<string>, IAdminAsker> Askers, IUnlockProtection Protection, Action OnUnlocked, int Port,
+    AuthorityKeyRing Keys, LocalAuthority Authority, HostConfigFile HostConfig, string? LocalFingerprint, IPasskeyAdmin? Passkeys, TimeProvider? Clock = null);
+
 /// <summary>
-/// The authority's minimal administration, served by the service on its own loopback port: <c>GET /admin</c> (status: running, locked or unlocked, the unlock mode shown
-/// visibly) and <c>POST /admin/op</c> to start Unlock, Lock or a change of the unlock policy. Each operation is its own fresh passkey ceremony: the call returns the link to a
-/// one-use page whose signed text names the operation and its parameters (<see cref="AdminAuthorizer" />), and the operation is applied only after an enrolled admin key's
-/// verified assertion for exactly that page. Opening this page, being unlocked, or having tapped for something else authorizes nothing. This is the seed of the full
-/// admin interface (Phase 6): more operations are added to <see cref="Start" /> the same way.
+/// The authority's administration, served by the service on its own loopback port as a small server-rendered web app (<see cref="AdminWeb" />). Everything an administrator does lives here;
+/// <c>with-secrets admin</c> only prints the link.
+/// <para>
+/// A <b>session</b> (<see cref="AdminSessions" />) is the right to READ: status, machines, grants, audit history, settings. One fresh passkey tap starts it. It authorizes nothing
+/// else: every operation on the sensitive list (a machine's trust, a grant, passkeys, settings, the authority key, lock and unlock) is its own fresh, single-use, time-limited
+/// passkey tap with user verification on a one-use page whose signed text names the operation and its parameters (<see cref="AdminAuthorizer" />); a session, an earlier unlock or an earlier
+/// tap never satisfies it. A request to change something also needs the anti-forgery value of its page, a same-origin request and a loopback Host. A failed or unavailable passkey is a refusal.
+/// </para>
 /// </summary>
-public sealed class AdminService(AuthorityStore store, AuthorityLock lockState, AdminAuthorizer authorizer, Func<Action<string>, IAdminAsker> askers, IUnlockProtection protection, Action onUnlocked, int port)
+public sealed partial class AdminService
 {
     public const string OpUnlock = "unlock";
     public const string OpLock = "lock";
     public const string OpPolicyManual = "policy-manual";
     public const string OpPolicyUnattended = "policy-unattended";
+    public const string OpLogin = "admin-login";
 
     private const string Heading = "Check this change to the authority. Nothing is changed unless you approve here with your passkey.";
     private static readonly TimeSpan LinkWait = TimeSpan.FromSeconds(30);
 
-    /// <summary>How long a second operation waits for the one whose passkey page is still open before it is told to try again.</summary>
-    private static readonly TimeSpan BusyWait = TimeSpan.FromSeconds(8);
+    /// <summary>How long a new operation waits for the page it replaces to close.</summary>
+    private static readonly TimeSpan CloseWait = TimeSpan.FromSeconds(5);
 
-    private readonly SemaphoreSlim _busy = new(1, 1);
+    /// <summary>The most operations a caller may start per minute: a local program cannot flood the audit history or the passkey prompts. Session callers and others count apart, so one cannot use up the other's.</summary>
+    public const int MaxStartsPerMinute = 30;
 
-    /// <summary>The authority's page, for the message of a refused run and the startup lines. Public; it carries nothing.</summary>
-    public string PageUrl => $"http://localhost:{port}/admin";
+    private readonly AdminServiceParts _p;
+    private readonly TimeProvider _clock;
+    private readonly Lock _gate = new();
+    private readonly Pending?[] _slots = new Pending?[2];
+    private readonly Queue<DateTimeOffset>[] _starts = [new(), new()];
+    private readonly ConcurrentQueue<string> _recent = new();
 
-    public AuthorityStatus Status() => new(lockState.IsLocked, lockState.How, store.GetUnlockPolicy());
-
-    /// <summary>Starts an operation. The returned link is the page that asks for the passkey; the operation runs in the background and is applied only after that page's verified tap.</summary>
-    public async Task<AdminStart> StartAsync(string op, CancellationToken cancel)
+    private sealed class Pending(CancellationTokenSource cancel)
     {
-        (string Operation, string Sentence, IReadOnlyList<(string Name, string Value)> Parameters, Func<VerifiedAdmin, string?> Apply, byte[]? Material)? plan = Plan(op, out string? refusal);
-        if (plan is null)
+        public CancellationTokenSource Cancel { get; } = cancel;
+
+        public TaskCompletionSource Done { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    public AdminService(AdminServiceParts parts)
+    {
+        _p = parts;
+        _clock = parts.Clock ?? TimeProvider.System;
+        Sessions = new AdminSessions(_clock, () =>
         {
-            return new AdminStart(null, refusal, refusal is "unknown operation" ? 400 : 409);
+            (int idle, int absolute) = parts.Store.SessionTimeouts();
+
+            return (TimeSpan.FromMinutes(idle), TimeSpan.FromMinutes(absolute));
+        });
+        // A lock ends every session and every unclaimed login, and closes every passkey page that is waiting.
+        parts.Lock.OnLock(_ =>
+        {
+            Sessions.DestroyAll();
+            CancelPending();
+        });
+    }
+
+    /// <summary>The sessions (service memory only).</summary>
+    public AdminSessions Sessions { get; }
+
+    /// <summary>The HTTP side of the app (the service routes <c>/admin</c> requests here).</summary>
+    internal AdminWeb Web => _web ??= new AdminWeb(this, _p.Port);
+
+    private AdminWeb? _web;
+    private readonly Queue<DateTimeOffset> _refusalRows = new();
+
+    /// <summary>
+    /// Audits a refused request (no session, no anti-forgery value, an operation that does not apply). At most 20 rows a minute, so a program that keeps sending bad requests cannot flood the
+    /// audit history; a refusal is a refusal whether or not it was written.
+    /// </summary>
+    internal void Refused(string operation, string reason)
+    {
+        lock (_gate)
+        {
+            DateTimeOffset now = _clock.GetUtcNow();
+            while (_refusalRows.Count > 0 && now - _refusalRows.Peek() > TimeSpan.FromMinutes(1))
+            {
+                _refusalRows.Dequeue();
+            }
+
+            if (_refusalRows.Count >= 20)
+            {
+                return;
+            }
+
+            _refusalRows.Enqueue(now);
         }
 
-        if (!await _busy.WaitAsync(BusyWait, cancel))
+        _p.Authorizer.RecordRefusal(operation.Length > 40 ? operation[..40] : operation, reason);
+    }
+
+    internal AdminAuthorizer Authorizer => _p.Authorizer;
+
+    internal AuthorityStore Store => _p.Store;
+
+    internal TimeProvider Clock => _clock;
+
+    /// <summary>The authority's page, for the message of a refused run and the startup lines. Public; it carries nothing.</summary>
+    public string PageUrl => $"http://localhost:{_p.Port}/admin";
+
+    public AuthorityStatus Status() => new(_p.Lock.IsLocked, _p.Lock.How, _p.Store.GetUnlockPolicy());
+
+    /// <summary>The last operations and how they ended (names and outcomes only), newest first, for the dashboard of a session.</summary>
+    internal IReadOnlyList<string> Recent => [.. _recent.Reverse()];
+
+    private void Note(string text)
+    {
+        _recent.Enqueue(_clock.GetUtcNow().UtcDateTime.ToString("HH:mm:ss", CultureInfo.InvariantCulture) + " " + text);
+        while (_recent.Count > 10 && _recent.TryDequeue(out _))
         {
-            return new AdminStart(null, "another administrator operation is waiting for its passkey page; finish or let it time out first", 409);
+        }
+    }
+
+    /// <summary>True for the operation a browser without a session may ask for: unlock (the only thing a locked authority allows). Everything else needs a session.</summary>
+    public static bool NeedsNoSession(string op) => op == OpUnlock;
+
+    /// <summary>Closes every passkey page that is waiting (a lock does this, and so does a new request from the admin app).</summary>
+    public void CancelPending()
+    {
+        lock (_gate)
+        {
+            foreach (Pending? pending in _slots)
+            {
+                CancelQuietly(pending);
+            }
+        }
+    }
+
+    private static void CancelQuietly(Pending? pending)
+    {
+        try
+        {
+            pending?.Cancel.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // It ended just now.
+        }
+    }
+
+    private bool TakeStart(int slot)
+    {
+        lock (_gate)
+        {
+            DateTimeOffset now = _clock.GetUtcNow();
+            Queue<DateTimeOffset> queue = _starts[slot];
+            while (queue.Count > 0 && now - queue.Peek() > TimeSpan.FromMinutes(1))
+            {
+                queue.Dequeue();
+            }
+
+            if (queue.Count >= MaxStartsPerMinute)
+            {
+                return false;
+            }
+
+            queue.Enqueue(now);
+
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Starts an operation for a caller. The returned link is the page that asks for the passkey; the operation runs in the background and is applied only after that page's verified tap.
+    /// A new request replaces the passkey page that one slot is still waiting on (a session's requests replace each other, a sessionless one only another sessionless one), and Lock
+    /// replaces them all, so no request can hold the others out and the emergency control always gets its page.
+    /// </summary>
+    public async Task<AdminStart> StartAsync(AdminCaller caller, string op, IReadOnlyDictionary<string, string> args, CancellationToken cancel)
+    {
+        bool isSession = caller.Session is not null;
+        if (!isSession && !NeedsNoSession(op))
+        {
+            Refused(op, "no administrator session");
+
+            return new AdminStart(null, "sign in first: this needs an administrator session", 401);
+        }
+
+        if (!TakeStart(isSession ? 1 : 0))
+        {
+            Refused(op, "too many requests");
+
+            return new AdminStart(null, "too many requests; wait a minute", 429);
+        }
+
+        AdminPlan? plan = Plan(op, args, out string? refusal, out int refusalStatus);
+        if (plan is null)
+        {
+            Refused(op, refusal ?? "refused");
+
+            return new AdminStart(null, refusal, refusalStatus);
+        }
+
+        return await Run(plan, isSession, cancel);
+    }
+
+    private async Task<AdminStart> Run(AdminPlan plan, bool isSession, CancellationToken cancel)
+    {
+        int slot = isSession ? 1 : 0;
+        CancellationTokenSource source = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken.None);
+        Pending pending = new(source);
+        Pending?[] before;
+        lock (_gate)
+        {
+            before = plan.Operation == "lock-authority" ? [.. _slots] : [_slots[slot]];
+            foreach (Pending? old in before)
+            {
+                CancelQuietly(old);
+            }
+
+            _slots[slot] = pending;
+        }
+
+        foreach (Pending? old in before.Where(item => item is not null))
+        {
+            await Task.WhenAny(old!.Done.Task, Task.Delay(CloseWait, cancel));
         }
 
         TaskCompletionSource<string> link = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        IAdminAsker asker = askers(text => link.TrySetResult(text));
-        (string operation, string sentence, IReadOnlyList<(string, string)> parameters, Func<VerifiedAdmin, string?> apply, byte[]? material) = plan.Value;
-        Task done = Task.Run(() =>
+        Action<string> announce = text =>
+        {
+            if (text.Contains("http", StringComparison.Ordinal))
+            {
+                link.TrySetResult(text);
+            }
+            else
+            {
+                TerminalPrompt.Line(text);
+            }
+        };
+        IAdminAsker asker = _p.Askers(announce);
+        CancellationToken token = source.Token;
+        _ = Task.Run(() =>
         {
             try
             {
-                AdminAuthorization authorized = authorizer.Authorize(asker, Heading, sentence, operation, parameters);
-                if (authorized.Admin is { } admin)
-                {
-                    string? failure = null;
-                    try
-                    {
-                        failure = apply(admin);
-                    }
-                    catch (Exception error) when (error is not OutOfMemoryException)
-                    {
-                        failure = error is AuthorityDatabaseException ? error.Message : "the change failed (" + error.GetType().Name + ")";
-                    }
-
-                    authorizer.Outcome(admin, failure is null ? "applied" : "failed: " + failure);
-                }
-
-                link.TrySetResult("done: " + authorized.Detail);
+                string outcome = Execute(plan, asker, announce, token);
+                link.TrySetResult("done: " + outcome);
+            }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            {
+                AppLog.Warn("an administrator operation failed unexpectedly: {Type}", error.GetType().Name);
+                plan.OnRefused?.Invoke("the operation failed");
+                link.TrySetResult("done: the operation failed (" + error.GetType().Name + ")");
             }
             finally
             {
-                if (material is not null)
+                if (plan.Material is not null)
                 {
-                    CryptographicOperations.ZeroMemory(material);
+                    CryptographicOperations.ZeroMemory(plan.Material);
                 }
 
-                _busy.Release();
+                lock (_gate)
+                {
+                    if (ReferenceEquals(_slots[slot], pending))
+                    {
+                        _slots[slot] = null;
+                    }
+                }
+
+                source.Dispose();
+                pending.Done.TrySetResult();
             }
         }, CancellationToken.None);
 
         Task first = await Task.WhenAny(link.Task, Task.Delay(LinkWait, cancel));
         if (first != link.Task)
         {
+            CancelQuietly(pending);
+
             return new AdminStart(null, "the passkey page was not made in time", 504);
         }
 
@@ -97,8 +295,6 @@ public sealed class AdminService(AuthorityStore store, AuthorityLock lockState, 
         if (text.StartsWith("done: ", StringComparison.Ordinal))
         {
             // Finished without a page: the asker refused (for example no passkey is enrolled), so nothing changed.
-            _ = done;
-
             return new AdminStart(null, text["done: ".Length..], 409);
         }
 
@@ -107,180 +303,111 @@ public sealed class AdminService(AuthorityStore store, AuthorityLock lockState, 
         return at < 0 ? new AdminStart(null, "the passkey page was not made", 500) : new AdminStart(text[at..], null);
     }
 
-    private (string Operation, string Sentence, IReadOnlyList<(string Name, string Value)> Parameters, Func<VerifiedAdmin, string?> Apply, byte[]? Material)? Plan(string op, out string? refusal)
+    /// <summary>Runs a plan to its end: the tap, the check, the change. Returns the one line for the person.</summary>
+    private string Execute(AdminPlan plan, IAdminAsker asker, Action<string> announce, CancellationToken cancel)
     {
-        refusal = null;
-        string key = store.ActiveKey()?.Fingerprint is { } fingerprint ? KeyIdentity.Display(fingerprint) : "(none yet)";
-        switch (op)
+        if (plan.Delegated is { } delegated)
         {
-            case OpUnlock:
-                if (!lockState.IsLocked)
-                {
-                    refusal = "the authority is already unlocked";
-
-                    return null;
-                }
-
-                return ("unlock-authority",
-                    "unlock the authority so that it serves secret requests again. It creates no grant and widens none; every sensitive change still needs its own passkey tap",
-                    [("authority-key", key)],
-                    _ =>
-                    {
-                        lockState.Unlock(UnlockMethod.Manual);
-                        onUnlocked();
-
-                        return null;
-                    },
-                    null);
-
-            case OpLock:
-                if (lockState.IsLocked)
-                {
-                    refusal = "the authority is already locked";
-
-                    return null;
-                }
-
-                return ("lock-authority",
-                    "lock the authority now: secret requests stop, the held keys, the offline lease and the synchronized grants are discarded",
-                    [("authority-key", key)],
-                    _ =>
-                    {
-                        lockState.Lock("locked by an administrator");
-
-                        return null;
-                    },
-                    null);
-
-            case OpPolicyManual:
-                if (store.GetUnlockPolicy() == UnlockPolicy.Manual)
-                {
-                    refusal = "unlock is manual already";
-
-                    return null;
-                }
-
-                return Policy(UnlockPolicy.Manual, "make unlock manual again: after a start an administrator unlocks with a passkey tap, and the unattended-unlock material is deleted", null, null);
-
-            case OpPolicyUnattended:
-                if (store.GetUnlockPolicy() == UnlockPolicy.Unattended)
-                {
-                    refusal = "unlock is unattended already";
-
-                    return null;
-                }
-
-                if (protection.Unavailable is { } unavailable)
-                {
-                    refusal = unavailable;
-
-                    return null;
-                }
-
-                byte[] material = RandomNumberGenerator.GetBytes(32);
-                try
-                {
-                    byte[] sealedBlob = protection.Seal(material);
-
-                    return Policy(UnlockPolicy.Unattended,
-                        "let the authority unlock itself after it starts, using material that " + protection.Name + " protects for this user. This is WEAKER than manual unlock: anything that can run as this user can unlock the service the same way. It does not remove the passkey tap for sensitive changes and creates no grant",
-                        sealedBlob, Convert.ToHexString(SHA256.HashData(material)), material);
-                }
-                catch (Exception error) when (error is CryptographicException or InvalidOperationException)
-                {
-                    CryptographicOperations.ZeroMemory(material);
-                    refusal = "the platform could not protect the unlock material (" + error.GetType().Name + ")";
-
-                    return null;
-                }
-
-            default:
-                refusal = "unknown operation";
-
-                return null;
-        }
-
-        (string, string, IReadOnlyList<(string, string)>, Func<VerifiedAdmin, string?>, byte[]?)? Policy(UnlockPolicy policy, string sentence, byte[]? sealedBlob, string? verifier, byte[]? material = null)
-        {
-            (string operation, IReadOnlyList<(string Name, string Value)> parameters) = AuthorityStore.PolicyOperation(policy);
-
-            return (operation, sentence, parameters, admin =>
+            // An operation whose own pages are the taps (adding and removing a passkey): audited here, each page binds its own text and checks user verification.
+            if (!_p.Authorizer.Record(plan.Operation, "requested", "", AdminAuthorizer.Canonical(plan.Parameters)))
             {
-                store.SetUnlockPolicy(policy, sealedBlob, verifier, admin);
+                return "the audit history cannot be written, so nothing was started";
+            }
+
+            (bool ok, string detail, string actor) = delegated(announce);
+            _p.Authorizer.Record(plan.Operation, ok ? "applied" : "refused: " + ApprovalSummary.Clean(detail), ok ? actor : "", AdminAuthorizer.Canonical(plan.Parameters));
+            Note(plan.Operation + (ok ? ": applied" : ": refused"));
+
+            return detail;
+        }
+
+        AdminAuthorization authorized = _p.Authorizer.Authorize(asker, Heading, plan.Sentence, plan.Operation, plan.Parameters, cancel);
+        if (authorized.Admin is not { } admin)
+        {
+            Note(plan.Operation + ": refused");
+            plan.OnRefused?.Invoke(authorized.Detail);
+
+            return authorized.Detail;
+        }
+
+        string? failure;
+        try
+        {
+            // A lock between the tap and the change stops the change: nothing is applied by a locked authority (except the unlock itself).
+            if (_p.Lock.IsLocked && plan.Operation != "unlock-authority")
+            {
+                throw new AuthorityLockedException();
+            }
+
+            failure = plan.Apply(authorized);
+        }
+        catch (AuthorityLockedException)
+        {
+            failure = "the authority is locked";
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            failure = error is AuthorityDatabaseException ? error.Message : "the change failed (" + error.GetType().Name + ")";
+        }
+
+        _p.Authorizer.Outcome(admin, failure is null ? "applied" : "failed: " + ApprovalSummary.Clean(failure));
+        Note(plan.Operation + (failure is null ? ": applied" : ": failed"));
+
+        return failure ?? "applied";
+    }
+
+    // ---- signing in ----
+
+    /// <summary>
+    /// Starts a login for a browser: the tap (one fresh passkey page whose signed text names this login) proves an administrator is here, and the browser that began the login then claims its
+    /// session (<see cref="AdminSessions.Claim" />). Refused while the authority is locked (it can only be unlocked).
+    /// </summary>
+    public async Task<(AdminStart Start, string? Ticket)> BeginLoginAsync(CancellationToken cancel)
+    {
+        if (!TakeStart(0))
+        {
+            Refused(OpLogin, "too many requests");
+
+            return (new AdminStart(null, "too many requests; wait a minute", 429), null);
+        }
+
+        if (_p.Lock.IsLocked)
+        {
+            Refused(OpLogin, "the authority is locked");
+
+            return (new AdminStart(null, "the authority is locked: unlock it first (no session starts on a locked authority)", 423), null);
+        }
+
+        (string ticket, string code) = Sessions.BeginLogin();
+        (int idle, int absolute) = _p.Store.SessionTimeouts();
+        AdminPlan plan = new("admin-session", "start an administrator session on the admin web app. Only tap if you just chose to sign in there yourself. The session lets this browser READ (status, machines, grants, audit, settings) for up to "
+            + absolute.ToString(CultureInfo.InvariantCulture) + " minutes, ending after " + idle.ToString(CultureInfo.InvariantCulture) + " minutes without use; it changes nothing and every change still needs its own passkey tap",
+            [("login", code)],
+            authorization =>
+            {
+                Sessions.CompleteLogin(code, authorization.Admin!.Signer.Length > 0 ? authorization.Admin.Signer : "(unnamed)", null);
 
                 return null;
-            }, material);
-        }
+            },
+            OnRefused: reason => Sessions.CompleteLogin(code, null, reason));
+        AdminStart started = await Run(plan, false, cancel);
+
+        return (started, started.Link is not null ? ticket : null);
     }
 
-    /// <summary>The routes of the admin web app (GET): path, title. Phase 6 adds machines, grants and the rest here; each sensitive action on them is a fresh operation-bound passkey tap like the three here.</summary>
-    public static readonly IReadOnlyList<(string Path, string Title)> Pages = [("/admin", "Status"), ("/admin/audit", "Audit")];
-
-    /// <summary>The page of a GET route, or null when there is none. <paramref name="nonce" /> is the script nonce of the response.</summary>
-    public string? Page(string path, string nonce) => path switch
+    /// <summary>Called once a browser's session starts: the start is audited durably (no secret in it).</summary>
+    public void RecordSessionStart(AdminSession session)
     {
-        "/admin" => Layout("/admin", Root(), nonce, Script),
-        "/admin/audit" => Layout("/admin/audit", AuditBody(), nonce, null),
-        _ => null,
-    };
-
-    /// <summary>Back-compatible name for the root page.</summary>
-    public string Html(string nonce) => Page("/admin", nonce)!;
-
-    private string Layout(string current, string body, string nonce, string? script)
-    {
-        StringBuilder html = new();
-        html.Append("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>with-secrets authority</title><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">")
-            .Append("<style>body{font:16px system-ui,sans-serif;max-width:60rem;margin:2rem auto;padding:0 1rem}.weak{color:#8a3b00;font-weight:600}button{font:inherit;margin:.25rem .5rem .25rem 0;padding:.5rem 1rem}#msg{margin-top:1rem;min-height:1.5rem}nav a{margin-right:1rem}table{border-collapse:collapse;width:100%;font-size:.9rem}td,th{border-bottom:1px solid #ccc;padding:.25rem .5rem;text-align:left;vertical-align:top}</style></head><body>")
-            .Append("<h1>with-secrets authority</h1><nav>");
-        foreach ((string path, string title) in Pages)
-        {
-            html.Append("<a href=\"").Append(path).Append("\"").Append(path == current ? " aria-current=\"page\"" : "").Append('>').Append(WebUtility.HtmlEncode(title)).Append("</a>");
-        }
-
-        html.Append("</nav>").Append(body);
-        if (script is not null)
-        {
-            html.Append("<script nonce=\"").Append(nonce).Append("\">").Append(script).Append("</script>");
-        }
-
-        return html.Append("</body></html>").ToString();
+        _p.Authorizer.Record("admin-session", "started", "admin passkey " + session.Admin, "");
+        Note("admin session started");
     }
 
-    private const string Script = "for(const b of document.querySelectorAll('button')){b.onclick=async()=>{const m=document.getElementById('msg');m.textContent='';"
-        + "try{const r=await fetch('/admin/op',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({op:b.dataset.op})});"
-        + "const j=await r.json();if(j.link){location.href=j.link}else{m.textContent=j.error||'Not started.'}}catch(e){m.textContent='Not started.'}}}";
-
-    private string Root()
+    public void RecordSessionEnd(AdminSession session, string how)
     {
-        AuthorityStatus status = Status();
-        string state = status.Locked ? "LOCKED" : "Unlocked" + (status.How is { } how ? " (" + how.ToString().ToLowerInvariant() + ")" : "");
-        string weaker = status.Policy == UnlockPolicy.Unattended ? " class=\"weak\"" : "";
-        StringBuilder html = new();
-        html.Append("<p>Status: running, <strong id=\"state\">").Append(WebUtility.HtmlEncode(state)).Append("</strong></p>")
-            .Append("<p>Unlock mode: <span").Append(weaker).Append('>').Append(WebUtility.HtmlEncode(UnlockPolicies.Describe(status.Policy))).Append("</span></p>")
-            .Append("<p>Every button below opens a one-use page where you approve that one change with your passkey. Nothing changes without it.</p>")
-            .Append(status.Locked ? "<button data-op=\"unlock\">Unlock</button>" : "<button data-op=\"lock\">Lock now</button>")
-            .Append(status.Policy == UnlockPolicy.Unattended
-                ? "<button data-op=\"policy-manual\">Make unlock manual</button>"
-                : "<button data-op=\"policy-unattended\">Allow unattended unlock (weaker)</button>")
-            .Append("<div id=\"msg\" role=\"status\"></div>");
-
-        return html.ToString();
-    }
-
-    /// <summary>Read-only: the authority's own audit history, newest first (machine and grant changes, key changes, and every attempt at a sensitive administrator operation with its outcome). No proof, code, key or secret is in it.</summary>
-    private string AuditBody()
-    {
-        StringBuilder html = new("<h2>Authority audit history</h2><p>Read-only. Newest first, at most 200.</p><table><tr><th>Time (UTC)</th><th>Event</th><th>Actor</th><th>Detail</th></tr>");
-        foreach (AuditEntry entry in store.Audit(200))
-        {
-            html.Append("<tr><td>").Append(WebUtility.HtmlEncode(entry.Time.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)))
-                .Append("</td><td>").Append(WebUtility.HtmlEncode(ApprovalSummary.Clean(entry.Event)))
-                .Append("</td><td>").Append(WebUtility.HtmlEncode(ApprovalSummary.Clean(entry.Actor)))
-                .Append("</td><td>").Append(WebUtility.HtmlEncode(ApprovalSummary.Clean(entry.Detail))).Append("</td></tr>");
-        }
-
-        return html.Append("</table>").ToString();
+        _p.Authorizer.Record("admin-session", how, "admin passkey " + session.Admin, "");
     }
 }
+
+/// <summary>One operation as it will be asked and applied: its name, the sentence the person reads, its parameters (all of them are signed), and what runs after the verified tap.</summary>
+internal sealed record AdminPlan(string Operation, string Sentence, IReadOnlyList<(string Name, string Value)> Parameters, Func<AdminAuthorization, string?> Apply, byte[]? Material = null,
+    Func<Action<string>, (bool Ok, string Detail, string Actor)>? Delegated = null, Action<string>? OnRefused = null);

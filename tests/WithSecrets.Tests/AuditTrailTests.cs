@@ -114,6 +114,7 @@ internal static class AuditTrailTests
             await Uploading(check, parent);
             Schema(check, parent);
             Cli(check, parent);
+            await AdminAuditView(check, parent);
             await ThroughTheService(check, parent);
             await Review(check, parent);
         }
@@ -631,29 +632,80 @@ internal static class AuditTrailTests
 
     private static void Cli(Action<bool, string> check, string parent)
     {
-        CliCommand.AuditAdmin? Parse(params string[] args) => CliArgs.Parse(["admin", "audit", .. args], out _) as CliCommand.AuditAdmin;
-        check(Parse() is { Gaps: false, Query: { Limit: 50, MachinePrefix: null, Text: null } } && CliArgs.NeedsTerminal(Parse()!), "admin audit parse: no arguments lists the newest 50, and the command is for a person in a terminal");
-        CliCommand.AuditAdmin? full = Parse("--machine", "AB12", "--since", "2026-11-01", "--until", "2026-11-02T10:00:00Z", "--type", "launch", "--outcome", "started", "--grant", "g-12", "--folder", "alpha", "--text", "build", "--last", "7", "--debug");
-        check(full is { Debug: true, Query: { MachinePrefix: "AB12", Type: "launch", Outcome: "started", GrantId: "g-12", Folder: "alpha", Text: "build", Limit: 7 } } && full.Query.From == new DateTimeOffset(2026, 11, 1, 0, 0, 0, TimeSpan.Zero) && full.Query.To == new DateTimeOffset(2026, 11, 2, 10, 0, 0, TimeSpan.Zero), "admin audit parse: every filter (a time without a zone is UTC)");
-        check(Parse("--gaps", "--machine", "AB12") is { Gaps: true } && Parse("--gaps", "--text", "x") is null && Parse("--type", "nope") is null && Parse("--since", "yesterday-ish") is null && Parse("--last", "0") is null && Parse("--last", "1001") is null && Parse("--bogus") is null && Parse("positional") is null && Parse("--text") is null, "admin audit parse: bad arguments are refused");
+        // The audit search of the admin web app (the old `admin audit` verb is gone): its query parsing and the data it reads.
+        (AuditQuery? Query, bool Gaps, string? Error) Parse(params (string Name, string Value)[] args) => AdminService.ParseAuditQuery(name => args.Where(item => item.Name == name).Select(item => item.Value).FirstOrDefault());
+        check(Parse() is { Gaps: false, Error: null, Query: { Limit: 100, MachinePrefix: null, Text: null } }, "audit search parse: no filters lists the newest 100");
+        var full = Parse(("machine", "AB12"), ("since", "2026-11-01"), ("until", "2026-11-02T10:00:00Z"), ("type", "launch"), ("outcome", "started"), ("grant", "g-12"), ("folder", "alpha"), ("text", "build"), ("last", "7"));
+        check(full.Query is { MachinePrefix: "AB12", Type: "launch", Outcome: "started", GrantId: "g-12", Folder: "alpha", Text: "build", Limit: 7 } && full.Query.From == new DateTimeOffset(2026, 11, 1, 0, 0, 0, TimeSpan.Zero) && full.Query.To == new DateTimeOffset(2026, 11, 2, 10, 0, 0, TimeSpan.Zero), "audit search parse: every filter (a time without a zone is UTC)");
+        check(Parse(("gaps", "1"), ("machine", "AB12")) is { Gaps: true, Error: null } && Parse(("type", "nope")).Error is not null && Parse(("since", "yesterday-ish")).Error is not null && Parse(("last", "0")).Error is not null && Parse(("last", "1001")).Error is not null && Parse(("last", "-3")).Error is not null, "audit search parse: bad values are refused with a reason");
 
         using TestMachine machine = new(Path.Combine(parent, "cl-" + Guid.NewGuid().ToString("N")[..6]));
         HostAuditOutbox outbox = HostAuditOutbox.InFolder(machine.Folder, machine.MachineKey);
-        StringWriter empty = new();
-        check(CommandWiring.AdminAudit(Parse()!, machine.Folder, empty) == 0 && empty.ToString().Contains("No audit events match", StringComparison.Ordinal), "admin audit: nothing recorded yet says so");
+        check(machine.Deployment.Store.AuditHistory(new AuditQuery()).Count == 0, "audit search: nothing recorded yet finds nothing");
         AuditEvent a = outbox.Append(Facts(program: "/work/build.sh", arguments: ["--token=[REDACTED]"]));
         AuditEvent b = outbox.Append(Facts(AuditEventTypes.Execution, "exited", "", "g-1", 3, "/work", "/work/build.sh"));
         AuditEvent skipped = AuditEvent.Create(Facts(), Guid.NewGuid().ToString("D"), 9, DateTimeOffset.UtcNow, machine.MachineKey, (string)Scalar(outbox.FilePath, "SELECT epoch FROM counter")!);
         machine.Deployment.Authority.UploadAsync(Batch(machine, a, b, skipped)).GetAwaiter().GetResult();
-        StringWriter listed = new();
-        check(CommandWiring.AdminAudit(Parse()!, machine.Folder, listed) == 0 && listed.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 3 && listed.ToString().Contains("exited", StringComparison.Ordinal) && listed.ToString().Contains("g-1", StringComparison.Ordinal) && listed.ToString().Contains("--token=[REDACTED]", StringComparison.Ordinal), "admin audit: one tab-separated line per event, newest first, with the outcome, grant, exit code and the redacted command");
-        StringWriter filtered = new();
-        CommandWiring.AdminAudit(Parse("--grant", "g-1")!, machine.Folder, filtered);
-        check(filtered.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 1 && filtered.ToString().Contains("exited", StringComparison.Ordinal), "admin audit: filters apply");
-        StringWriter gaps = new();
-        CommandWiring.AdminAudit(Parse("--gaps")!, machine.Folder, gaps);
-        check(gaps.ToString().Contains("missing", StringComparison.Ordinal) && gaps.ToString().Contains("3-8", StringComparison.Ordinal), "admin audit --gaps: lists the missing range (" + gaps.ToString().Trim() + ")");
-        check(CliArgs.Parse(["--help"], out _) is CliCommand.Help { Text: var help } && help.Contains("admin audit", StringComparison.Ordinal) && help.Contains("--gaps", StringComparison.Ordinal), "help: it describes the audit trail and the admin audit command");
+        check(machine.Deployment.Store.AuditHistory(Parse().Query!).Count == 3, "audit search: all three stored events are found, newest first");
+        check(machine.Deployment.Store.AuditHistory(Parse(("grant", "g-1")).Query!) is { Count: 1 } one && one[0].Event.Outcome == "exited", "audit search: the grant filter applies");
+        check(machine.Deployment.Store.AuditGaps(null, openOnly: true) is { Count: > 0 } gaps && gaps.Any(gap => gap.From == 3 && gap.To == 8), "audit search: the gap view lists the missing range 3-8");
+        check(CliArgs.Parse(["--help"], out _) is CliCommand.Help { Text: var help } && help.Contains("admin web app", StringComparison.Ordinal) && !help.Contains("admin audit", StringComparison.Ordinal), "help: it describes the admin web app and no longer an admin audit command");
+    }
+
+    // ---- the audit view of the admin web app ----
+
+    private static async Task AdminAuditView(Action<bool, string> check, string parent)
+    {
+        using AdminApp app = new(parent);
+        TestMachine machine = app.Machine;
+        app.Service.Dispose();
+        HostAuditOutbox outbox = HostAuditOutbox.InFolder(machine.Folder, machine.MachineKey);
+        AuditEvent a = outbox.Append(Facts(program: "/work/build.sh", arguments: ["--token=[REDACTED]"]));
+        AuditEvent b = outbox.Append(Facts(AuditEventTypes.Execution, "exited", "", "g-1", 3, "/other/dir", "/work/test.sh"));
+        AuditEvent skipped = AuditEvent.Create(Facts(), Guid.NewGuid().ToString("D"), 9, DateTimeOffset.UtcNow, machine.MachineKey, EpochOf(outbox));
+        machine.Deployment.Authority.UploadAsync(Batch(machine, a, b, skipped)).GetAwaiter().GetResult();
+        app.Start(true);
+        AdminBrowser anon = app.Browser();
+        check((await anon.GetAsync("/admin/audit?text=build")).Status == 401, "audit view: without a session nothing of the history is served");
+        AdminBrowser browser = await app.SignedIn();
+        async Task<string> View(string query) => (await browser.GetAsync("/admin/audit" + query)).Html;
+        string all = await View("");
+        check(all.Contains("build.sh", StringComparison.Ordinal) && all.Contains("test.sh", StringComparison.Ordinal) && all.Contains("exited", StringComparison.Ordinal) && all.Contains("g-1", StringComparison.Ordinal) && all.Contains("--token=[REDACTED]", StringComparison.Ordinal), "audit view: every event with its outcome, grant, exit code and the redacted command");
+        check(all.Contains("admin-session", StringComparison.Ordinal) && all.Contains("Authority changes", StringComparison.Ordinal), "audit view: the authority's own changes (the session start) are shown too");
+        string byGrant = await View("?grant=g-1");
+        check(byGrant.Contains("test.sh", StringComparison.Ordinal) && !byGrant.Contains("build.sh", StringComparison.Ordinal), "audit view: the grant filter applies");
+        string byMachine = await View("?machine=" + KeyIdentity.Display(machine.Fingerprint).Replace(" ", "")[..8]);
+        string otherMachine = await View("?machine=ffffffff");
+        check(byMachine.Contains("build.sh", StringComparison.Ordinal) && !otherMachine.Contains("build.sh", StringComparison.Ordinal) && otherMachine.Contains("No audit events match", StringComparison.Ordinal), "audit view: the machine filter applies");
+        check((await View("?type=execution")).Contains("test.sh", StringComparison.Ordinal) && !(await View("?type=execution")).Contains("build.sh", StringComparison.Ordinal), "audit view: the type (launch or execution) filter applies");
+        check((await View("?outcome=exited")).Contains("test.sh", StringComparison.Ordinal) && !(await View("?outcome=exited")).Contains("build.sh", StringComparison.Ordinal), "audit view: the outcome filter applies");
+        check((await View("?folder=other")).Contains("test.sh", StringComparison.Ordinal) && !(await View("?folder=other")).Contains("build.sh", StringComparison.Ordinal), "audit view: the project (working directory) filter applies");
+        check((await View("?text=build")).Contains("build.sh", StringComparison.Ordinal) && !(await View("?text=build")).Contains("test.sh", StringComparison.Ordinal), "audit view: the text search applies");
+        check((await View("?since=2999-01-01")).Contains("No audit events match", StringComparison.Ordinal) && (await View("?until=2000-01-01")).Contains("No audit events match", StringComparison.Ordinal) && (await View("?since=2000-01-01")).Contains("build.sh", StringComparison.Ordinal), "audit view: the time range applies");
+        string gaps = await View("?gaps=1");
+        check(gaps.Contains("3-8", StringComparison.Ordinal) && gaps.Contains("missing", StringComparison.OrdinalIgnoreCase), "audit view: the gap view lists the missing range 3-8");
+        string bad = await View("?last=0&since=nonsense");
+        check(bad.Contains("audit-error", StringComparison.Ordinal) && !bad.Contains("build.sh", StringComparison.Ordinal), "audit view: a bad filter says why and shows nothing");
+        string xss = await View("?text=" + Uri.EscapeDataString("<script>alert(1)</script>"));
+        check(!xss.Contains("<script>alert(1)", StringComparison.Ordinal) && xss.Contains("&lt;script&gt;", StringComparison.Ordinal), "audit view: a search text is shown encoded (no script injection)");
+        check(!all.Contains("authenticatorData", StringComparison.Ordinal) && !all.Contains(browser.Cookies[AdminSessions.SessionCookie], StringComparison.Ordinal), "audit view: no proof and no session token in the page");
+
+        // L2: a locked authority stores nothing that a host uploads.
+        using TestMachine lockedMachine = new(Path.Combine(parent, "l2-" + Guid.NewGuid().ToString("N")[..6]));
+        lockedMachine.Deployment.Keys.LockState = new AuthorityLock();
+        HostAuditOutbox lockedOutbox = HostAuditOutbox.InFolder(lockedMachine.Folder, lockedMachine.MachineKey);
+        AuditEvent held = lockedOutbox.Append(Facts());
+        bool refused = false;
+        try
+        {
+            await lockedMachine.Deployment.Authority.UploadAsync(Batch(lockedMachine, held));
+        }
+        catch (AuthorityLockedException)
+        {
+            refused = true;
+        }
+
+        check(refused && lockedMachine.Deployment.Store.AuditHistory(new AuditQuery()).Count == 0, "audit upload: a locked authority refuses an upload and stores (and prunes) nothing (L2)");
     }
 
     // ---- through the running service ----

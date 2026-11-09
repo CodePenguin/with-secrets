@@ -47,7 +47,7 @@ internal static class Cmds
         // talks to it over HTTP. The page listens on the port the harness chose (the --port of the run).
         return new Cmd<int>((port, o, e) =>
         {
-            // The machine is enrolled and approved through AdminActions (what `admin approve` does after the passkey tap), with software keys.
+            // The machine is enrolled and approved through AdminActions (what the admin web app does after the passkey tap), with software keys.
             E2EMachine machine = rig.Machine;
             using HostService service = HostService.Start(new HostServiceOptions { Lock = AuthorityLock.UnlockedForTests(), State = rig.State, Store = rig.Store, Grants = rig.Grants, Deployment = machine.Deployment, Port = 0, TimeLimit = timeLimit });
 

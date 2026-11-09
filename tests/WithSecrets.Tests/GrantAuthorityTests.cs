@@ -264,6 +264,7 @@ internal static class GrantAuthorityTests
             await Evidence(check, parent);
             await Atomicity(check, parent);
             await AdminGate(check, parent);
+            await LockDuringApproval(check, parent);
             await KeyHolding(check, parent);
             await ThroughTheService(check, parent);
         }
@@ -294,17 +295,6 @@ internal static class GrantAuthorityTests
         check(Parse("approve") is CliCommand.Help && Parse("approve", "--help") is CliCommand.Help, "approve parse: nothing to approve shows the help; --help still works");
         check(Parse("approve", "-f", "a.env", "--secrets", "A", "--reason", "r", "--", "p") is CliCommand.Approve { Args.EnvFiles.Count: 1 }, "approve parse: -f works as for a run");
         check(!CliArgs.NeedsTerminal(approve!), "approve: needs no terminal of its own (the approval is on the page, as for a run)");
-
-        CliCommand.GrantAdmin? Grant(params string[] args) => CliArgs.Parse(["admin", "grant", .. args], out _) as CliCommand.GrantAdmin;
-        check(Grant("list") is { Action: GrantAdminAction.List, Id: null }, "admin grant parse: list");
-        check(Grant("extend", "g-abcd", "--minutes", "30") is { Action: GrantAdminAction.Extend, Id: "g-abcd", Minutes: 30, Indefinite: false }, "admin grant parse: extend ID --minutes N");
-        check(Grant("extend", "g-abcd", "--indefinite") is { Action: GrantAdminAction.Extend, Indefinite: true, Minutes: null } && Grant("renew", "g-abcd", "--minutes", "5") is { Action: GrantAdminAction.Renew, Minutes: 5 }, "admin grant parse: extend and renew take --indefinite or --minutes");
-        check(Grant("revoke", "g-abcd") is { Action: GrantAdminAction.Revoke }, "admin grant parse: revoke ID");
-        check(Grant("extend", "g-abcd") is null && Grant("extend", "g-abcd", "--minutes", "5", "--indefinite") is null && Grant("renew", "g-abcd", "--minutes", "0") is null && Grant("extend", "g-abcd", "--minutes", "1441") is null, "admin grant parse: a time (1 to 1440 minutes) or --indefinite, exactly one");
-        check(Grant("revoke", "g-abcd", "--minutes", "5") is null && Grant("list", "g-abcd") is null && Grant("list", "--port", "5") is null && Grant("revoke") is null && Grant("frobnicate", "g-abcd") is null && Grant() is null, "admin grant parse: missing, extra or unknown arguments are refused");
-        check(Grant("revoke", "g-abcd", "--port", "4000", "--debug") is { Port: 4000, Debug: true }, "admin grant parse: --port and --debug are accepted");
-        string[][] all = [["list"], ["extend", "g-abcd", "--minutes", "5"], ["renew", "g-abcd", "--indefinite"], ["revoke", "g-abcd"]];
-        check(all.All(args => Grant(args) is { } command && CliArgs.NeedsTerminal(command)), "admin grant gate: every admin grant command, the listing included, needs a real terminal (it is for people, not agents)");
     }
 
     // ---- grant lifecycle ----
@@ -975,118 +965,128 @@ internal static class GrantAuthorityTests
         }
     }
 
-    // ---- the admin gate ----
+    // ---- a lock while an approval page is open (M1) ----
 
-    private sealed class PageResult
+    private static async Task LockDuringApproval(Action<bool, string> check, string parent)
     {
-        public (int Code, string Detail)? Result { get; set; }
-
-        public int Status { get; set; }
-
-        public int Announced { get; set; }
-
-        public string Html { get; set; } = "";
-
-        public string Url { get; set; } = "";
-
-        public string Proof { get; set; } = "";
-    }
-
-    private static async Task<PageResult> RunGrantAdmin(Fixture fx, StateDatabase db, CliCommand.GrantAdmin command, TestAuthenticator? signer, Action? beforeTap = null, bool userVerified = true, Func<byte[], byte[]>? changeChallenge = null)
-    {
-        using HttpClient client = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(20) };
-        TaskCompletionSource<string> line = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        PageResult page = new();
-        int announced = 0;
-        ApprovalSettings settings = new("passkey", null, 0, TimeSpan.FromSeconds(signer is null ? 1 : 20));
-        PasskeyMethod method = new(new PasskeyStore(db), settings);
-        EnrollmentTarget target = EnrollmentTarget.For(method, new WebApprover(method, settings, text =>
+        using Fixture fx = new(parent);
+        AuthorityLock lockState = AuthorityLock.UnlockedForTests();
+        fx.Machine.Deployment.Keys.LockState = lockState;
+        await fx.Start();
+        string outcome;
+        try
         {
-            Interlocked.Increment(ref announced);
-            line.TrySetResult(text);
-        }, TimeSpan.Zero));
-        AdminContext context = new(fx.Store, fx.Machine.Deployment.Keys, fx.Machine.Deployment.HostConfig, fx.Fingerprint, target, target, new AuditLog(db), new StringWriter(), fx.Clock, new ManifestApprovalVerifier(db));
-        Task<(int, string)> task = Task.Run(() => AdminGrantCommand.Run(command, context));
-        if (await Task.WhenAny(line.Task, task, Task.Delay(TimeSpan.FromSeconds(20))) == line.Task && signer is not null)
+            GrantApproval made = await fx.Host.ApproveGrantAsync(fx.Req(), S1, () =>
+            {
+                lockState.Lock("locked while the page was open");
+
+                return ApprovalDecision.Allow("approved with passkey key-one", 60, fx.Sign(fx.UserKey, Fixture.ApproveText(S1, fx.Host.KnownRevision ?? 1), 60));
+            }, CancellationToken.None);
+            outcome = made.GrantId is null ? "no grant" : "grant " + made.GrantId;
+        }
+        catch (AuthorityLockedException)
         {
-            beforeTap?.Invoke();
-            Uri link = new(line.Task.Result[line.Task.Result.IndexOf("http", StringComparison.Ordinal)..]);
-            string url = "http://127.0.0.1:" + link.Port + link.AbsolutePath;
-            (_, page.Html) = TestState.Get(client, url);
-            (page.Status, _) = TestState.Approve(client, url, "http://localhost:" + link.Port, "localhost", signer, userVerified: userVerified, changeChallenge: changeChallenge);
-            page.Url = url;
-            page.Proof = TestState.LastProofBody;
+            outcome = "locked";
         }
 
-        Task done = await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(20)));
-        page.Result = done == task ? task.Result : null;
-        page.Announced = Volatile.Read(ref announced);
-
-        return page;
+        check(outcome != "grant " && !outcome.StartsWith("grant ", StringComparison.Ordinal) && fx.Store.Grants().Count == 0, "lock: a grant approved on a page that was open when the authority locked is not made (" + outcome + ")");
     }
+
+    // ---- the admin gate (the admin web app's grant functions: each a fresh, bound passkey tap behind a signed-in session) ----
+
+    private static string Snap(Fixture fx, string id) => fx.Store.FindGrant(id) is { } grant ? grant.Status + "|" + grant.Revision + "|" + grant.Expires?.ToString("O") : "none";
 
     private static async Task AdminGate(Action<bool, string> check, string parent)
     {
         using Fixture fx = new(parent);
         TestAuthenticator laptop = fx.AdminKey;
         TestAuthenticator phone = fx.UserKey;
-        StateDatabase db = fx.Db;
         await fx.Start();
         GrantApproval made = await fx.Approve(S1, 60);
         string id = made.GrantId!;
-        CliCommand.GrantAdmin Cmd(GrantAdminAction action, int? minutes = null, bool indefinite = false, string? grant = null) => new(action, grant ?? id, minutes, indefinite);
-
-        PageResult none = await RunGrantAdmin(fx, db, Cmd(GrantAdminAction.Extend, 30), null);
-        check(none.Result is { Code: RunCommand.Denied } && fx.Store.FindGrant(id) is { Revision: 1 }, "admin grant extend: with no passkey answer nothing changes (" + none.Result?.Detail + ")");
-        PageResult wrong = await RunGrantAdmin(fx, db, Cmd(GrantAdminAction.Extend, 30), phone);
-        check(wrong.Result is { Code: RunCommand.Denied } && wrong.Status == 403 && fx.Store.FindGrant(id) is { Revision: 1 }, "admin grant extend: a key that is not an admin key is refused (403), nothing changes");
-        // Sensitive operation: no user verification, a signature over another challenge, or no answer each change nothing (fail closed).
-        PageResult noUv = await RunGrantAdmin(fx, db, Cmd(GrantAdminAction.Extend, 30), laptop, userVerified: false);
-        PageResult otherChallenge = await RunGrantAdmin(fx, db, Cmd(GrantAdminAction.Extend, 30), laptop, changeChallenge: challenge => SHA256.HashData(challenge));
-        check(noUv.Result is { Code: RunCommand.Denied } && otherChallenge.Result is { Code: RunCommand.Denied } && fx.Store.FindGrant(id) is { Revision: 1 }, "admin grant extend: an assertion without user verification, or a signature over another challenge, changes nothing");
-        PageResult noUvRevoke = await RunGrantAdmin(fx, db, Cmd(GrantAdminAction.Revoke), laptop, userVerified: false);
-        PageResult wrongRevoke = await RunGrantAdmin(fx, db, Cmd(GrantAdminAction.Revoke), phone);
-        check(noUvRevoke.Result is { Code: RunCommand.Denied } && wrongRevoke.Result is { Code: RunCommand.Denied } && fx.Store.FindGrant(id) is { Status: "active", Revision: 1 }, "admin grant revoke: no user verification, or a key that is not an admin key, revokes nothing");
-        PageResult ok = await RunGrantAdmin(fx, db, Cmd(GrantAdminAction.Extend, 30, grant: id[..6]), laptop);
-        using (HttpClient replayClient = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(20) })
+        using HostService service = HostService.Start(new HostServiceOptions
         {
-            // Replay: the proof of that extension sent again to its page, and the same signed change presented to the authority again, extend nothing more.
-            TestState.Post(replayClient, ok.Url + "/proof", ok.Proof);
-            check(fx.Store.FindGrant(id) is { Revision: 2 }, "admin grant extend: replaying the proof does not extend it again");
-        }
+            Lock = AuthorityLock.UnlockedForTests(),
+            State = fx.Db,
+            Store = new HostServiceTests.CountingStore(new Dictionary<string, string> { ["TOKEN"] = "x" }),
+            Deployment = fx.Machine.Deployment,
+            Port = 0,
+            AdminAskerFactory = announce =>
+            {
+                ApprovalSettings settings = new("passkey", null, 0, TimeSpan.FromSeconds(4));
+                PasskeyMethod method = new(new PasskeyStore(fx.Db), settings);
+                EnrollmentTarget target = EnrollmentTarget.For(method, new WebApprover(method, settings, announce, TimeSpan.Zero));
 
-        string text = WebUtility.HtmlDecode(ok.Html);
-        check(ok.Result is { Code: 0 } && fx.Store.FindGrant(id) is { Revision: 2 } extended && extended.Expires == fx.Clock.GetUtcNow().AddMinutes(90), "admin grant extend: the admin key's tap extends it (found by a prefix of its id) (" + ok.Result?.Detail + string.Join(" | ", fx.Store.Audit().Where(e => e.Event.StartsWith("grant", StringComparison.Ordinal)).Select(e => e.Event + ":" + e.Detail)) + ")");
-        check(text.Contains("extend this grant by 30 minutes", StringComparison.Ordinal) && text.Contains(id, StringComparison.Ordinal) && text.Contains(KeyIdentity.Display(fx.Fingerprint), StringComparison.Ordinal) && text.Contains(fx.Machine.HostName, StringComparison.Ordinal), "admin grant extend: the page (which the passkey signs) shows the action, the grant, the machine's fingerprint and host name");
-        check(fx.Store.Audit().Any(entry => entry.Event == "grant-extended" && entry.Detail.Contains("admin passkey admin-key", StringComparison.Ordinal)), "admin grant extend: the authority audit names the admin key that tapped");
+                return new TargetAdminAsker(target, target);
+            },
+        });
+        using HttpClient http = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(30) };
+        AdminBrowser browser = new(service, http);
+        check(await browser.SignInAsync(laptop), "admin grants: the administrator signs in to the app with one tap");
 
-        PageResult notYet = await RunGrantAdmin(fx, db, Cmd(GrantAdminAction.Renew, 30), laptop);
-        check(notYet.Result is { Code: RunCommand.Denied } && notYet.Announced == 0, "admin grant renew: a grant that has not ended is refused before any page (" + notYet.Result?.Detail + ")");
-        PageResult unknown = await RunGrantAdmin(fx, db, Cmd(GrantAdminAction.Revoke, grant: "g-none"), laptop);
-        PageResult tooShort = await RunGrantAdmin(fx, db, Cmd(GrantAdminAction.Revoke, grant: "g-"), laptop);
-        check(unknown.Result is { Code: RunCommand.Denied } && unknown.Announced == 0 && tooShort.Result is { Code: RunCommand.Denied } && tooShort.Announced == 0, "admin grant: an unknown grant, or an id of fewer than 4 characters, is refused before any page");
+        // The grants view lists each grant (no scope key), with its state and end; it needs the session.
+        (int listStatus, string listHtml, _) = await browser.GetAsync("/admin/grants");
+        check(listStatus == 200 && listHtml.Contains(id, StringComparison.Ordinal) && listHtml.Contains("active", StringComparison.Ordinal) && !listHtml.Contains(S1, StringComparison.Ordinal), "admin grants: the grants view shows the grant and its state, and not the scope key");
+        AdminBrowser stranger = new(service, http);
+        check((await stranger.GetAsync("/admin/grants")).Status == 401, "admin grants: without a session the view is refused");
+
+        string before = Snap(fx, id);
+        async Task<Tapped> Op(string op, TestAuthenticator? who, bool uv = true, Func<byte[], byte[]>? change = null, params (string, string)[] args) => await browser.OpAsync(op, who, uv, change, true, args);
+
+        Tapped none = await Op("grant-extend", null, true, null, ("id", id), ("minutes", "30"));
+        await Task.Delay(TimeSpan.FromSeconds(5));
+        check(none.Link is not null && Snap(fx, id) == before, "admin grants extend: with no passkey answer nothing changes");
+        Tapped wrong = await Op("grant-extend", phone, true, null, ("id", id), ("minutes", "30"));
+        check(wrong.ApproveStatus == 403 && Snap(fx, id) == before, "admin grants extend: a key that is not an admin key is refused (403), nothing changes");
+        Tapped noUv = await Op("grant-extend", laptop, false, null, ("id", id), ("minutes", "30"));
+        Tapped otherChallenge = await Op("grant-extend", laptop, true, challenge => SHA256.HashData(challenge), ("id", id), ("minutes", "30"));
+        check(noUv.ApproveStatus == 403 && otherChallenge.ApproveStatus is 403 or 400 && Snap(fx, id) == before, "admin grants extend: no user verification, or a signature over another challenge, changes nothing");
+        Tapped noUvRevoke = await Op("grant-revoke", laptop, false, null, ("id", id));
+        Tapped wrongRevoke = await Op("grant-revoke", phone, true, null, ("id", id));
+        check(noUvRevoke.ApproveStatus == 403 && wrongRevoke.ApproveStatus == 403 && Snap(fx, id) == before, "admin grants revoke: no user verification, or a key that is not an admin key, revokes nothing");
+
+        // The session alone changes nothing: every request so far had a session and no genuine tap.
+        check(Snap(fx, id) == before && fx.Store.FindGrant(id) is { Revision: 1 }, "admin grants: a signed-in session without a genuine tap changes no grant");
+
+        Tapped ok = await Op("grant-extend", laptop, true, null, ("id", id[..6]), ("minutes", "30"));
+        string text = ok.Page;
+        check(ok.ApproveStatus == 200 && await HostServiceTests.WaitFor(() => fx.Store.FindGrant(id) is { Revision: 2 } extended && extended.Expires == fx.Clock.GetUtcNow().AddMinutes(90)), "admin grants extend: the admin key's tap extends it (found by a prefix of its id)");
+        string settled = Snap(fx, id);
+        TestState.Post(http, ok.PageUrl + "/proof", ok.ProofBody);
+        await Task.Delay(300);
+        check(Snap(fx, id) == settled, "admin grants extend: replaying the proof does not extend it again");
+        check(text.Contains("extend this grant by 30 minutes", StringComparison.Ordinal) && text.Contains(id, StringComparison.Ordinal) && text.Contains(KeyIdentity.Display(fx.Fingerprint), StringComparison.Ordinal) && text.Contains(fx.Machine.HostName, StringComparison.Ordinal), "admin grants extend: the page (which the passkey signs) shows the action, the grant, the machine's fingerprint and host name");
+        check(fx.Store.Audit().Any(entry => entry.Event == "grant-extended" && entry.Detail.Contains("admin passkey admin-key", StringComparison.Ordinal)), "admin grants extend: the authority audit names the admin key that tapped");
+
+        Tapped notYet = await Op("grant-renew", laptop, true, null, ("id", id), ("minutes", "30"));
+        check(notYet.Link is null && notYet.PostStatus == 409, "admin grants renew: a grant that has not ended is refused before any page (" + notYet.Error + ")");
+        Tapped unknown = await Op("grant-revoke", laptop, true, null, ("id", "g-none"));
+        Tapped tooShort = await Op("grant-revoke", laptop, true, null, ("id", "g-"));
+        check(unknown.Link is null && tooShort.Link is null, "admin grants: an unknown grant, or an id of fewer than 4 characters, is refused before any page");
+        Tapped badTime = await Op("grant-extend", laptop, true, null, ("id", id), ("minutes", "0"));
+        Tapped bothTimes = await Op("grant-extend", laptop, true, null, ("id", id), ("minutes", "5"), ("indefinite", "true"));
+        check(badTime.Link is null && bothTimes.Link is null, "admin grants: a time of 0, or a time and no-end together, is refused before any page");
 
         // A grant that changed while the page was open: the tap changes nothing.
-        PageResult stale = await RunGrantAdmin(fx, db, Cmd(GrantAdminAction.Revoke), laptop, beforeTap: () => fx.Admin(GrantOps.Extend, id, 1));
-        check(stale.Result is { Code: RunCommand.Denied } && fx.Store.FindGrant(id) is { Status: "active" }, "admin grant revoke: a grant that changed while the page was open is not revoked by the stale tap (" + stale.Result?.Detail + ")");
+        Tapped stalePage = await browser.OpAsync("grant-revoke", null, true, null, true, ("id", id));
+        fx.Admin(GrantOps.Extend, id, 1);
+        (int staleStatus, _) = TestState.Approve(http, "http://127.0.0.1:" + new Uri(stalePage.Link!).Port + new Uri(stalePage.Link!).AbsolutePath, "http://localhost:" + new Uri(stalePage.Link!).Port, "localhost", laptop);
+        await Task.Delay(500);
+        check(fx.Store.FindGrant(id) is { Status: "active" } && staleStatus != 0, "admin grants revoke: a grant that changed while the page was open is not revoked by the stale tap");
 
-        PageResult revoke = await RunGrantAdmin(fx, db, Cmd(GrantAdminAction.Revoke), laptop);
-        check(revoke.Result is { Code: 0 } && fx.Store.FindGrant(id) is { Status: "revoked" } && WebUtility.HtmlDecode(revoke.Html).Contains("revoke this grant", StringComparison.Ordinal), "admin grant revoke: the tap revokes it and the page named exactly that action");
+        Tapped revoke = await Op("grant-revoke", laptop, true, null, ("id", id));
+        check(revoke.ApproveStatus == 200 && await HostServiceTests.WaitFor(() => fx.Store.FindGrant(id) is { Status: "revoked" }) && revoke.Page.Contains("revoke this grant", StringComparison.Ordinal), "admin grants revoke: the tap revokes it and the page named exactly that action");
 
         GrantApproval short1 = await fx.Approve(Scope("short"), 10);
         fx.Clock.Advance(TimeSpan.FromMinutes(11));
-        PageResult renew = await RunGrantAdmin(fx, db, Cmd(GrantAdminAction.Renew, 15, grant: short1.GrantId), laptop);
-        check(renew.Result is { Code: 0 } && fx.Store.FindGrant(short1.GrantId!) is { } renewed && renewed.Expires == fx.Clock.GetUtcNow().AddMinutes(15) && WebUtility.HtmlDecode(renew.Html).Contains("renew this ended grant for 15 minutes from now", StringComparison.Ordinal), "admin grant renew: an ended grant is renewed from now after the tap");
-        PageResult indefinite = await RunGrantAdmin(fx, db, Cmd(GrantAdminAction.Extend, indefinite: true, grant: short1.GrantId), laptop);
-        check(indefinite.Result is { Code: 0 } && fx.Store.FindGrant(short1.GrantId!) is { Expires: null }, "admin grant extend --indefinite: gives the grant no end after the tap");
+        Tapped renew = await Op("grant-renew", laptop, true, null, ("id", short1.GrantId!), ("minutes", "15"));
+        check(renew.ApproveStatus == 200 && await HostServiceTests.WaitFor(() => fx.Store.FindGrant(short1.GrantId!) is { } renewed && renewed.Expires == fx.Clock.GetUtcNow().AddMinutes(15)) && renew.Page.Contains("renew this ended grant for 15 minutes from now", StringComparison.Ordinal), "admin grants renew: an ended grant is renewed from now after the tap");
+        Tapped indefinite = await Op("grant-extend", laptop, true, null, ("id", short1.GrantId!), ("indefinite", "true"));
+        check(indefinite.ApproveStatus == 200 && await HostServiceTests.WaitFor(() => fx.Store.FindGrant(short1.GrantId!) is { Expires: null }), "admin grants extend (no end): gives the grant no end after the tap");
 
-        StringWriter listing = new();
-        AdminGrantCommand.List(fx.Store, listing, fx.Clock.GetUtcNow());
-        string[] lines = listing.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries);
-        check(lines.Length == 2 && lines.Any(line => line.StartsWith(id, StringComparison.Ordinal) && line.Contains("revoked", StringComparison.Ordinal)) && lines.Any(line => line.StartsWith(short1.GrantId!, StringComparison.Ordinal) && line.Contains("no end", StringComparison.Ordinal)), "admin grant list: one line per grant with its state, end, scope names, program and folder (" + lines.Length + " lines)");
-        check(!listing.ToString().Contains(S1, StringComparison.Ordinal), "admin grant list: the scope key (a hash of the request) is not printed");
+        (_, string again, _) = await browser.GetAsync("/admin/grants");
+        check(again.Contains(id, StringComparison.Ordinal) && again.Contains("revoked", StringComparison.Ordinal) && again.Contains(short1.GrantId!, StringComparison.Ordinal) && again.Contains("no end", StringComparison.Ordinal) && !again.Contains(S1, StringComparison.Ordinal), "admin grants list: one row per grant with its state and end; the scope key (a hash of the request) is not shown");
     }
-
 
     // ---- the held store key: dropped on every end of its grant ----
 

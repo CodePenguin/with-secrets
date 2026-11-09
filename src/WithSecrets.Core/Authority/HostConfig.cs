@@ -53,7 +53,7 @@ public sealed class HostConfigFile(string path)
         }
     }
 
-    private string Damaged(string why) => $"{FileName} {why}. Delete it and ask the administrator to run: with-secrets admin approve (or admin recover-authority)";
+    private string Damaged(string why) => $"{FileName} {why}. Delete it and ask the administrator to approve this machine again (or recover the authority key) in the authority's admin web app (with-secrets admin prints its link)";
 
     private HostConfigLoad Parse(string json)
     {

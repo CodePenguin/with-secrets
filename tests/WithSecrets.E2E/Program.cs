@@ -18,6 +18,10 @@ internal static class Program
         ("h3-lost-reply", ScenariosH.LostReply),
         ("h4-continue-fallback", ScenariosH.ContinueFallback),
         ("h5-tap-rule", ScenariosH.TapRule),
+        ("i1-admin-login", ScenariosAdmin.Login),
+        ("i2-admin-approve-machine", ScenariosAdmin.ApproveMachine),
+        ("i3-admin-grant-revoke", ScenariosAdmin.GrantRevoke),
+        ("i4-admin-audit-search", ScenariosAdmin.AuditSearch),
     ];
 
     private static async Task<int> Main(string[] args)
