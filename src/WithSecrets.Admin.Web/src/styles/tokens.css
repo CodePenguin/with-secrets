@@ -1,0 +1,62 @@
+/* Design tokens. Every text/background pair is at least 4.5:1 (7:1 for body text), every control border and focus ring at least 3:1.
+   Light and dark follow the person's system setting; nothing here depends on colour alone (states also carry words). */
+:root {
+  color-scheme: light dark;
+
+  --font-body: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Mono', 'Segoe UI Mono', Consolas, Menlo, monospace;
+
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --radius: 0.5rem;
+  --target: 2.75rem; /* touch target: 44 CSS px (WCAG 2.2 AA asks for 24) */
+  --content-width: 72rem;
+
+  --bg: #f4f6fa;
+  --surface: #ffffff;
+  --surface-2: #eef1f7;
+  --text: #161b26;
+  --muted: #465064;
+  --border: #6a7488;
+  --border-soft: #c9d0de;
+  --accent: #0a4fc4;
+  --accent-text: #ffffff;
+  --accent-soft: #e3ebfc;
+  --danger: #a8201a;
+  --danger-text: #ffffff;
+  --danger-soft: #fde8e6;
+  --ok: #17602f;
+  --ok-soft: #e0f3e6;
+  --warn: #7a4a00;
+  --warn-soft: #fcefd2;
+  --focus: #0a4fc4;
+  --backdrop: rgb(10 14 24 / 55%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f131b;
+    --surface: #181e29;
+    --surface-2: #212938;
+    --text: #e9edf5;
+    --muted: #b6bfd0;
+    --border: #8c97ad;
+    --border-soft: #3a4457;
+    --accent: #8ab4ff;
+    --accent-text: #08172f;
+    --accent-soft: #1d2b4a;
+    --danger: #ff9b92;
+    --danger-text: #2a0705;
+    --danger-soft: #3b1816;
+    --ok: #86dba0;
+    --ok-soft: #14301f;
+    --warn: #f3c46d;
+    --warn-soft: #34270a;
+    --focus: #8ab4ff;
+    --backdrop: rgb(0 0 0 / 65%);
+  }
+}

@@ -1,0 +1,58 @@
+.dialog {
+  width: min(40rem, calc(100vw - 1rem));
+  max-height: calc(100dvh - 1rem);
+  padding: 0;
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  overflow: auto;
+}
+
+.dialog::backdrop {
+  background: var(--backdrop);
+}
+
+.inner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-5);
+}
+
+.title {
+  margin: 0;
+}
+
+.title:focus {
+  outline: none;
+}
+
+.title:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 4px;
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  padding-top: var(--space-2);
+}
+
+@media (max-width: 30rem) {
+  .inner {
+    padding: var(--space-4);
+  }
+
+  .footer > * {
+    flex: 1 1 100%;
+  }
+}
