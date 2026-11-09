@@ -23,7 +23,7 @@ internal static class AuthorityLockTests
             await Startup(check, root);
             await Ceremonies(check, root);
             await Unattended(check, root);
-            Origins(check, root);
+            await Origins(check, root);
             Store(check, root);
             Authorizer(check, root);
             await GrantUseIsNotAdministrative(check, root);
@@ -349,8 +349,9 @@ internal static class AuthorityLockTests
         Tapped allow = await TapOn(first, http, AdminService.OpPolicyUnattended, laptop);
         check(allow.ApproveStatus == 200 && await HostServiceTests.WaitFor(() => store.GetUnlockPolicy() == UnlockPolicy.Unattended) && store.UnattendedMaterial() is { Sealed.Length: > 0 }, "policy: the admin key's tap allows unattended unlock");
         check(store.Audit(1000).Any(entry => entry.Event == "unlock-policy-changed" && entry.Detail.Contains("manual to unattended", StringComparison.Ordinal) && entry.Actor.Contains("laptop", StringComparison.Ordinal)), "policy: the change is in the audit history with the key that tapped");
-        string root1 = await http.GetStringAsync("http://127.0.0.1:" + first.Port + "/admin");
-        check(root1.Contains("WEAKER", StringComparison.Ordinal) && root1.Contains("unattended", StringComparison.Ordinal), "policy: the admin page shows the weaker mode visibly");
+        string rootStatus = await http.GetStringAsync("http://127.0.0.1:" + first.Port + "/api/v1/status");
+        string rootSettings = (await (await Login(first, http)).GetAsync("/api/v1/settings")).Html;
+        check(rootStatus.Contains("\"unlockMode\":\"unattended\"", StringComparison.Ordinal) && rootSettings.Contains("WEAKER", StringComparison.Ordinal) && rootSettings.Contains("unattended", StringComparison.Ordinal), "policy: the API shows the weaker mode (the status names it, the settings describe it as WEAKER)");
         check(ServiceStartup.LockLines(true, UnlockPolicy.Unattended, null, first.Admin.PageUrl).Any(line => line.Contains("WEAKER", StringComparison.Ordinal)) && ServiceStartup.LockLines(true, UnlockPolicy.Manual, null, first.Admin.PageUrl).Any(line => line.Contains("manual", StringComparison.Ordinal) && line.Contains("unlock mode", StringComparison.Ordinal)), "policy: the service startup lines report the unlock mode, the weaker one by name");
 
         // A restart unlocks itself; nothing else changes.
@@ -438,7 +439,7 @@ internal static class AuthorityLockTests
 
     // ---- the admin app's origin rules ----
 
-    private static void Origins(Action<bool, string> check, string root)
+    private static async Task Origins(Action<bool, string> check, string root)
     {
         using HostServiceTests.Rig rig = new(root, startLocked: true);
         HttpClient http = rig.Http;
@@ -462,21 +463,26 @@ internal static class AuthorityLockTests
         }
 
         string good = "http://localhost:" + rig.Service.Port;
-        check(Send(HttpMethod.Post, "/admin/op", null, "{\"op\":\"unlock\"}") == HttpStatusCode.Forbidden, "admin app: an operation from a program (no Origin) is refused");
-        check(Send(HttpMethod.Post, "/admin/op", "http://evil.example", "{\"op\":\"unlock\"}") == HttpStatusCode.Forbidden, "admin app: an operation from another site is refused");
-        check(Send(HttpMethod.Get, "/admin", "http://evil.example") == HttpStatusCode.Forbidden, "admin app: a page request from another site is refused");
-        check(Send(HttpMethod.Post, "/admin/op", good, "op=unlock", "text/plain") == HttpStatusCode.UnsupportedMediaType, "admin app: a body that is not JSON is refused");
-        check(Send(HttpMethod.Post, "/admin/op", good, "[1]") == HttpStatusCode.BadRequest && Send(HttpMethod.Post, "/admin/op", good, "{\"op\":\"unlock\"}") == HttpStatusCode.Forbidden, "admin app: a body that is not an object is refused, and a well-formed one without the page's anti-forgery value is refused");
-        check(Send(HttpMethod.Get, "/admin/op", null) == HttpStatusCode.MethodNotAllowed || Send(HttpMethod.Get, "/admin/op", null) == HttpStatusCode.NotFound, "admin app: an operation is not a GET");
-        check(Send(HttpMethod.Get, "/admin/unknown", null) == HttpStatusCode.NotFound, "admin app: an unknown route is 404");
-        check(Send(HttpMethod.Post, "/v1/launch", "http://localhost:1", "{}") == HttpStatusCode.Forbidden, "admin app: the run API still refuses any request with an Origin");
+        string unlock = "{\"authorization\":\"AAAAAAAAAAAA\"}";
+        check(Send(HttpMethod.Post, "/api/v1/unlock", null, unlock) == HttpStatusCode.Forbidden, "api: a change from a program (no Origin) is refused");
+        check(Send(HttpMethod.Post, "/api/v1/unlock", "http://evil.example", unlock) == HttpStatusCode.Forbidden, "api: a change from another site is refused");
+        check(Send(HttpMethod.Get, "/api/v1/status", "http://evil.example") == HttpStatusCode.Forbidden, "api: a read from another site is refused (no CORS)");
+        check(Send(HttpMethod.Post, "/api/v1/unlock", good, unlock) == HttpStatusCode.Forbidden, "api: a well-formed change without the page's anti-forgery value is refused");
+        AdminBrowser page = new(rig.Service, http);
+        await page.LoadAsync();
+        check((await page.PostAsync("/api/v1/unlock", "op=unlock", contentType: "text/plain")).Status == 415, "api: a body that is not JSON is refused");
+        check((await page.PostAsync("/api/v1/unlock", "[1]")).Status == 400 && (await page.PostAsync("/api/v1/unlock", "{\"authorization\":\"AAAAAAAAAAAA\",\"x\":1}")).Status == 400, "api: a body that is not an object, or has a member the route does not take, is refused");
+        check((await page.PostAsync("/api/v1/unlock", unlock)).Status == 403, "api: a change with an authorization that was never made is refused (403)");
+        check(Send(HttpMethod.Get, "/api/v1/unlock", null) == HttpStatusCode.MethodNotAllowed, "api: a change is not a GET");
+        check(Send(HttpMethod.Get, "/api/v1/unknown", null) == HttpStatusCode.NotFound, "api: an unknown route is 404");
+        check(Send(HttpMethod.Post, "/v1/launch", "http://localhost:1", "{}") == HttpStatusCode.Forbidden, "api: the run API still refuses any request with an Origin");
 
-        string page = http.GetStringAsync(baseUrl + "/admin").GetAwaiter().GetResult();
-        using HttpResponseMessage head = http.GetAsync(baseUrl + "/admin").GetAwaiter().GetResult();
-        check(page.Contains("LOCKED", StringComparison.Ordinal) && page.Contains("Unlock", StringComparison.Ordinal) && page.Contains("manual", StringComparison.Ordinal) && head.Headers.Contains("X-Frame-Options") && head.Headers.Contains("Content-Security-Policy"), "admin app: the root page shows running/locked and the unlock mode, and is protected against framing and inline script");
-        using HttpResponseMessage auditResponse = http.GetAsync(baseUrl + "/admin/audit").GetAwaiter().GetResult();
-        string audit = auditResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-        check(auditResponse.StatusCode == HttpStatusCode.Unauthorized && !audit.Contains("<button", StringComparison.Ordinal) && !audit.Contains("admin-operation", StringComparison.Ordinal), "admin app: the audit view is served to a signed-in session only (401 without one, M2)");
+        string status = await http.GetStringAsync(baseUrl + "/api/v1/status");
+        using HttpResponseMessage head = await http.GetAsync(baseUrl + "/api/v1/status");
+        check(status.Contains("\"locked\":true", StringComparison.Ordinal) && status.Contains("\"unlockMode\":\"manual\"", StringComparison.Ordinal) && head.Headers.Contains("X-Frame-Options") && head.Headers.Contains("Content-Security-Policy"), "api: the public status shows running/locked and the unlock mode, and the answer cannot be framed or run as script");
+        using HttpResponseMessage auditResponse = await http.GetAsync(baseUrl + "/api/v1/audit/changes");
+        string audit = await auditResponse.Content.ReadAsStringAsync();
+        check(auditResponse.StatusCode == HttpStatusCode.Unauthorized && !audit.Contains("admin-operation", StringComparison.Ordinal), "api: the audit history is served to a signed-in session only (401 without one, M2)");
     }
 
     // ---- store-level guards ----

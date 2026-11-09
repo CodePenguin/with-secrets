@@ -334,19 +334,34 @@ public sealed class HostService : IDisposable
         HttpRequest request = context.Request;
 
         // DNS rebinding: a page on another name that resolves to 127.0.0.1 still sends its own name as Host.
+        string path = request.Path.Value ?? "";
         if (!LoopbackHosts.Contains(request.Host.Host, StringComparer.OrdinalIgnoreCase))
         {
+            if (path == "/api" || path.StartsWith("/api/", StringComparison.Ordinal))
+            {
+                // The administration API answers in its own (problem document) form.
+                await Admin.Api.RefuseHostAsync(context);
+
+                return;
+            }
+
             await Refuse(response, 421, "the Host header is not a loopback name");
 
             return;
         }
 
-        string path = request.Path.Value ?? "";
+        // The administration API (JSON, under /api): sessions are read-only, every change carries its own passkey authorization (see AdminApi). Nothing under /api is anything but JSON.
+        if (path == "/api" || path.StartsWith("/api/", StringComparison.Ordinal))
+        {
+            await Admin.Api.HandleAsync(context);
 
-        // The admin web app is for a person's browser (sessions, anti-forgery values and one-use passkey pages; see AdminWeb). It answers a request only from its own origin (or a navigation, which has none).
+            return;
+        }
+
+        // The administration web application (the SPA) is not part of this build yet: its address answers a JSON 404 that says where the API is, never an HTML page.
         if (path == "/admin" || path.StartsWith("/admin/", StringComparison.Ordinal))
         {
-            await Admin.Web.HandleAsync(context);
+            await Admin.Api.NotBuiltAsync(context);
 
             return;
         }

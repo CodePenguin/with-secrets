@@ -369,6 +369,25 @@ Maintainer decisions followed: `with-secrets admin` has no verbs (it checks the 
 - Mutation evidence (change, run `WS_ONLY=AdminApp`, revert): a session satisfying a sensitive operation (skip the authorizer for session operations) fails 7 checks (every sensitive variant, lock, timeouts); the anti-forgery check removed fails 8 (no value, wrong, another browser's, from before the session, no cookie, nothing started); the session timeouts ignored fails 3 (idle, expired cookie, absolute).
 - Open items and concerns for the maintainer: cookies are not port-isolated on localhost (read-only cookie plus anti-forgery limits the harm); a local program can start a sign-in or an operation and ask for a tap (the pages name the operation); an emergency Lock needs a session (two taps, the stricter reading of M3); adding and removing a passkey reuse the existing enrollment pages (the code is typed in the service's terminal; tested with a fake `IPasskeyAdmin`); secret, credential and settings commands (`--set`, `--remove`, `--config`, ...) are still terminal commands; after the sign-in tap the person returns to the app by hand (the app claims the session on the next page load, waiting up to 1.5 s for the verification); the Phase 5 concern 1 (approval page and secret delivery for a truly separate remote authority) is untouched.
 
+## Phase 6b-1: admin JSON API under /api/v1 with OpenAPI (done, pending review)
+
+- Server-rendered `/admin*` pages, `AdminWeb.cs` and the `POST /admin/op` endpoint are removed; `/admin*` answers 404 `not-built` until the SPA (6b-2). All administration is under `/api/v1` (`Authority/Api/AdminApi.Routes.cs`, `AdminApi.cs`, `AdminApi.OpenApi.cs`, `ApiSchema.cs`; `AdminService.Authorizations.cs`; DTOs in `AdminViews.cs`).
+- Session stays read-only (cookies `Path=/api/v1`, HttpOnly, SameSite=Strict, CSRF header, exact Origin, loopback Host, logout, revocation on lock and restart). Every mutation is authorize (`POST /authorizations`), tap, mutate with the authorization id; the service checks verified state, operation, equal parameters, 2-minute freshness and single use. A mismatch burns it.
+- RFC 9457 problems, 4096-byte bodies, schema validation shared with the OpenAPI document, `X-Api-Version` with an unsupported-version problem, 404/405 inside `/api` (no SPA fallback), OpenAPI at `/api/v1/openapi.json` plus `docs/api/openapi.json` snapshot (divergence test; regenerate with `WS_UPDATE_OPENAPI=1 WS_ONLY=Api`).
+- Tests: suite `Api` replaces `AdminApp` (its coverage was ported); `AuditTrail`, `AuthorityLock`, `GrantAuthority` ported to the API. E2E i1 to i4 run through the API and the real-browser passkey page.
+- Mutation evidence: see `task-p6b1-report.md`.
+- Not applicable, recorded: provider/mount/credential endpoint (no such resources in the app; item 5 stays open for a later phase), grant creation and passkey replace (not app operations), cookie lifetime (session cookie, no Max-Age).
+
+### Gap list after 6b-1 (against architecture 10.5)
+
+1. JSON API and OpenAPI: DONE (TypeScript client generation remains for 6b-2).
+2. SPA and fallback separation: API side DONE (`/api` never falls through, tested); SPA, CSS, accessibility, embedded assets, single-EXE check open (6b-2).
+3. Same origin, CORS, CSRF: DONE (no CORS, Origin on every non-read, cookie path `/api/v1`).
+4. Per-operation passkey at the API: DONE.
+5. Write-only credential endpoint: NOT APPLICABLE yet (no providers, mounts or credentials in the app); open.
+6. Session semantics: DONE; passkey add/remove are API operations (`passkey-enroll`, `passkey-unenroll`) using the existing enrollment ceremony.
+7. Verification: API security tests DONE; accessibility and single-EXE open.
+
 ### Gap list: Phase 6a server-rendered `/admin` against architecture 10.5 (target design, accepted)
 
 Phase 6a built the back end and the session and authorization model, as server-rendered pages. 10.5 is not implemented yet. What remains:

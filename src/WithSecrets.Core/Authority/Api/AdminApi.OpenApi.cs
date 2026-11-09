@@ -1,0 +1,306 @@
+using System.Text.Json.Nodes;
+
+namespace WithSecrets;
+
+/// <summary>
+/// The OpenAPI 3.1 document, generated from the route table (<see cref="BuildRoutes" />) and the schemas below: the dispatcher and the document are made from the same records, so a route cannot be served
+/// without being documented. The checked-in copy (<c>docs/api/openapi.json</c>, the input of the TypeScript client) is compared with this by a test; the schemas of the answers are checked against real answers by tests.
+/// </summary>
+internal sealed partial class AdminApi
+{
+    private static JsonObject Components()
+    {
+        string[] machineActions = ["approve", "disable", "enable", "untrust", "trust", "approve-host-change", "rename"];
+        string[] grantActions = ["extend", "renew", "revoke"];
+        JsonObject schemas = new()
+        {
+            ["Problem"] = S.Obj(
+            [
+                ("type", S.Str(description: "A URI naming the kind of problem (urn:with-secrets:problem:CODE).")),
+                ("title", S.Str()),
+                ("status", S.Int()),
+                ("detail", S.Str(description: "One safe sentence. Never a secret, a credential, a key or an internal detail.")),
+                ("code", S.Str(description: "A stable machine-readable code.")),
+                ("supportedVersions", S.Arr(S.Str())),
+            ], ["supportedVersions"], "An RFC 9457 problem document (application/problem+json)."),
+            ["Done"] = S.Obj([("ok", S.Bool())]),
+            ["Status"] = S.Obj(
+            [
+                ("running", S.Bool()),
+                ("locked", S.Bool()),
+                ("unlockMode", S.Str(values: [UnlockPolicies.Manual, UnlockPolicies.Unattended])),
+                ("unlockedHow", S.Str(nullable: true, description: "How it was unlocked (manual, unattended), when it is unlocked.")),
+                ("apiVersion", S.Str()),
+                ("version", S.Str()),
+                ("protocolVersion", S.Int()),
+            ]),
+            ["Login"] = S.Obj([("state", S.Str(values: ["waiting", "failed"])), ("problem", S.Str(nullable: true))]),
+            ["Session"] = S.Obj(
+            [
+                ("authenticated", S.Bool()),
+                ("admin", S.Str(nullable: true, description: "The name of the admin passkey that tapped.")),
+                ("started", S.Time(nullable: true)),
+                ("idleExpires", S.Time(nullable: true)),
+                ("absoluteExpires", S.Time(nullable: true)),
+                ("antiForgery", S.Str(description: "Send this as the X-Admin-Token header with every request that is not a GET.")),
+                ("login", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("Login"), new JsonObject { ["type"] = "null" }) }),
+                ("recent", S.Arr(S.Str())),
+            ]),
+            ["LoginStarted"] = S.Obj([("link", S.Str(description: "The one-use passkey page to open. The tap there starts the session."))]),
+            ["Machine"] = S.Obj(
+            [
+                ("fingerprint", S.Str()),
+                ("display", S.Str()),
+                ("status", S.Str(values: ["pending", "trusted", "disabled", "untrusted"])),
+                ("revision", S.Int()),
+                ("hostName", S.Str()),
+                ("pendingHostName", S.Str(nullable: true)),
+                ("friendlyName", S.Str(nullable: true)),
+                ("created", S.Time()),
+                ("updated", S.Time()),
+                ("thisMachine", S.Bool()),
+                ("actions", S.Arr(S.Str(values: machineActions))),
+            ]),
+            ["MachineList"] = S.Obj([("items", S.Arr(S.Ref("Machine")))]),
+            ["Grant"] = S.Obj(
+            [
+                ("id", S.Str()),
+                ("fingerprint", S.Str()),
+                ("machineName", S.Str(nullable: true)),
+                ("state", S.Str()),
+                ("status", S.Str()),
+                ("revision", S.Int()),
+                ("created", S.Time()),
+                ("updated", S.Time()),
+                ("expires", S.Time(nullable: true)),
+                ("ends", S.Str()),
+                ("secretNames", S.Str(description: "The NAMES of the secrets the grant covers (never a value).")),
+                ("program", S.Str()),
+                ("workingDirectory", S.Str()),
+                ("approvedBy", S.Str()),
+                ("revoked", S.Time(nullable: true)),
+                ("actions", S.Arr(S.Str(values: grantActions))),
+            ]),
+            ["GrantList"] = S.Obj([("items", S.Arr(S.Ref("Grant")))]),
+            ["AuditEvent"] = S.Obj(
+            [
+                ("eventId", S.Str()),
+                ("sequence", S.Int()),
+                ("time", S.Time()),
+                ("received", S.Time()),
+                ("machine", S.Str()),
+                ("type", S.Str(values: [.. AuditEventTypes.All])),
+                ("outcome", S.Str()),
+                ("reason", S.Str()),
+                ("requestId", S.Str()),
+                ("folder", S.Str()),
+                ("program", S.Str()),
+                ("arguments", S.Arr(S.Str())),
+                ("grantId", S.Str()),
+                ("exitCode", S.Int(nullable: true)),
+            ]),
+            ["AuditEventList"] = S.Obj([("items", S.Arr(S.Ref("AuditEvent")))]),
+            ["AuditChange"] = S.Obj([("id", S.Int()), ("time", S.Time()), ("event", S.Str()), ("machine", S.Str(nullable: true)), ("actor", S.Str()), ("detail", S.Str())]),
+            ["AuditChangeList"] = S.Obj([("items", S.Arr(S.Ref("AuditChange")))]),
+            ["AuditGap"] = S.Obj([("id", S.Int()), ("machine", S.Str()), ("kind", S.Str()), ("from", S.Int()), ("to", S.Int()), ("detected", S.Time()), ("resolved", S.Time(nullable: true)), ("epoch", S.Str())]),
+            ["AuditGapList"] = S.Obj([("items", S.Arr(S.Ref("AuditGap")))]),
+            ["Settings"] = S.Obj(
+            [
+                ("unlockMode", S.Str(values: [UnlockPolicies.Manual, UnlockPolicies.Unattended])),
+                ("unlockModeDescription", S.Str()),
+                ("auditRetentionDays", S.Int()),
+                ("sessionIdleMinutes", S.Int()),
+                ("sessionAbsoluteMinutes", S.Int()),
+                ("authorityKey", S.Str(description: "The public fingerprint of the authority key in use.")),
+                ("maxAuditRetentionDays", S.Int()),
+                ("maxSessionIdleMinutes", S.Int()),
+                ("maxSessionAbsoluteMinutes", S.Int()),
+            ]),
+            ["Passkey"] = S.Obj([("name", S.Str()), ("detail", S.Str()), ("created", S.Time()), ("admin", S.Bool())]),
+            ["Passkeys"] = S.Obj([("available", S.Bool()), ("problem", S.Str(nullable: true)), ("items", S.Arr(S.Ref("Passkey")))]),
+            ["NameValue"] = S.Obj([("name", S.Str()), ("value", S.Str())]),
+            ["Authorization"] = S.Obj(
+            [
+                ("id", S.Str(description: "Carry this in the `authorization` member of the one mutation it was made for.")),
+                ("operation", S.Str(values: [.. Operations.Select(item => item.Operation)])),
+                ("state", S.Str(values: ["pending", "verified", "refused", "consumed", "expired"])),
+                ("detail", S.Str(nullable: true)),
+                ("link", S.Str(nullable: true, description: "The one-use passkey page to open (while pending). The tap there is the authorization.")),
+                ("sentence", S.Str(description: "Exactly what the passkey signs: show it to the person.")),
+                ("parameters", S.Arr(S.Ref("NameValue"))),
+                ("created", S.Time()),
+                ("expires", S.Time()),
+                ("lifetimeSeconds", S.Int(description: "How long a verified authorization may wait for its mutation.")),
+            ]),
+            ["AuthorizationRequest"] = AuthorizationRequest(),
+            ["MutationResponse"] = S.Obj(
+            [
+                ("operation", S.Str()),
+                ("outcome", S.Str(values: ["applied", "started"], description: "applied: done. started: the first passkey page of an operation with pages of its own is at `link`.")),
+                ("link", S.Str(nullable: true)),
+            ]),
+        };
+
+        return schemas;
+    }
+
+    private static JsonObject ProblemResponse(string description) => new()
+    {
+        ["description"] = description,
+        ["content"] = new JsonObject { ["application/problem+json"] = new JsonObject { ["schema"] = S.Ref("Problem") } },
+    };
+
+    private static JsonObject Document0(IReadOnlyList<ApiRoute> routes)
+    {
+        JsonObject paths = [];
+        foreach (ApiRoute route in routes)
+        {
+            string key = route.Template;
+            if (paths[key] is not JsonObject item)
+            {
+                item = [];
+                paths[key] = item;
+            }
+
+            JsonObject operation = new() { ["operationId"] = route.OperationId, ["summary"] = route.Summary, ["tags"] = new JsonArray(route.Tag) };
+            JsonArray parameters = [];
+            foreach (string name in route.Template.Split('/').Where(part => part.StartsWith('{')).Select(part => part.Trim('{', '}')))
+            {
+                parameters.Add(new JsonObject { ["name"] = name, ["in"] = "path", ["required"] = true, ["schema"] = name is "fingerprint" or "id" or "name" ? ParameterSchema(name) : S.Str(max: 80) });
+            }
+
+            foreach (ApiQuery query in route.Query)
+            {
+                parameters.Add(new JsonObject { ["name"] = query.Name, ["in"] = "query", ["required"] = false, ["description"] = query.Description, ["schema"] = query.Schema.DeepClone() });
+            }
+
+            if (parameters.Count > 0)
+            {
+                operation["parameters"] = parameters;
+            }
+
+            if (route.Request is not null)
+            {
+                operation["requestBody"] = new JsonObject
+                {
+                    ["required"] = true,
+                    ["content"] = new JsonObject { ["application/json"] = new JsonObject { ["schema"] = route.OperationId == "createAuthorization" ? S.Ref("AuthorizationRequest") : route.Request.DeepClone() } },
+                };
+            }
+
+            string access = route.Access switch
+            {
+                ApiAccess.Public => "public",
+                ApiAccess.Owner => "caller",
+                ApiAccess.Read => "session",
+                ApiAccess.Login => "browser",
+                ApiAccess.Logout => "session",
+                ApiAccess.Authorize => "session",
+                _ => "authorization",
+            };
+            operation["x-access"] = access;
+            if (route.Access == ApiAccess.Mutation)
+            {
+                operation["x-operation"] = route.Operation ?? "policy-manual | policy-unattended";
+                operation["description"] = route.Summary + " Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than " + AdminService.LifetimeText + " seconds. Any other authorization, a repeated one or a session alone is refused with 403.";
+            }
+
+            JsonObject responses = [];
+            if (route.OperationId == "getOpenApi")
+            {
+                responses["200"] = new JsonObject { ["description"] = "The OpenAPI document.", ["content"] = new JsonObject { ["application/json"] = new JsonObject { ["schema"] = new JsonObject { ["type"] = "object" } } } };
+            }
+            else
+            {
+                responses[route.Success.ToString(System.Globalization.CultureInfo.InvariantCulture)] = new JsonObject
+                {
+                    ["description"] = "Success.",
+                    ["content"] = new JsonObject { ["application/json"] = new JsonObject { ["schema"] = S.Ref(route.Response!) } },
+                };
+                foreach (string also in route.AlsoSuccess ?? [])
+                {
+                    responses[also] = new JsonObject { ["description"] = "Started: the first passkey page of the operation is at `link`.", ["content"] = new JsonObject { ["application/json"] = new JsonObject { ["schema"] = S.Ref(route.Response!) } } };
+                }
+            }
+
+            if (route.Request is not null || route.Query.Count > 0 || route.Template.Contains('{', StringComparison.Ordinal))
+            {
+                responses["400"] = ProblemResponse("The request is not valid (invalid-request, invalid-json).");
+            }
+
+            responses["403"] = ProblemResponse("Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).");
+            if (route.Access is not (ApiAccess.Public or ApiAccess.Owner))
+            {
+                responses["401"] = ProblemResponse("No administrator session (session-required).");
+            }
+
+            if (route.Template.Contains('{', StringComparison.Ordinal) || route.Access == ApiAccess.Authorize)
+            {
+                responses["404"] = ProblemResponse("No such resource (not-found).");
+            }
+
+            if (route.Access is ApiAccess.Authorize or ApiAccess.Mutation)
+            {
+                responses["409"] = ProblemResponse("The operation does not apply, or the change failed (operation-refused, operation-failed).");
+                responses["423"] = ProblemResponse("The authority is locked (authority-locked).");
+            }
+
+            if (route.Request is not null)
+            {
+                responses["413"] = ProblemResponse("The body is too large (payload-too-large).");
+                responses["415"] = ProblemResponse("The body is not application/json (unsupported-media-type).");
+            }
+
+            responses["421"] = ProblemResponse("The Host is not a loopback name (host-not-allowed).");
+            if (route.Access is ApiAccess.Authorize or ApiAccess.Mutation or ApiAccess.Login)
+            {
+                responses["429"] = ProblemResponse("Too many requests (too-many-requests).");
+            }
+
+            responses["500"] = ProblemResponse("The request failed (internal-error). Nothing the response does not say was changed.");
+            operation["responses"] = responses;
+            if (route.Access is not (ApiAccess.Public or ApiAccess.Owner))
+            {
+                operation["security"] = route.Access is ApiAccess.Read ? new JsonArray(new JsonObject { ["sessionCookie"] = new JsonArray() })
+                    : route.Access is ApiAccess.Login ? new JsonArray(new JsonObject { ["antiForgery"] = new JsonArray() })
+                    : new JsonArray(new JsonObject { ["sessionCookie"] = new JsonArray(), ["antiForgery"] = new JsonArray() });
+            }
+
+            item[route.Method.ToLowerInvariant()] = operation;
+        }
+
+        return paths;
+    }
+
+    private static JsonObject BuildDocument(IReadOnlyList<ApiRoute> routes, int port)
+    {
+        _ = port;
+
+        return new JsonObject
+        {
+            ["openapi"] = "3.1.0",
+            ["info"] = new JsonObject
+            {
+                ["title"] = "with-secrets authority administration API",
+                ["version"] = "1.0.0",
+                ["description"] = "The administration API of the with-secrets authority on the Windows host service's loopback port (same origin as the administration web application). JSON only. "
+                    + "A browser session is READ-ONLY (an HttpOnly, SameSite=Strict cookie, in service memory only). Every change needs its own fresh passkey authorization (POST /api/v1/authorizations, then the tap, then the mutation carrying the authorization id), "
+                    + "bound to the operation and its parameters, single use and time limited. There is no CORS. Changes within v1 are additive; a breaking change is a new major version. Another version number (/api/v2/...) is answered with 400 and the problem code "
+                    + "unsupported-api-version listing supportedVersions; an unknown path under /api is 404 route-not-found; /api never falls through to the web application. Every response carries X-Api-Version. No answer contains a secret value, a credential, a private key or recovery material.",
+            },
+            ["servers"] = new JsonArray(new JsonObject { ["url"] = "/", ["description"] = "The service's own origin (http://localhost:PORT)." }),
+            ["tags"] = new JsonArray([.. routes.Select(route => route.Tag).Distinct().Select(tag => (JsonNode?)new JsonObject { ["name"] = tag })]),
+            ["paths"] = Document0(routes),
+            ["components"] = new JsonObject
+            {
+                ["securitySchemes"] = new JsonObject
+                {
+                    ["sessionCookie"] = new JsonObject { ["type"] = "apiKey", ["in"] = "cookie", ["name"] = AdminSessions.SessionCookie, ["description"] = "A read-only administrator session (HttpOnly, SameSite=Strict, path " + Prefix + ")." },
+                    ["antiForgery"] = new JsonObject { ["type"] = "apiKey", ["in"] = "header", ["name"] = TokenHeader, ["description"] = "The antiForgery value of GET /session, for every request that is not a GET." },
+                },
+                ["schemas"] = Components(),
+            },
+            ["x-versioning"] = new JsonObject { ["current"] = Version, ["supported"] = new JsonArray(Version), ["unsupportedVersionProblem"] = "unsupported-api-version" },
+        };
+    }
+}

@@ -1,15 +1,17 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 
 namespace WithSecrets.Tests;
 
-/// <summary>What one operation of the admin app came to when the test acted as the person: the start request, the passkey page and the tap.</summary>
-internal sealed record Tapped(int PostStatus, string? Link, string? Error, int ApproveStatus, string PageUrl, string ProofBody, string Page = "");
+/// <summary>
+/// What one operation of the administration API came to when the test acted as the person: the authorization request, the passkey page and the tap, and (when the tap was approved and judged good) the
+/// mutation that carried the authorization.
+/// </summary>
+internal sealed record Tapped(int PostStatus, string? Link, string? Error, int ApproveStatus, string PageUrl, string ProofBody, string Page = "", string? AuthorizationId = null, int MutationStatus = 0, string MutationBody = "");
 
 /// <summary>
-/// A browser, for tests of the admin web app: it keeps cookies, reads the anti-forgery value from the page it was served and sends it back, sends the Origin a page sends, and acts as the
+/// A browser, for tests of the administration API: it keeps cookies, reads the anti-forgery value from <c>GET /api/v1/session</c> and sends it back, sends the Origin a page sends, and acts as the
 /// person on the passkey pages with a software authenticator. Each of those can be left out or changed to test the refusals.
 /// </summary>
 internal sealed class AdminBrowser(HostService service, HttpClient http)
@@ -27,6 +29,12 @@ internal sealed class AdminBrowser(HostService service, HttpClient http)
 
     public string LastSetCookie { get; private set; } = "";
 
+    /// <summary>The headers of the last answer, one per line.</summary>
+    public string LastHeaders { get; private set; } = "";
+
+    /// <summary>Everything this browser was answered (headers and bodies), for the scans for secrets that must never appear.</summary>
+    public List<string> Seen { get; } = [];
+
     public bool HasSession => _cookies.ContainsKey(AdminSessions.SessionCookie);
 
     public void ForgetCookies() => _cookies.Clear();
@@ -34,7 +42,7 @@ internal sealed class AdminBrowser(HostService service, HttpClient http)
     public void SetCookie(string name, string value) => _cookies[name] = value;
 
     /// <summary>True when the browser holds a session the service still honours (a read-only view is served).</summary>
-    public async Task<bool> StillSignedIn() => HasSession && (await GetAsync("/admin/machines")).Status == 200;
+    public async Task<bool> StillSignedIn() => HasSession && (await GetAsync("/api/v1/machines")).Status == 200;
 
     private void Keep(HttpResponseMessage response)
     {
@@ -61,14 +69,20 @@ internal sealed class AdminBrowser(HostService service, HttpClient http)
         }
 
         LastSetCookie = all.ToString();
+        LastHeaders = string.Join("\n", response.Headers.Select(header => header.Key + ": " + string.Join(",", header.Value)).Concat(response.Content.Headers.Select(header => header.Key + ": " + string.Join(",", header.Value))));
     }
 
-    public async Task<(int Status, string Html, HttpResponseMessage Response)> GetAsync(string path, string? origin = null, bool withCookies = true)
+    public async Task<(int Status, string Html, HttpResponseMessage Response)> GetAsync(string path, string? origin = null, bool withCookies = true, string? host = null)
     {
         using HttpRequestMessage request = new(HttpMethod.Get, Base + path);
         if (origin is not null)
         {
             request.Headers.Add("Origin", origin);
+        }
+
+        if (host is not null)
+        {
+            request.Headers.Host = host;
         }
 
         if (withCookies && _cookies.Count > 0)
@@ -78,19 +92,27 @@ internal sealed class AdminBrowser(HostService service, HttpClient http)
 
         HttpResponseMessage response = await _web.SendAsync(request);
         Keep(response);
-        string html = await response.Content.ReadAsStringAsync();
-        if (Regex.Match(html, "<meta name=\"anti-forgery\" content=\"([^\"]+)\"") is { Success: true } meta)
+        string body = await response.Content.ReadAsStringAsync();
+        if (path == "/api/v1/session" && response.IsSuccessStatusCode)
         {
-            Csrf = WebUtility.HtmlDecode(meta.Groups[1].Value);
+            using JsonDocument session = JsonDocument.Parse(body);
+            Csrf = session.RootElement.GetProperty("antiForgery").GetString();
         }
 
-        return ((int)response.StatusCode, html, response);
+        Seen.Add(LastHeaders + "\n" + body);
+
+        return ((int)response.StatusCode, body, response);
     }
 
-    /// <summary>A POST as the page's script sends it. Pass <paramref name="token" /> null to send none, <paramref name="origin" /> null to send no Origin.</summary>
-    public async Task<(int Status, string Body)> PostAsync(string path, string json, string? token = "page", string? origin = "page", string? host = null, bool withCookies = true, string contentType = "application/json")
+    /// <summary>A request as the page's script sends it. Pass <paramref name="token" /> null to send none, <paramref name="origin" /> null to send no Origin.</summary>
+    public async Task<(int Status, string Body)> SendAsync(HttpMethod method, string path, string? json, string? token = "page", string? origin = "page", string? host = null, bool withCookies = true, string contentType = "application/json")
     {
-        using HttpRequestMessage request = new(HttpMethod.Post, Base + path) { Content = new StringContent(json, Encoding.UTF8, contentType) };
+        using HttpRequestMessage request = new(method, Base + path);
+        if (json is not null)
+        {
+            request.Content = new StringContent(json, Encoding.UTF8, contentType);
+        }
+
         if (origin is not null)
         {
             request.Headers.Add("Origin", origin == "page" ? Origin : origin);
@@ -99,7 +121,7 @@ internal sealed class AdminBrowser(HostService service, HttpClient http)
         string? send = token == "page" ? Csrf : token;
         if (send is not null)
         {
-            request.Headers.Add(AdminWeb.TokenHeader, send);
+            request.Headers.Add(AdminApi.TokenHeader, send);
         }
 
         if (host is not null)
@@ -114,23 +136,65 @@ internal sealed class AdminBrowser(HostService service, HttpClient http)
 
         using HttpResponseMessage response = await _web.SendAsync(request);
         Keep(response);
+        string answer = await response.Content.ReadAsStringAsync();
+        Seen.Add(LastHeaders + "\n" + answer);
 
-        return ((int)response.StatusCode, await response.Content.ReadAsStringAsync());
+        return ((int)response.StatusCode, answer);
     }
 
-    private static string Json(string op, params (string Name, string Value)[] args) => JsonSerializer.Serialize(new[] { ("op", op) }.Concat(args).ToDictionary(item => item.Item1, item => item.Item2));
+    public Task<(int Status, string Body)> PostAsync(string path, string json, string? token = "page", string? origin = "page", string? host = null, bool withCookies = true, string contentType = "application/json") => SendAsync(HttpMethod.Post, path, json, token, origin, host, withCookies, contentType);
 
-    /// <summary>Loads the status page (cookies and the anti-forgery value of the page).</summary>
-    public async Task<string> LoadAsync(string path = "/admin") => (await GetAsync(path)).Html;
+    /// <summary>The names whose values are numbers (or true/false) in a request body, as the API's schemas type them.</summary>
+    private static readonly string[] Numbers = ["days", "idle", "absolute", "minutes"];
+
+    private static object Typed(string name, string value) => Numbers.Contains(name) && int.TryParse(value, out int number) ? number : name == "indefinite" && bool.TryParse(value, out bool flag) ? flag : value;
+
+    /// <summary>The body of <c>POST /api/v1/authorizations</c>.</summary>
+    public static string AuthorizationBody(string op, params (string Name, string Value)[] args) => JsonSerializer.Serialize(new Dictionary<string, object> { ["operation"] = op, ["parameters"] = args.ToDictionary(item => item.Name, item => Typed(item.Name, item.Value)) });
+
+    /// <summary>The mutation request for an operation: the route of the API that names it, the path parameters filled in and the authorization id in the body.</summary>
+    public (HttpMethod Method, string Path, string Body) MutationRequest(string op, string? authorization, params (string Name, string Value)[] args)
+    {
+        ApiRoute route = service.Admin.Api.Routes.First(item => item.Access == ApiAccess.Mutation && (item.Operation == op || (item.Operation is null && op.StartsWith("policy-", StringComparison.Ordinal))));
+        string path = route.Template;
+        Dictionary<string, object> body = [];
+        if (authorization is not null)
+        {
+            body["authorization"] = authorization;
+        }
+
+        foreach ((string name, string value) in args)
+        {
+            if (path.Contains("{" + name + "}", StringComparison.Ordinal))
+            {
+                path = path.Replace("{" + name + "}", Uri.EscapeDataString(value), StringComparison.Ordinal);
+            }
+            else
+            {
+                body[name] = Typed(name, value);
+            }
+        }
+
+        if (route.Operation is null)
+        {
+            body["policy"] = op["policy-".Length..];
+        }
+
+        return (new HttpMethod(route.Method), path, JsonSerializer.Serialize(body));
+    }
+
+    /// <summary>Loads the session resource (cookies and the anti-forgery value).</summary>
+    public async Task<string> LoadAsync(string path = "/api/v1/session") => (await GetAsync(path)).Html;
 
     private async Task<Tapped> Tap(int status, string body, TestAuthenticator? signer, bool userVerified, Func<byte[], byte[]>? change)
     {
         using JsonDocument doc = JsonDocument.Parse(body);
-        string? link = doc.RootElement.TryGetProperty("link", out JsonElement l) ? l.GetString() : null;
-        string? error = doc.RootElement.TryGetProperty("error", out JsonElement e) ? e.GetString() : null;
+        string? link = doc.RootElement.TryGetProperty("link", out JsonElement l) && l.ValueKind == JsonValueKind.String ? l.GetString() : null;
+        string? error = doc.RootElement.TryGetProperty("detail", out JsonElement e) ? e.GetString() : null;
+        string? id = doc.RootElement.TryGetProperty("id", out JsonElement i) ? i.GetString() : null;
         if (link is null || signer is null)
         {
-            return new Tapped(status, link, error, 0, link is null ? "" : "http://127.0.0.1:" + new Uri(link).Port + new Uri(link).AbsolutePath, "");
+            return new Tapped(status, link, error, 0, link is null ? "" : "http://127.0.0.1:" + new Uri(link).Port + new Uri(link).AbsolutePath, "", AuthorizationId: id);
         }
 
         Uri uri = new(link);
@@ -138,10 +202,36 @@ internal sealed class AdminBrowser(HostService service, HttpClient http)
         string pageText = WebUtility.HtmlDecode(TestState.Get(http, url).Body);
         (int approved, _) = TestState.Approve(http, url, "http://localhost:" + uri.Port, "localhost", signer, userVerified: userVerified, changeChallenge: change);
 
-        return new Tapped(status, link, null, approved, url, TestState.LastProofBody, pageText);
+        return new Tapped(status, link, null, approved, url, TestState.LastProofBody, pageText, id);
     }
 
-    /// <summary>Starts an operation (as the page's script would, with the page's anti-forgery value) and, with a signer, taps on the page it names.</summary>
+    /// <summary>Waits until the service has judged the tap of an authorization (it does so a moment after the page says Approved). Returns the state.</summary>
+    public async Task<string> WaitAuthorizationAsync(string id)
+    {
+        string state = "pending";
+        for (int i = 0; i < 100 && state == "pending"; i++)
+        {
+            (int status, string body) = await SendAsync(HttpMethod.Get, "/api/v1/authorizations/" + id, null);
+            if (status != 200)
+            {
+                return "unknown";
+            }
+
+            using JsonDocument doc = JsonDocument.Parse(body);
+            state = doc.RootElement.GetProperty("state").GetString()!;
+            if (state == "pending")
+            {
+                await Task.Delay(50);
+            }
+        }
+
+        return state;
+    }
+
+    /// <summary>
+    /// Asks for an authorization (as the page's script would, with the page's anti-forgery value), taps on the page it names with a signer and, when the tap was approved and judged good, sends the one mutation
+    /// that carries the authorization. Without a signer only the authorization is asked for.
+    /// </summary>
     public async Task<Tapped> OpAsync(string op, TestAuthenticator? signer, bool userVerified = true, Func<byte[], byte[]>? change = null, bool reload = true, params (string Name, string Value)[] args)
     {
         if (reload)
@@ -149,16 +239,35 @@ internal sealed class AdminBrowser(HostService service, HttpClient http)
             await LoadAsync();
         }
 
-        (int status, string body) = await PostAsync("/admin/op", Json(op, args));
+        (int status, string body) = await PostAsync("/api/v1/authorizations", AuthorizationBody(op, args));
+        Tapped tapped = await Tap(status, body, signer, userVerified, change);
+        if (tapped.AuthorizationId is null || tapped.ApproveStatus != 200 || await WaitAuthorizationAsync(tapped.AuthorizationId) != "verified")
+        {
+            return tapped;
+        }
 
-        return await Tap(status, body, signer, userVerified, change);
+        (HttpMethod method, string path, string json) = MutationRequest(op, tapped.AuthorizationId, args);
+        (int mutationStatus, string mutationBody) = await SendAsync(method, path, json);
+
+        return tapped with { MutationStatus = mutationStatus, MutationBody = mutationBody };
     }
+
+    /// <summary>As <see cref="OpAsync" /> but without the mutation: the authorization is asked for and tapped, and the caller decides what to send.</summary>
+    public async Task<Tapped> OpAsyncWithoutMutation(string op, TestAuthenticator? signer, bool userVerified, params (string Name, string Value)[] args)
+    {
+        await LoadAsync();
+        (int status, string body) = await PostAsync("/api/v1/authorizations", AuthorizationBody(op, args));
+
+        return await Tap(status, body, signer, userVerified, null);
+    }
+
+    public Task<Tapped> OpAsyncWithoutMutation(string op, TestAuthenticator? signer, params (string Name, string Value)[] args) => OpAsyncWithoutMutation(op, signer, true, args);
 
     /// <summary>The sign-in: the login request, one tap on its page, and the browser's return to the app, which claims the session. True when a session started.</summary>
     public async Task<bool> SignInAsync(TestAuthenticator signer, bool userVerified = true, Func<byte[], byte[]>? change = null)
     {
         await LoadAsync();
-        (int status, string body) = await PostAsync("/admin/login", "{}");
+        (int status, string body) = await PostAsync("/api/v1/session", "{}");
         Tapped tapped = await Tap(status, body, signer, userVerified, change);
         if (tapped.ApproveStatus != 200)
         {

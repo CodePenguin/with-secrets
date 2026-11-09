@@ -1,0 +1,5662 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "with-secrets authority administration API",
+    "version": "1.0.0",
+    "description": "The administration API of the with-secrets authority on the Windows host service\u0027s loopback port (same origin as the administration web application). JSON only. A browser session is READ-ONLY (an HttpOnly, SameSite=Strict cookie, in service memory only). Every change needs its own fresh passkey authorization (POST /api/v1/authorizations, then the tap, then the mutation carrying the authorization id), bound to the operation and its parameters, single use and time limited. There is no CORS. Changes within v1 are additive; a breaking change is a new major version. Another version number (/api/v2/...) is answered with 400 and the problem code unsupported-api-version listing supportedVersions; an unknown path under /api is 404 route-not-found; /api never falls through to the web application. Every response carries X-Api-Version. No answer contains a secret value, a credential, a private key or recovery material."
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "The service\u0027s own origin (http://localhost:PORT)."
+    }
+  ],
+  "tags": [
+    {
+      "name": "meta"
+    },
+    {
+      "name": "status"
+    },
+    {
+      "name": "session"
+    },
+    {
+      "name": "machines"
+    },
+    {
+      "name": "grants"
+    },
+    {
+      "name": "audit"
+    },
+    {
+      "name": "settings"
+    },
+    {
+      "name": "passkeys"
+    },
+    {
+      "name": "authorizations"
+    },
+    {
+      "name": "authority"
+    }
+  ],
+  "paths": {
+    "/api/v1/openapi.json": {
+      "get": {
+        "operationId": "getOpenApi",
+        "summary": "The OpenAPI 3.1 document of this API (public; it carries no secret).",
+        "tags": [
+          "meta"
+        ],
+        "x-access": "public",
+        "responses": {
+          "200": {
+            "description": "The OpenAPI document.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/status": {
+      "get": {
+        "operationId": "getStatus",
+        "summary": "Whether the service is running, locked or unlocked, the unlock mode and the versions (public).",
+        "tags": [
+          "status"
+        ],
+        "x-access": "public",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/session": {
+      "get": {
+        "operationId": "getSession",
+        "summary": "Who is signed in (a read-only session), the anti-forgery value for requests that change something, and how a sign-in in progress stands. Claims the session of a sign-in whose tap was verified.",
+        "tags": [
+          "session"
+        ],
+        "x-access": "public",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "startSession",
+        "summary": "Start a sign-in: answers the link of the one-use passkey page whose tap (user verification) starts a read-only session for this browser. Then GET /session.",
+        "tags": [
+          "session"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-access": "browser",
+        "responses": {
+          "202": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginStarted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "antiForgery": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "endSession",
+        "summary": "Sign out: ends the session now.",
+        "tags": [
+          "session"
+        ],
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/machines": {
+      "get": {
+        "operationId": "listMachines",
+        "summary": "The machines and where each stands (read-only session).",
+        "tags": [
+          "machines"
+        ],
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MachineList"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/v1/machines/{fingerprint}": {
+      "get": {
+        "operationId": "getMachine",
+        "summary": "One machine, by its fingerprint or an unambiguous start of it (read-only session).",
+        "tags": [
+          "machines"
+        ],
+        "parameters": [
+          {
+            "name": "fingerprint",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 12,
+              "maxLength": 80,
+              "description": "The machine\u0027s fingerprint, or an unambiguous start of it (12 hex digits or more)."
+            }
+          }
+        ],
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Machine"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/v1/grants": {
+      "get": {
+        "operationId": "listGrants",
+        "summary": "The grants and what can be done to each (read-only session).",
+        "tags": [
+          "grants"
+        ],
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GrantList"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/v1/grants/{id}": {
+      "get": {
+        "operationId": "getGrant",
+        "summary": "One grant, by its id or an unambiguous start of it (read-only session).",
+        "tags": [
+          "grants"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 4,
+              "maxLength": 80,
+              "description": "The grant\u0027s id, or an unambiguous start of it."
+            }
+          }
+        ],
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Grant"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/v1/audit/events": {
+      "get": {
+        "operationId": "searchAuditEvents",
+        "summary": "Search the host events the authority holds (authorization, launch and execution outcomes). Every filter is optional.",
+        "tags": [
+          "audit"
+        ],
+        "parameters": [
+          {
+            "name": "machine",
+            "in": "query",
+            "required": false,
+            "description": "A machine\u0027s fingerprint, or the start of it.",
+            "schema": {
+              "type": "string",
+              "maxLength": 80
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "description": "Only events at or after this time (ISO 8601, UTC when no zone is given).",
+            "schema": {
+              "type": "string",
+              "maxLength": 40
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "description": "Only events at or before this time.",
+            "schema": {
+              "type": "string",
+              "maxLength": 40
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "description": "authorization, launch or execution.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "authorization",
+                "launch",
+                "execution"
+              ]
+            }
+          },
+          {
+            "name": "outcome",
+            "in": "query",
+            "required": false,
+            "description": "The outcome, for example approved, denied, started or exited.",
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            }
+          },
+          {
+            "name": "grant",
+            "in": "query",
+            "required": false,
+            "description": "Events that used this grant.",
+            "schema": {
+              "type": "string",
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "folder",
+            "in": "query",
+            "required": false,
+            "description": "The working directory contains this text.",
+            "schema": {
+              "type": "string",
+              "maxLength": 300
+            }
+          },
+          {
+            "name": "text",
+            "in": "query",
+            "required": false,
+            "description": "Any of the event\u0027s text contains this.",
+            "schema": {
+              "type": "string",
+              "maxLength": 300
+            }
+          },
+          {
+            "name": "last",
+            "in": "query",
+            "required": false,
+            "description": "The most to return, 1 to 1000 (default 100).",
+            "schema": {
+              "type": "string",
+              "maxLength": 4
+            }
+          }
+        ],
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditEventList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/v1/audit/changes": {
+      "get": {
+        "operationId": "searchAuditChanges",
+        "summary": "Search the authority\u0027s own audit history (administrator operations, machine and grant changes). Filters: machine, since, until, text, last.",
+        "tags": [
+          "audit"
+        ],
+        "parameters": [
+          {
+            "name": "machine",
+            "in": "query",
+            "required": false,
+            "description": "A machine\u0027s fingerprint, or the start of it.",
+            "schema": {
+              "type": "string",
+              "maxLength": 80
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "description": "Only events at or after this time (ISO 8601, UTC when no zone is given).",
+            "schema": {
+              "type": "string",
+              "maxLength": 40
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "description": "Only events at or before this time.",
+            "schema": {
+              "type": "string",
+              "maxLength": 40
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "description": "authorization, launch or execution.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "authorization",
+                "launch",
+                "execution"
+              ]
+            }
+          },
+          {
+            "name": "outcome",
+            "in": "query",
+            "required": false,
+            "description": "The outcome, for example approved, denied, started or exited.",
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            }
+          },
+          {
+            "name": "grant",
+            "in": "query",
+            "required": false,
+            "description": "Events that used this grant.",
+            "schema": {
+              "type": "string",
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "folder",
+            "in": "query",
+            "required": false,
+            "description": "The working directory contains this text.",
+            "schema": {
+              "type": "string",
+              "maxLength": 300
+            }
+          },
+          {
+            "name": "text",
+            "in": "query",
+            "required": false,
+            "description": "Any of the event\u0027s text contains this.",
+            "schema": {
+              "type": "string",
+              "maxLength": 300
+            }
+          },
+          {
+            "name": "last",
+            "in": "query",
+            "required": false,
+            "description": "The most to return, 1 to 1000 (default 100).",
+            "schema": {
+              "type": "string",
+              "maxLength": 4
+            }
+          }
+        ],
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditChangeList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/v1/audit/gaps": {
+      "get": {
+        "operationId": "listAuditGaps",
+        "summary": "The open holes in a machine\u0027s audit numbering. Filter: machine.",
+        "tags": [
+          "audit"
+        ],
+        "parameters": [
+          {
+            "name": "machine",
+            "in": "query",
+            "required": false,
+            "description": "A machine\u0027s fingerprint or the start of it.",
+            "schema": {
+              "type": "string",
+              "maxLength": 80
+            }
+          }
+        ],
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditGapList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/v1/settings": {
+      "get": {
+        "operationId": "getSettings",
+        "summary": "Audit retention, the unlock mode, the session timeouts and the authority key in use (read-only session).",
+        "tags": [
+          "settings"
+        ],
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Settings"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      }
+    },
+    "/api/v1/passkeys": {
+      "get": {
+        "operationId": "listPasskeys",
+        "summary": "The enrolled passkeys (names and kinds; no key material).",
+        "tags": [
+          "passkeys"
+        ],
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Passkeys"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "addPasskey",
+        "summary": "Add a passkey: after its authorization the enrollment pages (their own passkey taps) are started; the answer is the link of the first.",
+        "tags": [
+          "passkeys"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "passkey-enroll",
+        "description": "Add a passkey: after its authorization the enrollment pages (their own passkey taps) are started; the answer is the link of the first. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Started: the first passkey page of the operation is at \u0060link\u0060.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/authorizations": {
+      "post": {
+        "operationId": "createAuthorization",
+        "summary": "Ask to authorize one change: answers the link of a one-use passkey page whose signed text names the operation and every security-relevant parameter, and the text to show. The tap (user verification) makes the authorization usable once, for exactly that operation and those parameters, for 120 seconds. It changes nothing by itself.",
+        "tags": [
+          "authorizations"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthorizationRequest"
+              }
+            }
+          }
+        },
+        "x-access": "session",
+        "responses": {
+          "201": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Authorization"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/authorizations/{id}": {
+      "get": {
+        "operationId": "getAuthorization",
+        "summary": "Where an authorization stands (pending, verified, refused, consumed or expired). Only for the caller it was made for (its session, or for the unlock its browser).",
+        "tags": [
+          "authorizations"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 4,
+              "maxLength": 80,
+              "description": "The grant\u0027s id, or an unambiguous start of it."
+            }
+          }
+        ],
+        "x-access": "caller",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Authorization"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/unlock": {
+      "post": {
+        "operationId": "unlockAuthority",
+        "summary": "Unlock the authority (needs no session, but its own authorization).",
+        "tags": [
+          "authority"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "unlock",
+        "description": "Unlock the authority (needs no session, but its own authorization). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/lock": {
+      "post": {
+        "operationId": "lockAuthority",
+        "summary": "Lock the authority now: secret requests stop, held keys are discarded and every session and authorization ends.",
+        "tags": [
+          "authority"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "lock",
+        "description": "Lock the authority now: secret requests stop, held keys are discarded and every session and authorization ends. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/settings/unlock-policy": {
+      "put": {
+        "operationId": "setUnlockPolicy",
+        "summary": "Set the unlock mode (manual, or the weaker unattended mode).",
+        "tags": [
+          "settings"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  },
+                  "policy": {
+                    "type": "string",
+                    "enum": [
+                      "manual",
+                      "unattended"
+                    ],
+                    "description": "The unlock mode."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization",
+                  "policy"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "policy-manual | policy-unattended",
+        "description": "Set the unlock mode (manual, or the weaker unattended mode). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/settings/audit-retention": {
+      "put": {
+        "operationId": "setAuditRetention",
+        "summary": "Set how many days audit events are kept (0 keeps everything).",
+        "tags": [
+          "settings"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  },
+                  "days": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 36500,
+                    "description": "How many days audit events are kept; 0 keeps everything."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization",
+                  "days"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "set-audit-retention",
+        "description": "Set how many days audit events are kept (0 keeps everything). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/settings/session-timeouts": {
+      "put": {
+        "operationId": "setSessionTimeouts",
+        "summary": "Set the idle and absolute timeouts of administrator sessions.",
+        "tags": [
+          "settings"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  },
+                  "idle": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 120,
+                    "description": "Minutes without use that end a session."
+                  },
+                  "absolute": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1440,
+                    "description": "Minutes after which a session ends however busy."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization",
+                  "idle",
+                  "absolute"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "set-session-timeouts",
+        "description": "Set the idle and absolute timeouts of administrator sessions. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/authority-key/rotate": {
+      "post": {
+        "operationId": "rotateAuthorityKey",
+        "summary": "Rotate the authority signing key (a transition the current key signs).",
+        "tags": [
+          "authority"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "authority-key-rotate",
+        "description": "Rotate the authority signing key (a transition the current key signs). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/authority-key/recover": {
+      "post": {
+        "operationId": "recoverAuthorityKey",
+        "summary": "Recover the authority signing key (no transition; other hosts must enroll again).",
+        "tags": [
+          "authority"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "authority-key-recover",
+        "description": "Recover the authority signing key (no transition; other hosts must enroll again). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/machines/{fingerprint}/approve": {
+      "post": {
+        "operationId": "approveMachine",
+        "summary": "Approve a pending machine with a friendly name (or re-pin the authority key for this machine).",
+        "tags": [
+          "machines"
+        ],
+        "parameters": [
+          {
+            "name": "fingerprint",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 12,
+              "maxLength": 80,
+              "description": "The machine\u0027s fingerprint, or an unambiguous start of it (12 hex digits or more)."
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 40,
+                    "description": "A friendly name (a passkey\u0027s or a machine\u0027s)."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "machine-approve",
+        "description": "Approve a pending machine with a friendly name (or re-pin the authority key for this machine). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/machines/{fingerprint}/disable": {
+      "post": {
+        "operationId": "disableMachine",
+        "summary": "Disable a machine (it is denied until enabled; its grants end).",
+        "tags": [
+          "machines"
+        ],
+        "parameters": [
+          {
+            "name": "fingerprint",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 12,
+              "maxLength": 80,
+              "description": "The machine\u0027s fingerprint, or an unambiguous start of it (12 hex digits or more)."
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "machine-disable",
+        "description": "Disable a machine (it is denied until enabled; its grants end). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/machines/{fingerprint}/enable": {
+      "post": {
+        "operationId": "enableMachine",
+        "summary": "Enable a disabled machine (it starts clean).",
+        "tags": [
+          "machines"
+        ],
+        "parameters": [
+          {
+            "name": "fingerprint",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 12,
+              "maxLength": 80,
+              "description": "The machine\u0027s fingerprint, or an unambiguous start of it (12 hex digits or more)."
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "machine-enable",
+        "description": "Enable a disabled machine (it starts clean). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/machines/{fingerprint}/untrust": {
+      "post": {
+        "operationId": "untrustMachine",
+        "summary": "Withdraw trust from a machine.",
+        "tags": [
+          "machines"
+        ],
+        "parameters": [
+          {
+            "name": "fingerprint",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 12,
+              "maxLength": 80,
+              "description": "The machine\u0027s fingerprint, or an unambiguous start of it (12 hex digits or more)."
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "machine-untrust",
+        "description": "Withdraw trust from a machine. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/machines/{fingerprint}/trust": {
+      "post": {
+        "operationId": "trustMachine",
+        "summary": "Trust an untrusted machine again, confirmed by typing its full fingerprint.",
+        "tags": [
+          "machines"
+        ],
+        "parameters": [
+          {
+            "name": "fingerprint",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 12,
+              "maxLength": 80,
+              "description": "The machine\u0027s fingerprint, or an unambiguous start of it (12 hex digits or more)."
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  },
+                  "confirm": {
+                    "type": "string",
+                    "maxLength": 80,
+                    "description": "The machine\u0027s full fingerprint, typed again to confirm."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization",
+                  "confirm"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "machine-trust",
+        "description": "Trust an untrusted machine again, confirmed by typing its full fingerprint. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/machines/{fingerprint}/rename": {
+      "post": {
+        "operationId": "renameMachine",
+        "summary": "Rename a machine (display only).",
+        "tags": [
+          "machines"
+        ],
+        "parameters": [
+          {
+            "name": "fingerprint",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 12,
+              "maxLength": 80,
+              "description": "The machine\u0027s fingerprint, or an unambiguous start of it (12 hex digits or more)."
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 40,
+                    "description": "A friendly name (a passkey\u0027s or a machine\u0027s)."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization",
+                  "name"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "machine-rename",
+        "description": "Rename a machine (display only). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/machines/{fingerprint}/approve-host-change": {
+      "post": {
+        "operationId": "approveMachineHostChange",
+        "summary": "Accept the new host name a machine reported.",
+        "tags": [
+          "machines"
+        ],
+        "parameters": [
+          {
+            "name": "fingerprint",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 12,
+              "maxLength": 80,
+              "description": "The machine\u0027s fingerprint, or an unambiguous start of it (12 hex digits or more)."
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "machine-host-change",
+        "description": "Accept the new host name a machine reported. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/grants/{id}/extend": {
+      "post": {
+        "operationId": "extendGrant",
+        "summary": "Extend a grant by minutes, or to no end.",
+        "tags": [
+          "grants"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 4,
+              "maxLength": 80,
+              "description": "The grant\u0027s id, or an unambiguous start of it."
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  },
+                  "minutes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1440,
+                    "description": "Minutes to add to (extend) or to grant from now (renew)."
+                  },
+                  "indefinite": {
+                    "type": "boolean",
+                    "description": "True for a grant with no end (instead of minutes)."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "grant-extend",
+        "description": "Extend a grant by minutes, or to no end. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/grants/{id}/renew": {
+      "post": {
+        "operationId": "renewGrant",
+        "summary": "Renew an ended grant for minutes from now, or to no end.",
+        "tags": [
+          "grants"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 4,
+              "maxLength": 80,
+              "description": "The grant\u0027s id, or an unambiguous start of it."
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  },
+                  "minutes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1440,
+                    "description": "Minutes to add to (extend) or to grant from now (renew)."
+                  },
+                  "indefinite": {
+                    "type": "boolean",
+                    "description": "True for a grant with no end (instead of minutes)."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "grant-renew",
+        "description": "Renew an ended grant for minutes from now, or to no end. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/grants/{id}/revoke": {
+      "post": {
+        "operationId": "revokeGrant",
+        "summary": "Revoke a grant (it ends now and its machine is told).",
+        "tags": [
+          "grants"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 4,
+              "maxLength": 80,
+              "description": "The grant\u0027s id, or an unambiguous start of it."
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "grant-revoke",
+        "description": "Revoke a grant (it ends now and its machine is told). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/passkeys/{name}/remove": {
+      "post": {
+        "operationId": "removePasskey",
+        "summary": "Remove a passkey (any key but the last admin key).",
+        "tags": [
+          "passkeys"
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 40,
+              "description": "A friendly name (a passkey\u0027s or a machine\u0027s)."
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "passkey-unenroll",
+        "description": "Remove a passkey (any key but the last admin key). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Started: the first passkey page of the operation is at \u0060link\u0060.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "ws_session",
+        "description": "A read-only administrator session (HttpOnly, SameSite=Strict, path /api/v1)."
+      },
+      "antiForgery": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Admin-Token",
+        "description": "The antiForgery value of GET /session, for every request that is not a GET."
+      }
+    },
+    "schemas": {
+      "Problem": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "A URI naming the kind of problem (urn:with-secrets:problem:CODE)."
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string",
+            "description": "One safe sentence. Never a secret, a credential, a key or an internal detail."
+          },
+          "code": {
+            "type": "string",
+            "description": "A stable machine-readable code."
+          },
+          "supportedVersions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail",
+          "code"
+        ],
+        "description": "An RFC 9457 problem document (application/problem\u002Bjson)."
+      },
+      "Done": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "ok"
+        ]
+      },
+      "Status": {
+        "type": "object",
+        "properties": {
+          "running": {
+            "type": "boolean"
+          },
+          "locked": {
+            "type": "boolean"
+          },
+          "unlockMode": {
+            "type": "string",
+            "enum": [
+              "manual",
+              "unattended"
+            ]
+          },
+          "unlockedHow": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "How it was unlocked (manual, unattended), when it is unlocked."
+          },
+          "apiVersion": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "protocolVersion": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "running",
+          "locked",
+          "unlockMode",
+          "unlockedHow",
+          "apiVersion",
+          "version",
+          "protocolVersion"
+        ]
+      },
+      "Login": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "waiting",
+              "failed"
+            ]
+          },
+          "problem": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "state",
+          "problem"
+        ]
+      },
+      "Session": {
+        "type": "object",
+        "properties": {
+          "authenticated": {
+            "type": "boolean"
+          },
+          "admin": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The name of the admin passkey that tapped."
+          },
+          "started": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "idleExpires": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "absoluteExpires": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "antiForgery": {
+            "type": "string",
+            "description": "Send this as the X-Admin-Token header with every request that is not a GET."
+          },
+          "login": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Login"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recent": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "authenticated",
+          "admin",
+          "started",
+          "idleExpires",
+          "absoluteExpires",
+          "antiForgery",
+          "login",
+          "recent"
+        ]
+      },
+      "LoginStarted": {
+        "type": "object",
+        "properties": {
+          "link": {
+            "type": "string",
+            "description": "The one-use passkey page to open. The tap there starts the session."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "link"
+        ]
+      },
+      "Machine": {
+        "type": "object",
+        "properties": {
+          "fingerprint": {
+            "type": "string"
+          },
+          "display": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "trusted",
+              "disabled",
+              "untrusted"
+            ]
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "hostName": {
+            "type": "string"
+          },
+          "pendingHostName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "friendlyName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "thisMachine": {
+            "type": "boolean"
+          },
+          "actions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "approve",
+                "disable",
+                "enable",
+                "untrust",
+                "trust",
+                "approve-host-change",
+                "rename"
+              ]
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "fingerprint",
+          "display",
+          "status",
+          "revision",
+          "hostName",
+          "pendingHostName",
+          "friendlyName",
+          "created",
+          "updated",
+          "thisMachine",
+          "actions"
+        ]
+      },
+      "MachineList": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Machine"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "items"
+        ]
+      },
+      "Grant": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "machineName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "ends": {
+            "type": "string"
+          },
+          "secretNames": {
+            "type": "string",
+            "description": "The NAMES of the secrets the grant covers (never a value)."
+          },
+          "program": {
+            "type": "string"
+          },
+          "workingDirectory": {
+            "type": "string"
+          },
+          "approvedBy": {
+            "type": "string"
+          },
+          "revoked": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "actions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "extend",
+                "renew",
+                "revoke"
+              ]
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "fingerprint",
+          "machineName",
+          "state",
+          "status",
+          "revision",
+          "created",
+          "updated",
+          "expires",
+          "ends",
+          "secretNames",
+          "program",
+          "workingDirectory",
+          "approvedBy",
+          "revoked",
+          "actions"
+        ]
+      },
+      "GrantList": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Grant"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "items"
+        ]
+      },
+      "AuditEvent": {
+        "type": "object",
+        "properties": {
+          "eventId": {
+            "type": "string"
+          },
+          "sequence": {
+            "type": "integer"
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "received": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "machine": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "authorization",
+              "launch",
+              "execution"
+            ]
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "requestId": {
+            "type": "string"
+          },
+          "folder": {
+            "type": "string"
+          },
+          "program": {
+            "type": "string"
+          },
+          "arguments": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "grantId": {
+            "type": "string"
+          },
+          "exitCode": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "eventId",
+          "sequence",
+          "time",
+          "received",
+          "machine",
+          "type",
+          "outcome",
+          "reason",
+          "requestId",
+          "folder",
+          "program",
+          "arguments",
+          "grantId",
+          "exitCode"
+        ]
+      },
+      "AuditEventList": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuditEvent"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "items"
+        ]
+      },
+      "AuditChange": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "event": {
+            "type": "string"
+          },
+          "machine": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "actor": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "time",
+          "event",
+          "machine",
+          "actor",
+          "detail"
+        ]
+      },
+      "AuditChangeList": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuditChange"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "items"
+        ]
+      },
+      "AuditGap": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "machine": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "from": {
+            "type": "integer"
+          },
+          "to": {
+            "type": "integer"
+          },
+          "detected": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "resolved": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "epoch": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "machine",
+          "kind",
+          "from",
+          "to",
+          "detected",
+          "resolved",
+          "epoch"
+        ]
+      },
+      "AuditGapList": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuditGap"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "items"
+        ]
+      },
+      "Settings": {
+        "type": "object",
+        "properties": {
+          "unlockMode": {
+            "type": "string",
+            "enum": [
+              "manual",
+              "unattended"
+            ]
+          },
+          "unlockModeDescription": {
+            "type": "string"
+          },
+          "auditRetentionDays": {
+            "type": "integer"
+          },
+          "sessionIdleMinutes": {
+            "type": "integer"
+          },
+          "sessionAbsoluteMinutes": {
+            "type": "integer"
+          },
+          "authorityKey": {
+            "type": "string",
+            "description": "The public fingerprint of the authority key in use."
+          },
+          "maxAuditRetentionDays": {
+            "type": "integer"
+          },
+          "maxSessionIdleMinutes": {
+            "type": "integer"
+          },
+          "maxSessionAbsoluteMinutes": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "unlockMode",
+          "unlockModeDescription",
+          "auditRetentionDays",
+          "sessionIdleMinutes",
+          "sessionAbsoluteMinutes",
+          "authorityKey",
+          "maxAuditRetentionDays",
+          "maxSessionIdleMinutes",
+          "maxSessionAbsoluteMinutes"
+        ]
+      },
+      "Passkey": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "admin": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "detail",
+          "created",
+          "admin"
+        ]
+      },
+      "Passkeys": {
+        "type": "object",
+        "properties": {
+          "available": {
+            "type": "boolean"
+          },
+          "problem": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Passkey"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "available",
+          "problem",
+          "items"
+        ]
+      },
+      "NameValue": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "value"
+        ]
+      },
+      "Authorization": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Carry this in the \u0060authorization\u0060 member of the one mutation it was made for."
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "unlock",
+              "lock",
+              "policy-manual",
+              "policy-unattended",
+              "set-audit-retention",
+              "set-session-timeouts",
+              "authority-key-rotate",
+              "authority-key-recover",
+              "machine-approve",
+              "machine-disable",
+              "machine-enable",
+              "machine-untrust",
+              "machine-trust",
+              "machine-rename",
+              "machine-host-change",
+              "grant-extend",
+              "grant-renew",
+              "grant-revoke",
+              "passkey-enroll",
+              "passkey-unenroll"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "verified",
+              "refused",
+              "consumed",
+              "expired"
+            ]
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "link": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The one-use passkey page to open (while pending). The tap there is the authorization."
+          },
+          "sentence": {
+            "type": "string",
+            "description": "Exactly what the passkey signs: show it to the person."
+          },
+          "parameters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NameValue"
+            }
+          },
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lifetimeSeconds": {
+            "type": "integer",
+            "description": "How long a verified authorization may wait for its mutation."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "operation",
+          "state",
+          "detail",
+          "link",
+          "sentence",
+          "parameters",
+          "created",
+          "expires",
+          "lifetimeSeconds"
+        ]
+      },
+      "AuthorizationRequest": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string",
+            "enum": [
+              "unlock",
+              "lock",
+              "policy-manual",
+              "policy-unattended",
+              "set-audit-retention",
+              "set-session-timeouts",
+              "authority-key-rotate",
+              "authority-key-recover",
+              "machine-approve",
+              "machine-disable",
+              "machine-enable",
+              "machine-untrust",
+              "machine-trust",
+              "machine-rename",
+              "machine-host-change",
+              "grant-extend",
+              "grant-renew",
+              "grant-revoke",
+              "passkey-enroll",
+              "passkey-unenroll"
+            ],
+            "description": "The operation to authorize."
+          },
+          "parameters": {
+            "type": "object",
+            "maxProperties": 8,
+            "additionalProperties": {
+              "type": [
+                "string",
+                "integer",
+                "boolean"
+              ],
+              "maxLength": 300
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "operation"
+        ],
+        "description": "The operation and every parameter that the passkey will sign. The mutation that follows must repeat exactly these."
+      },
+      "MutationResponse": {
+        "type": "object",
+        "properties": {
+          "operation": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "applied",
+              "started"
+            ],
+            "description": "applied: done. started: the first passkey page of an operation with pages of its own is at \u0060link\u0060."
+          },
+          "link": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "operation",
+          "outcome",
+          "link"
+        ]
+      }
+    }
+  },
+  "x-versioning": {
+    "current": "v1",
+    "supported": [
+      "v1"
+    ],
+    "unsupportedVersionProblem": "unsupported-api-version"
+  }
+}

@@ -1025,10 +1025,10 @@ internal static class GrantAuthorityTests
         check(await browser.SignInAsync(laptop), "admin grants: the administrator signs in to the app with one tap");
 
         // The grants view lists each grant (no scope key), with its state and end; it needs the session.
-        (int listStatus, string listHtml, _) = await browser.GetAsync("/admin/grants");
+        (int listStatus, string listHtml, _) = await browser.GetAsync("/api/v1/grants");
         check(listStatus == 200 && listHtml.Contains(id, StringComparison.Ordinal) && listHtml.Contains("active", StringComparison.Ordinal) && !listHtml.Contains(S1, StringComparison.Ordinal), "admin grants: the grants view shows the grant and its state, and not the scope key");
         AdminBrowser stranger = new(service, http);
-        check((await stranger.GetAsync("/admin/grants")).Status == 401, "admin grants: without a session the view is refused");
+        check((await stranger.GetAsync("/api/v1/grants")).Status == 401, "admin grants: without a session the view is refused");
 
         string before = Snap(fx, id);
         async Task<Tapped> Op(string op, TestAuthenticator? who, bool uv = true, Func<byte[], byte[]>? change = null, params (string, string)[] args) => await browser.OpAsync(op, who, uv, change, true, args);
@@ -1071,8 +1071,10 @@ internal static class GrantAuthorityTests
         Tapped stalePage = await browser.OpAsync("grant-revoke", null, true, null, true, ("id", id));
         fx.Admin(GrantOps.Extend, id, 1);
         (int staleStatus, _) = TestState.Approve(http, "http://127.0.0.1:" + new Uri(stalePage.Link!).Port + new Uri(stalePage.Link!).AbsolutePath, "http://localhost:" + new Uri(stalePage.Link!).Port, "localhost", laptop);
-        await Task.Delay(500);
-        check(fx.Store.FindGrant(id) is { Status: "active" } && staleStatus != 0, "admin grants revoke: a grant that changed while the page was open is not revoked by the stale tap");
+        string staleState = await browser.WaitAuthorizationAsync(stalePage.AuthorizationId!);
+        (HttpMethod staleMethod, string stalePath, string staleBody) = browser.MutationRequest("grant-revoke", stalePage.AuthorizationId, ("id", id));
+        (int staleMutation, _) = await browser.SendAsync(staleMethod, stalePath, staleBody);
+        check(fx.Store.FindGrant(id) is { Status: "active" } && staleStatus != 0 && staleState == "verified" && staleMutation == 409, "admin grants revoke: a grant that changed after the tap is not revoked by the stale authorization (409)");
 
         Tapped revoke = await Op("grant-revoke", laptop, true, null, ("id", id));
         check(revoke.ApproveStatus == 200 && await HostServiceTests.WaitFor(() => fx.Store.FindGrant(id) is { Status: "revoked" }) && revoke.Page.Contains("revoke this grant", StringComparison.Ordinal), "admin grants revoke: the tap revokes it and the page named exactly that action");
@@ -1084,7 +1086,7 @@ internal static class GrantAuthorityTests
         Tapped indefinite = await Op("grant-extend", laptop, true, null, ("id", short1.GrantId!), ("indefinite", "true"));
         check(indefinite.ApproveStatus == 200 && await HostServiceTests.WaitFor(() => fx.Store.FindGrant(short1.GrantId!) is { Expires: null }), "admin grants extend (no end): gives the grant no end after the tap");
 
-        (_, string again, _) = await browser.GetAsync("/admin/grants");
+        (_, string again, _) = await browser.GetAsync("/api/v1/grants");
         check(again.Contains(id, StringComparison.Ordinal) && again.Contains("revoked", StringComparison.Ordinal) && again.Contains(short1.GrantId!, StringComparison.Ordinal) && again.Contains("no end", StringComparison.Ordinal) && !again.Contains(S1, StringComparison.Ordinal), "admin grants list: one row per grant with its state and end; the scope key (a hash of the request) is not shown");
     }
 

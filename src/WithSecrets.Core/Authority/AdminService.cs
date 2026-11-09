@@ -72,6 +72,7 @@ public sealed partial class AdminService
         parts.Lock.OnLock(_ =>
         {
             Sessions.DestroyAll();
+            ClearAuthorizations();
             CancelPending();
         });
     }
@@ -79,10 +80,10 @@ public sealed partial class AdminService
     /// <summary>The sessions (service memory only).</summary>
     public AdminSessions Sessions { get; }
 
-    /// <summary>The HTTP side of the app (the service routes <c>/admin</c> requests here).</summary>
-    internal AdminWeb Web => _web ??= new AdminWeb(this, _p.Port);
+    /// <summary>The HTTP side of the administration: the JSON API under <c>/api/v1/</c> (the service routes <c>/api</c> requests here).</summary>
+    internal AdminApi Api => _api ??= new AdminApi(this, _p.Port);
 
-    private AdminWeb? _web;
+    private AdminApi? _api;
     private readonly Queue<DateTimeOffset> _refusalRows = new();
 
     /// <summary>
@@ -181,40 +182,7 @@ public sealed partial class AdminService
         }
     }
 
-    /// <summary>
-    /// Starts an operation for a caller. The returned link is the page that asks for the passkey; the operation runs in the background and is applied only after that page's verified tap.
-    /// A new request replaces the passkey page that one slot is still waiting on (a session's requests replace each other, a sessionless one only another sessionless one), and Lock
-    /// replaces them all, so no request can hold the others out and the emergency control always gets its page.
-    /// </summary>
-    public async Task<AdminStart> StartAsync(AdminCaller caller, string op, IReadOnlyDictionary<string, string> args, CancellationToken cancel)
-    {
-        bool isSession = caller.Session is not null;
-        if (!isSession && !NeedsNoSession(op))
-        {
-            Refused(op, "no administrator session");
-
-            return new AdminStart(null, "sign in first: this needs an administrator session", 401);
-        }
-
-        if (!TakeStart(isSession ? 1 : 0))
-        {
-            Refused(op, "too many requests");
-
-            return new AdminStart(null, "too many requests; wait a minute", 429);
-        }
-
-        AdminPlan? plan = Plan(op, args, out string? refusal, out int refusalStatus);
-        if (plan is null)
-        {
-            Refused(op, refusal ?? "refused");
-
-            return new AdminStart(null, refusal, refusalStatus);
-        }
-
-        return await Run(plan, isSession, cancel);
-    }
-
-    private async Task<AdminStart> Run(AdminPlan plan, bool isSession, CancellationToken cancel)
+    private async Task<AdminStart> Run(AdminPlan plan, bool isSession, CancellationToken cancel, Func<AdminPlan, IAdminAsker, Action<string>, CancellationToken, string>? execute = null, bool keepMaterial = false)
     {
         int slot = isSession ? 1 : 0;
         CancellationTokenSource source = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken.None);
@@ -254,7 +222,7 @@ public sealed partial class AdminService
         {
             try
             {
-                string outcome = Execute(plan, asker, announce, token);
+                string outcome = execute is null ? Execute(plan, asker, announce, token) : execute(plan, asker, announce, token);
                 link.TrySetResult("done: " + outcome);
             }
             catch (Exception error) when (error is not OutOfMemoryException)
@@ -265,7 +233,7 @@ public sealed partial class AdminService
             }
             finally
             {
-                if (plan.Material is not null)
+                if (plan.Material is not null && !keepMaterial)
                 {
                     CryptographicOperations.ZeroMemory(plan.Material);
                 }
@@ -330,10 +298,20 @@ public sealed partial class AdminService
             return authorized.Detail;
         }
 
+        string? failure = ApplyAuthorized(plan, authorized, admin);
+
+        return failure ?? "applied";
+    }
+
+    /// <summary>
+    /// Applies a plan after its verified tap: the lock is re-checked first (nothing is applied by a locked authority, except the unlock itself), a failure becomes one safe line, and the
+    /// outcome is audited. Returns null when it was applied, else why not.
+    /// </summary>
+    private string? ApplyAuthorized(AdminPlan plan, AdminAuthorization authorized, VerifiedAdmin admin)
+    {
         string? failure;
         try
         {
-            // A lock between the tap and the change stops the change: nothing is applied by a locked authority (except the unlock itself).
             if (_p.Lock.IsLocked && plan.Operation != "unlock-authority")
             {
                 throw new AuthorityLockedException();
@@ -353,7 +331,7 @@ public sealed partial class AdminService
         _p.Authorizer.Outcome(admin, failure is null ? "applied" : "failed: " + ApprovalSummary.Clean(failure));
         Note(plan.Operation + (failure is null ? ": applied" : ": failed"));
 
-        return failure ?? "applied";
+        return failure;
     }
 
     // ---- signing in ----

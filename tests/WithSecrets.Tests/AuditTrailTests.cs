@@ -633,11 +633,11 @@ internal static class AuditTrailTests
     private static void Cli(Action<bool, string> check, string parent)
     {
         // The audit search of the admin web app (the old `admin audit` verb is gone): its query parsing and the data it reads.
-        (AuditQuery? Query, bool Gaps, string? Error) Parse(params (string Name, string Value)[] args) => AdminService.ParseAuditQuery(name => args.Where(item => item.Name == name).Select(item => item.Value).FirstOrDefault());
-        check(Parse() is { Gaps: false, Error: null, Query: { Limit: 100, MachinePrefix: null, Text: null } }, "audit search parse: no filters lists the newest 100");
+        (AuditQuery? Query, string? Error) Parse(params (string Name, string Value)[] args) => AdminService.ParseAuditQuery(name => args.Where(item => item.Name == name).Select(item => item.Value).FirstOrDefault());
+        check(Parse() is { Error: null, Query: { Limit: 100, MachinePrefix: null, Text: null } }, "audit search parse: no filters lists the newest 100");
         var full = Parse(("machine", "AB12"), ("since", "2026-11-01"), ("until", "2026-11-02T10:00:00Z"), ("type", "launch"), ("outcome", "started"), ("grant", "g-12"), ("folder", "alpha"), ("text", "build"), ("last", "7"));
         check(full.Query is { MachinePrefix: "AB12", Type: "launch", Outcome: "started", GrantId: "g-12", Folder: "alpha", Text: "build", Limit: 7 } && full.Query.From == new DateTimeOffset(2026, 11, 1, 0, 0, 0, TimeSpan.Zero) && full.Query.To == new DateTimeOffset(2026, 11, 2, 10, 0, 0, TimeSpan.Zero), "audit search parse: every filter (a time without a zone is UTC)");
-        check(Parse(("gaps", "1"), ("machine", "AB12")) is { Gaps: true, Error: null } && Parse(("type", "nope")).Error is not null && Parse(("since", "yesterday-ish")).Error is not null && Parse(("last", "0")).Error is not null && Parse(("last", "1001")).Error is not null && Parse(("last", "-3")).Error is not null, "audit search parse: bad values are refused with a reason");
+        check(Parse(("machine", "AB12")) is { Error: null } && Parse(("type", "nope")).Error is not null && Parse(("since", "yesterday-ish")).Error is not null && Parse(("last", "0")).Error is not null && Parse(("last", "1001")).Error is not null && Parse(("last", "-3")).Error is not null, "audit search parse: bad values are refused with a reason");
 
         using TestMachine machine = new(Path.Combine(parent, "cl-" + Guid.NewGuid().ToString("N")[..6]));
         HostAuditOutbox outbox = HostAuditOutbox.InFolder(machine.Folder, machine.MachineKey);
@@ -666,29 +666,32 @@ internal static class AuditTrailTests
         machine.Deployment.Authority.UploadAsync(Batch(machine, a, b, skipped)).GetAwaiter().GetResult();
         app.Start(true);
         AdminBrowser anon = app.Browser();
-        check((await anon.GetAsync("/admin/audit?text=build")).Status == 401, "audit view: without a session nothing of the history is served");
+        check((await anon.GetAsync("/api/v1/audit/events?text=build")).Status == 401 && (await anon.GetAsync("/api/v1/audit/changes")).Status == 401 && (await anon.GetAsync("/api/v1/audit/gaps")).Status == 401, "audit view: without a session nothing of the history is served");
         AdminBrowser browser = await app.SignedIn();
-        async Task<string> View(string query) => (await browser.GetAsync("/admin/audit" + query)).Html;
+        async Task<string> View(string query, string kind = "events") => (await browser.GetAsync("/api/v1/audit/" + kind + query)).Html;
         string all = await View("");
         check(all.Contains("build.sh", StringComparison.Ordinal) && all.Contains("test.sh", StringComparison.Ordinal) && all.Contains("exited", StringComparison.Ordinal) && all.Contains("g-1", StringComparison.Ordinal) && all.Contains("--token=[REDACTED]", StringComparison.Ordinal), "audit view: every event with its outcome, grant, exit code and the redacted command");
-        check(all.Contains("admin-session", StringComparison.Ordinal) && all.Contains("Authority changes", StringComparison.Ordinal), "audit view: the authority's own changes (the session start) are shown too");
+        string changes = await View("", "changes");
+        check(changes.Contains("admin-session", StringComparison.Ordinal) && changes.Contains("\"actor\"", StringComparison.Ordinal), "audit view: the authority's own changes (the session start) are served too");
         string byGrant = await View("?grant=g-1");
         check(byGrant.Contains("test.sh", StringComparison.Ordinal) && !byGrant.Contains("build.sh", StringComparison.Ordinal), "audit view: the grant filter applies");
         string byMachine = await View("?machine=" + KeyIdentity.Display(machine.Fingerprint).Replace(" ", "")[..8]);
         string otherMachine = await View("?machine=ffffffff");
-        check(byMachine.Contains("build.sh", StringComparison.Ordinal) && !otherMachine.Contains("build.sh", StringComparison.Ordinal) && otherMachine.Contains("No audit events match", StringComparison.Ordinal), "audit view: the machine filter applies");
+        check(byMachine.Contains("build.sh", StringComparison.Ordinal) && !otherMachine.Contains("build.sh", StringComparison.Ordinal) && otherMachine == "{\"items\":[]}", "audit view: the machine filter applies");
         check((await View("?type=execution")).Contains("test.sh", StringComparison.Ordinal) && !(await View("?type=execution")).Contains("build.sh", StringComparison.Ordinal), "audit view: the type (launch or execution) filter applies");
         check((await View("?outcome=exited")).Contains("test.sh", StringComparison.Ordinal) && !(await View("?outcome=exited")).Contains("build.sh", StringComparison.Ordinal), "audit view: the outcome filter applies");
         check((await View("?folder=other")).Contains("test.sh", StringComparison.Ordinal) && !(await View("?folder=other")).Contains("build.sh", StringComparison.Ordinal), "audit view: the project (working directory) filter applies");
         check((await View("?text=build")).Contains("build.sh", StringComparison.Ordinal) && !(await View("?text=build")).Contains("test.sh", StringComparison.Ordinal), "audit view: the text search applies");
-        check((await View("?since=2999-01-01")).Contains("No audit events match", StringComparison.Ordinal) && (await View("?until=2000-01-01")).Contains("No audit events match", StringComparison.Ordinal) && (await View("?since=2000-01-01")).Contains("build.sh", StringComparison.Ordinal), "audit view: the time range applies");
-        string gaps = await View("?gaps=1");
-        check(gaps.Contains("3-8", StringComparison.Ordinal) && gaps.Contains("missing", StringComparison.OrdinalIgnoreCase), "audit view: the gap view lists the missing range 3-8");
-        string bad = await View("?last=0&since=nonsense");
-        check(bad.Contains("audit-error", StringComparison.Ordinal) && !bad.Contains("build.sh", StringComparison.Ordinal), "audit view: a bad filter says why and shows nothing");
-        string xss = await View("?text=" + Uri.EscapeDataString("<script>alert(1)</script>"));
-        check(!xss.Contains("<script>alert(1)", StringComparison.Ordinal) && xss.Contains("&lt;script&gt;", StringComparison.Ordinal), "audit view: a search text is shown encoded (no script injection)");
-        check(!all.Contains("authenticatorData", StringComparison.Ordinal) && !all.Contains(browser.Cookies[AdminSessions.SessionCookie], StringComparison.Ordinal), "audit view: no proof and no session token in the page");
+        check((await View("?since=2999-01-01")) == "{\"items\":[]}" && (await View("?until=2000-01-01")) == "{\"items\":[]}" && (await View("?since=2000-01-01")).Contains("build.sh", StringComparison.Ordinal), "audit view: the time range applies");
+        string gaps = await View("", "gaps");
+        check(gaps.Contains("\"from\":3", StringComparison.Ordinal) && gaps.Contains("\"to\":8", StringComparison.Ordinal) && gaps.Contains("missing", StringComparison.OrdinalIgnoreCase), "audit view: the gap list has the missing range 3-8");
+        (int badStatus, string bad, HttpResponseMessage badResponse) = await browser.GetAsync("/api/v1/audit/events?last=0&since=nonsense");
+        check(badStatus == 400 && badResponse.Content.Headers.ContentType?.MediaType == "application/problem+json" && bad.Contains("invalid-request", StringComparison.Ordinal) && !bad.Contains("build.sh", StringComparison.Ordinal), "audit view: a bad filter is a problem document and shows nothing");
+        (int unknownStatus, _, _) = await browser.GetAsync("/api/v1/audit/events?nope=1");
+        check(unknownStatus == 400, "audit view: a query parameter the route does not take is refused");
+        (int xssStatus, string xss, HttpResponseMessage xssResponse) = await browser.GetAsync("/api/v1/audit/changes?text=" + Uri.EscapeDataString("<script>alert(1)</script>"));
+        check(xssStatus == 200 && !xss.Contains("<script>", StringComparison.Ordinal) && xssResponse.Content.Headers.ContentType?.MediaType == "application/json" && xssResponse.Headers.GetValues("X-Content-Type-Options").Contains("nosniff"), "audit view: a search text never comes back as markup (JSON, nosniff)");
+        check(!all.Contains("authenticatorData", StringComparison.Ordinal) && !all.Contains(browser.Cookies[AdminSessions.SessionCookie], StringComparison.Ordinal) && !changes.Contains(browser.Cookies[AdminSessions.SessionCookie], StringComparison.Ordinal), "audit view: no proof and no session token in the answers");
 
         // L2: a locked authority stores nothing that a host uploads.
         using TestMachine lockedMachine = new(Path.Combine(parent, "l2-" + Guid.NewGuid().ToString("N")[..6]));

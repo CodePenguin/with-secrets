@@ -381,9 +381,9 @@ internal static class Program
             AuditTrailTests.Run(Check).GetAwaiter().GetResult();
         }
 
-        if (Wants("AdminApp"))
+        if (Wants("Api"))
         {
-            AdminAppTests.Run(Check).GetAwaiter().GetResult();
+            ApiTests.Run(Check).GetAwaiter().GetResult();
         }
 
         if (Wants("Admin"))
