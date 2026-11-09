@@ -38,7 +38,7 @@ public sealed record LaunchMapping(string Variable, string Secret);
 /// <para>
 /// The canonical text is exactly <c>{"protocolVersion":N,"requestId":S,"created":S,"expires":S,"clientNonce":S,"secretNames":[S,...],
 /// "mappings":[{"variable":S,"secret":S},...],"reason":S,"program":S,"arguments":[S,...],"workingDirectory":S,"envFiles":[S,...],
-/// "envNames":[S,...],"envVariables":{NAME:S,...}}</c>: this member order, no white space, <c>envVariables</c> sorted by name
+/// "envNames":[S,...],"envVariables":{NAME:S,...},"inheritedEnvironment":{NAME:S,...}}</c>: this member order, no white space, both maps sorted by name
 /// (ordinal), lists in the order given, times in UTC in the round-trip ("O") format, numbers as plain integers, and strings as
 /// <see cref="ToolSettings.QuoteJson" /> writes them (the escaping <see cref="Manifest.Canonical" /> uses, plus control
 /// characters). The digest is <see cref="Digest" />: SHA-256 of the UTF-8 bytes of that text, in upper-case hex.
@@ -58,7 +58,8 @@ public sealed record LaunchRequest(
     string WorkingDirectory,
     IReadOnlyList<string> EnvFiles,
     IReadOnlyList<string> EnvNames,
-    IReadOnlyDictionary<string, string> EnvVariables)
+    IReadOnlyDictionary<string, string> EnvVariables,
+    IReadOnlyDictionary<string, string> InheritedEnvironment)
 {
     /// <summary>The canonical JSON text of the request. Equal requests give equal text, whatever the order they were read in.</summary>
     public string Canonical()
@@ -99,18 +100,12 @@ public sealed record LaunchRequest(
         CanonicalJson.Strings(text, EnvFiles);
         text.Append(",\"envNames\":");
         CanonicalJson.Strings(text, EnvNames);
-        text.Append(",\"envVariables\":{");
-        first = true;
-        foreach (KeyValuePair<string, string> variable in EnvVariables.OrderBy(item => item.Key, StringComparer.Ordinal))
-        {
-            text.Append(first ? "" : ",");
-            first = false;
-            ToolSettings.QuoteJson(text, variable.Key);
-            text.Append(':');
-            ToolSettings.QuoteJson(text, variable.Value);
-        }
+        text.Append(",\"envVariables\":");
+        CanonicalJson.Map(text, EnvVariables);
+        text.Append(",\"inheritedEnvironment\":");
+        CanonicalJson.Map(text, InheritedEnvironment);
 
-        return text.Append("}}").ToString();
+        return text.Append('}').ToString();
     }
 
     /// <summary>The request digest: SHA-256 of the UTF-8 bytes of <see cref="Canonical" />, upper-case hex. It changes when any field changes.</summary>
@@ -213,7 +208,7 @@ public sealed record LaunchRequest(
 
         using (doc)
         {
-            ContractReader reader = new(doc!.RootElement, "protocolVersion", "requestId", "created", "expires", "clientNonce", "secretNames", "mappings", "reason", "program", "arguments", "workingDirectory", "envFiles", "envNames", "envVariables");
+            ContractReader reader = new(doc!.RootElement, "protocolVersion", "requestId", "created", "expires", "clientNonce", "secretNames", "mappings", "reason", "program", "arguments", "workingDirectory", "envFiles", "envNames", "envVariables", "inheritedEnvironment");
             if (reader.Problem is not null)
             {
                 error = reader.Problem;
@@ -225,7 +220,7 @@ public sealed record LaunchRequest(
             if (!reader.Int("protocolVersion", out int version) || !reader.Text("requestId", out string? id) || !reader.Time("created", out DateTimeOffset created) || !reader.Time("expires", out DateTimeOffset expires)
                 || !reader.Text("clientNonce", out string? nonce) || !reader.Strings("secretNames", out List<string>? names) || !reader.Text("reason", out string? reason) || !reader.Text("program", out string? program)
                 || !reader.Strings("arguments", out List<string>? arguments) || !reader.Text("workingDirectory", out string? folder) || !reader.Strings("envFiles", out List<string>? files)
-                || !reader.Strings("envNames", out List<string>? envNames) || !reader.Map("envVariables", out Dictionary<string, string>? variables) || !ReadMappings(reader, mappings))
+                || !reader.Strings("envNames", out List<string>? envNames) || !reader.Map("envVariables", out Dictionary<string, string>? variables) || !reader.Map("inheritedEnvironment", out Dictionary<string, string>? inherited) || !ReadMappings(reader, mappings))
             {
                 error = reader.Problem;
 
@@ -233,7 +228,7 @@ public sealed record LaunchRequest(
             }
 
             error = null;
-            request = new LaunchRequest(version, id!, created, expires, nonce!, names!, mappings, reason!, program!, arguments!, folder!, files!, envNames!, variables!);
+            request = new LaunchRequest(version, id!, created, expires, nonce!, names!, mappings, reason!, program!, arguments!, folder!, files!, envNames!, variables!, inherited!);
 
             return true;
         }
@@ -369,7 +364,7 @@ public sealed record LaunchBinding(string RequestDigest, string FingerprintKey, 
 public static class LaunchRequestBinding
 {
     /// <summary>The request for an approval: the command as typed, the pairs by name, the .env plan and the reason.</summary>
-    public static LaunchRequest From(ApprovalRequest approval, string requestId, string clientNonce, DateTimeOffset created, DateTimeOffset expires)
+    public static LaunchRequest From(ApprovalRequest approval, string requestId, string clientNonce, DateTimeOffset created, DateTimeOffset expires, IReadOnlyDictionary<string, string>? inheritedEnvironment = null)
         => new(
             LaunchProtocol.Version,
             requestId,
@@ -384,12 +379,13 @@ public static class LaunchRequestBinding
             approval.WorkingDirectory,
             approval.EnvFiles ?? [],
             approval.EnvNames ?? [],
-            approval.EnvValues ?? new Dictionary<string, string>());
+            approval.EnvValues ?? new Dictionary<string, string>(),
+            inheritedEnvironment ?? new Dictionary<string, string>());
 
     /// <summary>Null when the request is the approved one, else which part differs (names the part, never a value).</summary>
     public static string? Mismatch(LaunchRequest request, ApprovalRequest approval)
     {
-        LaunchRequest expected = From(approval, request.RequestId, request.ClientNonce, request.Created, request.Expires);
+        LaunchRequest expected = From(approval, request.RequestId, request.ClientNonce, request.Created, request.Expires, request.InheritedEnvironment);
         if (request.Program != expected.Program)
         {
             return "program differs from the approval";
@@ -471,6 +467,23 @@ internal static class CanonicalJson
         }
 
         text.Append(']');
+    }
+
+    /// <summary>A JSON object of strings, members sorted by name (ordinal).</summary>
+    public static void Map(StringBuilder text, IReadOnlyDictionary<string, string> map)
+    {
+        text.Append('{');
+        bool first = true;
+        foreach (KeyValuePair<string, string> item in map.OrderBy(entry => entry.Key, StringComparer.Ordinal))
+        {
+            text.Append(first ? "" : ",");
+            first = false;
+            ToolSettings.QuoteJson(text, item.Key);
+            text.Append(':');
+            ToolSettings.QuoteJson(text, item.Value);
+        }
+
+        text.Append('}');
     }
 
     public static bool Open(string json, out JsonDocument? doc, out string? error)

@@ -13,10 +13,10 @@ internal static class LaunchContractTests
 {
     private static readonly DateTimeOffset Created = new(2026, 11, 1, 12, 0, 0, TimeSpan.Zero);
 
-    private const string GoldenCanonical = "{\"protocolVersion\":1,\"requestId\":\"req-0001\",\"created\":\"2026-11-01T12:00:00.0000000Z\",\"expires\":\"2026-11-01T12:05:00.0000000Z\",\"clientNonce\":\"bm9uY2UtMDAwMDAwMDE\",\"secretNames\":[\"API_KEY\",\"team/DB_PASS\"],\"mappings\":[{\"variable\":\"API_KEY\",\"secret\":\"API_KEY\"},{\"variable\":\"DB\",\"secret\":\"team/DB_PASS\"}],\"reason\":\"deploy \\\"v2\\\"\\u000a\",\"program\":\"dotnet\",\"arguments\":[\"test\",\"--filter\",\"\\u00e9\"],\"workingDirectory\":\"C:\\\\work\\\\app\",\"envFiles\":[\".env\"],\"envNames\":[\"MODE\"],\"envVariables\":{\"MODE\":\"ci\"}}";
+    private const string GoldenCanonical = "{\"protocolVersion\":1,\"requestId\":\"req-0001\",\"created\":\"2026-11-01T12:00:00.0000000Z\",\"expires\":\"2026-11-01T12:05:00.0000000Z\",\"clientNonce\":\"bm9uY2UtMDAwMDAwMDE\",\"secretNames\":[\"API_KEY\",\"team/DB_PASS\"],\"mappings\":[{\"variable\":\"API_KEY\",\"secret\":\"API_KEY\"},{\"variable\":\"DB\",\"secret\":\"team/DB_PASS\"}],\"reason\":\"deploy \\\"v2\\\"\\u000a\",\"program\":\"dotnet\",\"arguments\":[\"test\",\"--filter\",\"\\u00e9\"],\"workingDirectory\":\"C:\\\\work\\\\app\",\"envFiles\":[\".env\"],\"envNames\":[\"MODE\"],\"envVariables\":{\"MODE\":\"ci\"},\"inheritedEnvironment\":{\"LANG\":\"en\",\"PATH\":\"C:\\\\bin\"}}";
 
     // Computed independently (Python hashlib) over the exact bytes of GoldenCanonical.
-    private const string GoldenDigest = "D45735A6A3F3C51093490EC8F2F6B82B57EA1B30E50BBEFE07211FE70DB401B3";
+    private const string GoldenDigest = "CB6CEE83EFA8D50D5754870AE0C47A0C0CB93BAFA7E294BA6EF02A0EF550211B";
 
     private const string GoldenResult = "{\"protocolVersion\":1,\"requestId\":\"req-0001\",\"outcome\":\"exited\",\"exitCode\":3,\"output\":\"hello [REDACTED]\\u000a\",\"detail\":\"\"}";
 
@@ -34,7 +34,8 @@ internal static class LaunchContractTests
         "C:\\work\\app",
         [".env"],
         ["MODE"],
-        new Dictionary<string, string> { ["MODE"] = "ci" });
+        new Dictionary<string, string> { ["MODE"] = "ci" },
+        new Dictionary<string, string> { ["PATH"] = "C:\\bin", ["LANG"] = "en" });
 
     public static Task Run(Action<bool, string> check)
     {
@@ -85,7 +86,7 @@ internal static class LaunchContractTests
         ConstructorInfo constructor = typeof(LaunchRequest).GetConstructors().Single();
         ParameterInfo[] parameters = constructor.GetParameters();
         LaunchRequest baseline = Sample();
-        check(parameters.Length == 14, "launch contract: the request has 14 fields (a new field needs a golden vector and a binding decision): " + parameters.Length);
+        check(parameters.Length == 15, "launch contract: the request has 15 fields (a new field needs a golden vector and a binding decision): " + parameters.Length);
         foreach (ParameterInfo parameter in parameters)
         {
             PropertyInfo property = typeof(LaunchRequest).GetProperty(parameter.Name!)!;
@@ -97,6 +98,8 @@ internal static class LaunchContractTests
         }
 
         check(Sample().Digest() != (Sample() with { EnvVariables = new Dictionary<string, string> { ["MODE"] = "cj" } }).Digest(), "request digest: a changed environment value changes the digest");
+        check(Sample().Digest() != (Sample() with { InheritedEnvironment = new Dictionary<string, string> { ["PATH"] = "C:\\other", ["LANG"] = "en" } }).Digest(), "request digest: a changed inherited environment value changes the digest");
+        check(Sample().Digest() == (Sample() with { InheritedEnvironment = new Dictionary<string, string> { ["LANG"] = "en", ["PATH"] = "C:\\bin" } }).Digest(), "request digest: the inherited environment is sorted by name, so its order does not matter");
         check(Sample().Digest() != (Sample() with { Arguments = ["--filter", "test", "\u00e9"] }).Digest(), "request digest: argument order matters");
         check(Sample().Digest() != (Sample() with { Arguments = ["test", "--filter\u00e9"] }).Digest(), "request digest: argument boundaries matter");
     }

@@ -66,7 +66,8 @@ public sealed record ChildSpec(
     IReadOnlyList<string> Arguments,
     string WorkingDirectory,
     IReadOnlyDictionary<string, string> Secrets,
-    IReadOnlyDictionary<string, string>? Ordinary = null);
+    IReadOnlyDictionary<string, string>? Ordinary = null,
+    IReadOnlyDictionary<string, string>? InheritedEnvironment = null);
 
 /// <summary>Runs the program with the secrets as environment variables and redacts what it prints.</summary>
 public static class ChildRunner
@@ -91,7 +92,27 @@ public static class ChildRunner
         return CodeLoadingVariables.Any(item => string.Equals(item, name, comparison)) || CodeLoadingPrefixes.Any(prefix => name.StartsWith(prefix, comparison));
     }
 
+    /// <summary>Prepares, starts and waits for the program, with no gate in between (the caller has none to pass).</summary>
     public static async Task<int> RunAsync(ChildSpec spec, TextWriter stdout, TextWriter stderr)
+    {
+        PreparedChild prepared = Prepare(spec);
+        Process? process = prepared.Start(out string? failure);
+        if (process is null)
+        {
+            await stderr.WriteLineAsync(failure);
+
+            return 127;
+        }
+
+        return await prepared.WaitAsync(process, stdout, stderr);
+    }
+
+    /// <summary>
+    /// Builds the child's start information and environment without starting anything: the inherited environment (the process's
+    /// own when the spec has none), minus the code-loading variables, plus the ordinary .env values, plus the secrets. The
+    /// result holds the secret values until it is started or discarded.
+    /// </summary>
+    public static PreparedChild Prepare(ChildSpec spec)
     {
         (string file, string? raw) = Launch(spec);
         ProcessStartInfo start = new(file)
@@ -114,6 +135,19 @@ public static class ChildRunner
             foreach (string argument in spec.Arguments)
             {
                 start.ArgumentList.Add(argument);
+            }
+        }
+
+        // The environment is the one the sender had, when the request carries it; otherwise it is this process's own.
+        if (spec.InheritedEnvironment is { } inherited)
+        {
+            start.Environment.Clear();
+            foreach ((string name, string value) in inherited)
+            {
+                if (name.Length > 0 && !name.Contains('=', StringComparison.Ordinal) && !name.Contains('\0', StringComparison.Ordinal) && !value.Contains('\0', StringComparison.Ordinal))
+                {
+                    start.Environment[name] = value;
+                }
             }
         }
 
@@ -144,29 +178,7 @@ public static class ChildRunner
             start.Environment[name] = value;
         }
 
-        Process process;
-        try
-        {
-            process = Process.Start(start) ?? throw new InvalidOperationException("The process did not start.");
-        }
-        catch (Exception error) when (error is Win32Exception or InvalidOperationException)
-        {
-            await stderr.WriteLineAsync($"with-secrets: cannot start '{spec.ResolvedProgram}': {error.Message}");
-
-            return 127;
-        }
-
-        using (process)
-        {
-            // The child gets no standard input (it reads end of file at once), so nothing can feed it code the page did not show.
-            process.StandardInput.Close();
-            Task output = Pump(process.StandardOutput, new StreamRedactor(spec.Secrets.Values), stdout);
-            Task errors = Pump(process.StandardError, new StreamRedactor(spec.Secrets.Values), stderr);
-            await process.WaitForExitAsync();
-            await Task.WhenAll(output, errors);
-
-            return process.ExitCode;
-        }
+        return new PreparedChild(start, spec);
     }
 
     /// <summary>
@@ -218,7 +230,7 @@ public static class ChildRunner
         return (spec.ResolvedProgram, string.Join(' ', spec.Arguments.Take(flag + 1)) + " \"" + first + rest + "\"");
     }
 
-    private static async Task Pump(TextReader reader, StreamRedactor redactor, TextWriter writer)
+    internal static async Task Pump(TextReader reader, StreamRedactor redactor, TextWriter writer)
     {
         char[] buffer = new char[4096];
         int count;
@@ -239,5 +251,84 @@ public static class ChildRunner
         }
 
         await writer.FlushAsync();
+    }
+}
+
+/// <summary>
+/// A child that is ready to start: its environment (with the secret values) is built and nothing is running. <see cref="Start" />
+/// starts it; <see cref="Discard" /> throws the environment away, for a launch that was cancelled or invalidated first.
+/// </summary>
+public sealed class PreparedChild
+{
+    private readonly ProcessStartInfo _start;
+    private readonly ChildSpec _spec;
+
+    internal PreparedChild(ProcessStartInfo start, ChildSpec spec)
+    {
+        _start = start;
+        _spec = spec;
+    }
+
+    /// <summary>True after <see cref="Discard" />: the environment is gone and the program was not started.</summary>
+    public bool IsDiscarded { get; private set; }
+
+    /// <summary>True after a successful <see cref="Start" />.</summary>
+    public bool IsStarted { get; private set; }
+
+    /// <summary>The number of variables still held (0 after a discard or a start). For tests; never the values.</summary>
+    internal int EnvironmentCount => _start.Environment.Count;
+
+    /// <summary>Starts the program. Returns it, or null with a line to show (names the program and the system's reason, never a value). The environment is dropped from here either way.</summary>
+    public Process? Start(out string? failure)
+    {
+        failure = null;
+        if (IsDiscarded || IsStarted)
+        {
+            failure = "with-secrets: the program was not started (already started or discarded)";
+
+            return null;
+        }
+
+        try
+        {
+            Process process = Process.Start(_start) ?? throw new InvalidOperationException("The process did not start.");
+            IsStarted = true;
+
+            return process;
+        }
+        catch (Exception error) when (error is Win32Exception or InvalidOperationException)
+        {
+            failure = $"with-secrets: cannot start '{_spec.ResolvedProgram}': {error.Message}";
+
+            return null;
+        }
+        finally
+        {
+            // The values are in the child now, or nowhere. The strings themselves cannot be wiped (see SecretValues).
+            _start.Environment.Clear();
+        }
+    }
+
+    /// <summary>Drops the environment: this child will never start.</summary>
+    public void Discard()
+    {
+        _start.Environment.Clear();
+        IsDiscarded = true;
+    }
+
+    /// <summary>Waits for a started program, writing its redacted output, and returns its exit code.</summary>
+    public async Task<int> WaitAsync(Process started, TextWriter stdout, TextWriter stderr)
+    {
+        using (started)
+        {
+            // The child gets no standard input (it reads end of file at once), so nothing can feed it code the page did not show.
+            started.StandardInput.Close();
+            Task output = ChildRunner.Pump(started.StandardOutput, new StreamRedactor(_spec.Secrets.Values), stdout);
+            Task errors = ChildRunner.Pump(started.StandardError, new StreamRedactor(_spec.Secrets.Values), stderr);
+            await started.WaitForExitAsync();
+            await Task.WhenAll(output, errors);
+
+            return started.ExitCode;
+        }
     }
 }
