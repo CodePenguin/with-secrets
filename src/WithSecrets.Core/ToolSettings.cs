@@ -220,6 +220,33 @@ public sealed record ToolSettings(int ReuseMinutes, int ReuseMaxMinutes, string 
         return root.TryGetProperty(name, out JsonElement element) && element.ValueKind == JsonValueKind.Number && element.TryGetInt32(out value);
     }
 
+    /// <summary>
+    /// <see cref="Quote" /> for text that may hold control characters (a reason, a command line): the same escapes, and U+0000 to
+    /// U+001F as a \u00XX escape, so that the result is always valid JSON. <see cref="Quote" /> itself is unchanged, because the
+    /// manifest and the settings are signed over its exact output.
+    /// </summary>
+    internal static void QuoteJson(StringBuilder text, string value)
+    {
+        text.Append('"');
+        foreach (char c in value)
+        {
+            if (c is '"' or '\\')
+            {
+                text.Append('\\').Append(c);
+            }
+            else if (c < ' ' || c >= '\u007f')
+            {
+                text.Append("\\u").Append(((int)c).ToString("x4", CultureInfo.InvariantCulture));
+            }
+            else
+            {
+                text.Append(c);
+            }
+        }
+
+        text.Append('"');
+    }
+
     internal static void Quote(StringBuilder text, string value)
     {
         text.Append('"');
