@@ -24,6 +24,7 @@ internal static class AdminTests
             Parsing(check);
             await Page(check, root);
             await KeyCommands(check, root);
+            await ReviewFixes(check, root);
             Listing(check, root);
             await Impostors(check, root);
         }
@@ -211,6 +212,45 @@ internal static class AdminTests
         PageResult recovered = await RunAdmin(machine, db, new CliCommand.Admin(AdminAction.RecoverAuthority, null, null), laptop);
         string third = machine.Deployment.Keys.CurrentRecord().Fingerprint;
         check(recovered.Result is { Code: 0 } && third != second && machine.Deployment.HostConfig.Load().Config!.Authority!.Fingerprint == third && machine.Deployment.Store.TransitionsFrom(second).Count == 0, "admin recover-authority: the admin tap makes a new key with no transition and pins it for this machine (" + recovered.Result?.Detail + ")");
+    }
+
+    private static async Task ReviewFixes(Action<bool, string> check, string root)
+    {
+        using TestAuthenticator laptop = TestAuthenticator.ES256();
+        using TestAuthenticator phone = TestAuthenticator.ES256();
+        StateDatabase db = StateDatabase.InFolder(Path.Combine(root, "review-state"));
+        DateTimeOffset created = new(2026, 11, 1, 10, 0, 0, TimeSpan.Zero);
+        TestState.Add(db, laptop.Record("localhost", "laptop") with { Created = created });
+        TestState.Add(db, phone.Record("localhost", "phone") with { Created = created });
+
+        // L6: the rotate and recover pages create no authority key before the tap.
+        using (TestMachine fresh = new(Path.Combine(root, "review-fresh"), trusted: false))
+        {
+            fresh.Deployment.EnrollAsync().GetAwaiter().GetResult();
+            PageResult none = await RunAdmin(fresh, db, new CliCommand.Admin(AdminAction.RotateAuthorityKey, null, null), phone);
+            check(none.Result is { Code: RunCommand.Denied } && fresh.Deployment.Store.ActiveKey() is null, "admin rotate-authority-key: a refused page created no authority key");
+        }
+
+        // L2: approve on a machine that is already Trusted says so on the page.
+        using TestMachine machine = new(Path.Combine(root, "review-machine"));
+        PageResult repin = await RunAdmin(machine, db, new CliCommand.Admin(AdminAction.Approve, machine.Fingerprint, "ignored name"), laptop);
+        check(repin.Result is { Code: 0 } && Decoded(repin.Html).Contains("re-pin the authority key", StringComparison.Ordinal) && Decoded(repin.Html).Contains("already Trusted", StringComparison.Ordinal) && machine.Deployment.Store.Find(machine.Fingerprint)!.FriendlyName == "test machine", "admin approve: on a Trusted machine the page says it re-pins the key and the name is not changed");
+
+        // L1: a different host name arriving while the page is open is not applied by the tap.
+        machine.Deployment.Store.RecordHostMismatch(machine.Fingerprint, "shown-name");
+        using HttpClient client = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(20) };
+        TaskCompletionSource<string> line = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        ApprovalSettings settings = new("passkey", null, 0, TimeSpan.FromSeconds(20));
+        PasskeyMethod method = new(new PasskeyStore(db), settings);
+        EnrollmentTarget target = EnrollmentTarget.For(method, new WebApprover(method, settings, text => line.TrySetResult(text), TimeSpan.Zero));
+        AdminContext context = new(machine.Deployment.Store, machine.Deployment.Keys, machine.Deployment.HostConfig, machine.Fingerprint, target, target, new AuditLog(db), new StringWriter());
+        Task<(int Code, string Detail)> pending = Task.Run(() => AdminCommand.Run(new CliCommand.Admin(AdminAction.ApproveHostChange, machine.Fingerprint, null), context));
+        await line.Task;
+        machine.Deployment.Store.RecordHostMismatch(machine.Fingerprint, "other-name");
+        Uri link = new(line.Task.Result[line.Task.Result.IndexOf("http", StringComparison.Ordinal)..]);
+        TestState.Approve(client, "http://127.0.0.1:" + link.Port + link.AbsolutePath, "http://localhost:" + link.Port, "localhost", laptop);
+        (int code, string detail) = await pending;
+        check(code == RunCommand.Denied && machine.Deployment.Store.Find(machine.Fingerprint) is { HostName: "test-host", PendingHostName: "other-name" }, "admin approve-host-change: a host name that replaced the shown one is not applied by the tap (" + detail + ")");
     }
 
     private static void Listing(Action<bool, string> check, string root)

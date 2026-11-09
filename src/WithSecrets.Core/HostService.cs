@@ -108,6 +108,7 @@ public sealed class HostService : IDisposable
     private readonly Lock _lock = new();
     private int _disposed;
     private bool _stopping;
+    private readonly SemaphoreSlim _identitySlots = new(4);
     private readonly CancellationTokenSource _stop = new();
     private Task _pump = Task.CompletedTask;
 
@@ -119,7 +120,7 @@ public sealed class HostService : IDisposable
         _options = options;
         _app = app;
         Port = port;
-        Authorization = options.Deployment.CreateAuthorization(options.Gate);
+        Authorization = options.Deployment.CreateAuthorization(options.Gate, () => options.Grants?.TryClear());
     }
 
     /// <summary>The host's side of the authority protocol: signs requests, verifies answers, applies invalidations.</summary>
@@ -330,6 +331,26 @@ public sealed class HostService : IDisposable
     /// that holds the port before it sends anything. It authenticates the service to the client; it authenticates nobody.
     /// </summary>
     private async Task Identity(HttpContext context)
+    {
+        // The machine key signs here for any local caller, so only a few at a time: a busy answer, not a queue behind a slow TPM.
+        if (!_identitySlots.Wait(0))
+        {
+            await Refuse(context.Response, 429, "the identity check is busy; try again");
+
+            return;
+        }
+
+        try
+        {
+            await IdentityCore(context);
+        }
+        finally
+        {
+            _identitySlots.Release();
+        }
+    }
+
+    private async Task IdentityCore(HttpContext context)
     {
         HttpRequest request = context.Request;
         HttpResponse response = context.Response;

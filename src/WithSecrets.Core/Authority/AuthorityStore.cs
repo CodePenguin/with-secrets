@@ -209,7 +209,7 @@ public sealed class AuthorityStore
             : new Plan(null, MachineStatus.Trusted, machine.FriendlyName, false, null, "re-enabled; starts clean"));
     }
 
-    /// <summary>Untrusted to Trusted. <paramref name="confirmedFingerprint" /> must be the machine's full fingerprint, typed or pasted by the administrator. Starts clean.</summary>
+    /// <summary>Untrusted to Trusted. <paramref name="confirmedFingerprint" /> is what the administrator typed; it is compared with the machine's real fingerprint <paramref name="fingerprint" /> (taken from the record, not from the typed text). Starts clean.</summary>
     public TransitionResult Trust(string fingerprint, string confirmedFingerprint, string actor, int? expectedRevision = null)
     {
         if (!string.Equals(KeyIdentity.ParseHex(confirmedFingerprint, true), fingerprint, StringComparison.Ordinal))
@@ -233,9 +233,10 @@ public sealed class AuthorityStore
     }
 
     /// <summary>An administrator accepts the host name the machine presented: it becomes the bound name. No revision change.</summary>
-    public TransitionResult ApproveHostChange(string fingerprint, string actor, int? expectedRevision = null)
+    public TransitionResult ApproveHostChange(string fingerprint, string actor, int? expectedRevision = null, string? expectedHostName = null)
     {
         return Change(fingerprint, "approve-host-change", actor, expectedRevision, machine => TransitionProblem("approve-host-change", machine) is { } problem ? Plan.Refuse(problem)
+            : expectedHostName is not null && expectedHostName != machine.PendingHostName ? Plan.Refuse("the host name waiting for approval is not the one that was shown; nothing was done")
             : new Plan(null, machine.Status, machine.FriendlyName, false, machine.PendingHostName, $"host name changed from {machine.HostName} to {machine.PendingHostName}"));
     }
 

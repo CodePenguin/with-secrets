@@ -150,6 +150,65 @@ internal static class IdentityTests
                     "cng deployment: after a restart the identity and the authority key are the same, and the machine is not enrolled twice");
             }
 
+            // A key planted under the name with an exportable private part is never adopted; a fresh key replaces it.
+            string planted = name + " planted";
+            try
+            {
+                CngKeyCreationParameters open = new() { Provider = CngProvider.MicrosoftSoftwareKeyStorageProvider, ExportPolicy = CngExportPolicies.AllowExport | CngExportPolicies.AllowPlaintextExport, KeyUsage = CngKeyUsages.Signing };
+                using (CngKey.Create(CngAlgorithm.ECDsaP256, planted, open))
+                {
+                }
+
+                bool refused = false;
+                try
+                {
+                    CngSigningKey.OpenOrCreate(planted, out _).Dispose();
+                }
+                catch (CryptographicException)
+                {
+                    refused = true;
+                }
+
+                check(refused, "cng key: an existing exportable key under the name is refused, not adopted");
+                using CngSigningKey replaced = CngSigningKey.CreateFresh(planted);
+                check(!replaced.Exportable && replaced.Problem() is null, "cng key: a fresh key replaces whatever held a not-yet-used name, and it is non-exportable");
+                using CngSigningKey reopened = CngSigningKey.OpenOrCreate(planted, out bool madeAgain);
+                check(!madeAgain && KeyIdentity.Fingerprint(reopened.PublicKey) == KeyIdentity.Fingerprint(replaced.PublicKey), "cng key: the replacement is what opens afterwards");
+
+                // Rotation and recovery use a fresh key even when the next generation's name holds a planted one.
+                string ringName = name + " ring ";
+                string plantedNext = ringName + "2";
+                using (CngKey.Create(CngAlgorithm.ECDsaP256, plantedNext, open))
+                {
+                }
+
+                byte[] plantedPublic;
+                using (CngSigningKey plantedKey = CngSigningKey.TryOpen(plantedNext)!)
+                {
+                    plantedPublic = plantedKey.PublicKey;
+                }
+
+                using (CngSigningKey machine = CngSigningKey.OpenOrCreate(name, out _))
+                using (LocalDeployment ring = LocalDeployment.Create(Path.Combine(parent, "cng-ring"), machine, generation => CngSigningKey.OpenOrCreate(ringName + generation, out _), "ring-host", create: generation => CngSigningKey.CreateFresh(ringName + generation)))
+                {
+                    ring.Keys.CurrentRecord();
+                    KeyTransition rotated = ring.Keys.Rotate("test");
+                    check(!rotated.NewPublicKey.AsSpan().SequenceEqual(plantedPublic) && ring.Keys.Current() is CngSigningKey { Exportable: false }, "cng key: a rotation does not adopt a key planted under the next generation's name");
+                    check(ring.Keys.Recover("test").PublicKey.AsSpan().SequenceEqual(plantedPublic) == false, "cng key: a recovery makes a new key too");
+                }
+
+                foreach (string suffix in new[] { "1", "2", "3" })
+                {
+                    using CngSigningKey? leftover = CngSigningKey.TryOpen(ringName + suffix);
+                    leftover?.Delete();
+                }
+            }
+            finally
+            {
+                using CngSigningKey? gone = CngSigningKey.TryOpen(planted);
+                gone?.Delete();
+            }
+
             // The program's fixed names exist as constants, are distinct, and generations after the first add a suffix.
             check(KeyNames.Machine != KeyNames.Authority && LocalDeployment.AuthorityKeyNameOf(1) == KeyNames.Authority && LocalDeployment.AuthorityKeyNameOf(2) != KeyNames.Authority, "cng names: the machine and authority key names are fixed and distinct");
         }

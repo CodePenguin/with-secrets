@@ -6,9 +6,10 @@ namespace WithSecrets;
 /// <summary>
 /// The authority's signing keys, one active at a time. The private parts are held by <paramref name="open" /> (CNG in the program),
 /// the public parts and the rotation history by the <see cref="AuthorityStore" />. A key that the store names but that cannot be
-/// opened, or whose public part differs, is an error: nothing is signed with another key.
+/// opened, or whose public part differs, is an error: nothing is signed with another key. A rotation or recovery uses <paramref name="create" />
+/// (a key that is made new, never one found under the name) when it is given.
 /// </summary>
-public sealed class AuthorityKeyRing(AuthorityStore store, Func<int, ISigningKey> open, TimeProvider? clock = null)
+public sealed class AuthorityKeyRing(AuthorityStore store, Func<int, ISigningKey> open, TimeProvider? clock = null, Func<int, ISigningKey>? create = null)
 {
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
     private readonly Lock _lock = new();
@@ -67,7 +68,7 @@ public sealed class AuthorityKeyRing(AuthorityStore store, Func<int, ISigningKey
         {
             AuthorityKeyRecord active = CurrentRecord();
             ISigningKey current = Open(active);
-            ISigningKey next = open(active.Generation + 1);
+            ISigningKey next = (create ?? open)(active.Generation + 1);
             KeyTransition transition = KeyTransition.Create(current, next.PublicKey, _clock.GetUtcNow());
             AuthorityKeyRecord recorded = store.RecordRotation(transition, actor);
             _opened[recorded.Fingerprint] = next;
@@ -82,7 +83,7 @@ public sealed class AuthorityKeyRing(AuthorityStore store, Func<int, ISigningKey
         lock (_lock)
         {
             AuthorityKeyRecord active = store.ActiveKey() ?? CurrentRecord();
-            ISigningKey next = open(active.Generation + 1);
+            ISigningKey next = (create ?? open)(active.Generation + 1);
             AuthorityKeyRecord recorded = store.RecordRecovery(next.PublicKey, actor);
             _opened[recorded.Fingerprint] = next;
 

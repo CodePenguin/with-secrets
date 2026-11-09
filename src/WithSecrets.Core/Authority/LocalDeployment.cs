@@ -26,11 +26,11 @@ public sealed class LocalDeployment(AuthorityStore store, AuthorityKeyRing keys,
     public string Fingerprint => KeyIdentity.Fingerprint(machineKey.PublicKey);
 
     /// <summary>A deployment over any keys (tests, tools). <paramref name="authorityKey" /> opens the authority key of a generation.</summary>
-    public static LocalDeployment Create(string folder, ISigningKey machineKey, Func<int, ISigningKey> authorityKey, string hostName, TimeProvider? clock = null)
+    public static LocalDeployment Create(string folder, ISigningKey machineKey, Func<int, ISigningKey> authorityKey, string hostName, TimeProvider? clock = null, Func<int, ISigningKey>? create = null)
     {
         clock ??= TimeProvider.System;
         AuthorityStore store = AuthorityStore.InFolder(folder, clock);
-        AuthorityKeyRing keys = new(store, authorityKey, clock);
+        AuthorityKeyRing keys = new(store, authorityKey, clock, create);
 
         return new LocalDeployment(store, keys, new LocalAuthority(store, keys, clock), machineKey, hostName, HostConfigFile.InFolder(folder), clock);
     }
@@ -43,14 +43,14 @@ public sealed class LocalDeployment(AuthorityStore store, AuthorityKeyRing keys,
     public static LocalDeployment OpenProduction(string folder)
     {
         CngSigningKey machine = CngSigningKey.OpenOrCreate(KeyNames.Machine, out _);
-        LocalDeployment deployment = Create(folder, machine, generation => CngSigningKey.OpenOrCreate(AuthorityKeyNameOf(generation), out _), Environment.MachineName);
+        LocalDeployment deployment = Create(folder, machine, generation => CngSigningKey.OpenOrCreate(AuthorityKeyNameOf(generation), out _), Environment.MachineName, create: generation => CngSigningKey.CreateFresh(AuthorityKeyNameOf(generation)));
 
         return deployment;
     }
 
     /// <summary>The authority key ring of this user's machine over a store (the keys are CNG keys, see <see cref="OpenProduction" />).</summary>
     [SupportedOSPlatform("windows")]
-    public static AuthorityKeyRing ProductionKeyRing(AuthorityStore store) => new(store, generation => CngSigningKey.OpenOrCreate(AuthorityKeyNameOf(generation), out _));
+    public static AuthorityKeyRing ProductionKeyRing(AuthorityStore store) => new(store, generation => CngSigningKey.OpenOrCreate(AuthorityKeyNameOf(generation), out _), null, generation => CngSigningKey.CreateFresh(AuthorityKeyNameOf(generation)));
 
     /// <summary>The fingerprint of this user's machine identity if the key exists already (nothing is created), else null.</summary>
     [SupportedOSPlatform("windows")]
@@ -72,7 +72,7 @@ public sealed class LocalDeployment(AuthorityStore store, AuthorityKeyRing keys,
         return await authority.EnrollAsync(EnrollmentRequest.Create(hostName, challenge, machineKey), cancel);
     }
 
-    public HostAuthorization CreateAuthorization(LaunchGate gate) => new(authority, machineKey, hostName, hostConfig, gate, authority.Offer, clock);
+    public HostAuthorization CreateAuthorization(LaunchGate gate, Action? clearSaved = null) => new(authority, machineKey, hostName, hostConfig, gate, authority.Offer, clock, clearSaved);
 
     public void Dispose() => machineKey.Dispose();
 }

@@ -67,6 +67,8 @@ public static class AdminActions
     /// <summary>Pins the authority's current public key for this machine.</summary>
     public static void PinLocal(AuthorityKeyRing keys, HostConfigFile host, string machineFingerprint)
     {
+        // The key store must hold the key authority.db names: nothing is pinned on the strength of a database row alone.
+        keys.Current();
         AuthorityKeyRecord key = keys.CurrentRecord();
         host.Pin(machineFingerprint, new PinnedAuthorityKey(key.Fingerprint, key.PublicKey, DateTimeOffset.UtcNow));
     }
@@ -179,7 +181,7 @@ public static class AdminCommand
                 result = store.Rename(fingerprint, command.Name!, actor, revision);
                 break;
             case AdminAction.ApproveHostChange:
-                result = store.ApproveHostChange(fingerprint, actor, revision);
+                result = store.ApproveHostChange(fingerprint, actor, revision, machine?.PendingHostName);
                 break;
             case AdminAction.RotateAuthorityKey:
                 KeyTransition transition = context.Keys.Rotate(actor);
@@ -259,7 +261,7 @@ public static class AdminCommand
     {
         if (command.Action is AdminAction.RotateAuthorityKey or AdminAction.RecoverAuthority)
         {
-            string current = context.Keys.CurrentRecord().Fingerprint;
+            string current = context.Store.ActiveKey()?.Fingerprint ?? "(none yet)";
 
             return command.Action == AdminAction.RotateAuthorityKey
                 ? $"Action: rotate the authority signing key\nCurrent key: {KeyIdentity.Display(current)}\nThe new key is introduced by a transition that the current key signs; hosts that pinned the current key accept it."
@@ -269,6 +271,7 @@ public static class AdminCommand
         MachineRecord shown = machine!;
         string what = command.Action switch
         {
+            AdminAction.Approve when shown.Status == MachineStatus.Trusted => $"re-pin the authority key for this machine, which is already Trusted (nothing else changes; the friendly name is not changed). The key to pin: {KeyIdentity.Display(context.Store.ActiveKey()?.Fingerprint ?? "")}",
             AdminAction.Approve => $"approve this machine (it may then ask for secrets) with the friendly name \"{ApprovalSummary.Clean(command.Name ?? "")}\"",
             AdminAction.Disable => "disable this machine (it is denied until enabled; its grants end)",
             AdminAction.Enable => "enable this machine (it starts clean: no earlier grants or cache)",

@@ -254,6 +254,13 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         // A saved approval that does not verify is never used; the person is asked again.
         GrantLookup saved = offer.IsOn ? grants!.Find(fingerprint.Key, offer.MaxMinutes) : GrantLookup.None;
 
+        // Behind a host service, a saved approval is also tied to the machine's security revision: one made before the machine was
+        // disabled or untrusted (or before this service started) is not honoured; the person is asked again.
+        if (saved.Grant is not null && context.Authorization is { } revisionHost && !revisionHost.SavedStillValid(fingerprint.Key))
+        {
+            saved = GrantLookup.None;
+        }
+
         // What the approving passkey released (PRF) on the approval page: the only thing that opens the store key. It is zeroed
         // when the values were read, and on every way out.
         Unlock? unlock = null;
@@ -290,6 +297,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             {
                 ApprovalDecision decision;
                 string? authorityMessage = null;
+                HostAuthorization? savedRevisionHost = null;
                 if (context.Authorization is { } host && context.Request is { } launched)
                 {
                     // The authority decides whether this machine may ask at all; only then is the person asked, for exactly this request.
@@ -302,6 +310,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                     }, context.Cancel);
                     decision = outcome.Decision;
                     authorityMessage = outcome.AuthorityMessage;
+                    savedRevisionHost = host;
                 }
                 else
                 {
@@ -343,6 +352,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                 // signed: the grant keeps the assertion and is checked again at every use.
                 if (decision.ReuseMinutes > 0 && decision.Evidence is { } evidence && grants!.Add(fingerprint.Key, decision.ReuseMinutes, evidence))
                 {
+                    savedRevisionHost?.RememberSaved(fingerprint.Key);
                     await stderr.WriteLineAsync($"with-secrets: the user approved this for {decision.ReuseMinutes} min; the same request runs again without asking until then.");
                 }
             }

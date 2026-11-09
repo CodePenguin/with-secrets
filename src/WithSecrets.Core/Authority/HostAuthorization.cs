@@ -6,7 +6,7 @@ namespace WithSecrets;
 /// <see cref="AuthorityMessage" /> is the one-line text for a denial that did not come from the person (the machine's status, an
 /// answer that did not verify, an authority that did not answer); null otherwise. <see cref="Code" /> is the reason code.
 /// </summary>
-public sealed record AuthorizationOutcome(ApprovalDecision Decision, string? AuthorityMessage, string Code);
+public sealed record AuthorizationOutcome(ApprovalDecision Decision, string? AuthorityMessage, string Code, int Revision = -1);
 
 /// <summary>
 /// The host service's side of the authority protocol. For one launch it signs the request with the machine identity key, asks the
@@ -16,13 +16,14 @@ public sealed record AuthorizationOutcome(ApprovalDecision Decision, string? Aut
 /// than the host knew means its cache and grants are stale: they are cleared (<see cref="LaunchGate.Invalidate" />) and this launch
 /// is refused; the next one starts from the new revision. Anything that does not verify is a denial.
 /// </summary>
-public sealed class HostAuthorization(IAuthority authority, ISigningKey machineKey, string hostName, HostConfigFile config, LaunchGate gate, Func<string, string, Func<ApprovalDecision>, IDisposable> offer, TimeProvider? clock = null)
+public sealed class HostAuthorization(IAuthority authority, ISigningKey machineKey, string hostName, HostConfigFile config, LaunchGate gate, Func<string, string, Func<ApprovalDecision>, IDisposable> offer, TimeProvider? clock = null, Action? clearSaved = null)
 {
     private static readonly TimeSpan ClockSkew = TimeSpan.FromMinutes(1);
 
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
     private readonly Lock _lock = new();
     private int? _knownRevision;
+    private readonly Dictionary<string, int> _saved = [];
 
     public string Fingerprint { get; } = KeyIdentity.Fingerprint(machineKey.PublicKey);
 
@@ -38,6 +39,37 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
                 return _knownRevision;
             }
         }
+    }
+
+    /// <summary>
+    /// Notes that the saved approval for <paramref name="requestKey" /> was made under the revision this host has applied. A saved approval
+    /// is honoured only while the machine's revision is that one; this note lives in memory only, so none survives a restart.
+    /// </summary>
+    public void RememberSaved(string requestKey)
+    {
+        lock (_lock)
+        {
+            if (_knownRevision is { } known)
+            {
+                _saved[requestKey] = known;
+            }
+        }
+    }
+
+    /// <summary>True when a saved approval for <paramref name="requestKey" /> was made under the revision this host currently has applied.</summary>
+    public bool SavedStillValid(string requestKey)
+    {
+        lock (_lock)
+        {
+            return _knownRevision is { } known && _saved.TryGetValue(requestKey, out int made) && made == known;
+        }
+    }
+
+    /// <summary>Forgets every saved approval: in this host and in the store behind <c>clearSaved</c>. Called with the lock held.</summary>
+    private void ForgetSaved()
+    {
+        _saved.Clear();
+        clearSaved?.Invoke();
     }
 
     /// <summary>The one-line text for a reason code that stops a machine (names the command that fixes it).</summary>
@@ -92,7 +124,25 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
             return Deny("authority-unavailable", "the authority could not be asked (" + error.GetType().Name + "). Nothing was run");
         }
 
-        string? problem = await Verify(response, launch, cancel);
+        string? problem;
+        string? revisionProblem = null;
+        try
+        {
+            problem = await Verify(response, launch, cancel);
+            if (problem is null)
+            {
+                revisionProblem = RevisionProblem(response.SecurityRevision);
+            }
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // A failure while checking the answer (the database, host.json) is a denial, and what the page released is zeroed.
+            local?.Unlock?.Dispose();
+            AppLog.Warn("the authority's answer could not be checked: {Type}", error.GetType().Name);
+
+            return Deny("response-invalid", "the authority's answer could not be verified (" + error.GetType().Name + "). Nothing was run");
+        }
+
         if (problem is not null)
         {
             local?.Unlock?.Dispose();
@@ -100,7 +150,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
             return Deny("response-invalid", "the authority's answer could not be verified (" + problem + "). Nothing was run");
         }
 
-        if (RevisionProblem(response.SecurityRevision) is { } revisionProblem)
+        if (revisionProblem is not null)
         {
             local?.Unlock?.Dispose();
 
@@ -116,13 +166,13 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
                 return Deny("no-approval", "the authority approved, but this host has no approval of its own for it. Nothing was run");
             }
 
-            return new AuthorizationOutcome(local, null, response.ReasonCode);
+            return new AuthorizationOutcome(local, null, response.ReasonCode, response.SecurityRevision);
         }
 
         local?.Unlock?.Dispose();
         if (response.ReasonCode is ReasonCodes.UserDenied or ReasonCodes.Cancelled && local is not null)
         {
-            return new AuthorizationOutcome(local, null, response.ReasonCode);
+            return new AuthorizationOutcome(local, null, response.ReasonCode, response.SecurityRevision);
         }
 
         return Deny(response.ReasonCode, Message(response.ReasonCode));
@@ -216,6 +266,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
             {
                 _knownRevision = revision;
                 gate.Invalidate();
+                ForgetSaved();
 
                 return "the machine's security revision changed, so the host cleared its authorization state. Ask again";
             }
@@ -237,6 +288,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
                 }
 
                 gate.Invalidate();
+                ForgetSaved();
             }
 
             // Acknowledged only after the cleanup above: an unacknowledged one is delivered again.

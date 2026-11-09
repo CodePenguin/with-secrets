@@ -87,19 +87,25 @@ internal static class HostServiceTests
         private readonly string _dir;
         private int _ids;
 
-        public Rig(string parent, Dictionary<string, string>? values = null, Func<IApprover>? approver = null, TimeSpan? bodyTimeout = null, Action<PreparedChild>? afterPrepare = null, Action? afterCommit = null, bool trusted = true, TestMachine? machine = null)
+        public Rig(string parent, Dictionary<string, string>? values = null, Func<IApprover>? approver = null, TimeSpan? bodyTimeout = null, Action<PreparedChild>? afterPrepare = null, Action? afterCommit = null, bool trusted = true, TestMachine? machine = null, TestAuthenticator? savedApprovalSigner = null)
         {
             _dir = Path.Combine(parent, "svc-" + Guid.NewGuid().ToString("N")[..8]);
             Work = Path.Combine(_dir, "work");
             Directory.CreateDirectory(Work);
             State = StateDatabase.InFolder(Path.Combine(_dir, "state"));
             Machine = machine ?? new TestMachine(Path.Combine(_dir, "state"), trusted);
+            if (savedApprovalSigner is not null)
+            {
+                TestState.Add(State, savedApprovalSigner.Record("localhost", "laptop") with { Created = DateTimeOffset.UtcNow });
+            }
+
             Store = new CountingStore(values ?? new Dictionary<string, string> { ["TOKEN"] = Value, ["OTHER_KEY"] = Other });
             Approvers = [];
             Service = HostService.Start(new HostServiceOptions
             {
                 State = State,
                 Store = Store,
+                Grants = savedApprovalSigner is null ? null : new GrantStore(State),
                 Deployment = Machine.Deployment,
                 Port = 0,
                 BodyTimeout = bodyTimeout ?? TimeSpan.FromSeconds(15),

@@ -102,6 +102,8 @@ internal static class AuthorityTests
             Durability(check, parent);
             await KeyRotation(check, parent);
             await ThroughTheService(check, parent);
+            await ReviewFixes(check, parent);
+            await Throttle(check, parent);
         }
         finally
         {
@@ -809,6 +811,103 @@ internal static class AuthorityTests
         }
 
         check(mismatch is not null && mismatch.Message.Contains("admin recover-authority", StringComparison.Ordinal), "keys: a key store whose key is not the one authority.db names is an error that names the recovery command");
+    }
+
+
+    // ---- review round: saved approvals, host name binding, pinning, cleanup, throttle ----
+
+    private static async Task ReviewFixes(Action<bool, string> check, string parent)
+    {
+        // H1: a saved approval made before the machine was disabled is not honoured after it is enabled again.
+        using (TestAuthenticator signer = TestAuthenticator.ES256())
+        {
+            FakeApprover approver = new(true, 10, signer);
+            using HostServiceTests.Rig rig = new(parent, approver: () => approver, savedApprovalSigner: signer);
+            string program = Show(rig);
+            HostServiceTests.Raw first = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program));
+            check(first.Result is { Outcome: LaunchOutcome.Exited } && approver.Requests.Count == 1 && new GrantStore(rig.State).Entries().Count == 1, "saved approval: the first run asks and saves an approval (" + first.Result?.Outcome + ")");
+            HostServiceTests.Raw reused = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program));
+            check(reused.Result is { Outcome: LaunchOutcome.Exited } && approver.Requests.Count == 1, "saved approval: the same request is reused while the machine's revision is the same (no new page)");
+
+            AuthorityStore store = rig.Machine.Deployment.Store;
+            string fp = rig.Machine.Fingerprint;
+            store.Disable(fp, "test");
+            store.Enable(fp, "test");
+            HostServiceTests.Raw after = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program));
+            check(approver.Requests.Count == 2 && after.Result is { Outcome: LaunchOutcome.Exited }, "saved approval: disable then enable, and the next run shows a fresh page (an old approval is not honoured) (" + approver.Requests.Count + " page(s))");
+            check(new GrantStore(rig.State).Entries().Count == 1 && !rig.Service.Authorization.SavedStillValid("not-a-key"), "saved approval: only the approval made after the change is kept");
+            HostServiceTests.Raw again = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program));
+            check(approver.Requests.Count == 2 && again.Result is { Outcome: LaunchOutcome.Exited }, "saved approval: the new approval is reused under the new revision");
+
+            // Untrust and trust: the same.
+            store.Untrust(fp, "test");
+            store.Trust(fp, fp, "test");
+            HostServiceTests.Raw afterTrust = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program));
+            check(approver.Requests.Count == 3 && afterTrust.Result is { Outcome: LaunchOutcome.Exited }, "saved approval: untrust then trust also needs a fresh page");
+        }
+
+        // A saved approval does not survive a service restart (the host keeps no authorization state).
+        using (TestAuthenticator signer = TestAuthenticator.ES256())
+        {
+            FakeApprover approver = new(true, 10, signer);
+            using HostServiceTests.Rig rig = new(parent, approver: () => approver, savedApprovalSigner: signer);
+            string program = Show(rig);
+            await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program));
+            HostAuthorization restarted = rig.Machine.Restart().CreateAuthorization(new LaunchGate());
+            check(!restarted.SavedStillValid(new GrantStore(rig.State).Entries().Single().Key), "saved approval: a restarted host does not honour a saved approval (nothing is remembered)");
+        }
+
+        // L1: the host name that is approved is the one that was shown.
+        using (Fixture fx = new(parent))
+        {
+            fx.Store.RecordHostMismatch(fx.Fingerprint, "name-one");
+            TransitionResult wrong = fx.Store.ApproveHostChange(fx.Fingerprint, "test", null, "name-two");
+            check(!wrong.Ok && fx.Store.Find(fx.Fingerprint) is { HostName: "test-host", PendingHostName: "name-one" }, "host change: a host name other than the one shown is not applied");
+            fx.Store.RecordHostMismatch(fx.Fingerprint, "name-three");
+            check(!fx.Store.ApproveHostChange(fx.Fingerprint, "test", null, "name-one").Ok && fx.Store.ApproveHostChange(fx.Fingerprint, "test", null, "name-three").Ok && fx.Store.Find(fx.Fingerprint)!.HostName == "name-three", "host change: a name that replaced the shown one is refused; the current shown one is applied");
+        }
+
+        // L2: nothing is pinned on the strength of a database row alone.
+        using (Fixture fx = new(parent))
+        {
+            AuthorityKeyRing wrongRing = new(fx.Store, _ => new SoftwareSigningKey());
+            string pinnedBefore = fx.Machine.Deployment.HostConfig.Load().Config!.Authority!.Fingerprint;
+            File.Delete(fx.Machine.Deployment.HostConfig.FilePath);
+            bool threw = false;
+            try
+            {
+                AdminActions.PinLocal(wrongRing, fx.Machine.Deployment.HostConfig, fx.Fingerprint);
+            }
+            catch (AuthorityDatabaseException)
+            {
+                threw = true;
+            }
+
+            check(threw && !File.Exists(fx.Machine.Deployment.HostConfig.FilePath) && pinnedBefore.Length > 0, "pin: a key store that does not hold the key authority.db names pins nothing");
+        }
+
+        // L4: a failure while checking the answer is a denial, and what the page released is zeroed.
+        using (Fixture fx = new(parent))
+        {
+            using SoftwareSigningKey stranger = new();
+            fx.Scripted.Tamper = r => Resign(r, stranger);
+            fx.Scripted.Transitions = _ => throw new IOException("disk");
+            byte[] released = [1, 2, 3, 4];
+            Unlock unlock = new("cred", released);
+            AuthorizationOutcome outcome = await fx.Host.AuthorizeAsync(IdentityTests.Sample("l4-1", fx.Now), () => ApprovalDecision.Allow("ok", 0, null, unlock), CancellationToken.None);
+            check(!outcome.Decision.Approved && outcome.Code == "response-invalid" && released.All(value => value == 0), "cleanup: an exception while verifying denies and zeroes the unlock material");
+        }
+    }
+
+    private static async Task Throttle(Action<bool, string> check, string parent)
+    {
+        FakeApprover approver = new(true);
+        using HostServiceTests.Rig rig = new(parent, approver: () => approver);
+        string body = "{\"challenge\":\"" + Convert.ToBase64String(RandomBytes(32)).TrimEnd('=').Replace('+', '-').Replace('/', '_') + "\"}";
+        HttpResponseMessage[] answers = await Task.WhenAll(Enumerable.Range(0, 40).Select(_ => rig.Http.PostAsync(rig.Url("/v1/identity"), new StringContent(body, Encoding.UTF8, "application/json"))));
+        int ok = answers.Count(answer => (int)answer.StatusCode == 200);
+        int busy = answers.Count(answer => (int)answer.StatusCode == 429);
+        check(ok >= 1 && ok + busy == 40, "identity: 40 parallel checks are answered or told to retry (" + ok + " answered, " + busy + " busy), never anything else");
     }
 
     // ---- through the real host service ----

@@ -158,15 +158,64 @@ public sealed class CngSigningKey : ISigningKey
         }
     }
 
-    /// <summary>The key named <paramref name="name" />, made when it does not exist. Never replaces an existing key.</summary>
+    /// <summary>
+    /// The key named <paramref name="name" />, made when it does not exist. An existing key is used only when it looks like what this
+    /// program makes (ECDSA P-256, signing, non-exportable): a key that someone planted under the name, with its private part
+    /// exportable, is refused, never adopted.
+    /// </summary>
     public static CngSigningKey OpenOrCreate(string name, out bool created)
     {
         created = false;
         if (TryOpen(name) is { } existing)
         {
+            if (existing.Problem() is { } problem)
+            {
+                existing.Dispose();
+                throw new CryptographicException($"the key named \"{name}\" is not one this program made ({problem}); it was not used");
+            }
+
             return existing;
         }
 
+        CngSigningKey made = Create(name);
+        created = true;
+
+        return made;
+    }
+
+    /// <summary>
+    /// A new key under <paramref name="name" />. A key that already has the name is deleted first: used for a generation that
+    /// authority.db does not record yet, so whatever holds the name is a leftover or a planted key, never one in use.
+    /// </summary>
+    public static CngSigningKey CreateFresh(string name)
+    {
+        while (TryOpen(name) is { } leftover)
+        {
+            leftover.Delete();
+            leftover.Dispose();
+        }
+
+        return Create(name);
+    }
+
+    /// <summary>Null when the key is what this program makes; otherwise what is different.</summary>
+    internal string? Problem()
+    {
+        if (_key.AlgorithmGroup != CngAlgorithmGroup.ECDsa || _key.KeySize != 256)
+        {
+            return "not ECDSA P-256";
+        }
+
+        if (Exportable)
+        {
+            return "its private part is exportable";
+        }
+
+        return (_key.KeyUsage & CngKeyUsages.Signing) == 0 ? "not for signing" : null;
+    }
+
+    private static CngSigningKey Create(string name)
+    {
         foreach (CngProvider provider in new[] { PlatformProvider, CngProvider.MicrosoftSoftwareKeyStorageProvider })
         {
             try
@@ -177,21 +226,12 @@ public sealed class CngSigningKey : ISigningKey
                     ExportPolicy = CngExportPolicies.None,
                     KeyUsage = CngKeyUsages.Signing,
                 };
-                created = true;
 
                 return new CngSigningKey(CngKey.Create(CngAlgorithm.ECDsaP256, name, parameters));
             }
             catch (CryptographicException) when (provider == PlatformProvider)
             {
                 // No TPM, or it refused: the software provider is the fallback.
-                created = false;
-            }
-            catch (CryptographicException) when (TryOpen(name) is { } raced)
-            {
-                // Another process made the key between the check and the creation.
-                created = false;
-
-                return raced;
             }
         }
 
