@@ -117,7 +117,11 @@ This plan turns the accepted target design in [architecture.md](architecture.md#
 
 **Goal:** Complete the operational experience and validate real deployments.
 
-- Complete admin web views for machine management, grant management, authority settings, locked/unlocked status, explicit manual unlock, opt-in unattended-unlock configuration, and searchable audit history.
+- Implement the accepted administration SPA and API from architecture Section 10.5: React/TypeScript/Vite, responsive feature-based UI, OpenAPI-generated TypeScript client, same-origin `/api/v1/`, and WCAG 2.2 AA.
+- Complete admin web views for machine management, provider instances and mounts, grant management, authority settings, locked/unlocked status, explicit manual unlock, opt-in unattended-unlock configuration, and searchable audit history.
+- Enforce read-only browser sessions and fresh operation-bound passkey authorization for every administrative mutation at the API boundary; test direct API calls, replay, expiry, and parameter binding independently of the UI.
+- Implement write-only provider credential entry and atomic replacement without exposing credentials in responses, logs, diagnostics, or telemetry.
+- Integrate the Vite build into the .NET publish pipeline so the Windows host service serves the SPA and API from one origin and the release is one self-contained EXE with embedded frontend assets. Verify the artifact and matching frontend/backend versions.
 - Validate that every sensitive administrative operation requires fresh operation-bound passkey authentication in both manual and unattended startup modes; validate that normal grant use requires no repeated passkey prompt.
 - Exercise lock/unlock, restart, key zeroization best-effort behavior, key backup/recovery, and fail-closed behavior when authentication or protected key access fails.
 - Validate machine rename/host-name change approval and authority signing-key rotation/recovery.

@@ -1108,6 +1108,109 @@ curl_api.github.com_authorization_value=secret://team/development/github/token
 - Unknown application prefixes must not silently become ordinary environment variables. Behavior when an adapter is unavailable (clear error versus unused declaration) remains open.
 - This is curl-specific initially. Do not generalize it into a broad command/network authorization broker; with-secrets remains focused on secret exposure.
 
+### 10.5 Administration web application and API
+
+**Status:** Accepted target design. This defines the canonical human administration interface for the host service and authority. It does not change the security or deployment boundaries in Section 10.2.
+
+#### Frontend application
+
+- Use React, TypeScript, and Vite.
+- Build one cohesive, fully responsive single-page application (SPA), not separate websites for individual workflows. Desktop, tablet, and mobile are first-class layouts.
+- Use standard HTML, CSS, and TypeScript. Use CSS Modules and CSS custom properties for shared styling/design tokens, with CSS Grid and Flexbox for responsive layouts. Prefer native HTML controls where practical.
+- Do not introduce a large UI component framework initially; build small reusable accessible components.
+- Organize the UI by feature, including machines, providers, mounts, grants, approvals, policies, authority status/settings, and audit.
+- Keep presentation separate from API communication. Generate the TypeScript API client from the OpenAPI contract.
+- Use URL-based navigation for primary application views and dialogs for contextual operations. Use React state for local UI state and a small server-state/query library (TanStack Query) for fetching, caching, mutations, and invalidation. Do not introduce a global Redux-style state store initially.
+- The SPA is the canonical human interface. Native applications may be added as optional clients later; they are not required components and do not form a security boundary.
+
+#### Accessibility
+
+Target WCAG 2.2 AA throughout the application, including every security-sensitive workflow.
+
+- Support keyboard-only operation, visible focus, logical tab order, semantic HTML, and accessible names, labels, and descriptions.
+- Manage focus correctly in dialogs and announce validation errors and asynchronous status changes accessibly.
+- Meet contrast requirements; do not use color as the only indicator.
+- Support text scaling and 200% zoom. Ordinary workflows must remain usable on small screens without horizontal scrolling.
+- Provide adequate touch targets, respect reduced-motion preferences, and avoid flashing content.
+- Passkey enrollment, authorization, unlock, and recovery flows must be accessible and must not impose unnecessary time limits.
+- Include automated accessibility checks and manual keyboard-only and screen-reader testing.
+
+#### API contract and browser security
+
+- OpenAPI is the authoritative, documented API contract. Generate the frontend TypeScript client from it.
+- Initial API namespace is `/api/v1/`. Changes within v1 are additive and backwards-compatible; breaking changes require a new major version. Unsupported versions return a documented error.
+- Treat every client as untrusted. The server validates every request and enforces authentication, authorization, and operation-specific security. UI restrictions, hidden controls, and obscure endpoints are not security controls.
+- Validate request schemas and bound request sizes. Return safe errors without leaking secrets, credentials, private keys, recovery material, or internal security details.
+- Never include secret values, provider credentials, private keys, or recovery material in API responses, logs, diagnostics, telemetry, or errors.
+- Serve the frontend and API from the same origin. Do not enable general CORS. Validate browser origins and protect browser state-changing requests against CSRF.
+- API routes under `/api/v1/` must never fall through to the SPA fallback. Application routes should resolve to the SPA.
+
+#### Read-only browser session and per-operation administration authorization
+
+A browser session and administrative authorization are separate security concepts.
+
+**Browser session**
+- Use a server-managed `HttpOnly`, `SameSite` cookie with expiration, CSRF protection, explicit logout, and revocation.
+- The browser session is read-only: it permits navigation and inspection of authorized metadata.
+- Browser session credentials cannot authorize state changes and cannot be elevated into a generally privileged session.
+
+**Administrative authorization**
+- Every administrative mutation requires a fresh passkey authorization with user verification.
+- Bind authorization to the exact operation and its security-relevant parameters.
+- Make authorization time-limited, single-use, and replay-protected.
+- Completing one operation does not authorize a subsequent operation. Each mutation requires its own fresh authorization.
+- Enforce this at the API/server boundary, regardless of frontend behavior.
+- Routine use of an existing applicable grant does not require fresh administrative passkey authorization; creating or changing grants does.
+
+#### Administration UI secret boundary
+
+The administration UI manages metadata, not secret values.
+
+It may manage provider configurations, logical mounts and paths, machine identities and trust, grants, policies, authority settings, and audit records. It must not retrieve or display existing secret values, provider credentials, private keys, or recovery material.
+
+The only credential-entry exception is when an administrator explicitly creates or replaces a provider credential:
+
+- Use a dedicated credential-submission endpoint and request model.
+- Treat the input as write-only: never return, prepopulate, reveal, or offer to copy the credential.
+- Exclude request bodies from logs and telemetry.
+- After saving, display metadata only (for example provider identity, credential status, and last-updated time).
+- Replacement is atomic: validate and securely store the proposed credential before activating it; preserve the existing credential if validation or storage fails.
+- Provider-specific credential semantics remain adapter-owned. The adapter reports standardized validation and provider-data invalidation results; core logic does not inspect credentials or infer provider-specific authentication semantics.
+
+Secret retrieval remains exclusively part of authorized child-process launches.
+
+#### Hosting, packaging, and deployment scope
+
+- Kestrel serves the SPA and API from the same origin.
+- The Windows host service serves the frontend and `/api/v1/`.
+- Vite builds static frontend assets ahead of time. Bundle those assets into the .NET application and publish one self-contained Windows EXE. There must be no loose frontend files, Node runtime, separate frontend server, or runtime asset downloads.
+- Frontend and backend versions always match. The build/publish pipeline must verify that the final artifact is genuinely a single EXE containing the required frontend assets.
+- A future remote authority may serve the same frontend build and API contract from its own Kestrel server.
+
+Initial release scope:
+- Local Windows host service and local authority.
+- The local Windows browser connects to the service over loopback HTTP.
+- Support WSL and Docker clients.
+- No LAN-facing administration interface, remote browser access, or remote-authority deployment in the initial release.
+
+The browser's loopback interface and WSL service-to-service connection are distinct access paths. WSL does not need the browser application exposed to it. For the WSL client path, use the existing independently enrolled machine identities and authenticated protocol:
+
+`WSL client → WSL host service → mutually authenticated and encrypted machine connection → Windows host service → local authority`
+
+The WSL and Windows host services each have independent machine identities and private keys. The WSL host service authenticates to the Windows host service using the existing machine-to-machine mutual-authentication and encrypted-communication protocol. The Windows service verifies trust and authorization before accepting requests. Do not introduce WSL-specific credentials or trust a request merely because it originates on a WSL network interface. Make the necessary local virtual-network connectivity available to WSL without enabling general LAN administration access.
+
+The web application is a human interface, not an authority or execution boundary. The authority remains responsible for authoritative state and authorization. Preserve the backend-agnostic shared API/protocol and authority abstraction so local and future remote-authority deployments use the same contract.
+
+#### Implementation and verification
+
+- Build and test the frontend independently, then integrate its generated assets into the .NET build/publish pipeline.
+- Test API security independently of the UI, including direct API attempts to bypass approval, passkey authorization, and machine/grant authorization.
+- Test same-origin behavior, CSRF and origin validation, route fallback separation, and API version handling.
+- Test the read-only browser session and operation-bound passkey authorization, including replay, expiry, parameter substitution, and attempts to reuse one authorization for another mutation.
+- Test credential write-only handling, request-body logging exclusion, and atomic replacement failure behavior.
+- Include automated accessibility tests and manual keyboard/screen-reader checks.
+- Verify the published Windows artifact is one self-contained EXE with matching frontend/backend versions and no runtime frontend dependencies.
+
 ## 11. Where is it in the code
 
 | Concept | File (`src/WithSecrets.Core` unless noted) |
