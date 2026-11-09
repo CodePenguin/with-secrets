@@ -115,6 +115,7 @@ internal static class AuditTrailTests
             Schema(check, parent);
             Cli(check, parent);
             await ThroughTheService(check, parent);
+            await Review(check, parent);
         }
         finally
         {
@@ -142,7 +143,7 @@ internal static class AuditTrailTests
 
         check(e.Verify(key.PublicKey) && !e.Verify(other.PublicKey) && e.MachineFingerprint == fingerprint, "event signing: the machine key's signature verifies; another key's does not");
         string expected = "{\"protocolVersion\":1,\"eventId\":\"11111111-1111-1111-1111-111111111111\",\"sequence\":7,\"time\":\"2026-11-09T12:00:00.0000000Z\",\"machineFingerprint\":\"" + fingerprint
-            + "\",\"type\":\"authorization\",\"outcome\":\"approved\",\"reason\":\"approved\",\"requestId\":\"req-1\",\"folder\":\"/work\",\"program\":\"/work/show.sh\",\"arguments\":[\"a\",\"b\"],\"grantId\":\"\",\"exitCode\":0}";
+            + "\",\"epoch\":\"default\",\"type\":\"authorization\",\"outcome\":\"approved\",\"reason\":\"approved\",\"requestId\":\"req-1\",\"folder\":\"/work\",\"program\":\"/work/show.sh\",\"arguments\":[\"a\",\"b\"],\"grantId\":\"\",\"exitCode\":0}";
         check(e.Canonical() == expected, "event signing: the canonical text is fixed (member order, no white space) (" + e.Canonical() + ")");
         check(e.Signature.Length == 64 && e.ToJson().StartsWith(expected[..^1], StringComparison.Ordinal) && e.ToJson().Contains(",\"signature\":\"", StringComparison.Ordinal), "event signing: the signature is 64 bytes (r||s) and is the last member of the stored form");
 
@@ -188,7 +189,7 @@ internal static class AuditTrailTests
             && (e with { Arguments = [.. Enumerable.Repeat("a", 300)] }).Problem() is not null && (e with { EventId = "bad id" }).Problem() is not null && (e with { ProtocolVersion = 9 }).Problem() is not null, "event shape: a number below 1, an unknown type, an empty outcome, a long field, too many arguments or a bad id are refused");
 
         string[] fields = [.. typeof(AuditEvent).GetProperties().Where(p => p.DeclaringType == typeof(AuditEvent) && p.Name != "EqualityContract").Select(p => p.Name).Order(StringComparer.Ordinal)];
-        string[] allowed = ["Arguments", "ExitCode", "EventId", "Folder", "GrantId", "MachineFingerprint", "Outcome", "Program", "ProtocolVersion", "Reason", "RequestId", "Sequence", "Signature", "Time", "Type"];
+        string[] allowed = ["Arguments", "ExitCode", "EventId", "Epoch", "Folder", "GrantId", "MachineFingerprint", "Outcome", "Program", "ProtocolVersion", "Reason", "RequestId", "Sequence", "Signature", "Time", "Type"];
         check(fields.SequenceEqual(allowed.Order(StringComparer.Ordinal)), "event content: exactly the agreed fields; none names an OS user, a secret value or an environment value (a new field must be decided here) (" + string.Join(",", fields) + ")");
     }
 
@@ -225,7 +226,7 @@ internal static class AuditTrailTests
         AuditEvent third = outbox.Append(Facts(AuditEventTypes.Execution, "exited", "", exit: 0));
         IReadOnlyList<AuditEvent> pending = outbox.Pending(10);
         check(new[] { first.Sequence, second.Sequence, third.Sequence }.SequenceEqual([1L, 2L, 3L]) && pending.Select(item => item.EventId).SequenceEqual([first.EventId, second.EventId, third.EventId]) && pending.All(item => item.Verify(key.PublicKey)), "outbox: events are numbered 1, 2, 3, kept in order, and stored signed");
-        check(Scalar(outbox.FilePath, "PRAGMA journal_mode") as string == "wal" && Convert.ToInt32(Scalar(outbox.FilePath, "SELECT version FROM schema_version")) == 1 && Path.GetFileName(outbox.FilePath) == "audit-outbox.db", "outbox: a file of its own in the store folder, WAL, schema version 1");
+        check(Scalar(outbox.FilePath, "PRAGMA journal_mode") as string == "wal" && Convert.ToInt32(Scalar(outbox.FilePath, "SELECT version FROM schema_version")) == 2 && Path.GetFileName(outbox.FilePath) == "audit-outbox.db", "outbox: a file of its own in the store folder, WAL, schema version 2");
 
         outbox.Acknowledge([first.EventId]);
         check(outbox.Count("pending") == 2 && outbox.LastSequence() == 3 && outbox.Append(Facts()).Sequence == 4, "outbox: an acknowledged event is removed, and its number is not used again");
@@ -287,7 +288,7 @@ internal static class AuditTrailTests
 
         Sql(outbox.FilePath, "UPDATE schema_version SET version = 99");
         AuditOutboxException? mismatch = Catch<AuditOutboxException>(() => HostAuditOutbox.InFolder(dir, key, clock).Append(Facts()));
-        check(mismatch?.Message == "audit-outbox.db is not of schema version 1; delete audit-outbox.db to start over", "outbox schema: another schema version is refused with the delete-it message (" + mismatch?.Message + ")");
+        check(mismatch?.Message == "audit-outbox.db is not of schema version 2; delete audit-outbox.db to start over", "outbox schema: another schema version is refused with the delete-it message (" + mismatch?.Message + ")");
 
         string blockedDir = Path.Combine(parent, "ob-blocked-" + Guid.NewGuid().ToString("N")[..6]);
         Directory.CreateDirectory(Path.Combine(blockedDir, HostAuditOutbox.FileName));
@@ -618,11 +619,11 @@ internal static class AuditTrailTests
     {
         using TestMachine machine = new(Path.Combine(parent, "sc-" + Guid.NewGuid().ToString("N")[..6]));
         string file = machine.Deployment.Store.FilePath;
-        check(AuthorityStore.SchemaVersion == 4 && Convert.ToInt32(Scalar(file, "SELECT version FROM schema_version")) == 4 && Convert.ToInt32(Scalar(file, "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('audit_events','audit_machine_state','audit_gaps','authority_settings')")) == 4, "schema: a new authority.db is version 4 with the audit tables");
+        check(AuthorityStore.SchemaVersion == 5 && Convert.ToInt32(Scalar(file, "SELECT version FROM schema_version")) == 5 && Convert.ToInt32(Scalar(file, "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('audit_events','audit_machine_state','audit_gaps','authority_settings')")) == 4, "schema: a new authority.db is version 5 with the audit tables");
         Sql(file, "DROP TABLE audit_events; DROP TABLE audit_machine_state; DROP TABLE audit_gaps; DROP TABLE authority_settings; UPDATE schema_version SET version = 3;");
         AuthorityStore migrated = AuthorityStore.InFolder(machine.Folder);
-        check(migrated.AuditHistory(new AuditQuery()).Count == 0 && Convert.ToInt32(Scalar(file, "SELECT version FROM schema_version")) == 4 && migrated.Machines().Count == 1 && migrated.AuditRetentionDays() == 365, "schema: a version 3 authority.db gains the audit tables in place (machines are kept)");
-        Sql(file, "UPDATE schema_version SET version = 5");
+        check(migrated.AuditHistory(new AuditQuery()).Count == 0 && Convert.ToInt32(Scalar(file, "SELECT version FROM schema_version")) == 5 && migrated.Machines().Count == 1 && migrated.AuditRetentionDays() == 365, "schema: a version 3 authority.db gains the audit tables in place (machines are kept)");
+        Sql(file, "UPDATE schema_version SET version = 6");
         check(Catch<AuthorityDatabaseException>(() => AuthorityStore.InFolder(machine.Folder).AuditHistory(new AuditQuery())) is not null, "schema: another version is still refused");
     }
 
@@ -642,7 +643,7 @@ internal static class AuditTrailTests
         check(CommandWiring.AdminAudit(Parse()!, machine.Folder, empty) == 0 && empty.ToString().Contains("No audit events match", StringComparison.Ordinal), "admin audit: nothing recorded yet says so");
         AuditEvent a = outbox.Append(Facts(program: "/work/build.sh", arguments: ["--token=[REDACTED]"]));
         AuditEvent b = outbox.Append(Facts(AuditEventTypes.Execution, "exited", "", "g-1", 3, "/work", "/work/build.sh"));
-        AuditEvent skipped = AuditEvent.Create(Facts(), Guid.NewGuid().ToString("D"), 9, DateTimeOffset.UtcNow, machine.MachineKey);
+        AuditEvent skipped = AuditEvent.Create(Facts(), Guid.NewGuid().ToString("D"), 9, DateTimeOffset.UtcNow, machine.MachineKey, (string)Scalar(outbox.FilePath, "SELECT epoch FROM counter")!);
         machine.Deployment.Authority.UploadAsync(Batch(machine, a, b, skipped)).GetAwaiter().GetResult();
         StringWriter listed = new();
         check(CommandWiring.AdminAudit(Parse()!, machine.Folder, listed) == 0 && listed.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries).Length == 3 && listed.ToString().Contains("exited", StringComparison.Ordinal) && listed.ToString().Contains("g-1", StringComparison.Ordinal) && listed.ToString().Contains("--token=[REDACTED]", StringComparison.Ordinal), "admin audit: one tab-separated line per event, newest first, with the outcome, grant, exit code and the redacted command");
@@ -702,11 +703,11 @@ internal static class AuditTrailTests
             await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program), path: "/v1/approve");
             chooser.Minutes = 0;
             HostServiceTests.Raw run = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program));
-            await HostServiceTests.WaitFor(() => Events(rig).Count == 4 && rig.Service.Audit.Outbox.Count("pending") == 0);
+            await HostServiceTests.WaitFor(() => Events(rig).Count == 5 && rig.Service.Audit.Outbox.Count("pending") == 0);
             List<AuditEvent> events = Events(rig);
             string grantId = rig.Machine.Deployment.Store.Grants()[0].Id;
-            check(run.Result is { Outcome: LaunchOutcome.Exited } && events.Select(item => item.Outcome).SequenceEqual(["grant-approved", "granted", "started", "exited"]) && events[0].GrantId == grantId, "service audit: approve is audited (grant-approved, with the grant id) and a run under the grant is audited as granted, started, exited (" + string.Join(",", events.Select(item => item.Outcome)) + ")");
-            check(events.Skip(1).All(item => item.GrantId == grantId) && events[1].Reason == "online" && events[1].Type == AuditEventTypes.Authorization, "service audit: every event of a grant use carries the grant id, and the authorization says it was checked online");
+            check(run.Result is { Outcome: LaunchOutcome.Exited } && events.Select(item => item.Outcome).SequenceEqual(["approval-requested", "grant-approved", "granted", "started", "exited"]) && events[1].GrantId == grantId, "service audit: approve is audited (approval-requested before the tap, then grant-approved with the grant id) and a run under the grant is audited as granted, started, exited (" + string.Join(",", events.Select(item => item.Outcome)) + ")");
+            check(events.Skip(1).All(item => item.GrantId == grantId) && events[2].Reason == "online" && events[2].Type == AuditEventTypes.Authorization, "service audit: every event of a grant use carries the grant id, and the authorization says it was checked online");
             check(rig.Machine.Deployment.Store.AuditHistory(new AuditQuery(GrantId: grantId)).Count == 4, "service audit: the history can be filtered by the grant id");
 
             // A grant use whose event cannot be committed does not run.
@@ -881,6 +882,180 @@ internal static class AuditTrailTests
             System.Diagnostics.Stopwatch watch = System.Diagnostics.Stopwatch.StartNew();
             HostServiceTests.Raw run = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, GrantAuthorityTests.Show(rig)));
             check(run.Result is { Outcome: LaunchOutcome.Exited } && rig.Service.Audit.Outbox.Count("pending") == 3 && watch.Elapsed < TimeSpan.FromSeconds(20), "never blocks: a run completes while the audit upload hangs (" + watch.ElapsedMilliseconds + " ms)");
+        }
+    }
+
+    // ---- review fixes (M1, M2, L1 to L7) ----
+
+    private static string EpochOf(HostAuditOutbox outbox) => (string)Scalar(outbox.FilePath, "SELECT epoch FROM counter")!;
+
+    private static async Task Review(Action<bool, string> check, string parent)
+    {
+        // M1: the host cuts what the authority would refuse, so a run's events always reach it.
+        {
+            TestClock clock = new();
+            using TestMachine machine = new(Path.Combine(parent, "m1-" + Guid.NewGuid().ToString("N")[..6]), true, clock: clock);
+            HostAuditOutbox outbox = HostAuditOutbox.InFolder(machine.Folder, machine.MachineKey, clock);
+            string deep = "/" + string.Join("/", Enumerable.Repeat("directory", 700));
+            AuditEvent a = outbox.Append(Facts(folder: deep, program: deep + "/" + new string('p', 12000) + ".sh"));
+            AuditEvent b = outbox.Append(Facts(AuditEventTypes.Launch, "started", "", folder: deep, program: new string('p', 16000)));
+            AuditEvent emoji = outbox.Append(Facts(folder: string.Concat(Enumerable.Repeat("\U0001F600", 3000)), program: "/work/x.sh"));
+            AuditEvent many = outbox.Append(Facts(reason: new string('r', 900), arguments: [.. Enumerable.Range(0, 400).Select(index => new string('a', 6000))]));
+            check(new[] { a, b, emoji, many }.All(item => item.Problem() is null && item.Verify(machine.MachineKey.PublicKey)) && a.Folder.Length <= AuditEvent.MaxText && a.Program.Length <= AuditEvent.MaxText && b.Program.Length <= AuditEvent.MaxText, "long folder or program: the signed event is cut to what the authority accepts (4096 characters), and still verifies");
+            check(a.Folder.EndsWith("characters omitted]", StringComparison.Ordinal) && a.Folder.StartsWith("/directory/directory", StringComparison.Ordinal) && Encoding.UTF8.GetString(Encoding.UTF8.GetBytes(emoji.Folder)) == emoji.Folder && many.Arguments.Count == AuditEvent.MaxArguments && many.Arguments.All(argument => argument.Length <= AuditEvent.MaxText) && many.Reason.Length <= 200 && many.Reason.EndsWith("characters omitted]", StringComparison.Ordinal), "long folder or program: a cut says how much is gone, never splits a character, and the arguments and reason are bounded too");
+            AuditAck ack = await machine.Deployment.Authority.UploadAsync(Batch(machine, a, b, emoji, many));
+            check(ack.Entries.All(entry => entry.Status == AuditStatus.Accepted) && machine.Deployment.Store.AuditHistory(new AuditQuery()).Count == 4 && machine.Deployment.Store.AuditGaps().Count == 0, "long folder or program: the authority accepts all of them (nothing is rejected, no gap)");
+            long before = outbox.LastSequence();
+            check(Catch<AuditOutboxException>(() => outbox.Append(Facts(outcome: ""))) is { } invalid && invalid.Message.Contains("not valid", StringComparison.Ordinal) && outbox.LastSequence() == before, "long folder or program: an event that is still invalid is never signed (the append fails closed and uses no number)");
+        }
+
+        // M2: a recreated outbox is a new epoch, and its numbers cannot close a hole the old one left.
+        {
+            TestClock clock = new();
+            using TestMachine machine = new(Path.Combine(parent, "m2-" + Guid.NewGuid().ToString("N")[..6]), true, clock: clock);
+            AuthorityStore store = machine.Deployment.Store;
+            HostAuditOutbox first = HostAuditOutbox.InFolder(machine.Folder, machine.MachineKey, clock);
+            AuditEvent e1 = first.Append(Facts());
+            string epoch1 = EpochOf(first);
+            first.Append(Facts());
+            AuditEvent lateOne = AuditEvent.Create(Facts(), Guid.NewGuid().ToString("D"), 6, clock.GetUtcNow(), machine.MachineKey, epoch1);
+            await machine.Deployment.Authority.UploadAsync(Batch(machine, [.. first.Pending(10), lateOne]));
+            check(e1.Epoch == epoch1 && store.AuditGaps() is [{ Kind: "missing", From: 3, To: 5 } hole] && hole.Epoch == epoch1, "epoch: every event carries its outbox's epoch; the authority tracks 3 to 5 as missing in that epoch");
+
+            foreach (string leftover in Directory.GetFiles(machine.Folder, HostAuditOutbox.FileName + "*"))
+            {
+                File.Delete(leftover);
+            }
+
+            HostAuditOutbox second = HostAuditOutbox.InFolder(machine.Folder, machine.MachineKey, clock);
+            for (int index = 0; index < 6; index++)
+            {
+                second.Append(Facts());
+            }
+
+            string epoch2 = EpochOf(second);
+            await machine.Deployment.Authority.UploadAsync(Batch(machine, [.. second.Pending(10)]));
+            IReadOnlyList<AuditGap> gaps = store.AuditGaps();
+            check(epoch2 != epoch1 && gaps.Any(gap => gap.Kind == "missing" && gap.From == 3 && gap.To == 5 && gap.Epoch == epoch1 && gap.Resolved is null), "epoch: the new outbox's numbers 3 to 5 do not close the hole its predecessor left");
+            check(gaps.Any(gap => gap.Kind == "epoch" && gap.Epoch == epoch2 && gap.From == 1) && !gaps.Any(gap => gap.Kind == "reused"), "epoch: the new epoch is recorded as its own gap kind, and its numbers 1 to 6 are not reuse");
+            AuditEvent again = AuditEvent.Create(Facts(), Guid.NewGuid().ToString("D"), 2, clock.GetUtcNow(), machine.MachineKey, epoch2);
+            await machine.Deployment.Authority.UploadAsync(Batch(machine, again));
+            check(store.AuditGaps().Any(gap => gap.Kind == "reused" && gap.From == 2 && gap.Epoch == epoch2) && store.AuditHistory(new AuditQuery()).Count == 10, "epoch: a number used twice within one epoch is still recorded as reused");
+            HostAuditOutbox reopened = HostAuditOutbox.InFolder(machine.Folder, machine.MachineKey, clock);
+            check(EpochOf(reopened) == epoch2 && reopened.Append(Facts()).Epoch == epoch2, "epoch: it is kept across a restart of the same outbox");
+            check(e1 with { Epoch = "" } is { } noEpoch && noEpoch.Problem() is not null && !AuditEvent.TryParse(e1.ToJson().Replace("\"epoch\":\"" + epoch1 + "\",", "", StringComparison.Ordinal), out _, out _), "epoch: an event without one is refused");
+            check(!(e1 with { Epoch = "other" }).Verify(machine.MachineKey.PublicKey), "epoch: changing the epoch breaks the signature (it is part of what is signed)");
+        }
+
+        // L1: the upload loop survives anything.
+        {
+            using TestMachine machine = new(Path.Combine(parent, "l1-" + Guid.NewGuid().ToString("N")[..6]));
+            HostAuditOutbox outbox = HostAuditOutbox.InFolder(machine.Folder, machine.MachineKey);
+            AuditUploader uploader = new(outbox, () => machine.Deployment.AuditSink, Verifier(AuthorityKey(machine)), machine.Fingerprint);
+            outbox.Append(Facts());
+            int throws = 0;
+            outbox.Fault = point =>
+            {
+                if (point == "pending" && Interlocked.Increment(ref throws) <= 3)
+                {
+                    throw new InvalidOperationException("an unexpected error while reading a row (test)");
+                }
+            };
+            AuditUploadResult broken = await uploader.DrainAsync();
+            check(broken.Failed && outbox.Count("pending") == 1, "upload loop: an unexpected error reading the outbox is a failed drain, not an exception");
+            HostAudit audit = new(outbox, uploader);
+            using CancellationTokenSource stop = new();
+            Task loop = audit.RunAsync(Fast, TimeSpan.FromMilliseconds(160), stop.Token);
+            check(await HostServiceTests.WaitFor(() => outbox.Count("pending") == 0 && machine.Deployment.Store.AuditHistory(new AuditQuery()).Count == 1, 10) && !loop.IsCompleted, "upload loop: it kept going through the errors and delivered the event (the loop is still running)");
+            stop.Cancel();
+            check(await Task.WhenAny(loop, Task.Delay(5000)) == loop && loop.Status == TaskStatus.RanToCompletion, "upload loop: it still ends cleanly when the service stops");
+        }
+
+        // L2: an event dropped as expired leaves a trace at the authority.
+        {
+            TestClock clock = new();
+            using TestMachine machine = new(Path.Combine(parent, "l2-" + Guid.NewGuid().ToString("N")[..6]), true, clock: clock);
+            AuthorityStore store = machine.Deployment.Store;
+            HostAuditOutbox outbox = HostAuditOutbox.InFolder(machine.Folder, machine.MachineKey, clock);
+            store.SetAuditRetentionDays(30, RetentionAdmin(30));
+            AuditEvent stale = outbox.Append(Facts());
+            AuditEvent stale2 = outbox.Append(Facts());
+            clock.Advance(TimeSpan.FromDays(40));
+            AuditAck ack = await machine.Deployment.Authority.UploadAsync(Batch(machine, stale, stale2));
+            check(ack.Entries.All(entry => entry.Status == AuditStatus.Expired) && store.AuditHistory(new AuditQuery()).Count == 0 && store.Audit().Any(entry => entry.Event == "audit-events-expired" && entry.Detail.Contains("2 event(s)", StringComparison.Ordinal) && entry.Detail.Contains("sequence 1 to 2", StringComparison.Ordinal)), "expired: events acknowledged without being stored are counted in the authority's own history (a machine with a wrong clock shows)");
+        }
+
+        // L3: approve fails closed.
+        using (TestAuthenticator signer = TestAuthenticator.ES256())
+        {
+            GrantAuthorityTests.Chooser chooser = new(60, signer: signer);
+            using HostServiceTests.Rig rig = new(parent, approver: () => chooser, enrolled: signer, auditInterval: Fast);
+            string program = GrantAuthorityTests.Show(rig);
+            rig.Service.Audit.Outbox.Fault = point => throw new IOException("the disk is full (test)");
+            HostServiceTests.Raw blocked = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program), path: "/v1/approve");
+            rig.Service.Audit.Outbox.Fault = null;
+            check(blocked.Result is { Outcome: LaunchOutcome.Failed, ExitCode: RunCommand.AuditError } && chooser.Requests.Count == 0 && rig.Machine.Deployment.Store.Grants().Count == 0 && rig.Store.Reads == 0, "approve: if the request for a grant cannot be committed there is no tap, no grant and nothing is decrypted (exit 5)");
+        }
+
+        // L4: a refusal that can pass is retried; a final one is parked.
+        {
+            using TestMachine machine = new(Path.Combine(parent, "l4-" + Guid.NewGuid().ToString("N")[..6]));
+            HostAuditOutbox outbox = HostAuditOutbox.InFolder(machine.Folder, machine.MachineKey);
+            FlakySink sink = new(machine.Deployment.Authority);
+            AuditUploader uploader = new(outbox, () => sink, Verifier(AuthorityKey(machine)), machine.Fingerprint);
+            AuditEvent held = outbox.Append(Facts());
+            foreach ((string status, string detail) in new[] { (AuditStatus.Rejected, AuditStatus.UnknownMachine), (AuditStatus.Rejected, AuditStatus.MachinePending), ("some-future-status", "") })
+            {
+                sink.Tamper = (batch, ack) => AuditAck.Create(batch, [new AuditAckEntry(held.EventId, status, detail)], ack.Issued, TimeSpan.FromSeconds(60), machine.Deployment.Keys.Current());
+                AuditUploadResult result = await uploader.DrainAsync();
+                check(result.Failed && result.Rejected == 0 && outbox.Count("pending") == 1 && outbox.Count("rejected") == 0, "retryable refusal: '" + status + " " + detail + "' leaves the event pending to be tried again");
+            }
+
+            sink.Tamper = null;
+            check((await uploader.DrainAsync()).Acknowledged == 1 && outbox.Count("pending") == 0 && machine.Deployment.Store.AuditHistory(new AuditQuery()).Count == 1, "retryable refusal: when the authority takes it the event is delivered");
+            AuditEvent bad = outbox.Append(Facts());
+            sink.Tamper = (batch, ack) => AuditAck.Create(batch, [new AuditAckEntry(bad.EventId, AuditStatus.Rejected, "event-id-reused")], ack.Issued, TimeSpan.FromSeconds(60), machine.Deployment.Keys.Current());
+            AuditUploadResult parked = await uploader.DrainAsync();
+            check(parked.Rejected == 1 && outbox.Count("rejected") == 1 && outbox.Count("pending") == 0, "final refusal: an event the authority can never use is still parked");
+        }
+
+        // L5: more forms of secret in the arguments.
+        {
+            string[] redacted = [.. AuditRedaction.Arguments(["{\"password\":\"JsonCanary1\",\"name\":\"x\"}", "--data", "{\"api_key\": \"JsonCanary2\", \"token\":\"JsonCanary3\"}", "-u", "bob:CurlCanary4", "--user=amy:CurlCanary5", "--proxy-user", "p:CurlCanary6", "-pMysqlCanary7", "--password=EqCanary8", "-u", "1000", "-pthread", "-p", "8080", "--port=80"])];
+            string all = string.Join("\n", redacted);
+            check(!all.Contains("Canary", StringComparison.Ordinal), "redaction forms: JSON bodies, curl -u/--user/--proxy-user NAME:PASSWORD, mysql -pSECRET and --password=VALUE are all masked (" + string.Join(" | ", redacted) + ")");
+            check(redacted[0].Contains("\"password\"", StringComparison.Ordinal) && redacted[0].Contains("\"name\":\"x\"", StringComparison.Ordinal) && redacted[4] == "bob:[REDACTED]" && redacted[5] == "--user=amy:[REDACTED]" && redacted[9] == "--password=[REDACTED]", "redaction forms: the name stays, only the value goes");
+            check(redacted[11] == "1000" && redacted[12] == "-pthread" && redacted[13] == "-p" && redacted[14] == "8080" && redacted[15] == "--port=80", "redaction forms: a user id, a compiler flag, a port and ordinary flags are left alone");
+        }
+
+        // L6 and L7 at the authority.
+        {
+            TestClock clock = new();
+            using TestMachine machine = new(Path.Combine(parent, "l6-" + Guid.NewGuid().ToString("N")[..6]), true, clock: clock);
+            AuthorityStore store = machine.Deployment.Store;
+            HostAuditOutbox outbox = HostAuditOutbox.InFolder(machine.Folder, machine.MachineKey, clock);
+            AuditEvent hard = outbox.Append(Facts(program: "C:\\proj\\build.exe", arguments: ["C:\\proj\\data\\x.txt", "say \"hello there\"", "caf\u00e9 \u00fcber", "plain 100%"]));
+            await machine.Deployment.Authority.UploadAsync(Batch(machine, hard));
+            int Count(string text) => store.AuditHistory(new AuditQuery(Text: text)).Count;
+            check(Count("C:\\proj\\data") == 1 && Count("say \"hello") == 1 && Count("caf\u00e9") == 1 && Count("\u00fcber") == 1 && Count("100%") == 1 && Count("C:\\proj\\build.exe") == 1 && Count("C:\\other") == 0, "text search: backslashes, quotes and non-ASCII letters in the arguments are found");
+
+            // The same event id from another machine is not this machine's problem.
+            string otherEvent = Guid.NewGuid().ToString("D");
+            Sql(store.FilePath, "INSERT INTO audit_events (fingerprint, event_id, epoch, sequence, time, type, outcome, reason, request_id, folder, program, arguments, grant_id, exit_code, event_json, received, acknowledged) VALUES ('OTHERMACHINE', '" + otherEvent + "', 'e', 1, '2026-01-01T00:00:00.0000000Z', 'authorization', 'approved', '', '', '', '', '[]', '', NULL, '{}', '2026-01-01T00:00:00.0000000Z', '2026-01-01T00:00:00.0000000Z')");
+            AuditEvent same = AuditEvent.Create(Facts(), otherEvent, 2, clock.GetUtcNow(), machine.MachineKey, EpochOf(outbox));
+            AuditAck ack = await machine.Deployment.Authority.UploadAsync(Batch(machine, same));
+            check(ack.Entries[0].Status == AuditStatus.Accepted && (await machine.Deployment.Authority.UploadAsync(Batch(machine, same))).Entries[0].Status == AuditStatus.Duplicate, "duplicate check: an event id another machine already used does not block this machine's event, and its own repeat is a duplicate");
+            AuditEvent clash = AuditEvent.Create(Facts(outcome: "different"), otherEvent, 9, clock.GetUtcNow(), machine.MachineKey, EpochOf(outbox));
+            check((await machine.Deployment.Authority.UploadAsync(Batch(machine, clash))).Entries[0].Detail == "event-id-reused", "duplicate check: the same id with other content from the same machine is still refused");
+        }
+
+        // Migration from the first cut (schema 4).
+        {
+            using TestMachine machine = new(Path.Combine(parent, "mg-" + Guid.NewGuid().ToString("N")[..6]));
+            string file = machine.Deployment.Store.FilePath;
+            Sql(file, "DROP TABLE audit_events; DROP TABLE audit_machine_state; DROP TABLE audit_gaps; CREATE TABLE audit_events (event_id TEXT PRIMARY KEY NOT NULL, fingerprint TEXT NOT NULL); CREATE TABLE audit_machine_state (fingerprint TEXT PRIMARY KEY NOT NULL, highest INTEGER NOT NULL, updated TEXT NOT NULL); CREATE TABLE audit_gaps (id INTEGER PRIMARY KEY, fingerprint TEXT NOT NULL); UPDATE schema_version SET version = 4;");
+            AuthorityStore migrated = AuthorityStore.InFolder(machine.Folder);
+            check(migrated.AuditHistory(new AuditQuery()).Count == 0 && Convert.ToInt32(Scalar(file, "SELECT version FROM schema_version")) == 5 && migrated.Machines().Count == 1 && Convert.ToInt32(Scalar(file, "SELECT COUNT(*) FROM pragma_table_info('audit_machine_state') WHERE name = 'epoch'")) == 1, "schema: a version 4 authority.db is migrated to 5 (the audit tables of the first cut are replaced, machines are kept)");
         }
     }
 }

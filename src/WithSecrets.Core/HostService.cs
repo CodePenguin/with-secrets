@@ -246,6 +246,19 @@ public sealed class HostService : IDisposable
                 app.Run(service.Handle);
                 app.StartAsync().GetAwaiter().GetResult();
                 service._pump = Task.Run(service.PumpLoop);
+                try
+                {
+                    if (service.Audit.Outbox.Count("rejected") is var refused and > 0)
+                    {
+                        // Events the authority refused for good are kept apart and never resent: a person should know they exist.
+                        AppLog.Warn("{Count} audit event(s) in the outbox were refused by the authority and are kept, not resent", refused);
+                    }
+                }
+                catch (AuditOutboxException)
+                {
+                    // The same problem is met, and logged, by the first event and the upload.
+                }
+
                 service._auditLoop = Task.Run(() => service.Audit.RunAsync(options.AuditUploadInterval, options.AuditMaxBackoff, service._stop.Token));
 
                 return service;

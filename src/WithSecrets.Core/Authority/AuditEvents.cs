@@ -40,6 +40,7 @@ public sealed record AuditEvent(
     long Sequence,
     DateTimeOffset Time,
     string MachineFingerprint,
+    string Epoch,
     string Type,
     string Outcome,
     string Reason,
@@ -72,6 +73,8 @@ public sealed record AuditEvent(
         ToolSettings.QuoteJson(text, CanonicalJson.Time(Time));
         text.Append(",\"machineFingerprint\":");
         ToolSettings.QuoteJson(text, MachineFingerprint);
+        text.Append(",\"epoch\":");
+        ToolSettings.QuoteJson(text, Epoch);
         text.Append(",\"type\":");
         ToolSettings.QuoteJson(text, Type);
         text.Append(",\"outcome\":");
@@ -104,9 +107,9 @@ public sealed record AuditEvent(
 
     internal static byte[] SigningBytes(string canonical) => WireText.Bytes(Domain, canonical);
 
-    public static AuditEvent Create(AuditFacts facts, string eventId, long sequence, DateTimeOffset time, ISigningKey machineKey)
+    public static AuditEvent Create(AuditFacts facts, string eventId, long sequence, DateTimeOffset time, ISigningKey machineKey, string epoch = "default")
     {
-        AuditEvent unsigned = new(1, eventId, sequence, time, KeyIdentity.Fingerprint(machineKey.PublicKey), facts.Type, facts.Outcome, facts.Reason, facts.RequestId, facts.Folder, facts.Program, [.. facts.Arguments], facts.GrantId, facts.ExitCode, []);
+        AuditEvent unsigned = new(1, eventId, sequence, time, KeyIdentity.Fingerprint(machineKey.PublicKey), epoch, facts.Type, facts.Outcome, facts.Reason, facts.RequestId, facts.Folder, facts.Program, [.. facts.Arguments], facts.GrantId, facts.ExitCode, []);
 
         return unsigned with { Signature = machineKey.Sign(SigningBytes(unsigned.Canonical())) };
     }
@@ -129,6 +132,11 @@ public sealed record AuditEvent(
         if (EventId.Length is 0 or > 64 || !EventId.All(letter => char.IsAsciiLetterOrDigit(letter) || letter == '-'))
         {
             return "the event id is not 1 to 64 letters, digits or dashes";
+        }
+
+        if (Epoch.Length is 0 or > 64 || !Epoch.All(letter => char.IsAsciiLetterOrDigit(letter) || letter == '-'))
+        {
+            return "the epoch is not 1 to 64 letters, digits or dashes";
         }
 
         if (Sequence < 1)
@@ -165,9 +173,9 @@ public sealed record AuditEvent(
 
         using (doc)
         {
-            ContractReader reader = new(doc!.RootElement, "protocolVersion", "eventId", "sequence", "time", "machineFingerprint", "type", "outcome", "reason", "requestId", "folder", "program", "arguments", "grantId", "exitCode", "signature");
+            ContractReader reader = new(doc!.RootElement, "protocolVersion", "eventId", "sequence", "time", "machineFingerprint", "epoch", "type", "outcome", "reason", "requestId", "folder", "program", "arguments", "grantId", "exitCode", "signature");
             if (reader.Problem is not null || !reader.Int("protocolVersion", out int version) || !reader.Text("eventId", out string? id) || !reader.Long("sequence", out long sequence)
-                || !reader.Time("time", out DateTimeOffset time) || !reader.Text("machineFingerprint", out string? machine) || !reader.Text("type", out string? type) || !reader.Text("outcome", out string? outcome)
+                || !reader.Time("time", out DateTimeOffset time) || !reader.Text("machineFingerprint", out string? machine) || !reader.Text("epoch", out string? epoch) || !reader.Text("type", out string? type) || !reader.Text("outcome", out string? outcome)
                 || !reader.Text("reason", out string? reason) || !reader.Text("requestId", out string? requestId) || !reader.Text("folder", out string? folder) || !reader.Text("program", out string? program)
                 || !reader.Strings("arguments", out List<string>? arguments) || !reader.Text("grantId", out string? grantId) || !reader.OptionalInt("exitCode", out int? exitCode) || !reader.Text("signature", out string? signature))
             {
@@ -185,7 +193,7 @@ public sealed record AuditEvent(
             }
 
             error = null;
-            parsed = new AuditEvent(version, id!, sequence, time, machine!, type!, outcome!, reason!, requestId!, folder!, program!, arguments!, grantId!, exitCode, bytes);
+            parsed = new AuditEvent(version, id!, sequence, time, machine!, epoch!, type!, outcome!, reason!, requestId!, folder!, program!, arguments!, grantId!, exitCode, bytes);
 
             return true;
         }
@@ -218,6 +226,14 @@ public static class AuditStatus
     public const string Rejected = "rejected";
 
     public static bool Done(string status) => status is Accepted or Duplicate or Expired;
+
+    /// <summary>Details of a refusal that can pass: the authority does not know (or has not yet approved) the machine, so a later upload may be taken.</summary>
+    public const string UnknownMachine = "unknown-machine";
+
+    public const string MachinePending = "machine-pending";
+
+    /// <summary>True for a refusal that is final (a bad signature, an event it cannot use). Anything else (an unknown machine, a status this host does not know) is tried again later.</summary>
+    public static bool Permanent(AuditAckEntry entry) => entry.Status == Rejected && entry.Detail is not (UnknownMachine or MachinePending);
 }
 
 public sealed record AuditAckEntry(string EventId, string Status, string Detail);
@@ -293,8 +309,8 @@ public sealed record AuditQuery(string? MachinePrefix = null, DateTimeOffset? Fr
 /// <summary>A stored event with when the authority received (and so acknowledged) it.</summary>
 public sealed record AuditHistoryRecord(AuditEvent Event, DateTimeOffset Received);
 
-/// <summary>A hole in a machine's sequence (<see cref="Kind" /> missing: events from <see cref="From" /> to <see cref="To" /> have not arrived) or a number used twice (reused). Recorded, never a reason to reject.</summary>
-public sealed record AuditGap(long Id, string Fingerprint, string Kind, long From, long To, DateTimeOffset Detected, DateTimeOffset? Resolved);
+/// <summary>A hole in a machine's sequence within one outbox epoch (<see cref="Kind" /> missing: events from <see cref="From" /> to <see cref="To" /> have not arrived), a number used twice (reused), or a new epoch (epoch: the machine's outbox was recreated, its first number is <see cref="From" />). Recorded, never a reason to reject.</summary>
+public sealed record AuditGap(long Id, string Fingerprint, string Kind, long From, long To, DateTimeOffset Detected, DateTimeOffset? Resolved, string Epoch = "");
 
 /// <summary>
 /// Redaction of the arguments before they go into an event. The host records the arguments before anything is decrypted, so it cannot mask the exact values: what it masks
@@ -309,7 +325,8 @@ public static partial class AuditRedaction
 
     private const string SecretWord = "pass(?:word|wd|phrase)?|pwd|secret|token|api[-_]?key|apikey|access[-_]?key|private[-_]?key|auth(?:orization)?|credential|bearer|cookie|session[-_]?id|signature";
 
-    [GeneratedRegex("(?<name>[\\w.-]*(?:" + SecretWord + ")[\\w.-]*)(?<sep>\\s*[=:]\\s*)(?<value>\"[^\"]*\"|'[^']*'|\\S+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    // The name may be quoted (a JSON body: {"password":"x"}); the quote stays, the value goes.
+    [GeneratedRegex(@"(?<name>[\w.-]*(?:" + SecretWord + @")[\w.-]*)(?<quote>[""']?)(?<sep>\s*[=:]\s*)(?<value>""[^""]*""|'[^']*'|[^\s,}\]]+)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex Pair();
 
     [GeneratedRegex("(?<scheme>bearer|basic|token)\\s+[A-Za-z0-9._~+/=-]{6,}", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
@@ -318,6 +335,18 @@ public static partial class AuditRedaction
     [GeneratedRegex("(?<start>[a-z][a-z0-9+.-]*://)[^/\\s:@]*:[^/\\s@]*@", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex UrlUser();
 
+    // --user=name:password and --proxy-user=name:password.
+    [GeneratedRegex(@"(?<name>--(?:proxy-)?user=)(?<user>[^:\s]*):\S+", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex UserPair();
+
+    // curl -u / --user / -U / --proxy-user NAME:PASSWORD (as the next argument).
+    [GeneratedRegex(@"^(?:-u|-U|--user|--proxy-user)$", RegexOptions.CultureInvariant)]
+    private static partial Regex UserFlag();
+
+    // mysql -pSECRET (the value is attached to the flag). A few compiler flags that start with -p are left alone.
+    [GeneratedRegex(@"^-p(?!thread$|ipe$|edantic$|g$|rofile$)(?<value>[^-\s].*)$", RegexOptions.CultureInvariant)]
+    private static partial Regex AttachedPassword();
+
     [GeneratedRegex("^-{1,2}[\\w.-]*(?:" + SecretWord + ")[\\w.-]*$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SecretFlag();
 
@@ -325,22 +354,79 @@ public static partial class AuditRedaction
     {
         List<string> result = [];
         bool nextIsValue = false;
+        bool nextIsUser = false;
         foreach (string argument in arguments)
         {
-            // A value that follows a flag named like a secret (--token VALUE).
-            string text = nextIsValue && !argument.StartsWith('-') ? Mask : Text(argument);
+            // A value that follows a flag named like a secret (--token VALUE), or the NAME:PASSWORD after -u.
+            string text;
+            if (nextIsValue && !argument.StartsWith('-'))
+            {
+                text = Mask;
+            }
+            else if (nextIsUser && !argument.StartsWith('-') && argument.Contains(':'))
+            {
+                text = argument[..argument.IndexOf(':')] + ":" + Mask;
+            }
+            else if (AttachedPassword().Match(argument) is { Success: true })
+            {
+                text = "-p" + Mask;
+            }
+            else
+            {
+                text = Text(argument);
+            }
+
             nextIsValue = !argument.Contains('=') && !argument.Contains(':') && SecretFlag().IsMatch(argument);
+            nextIsUser = UserFlag().IsMatch(argument);
             result.Add(text);
         }
 
         return result.Count <= AuditEvent.MaxArguments ? result : [.. result.Take(AuditEvent.MaxArguments - 1), "[" + (result.Count - AuditEvent.MaxArguments + 1) + " more arguments omitted]"];
     }
 
+    /// <summary>
+    /// The facts cut to what the authority accepts, so that no event this host signs can be refused for its size (the run it records went ahead): the folder and the program path
+    /// (a deep folder tree or a long path is allowed to a program), the codes, and the arguments (count and length). A cut text ends with a marker that says how much is gone.
+    /// </summary>
+    public static AuditFacts Bound(AuditFacts facts)
+    {
+        return facts with
+        {
+            Outcome = Cut(facts.Outcome, 64),
+            Reason = Cut(facts.Reason, 200),
+            RequestId = Cut(facts.RequestId, 128),
+            Folder = Cut(facts.Folder, AuditEvent.MaxText),
+            Program = Cut(facts.Program, AuditEvent.MaxText),
+            GrantId = Cut(facts.GrantId, 128),
+            Arguments = [.. facts.Arguments.Take(AuditEvent.MaxArguments).Select(argument => Cut(argument, AuditEvent.MaxText))],
+        };
+    }
+
+    /// <summary>The text itself when it fits, else its beginning and "[N more characters omitted]", at most <paramref name="limit" /> characters in all.</summary>
+    public static string Cut(string value, int limit)
+    {
+        if (value.Length <= limit)
+        {
+            return value;
+        }
+
+        int keep = Math.Max(0, limit - 40);
+        if (keep > 0 && char.IsHighSurrogate(value[keep - 1]))
+        {
+            keep--;
+        }
+
+        string marker = "[" + (value.Length - keep) + " more characters omitted]";
+
+        return limit <= marker.Length ? marker[..limit] : value[..keep] + marker;
+    }
+
     public static string Text(string value)
     {
         // The scheme first: in "Authorization: Bearer VALUE" the pair rule would otherwise take "Bearer" for the value and leave VALUE.
         string text = Scheme().Replace(value, match => match.Groups["scheme"].Value + " " + Mask);
-        text = Pair().Replace(text, match => match.Groups["name"].Value + match.Groups["sep"].Value + Mask);
+        text = Pair().Replace(text, match => match.Groups["name"].Value + match.Groups["quote"].Value + match.Groups["sep"].Value + Mask);
+        text = UserPair().Replace(text, match => match.Groups["name"].Value + match.Groups["user"].Value + ":" + Mask);
         text = UrlUser().Replace(text, match => match.Groups["start"].Value + Mask + "@");
         text = ApprovalSummary.Clean(text);
 

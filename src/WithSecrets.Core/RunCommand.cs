@@ -276,6 +276,12 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         // approve: the same validation and the human approval, but the result is a grant for this scope and nothing is launched.
         if (approveOnly)
         {
+            // Approving binds the store key to a grant at the tap, so the request for it is committed first, like the authorization of a run: without it, no tap is asked for.
+            if (!Record(AuditEventTypes.Authorization, "approval-requested", "grant"))
+            {
+                return await Fail(AuditError, AuditEventMessage);
+            }
+
             int approved = await ApproveGrantOnly(request, fingerprint, context, grantScope);
             Record(AuditEventTypes.Authorization, approved == 0 ? "grant-approved" : "denied", approved == 0 ? "" : _approveReason.Length > 0 ? _approveReason : "refused", _approveGrant);
 

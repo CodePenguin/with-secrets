@@ -8,21 +8,21 @@ namespace WithSecrets;
 public sealed class AuditOutboxException(string message, Exception? inner = null) : Exception(message, inner);
 
 /// <summary>
-/// The host-local audit outbox: <c>audit-outbox.db</c> in the store folder (SQLite, WAL, <c>synchronous=FULL</c>, schema version 1). An event is numbered, signed by the
+/// The host-local audit outbox: <c>audit-outbox.db</c> in the store folder (SQLite, WAL, <c>synchronous=FULL</c>, schema version 2). An event is numbered, signed by the
 /// machine identity key and committed in ONE write transaction, so the per-machine sequence is monotonic and gapless (a failed append consumes no number), and a commit
 /// that returned is on disk. Events stay until the authority acknowledges them; only then are they removed. No secret value, no environment value and no OS user is stored.
-/// A file of another schema version, or a damaged one, is never repaired: delete it to start over (the sequence then restarts at 1 and the authority records the reuse).
+/// A file of another schema version, or a damaged one, is never repaired: delete it to start over (the sequence then restarts at 1 under a new epoch, which the authority records).
 /// </summary>
 public sealed class HostAuditOutbox(string path, ISigningKey machineKey, TimeProvider? clock = null)
 {
     public const string FileName = "audit-outbox.db";
-    public const int SchemaVersion = 1;
+    public const int SchemaVersion = 2;
     public static readonly TimeSpan BusyTimeout = TimeSpan.FromSeconds(5);
 
     private const string Schema = """
         CREATE TABLE schema_version (version INTEGER NOT NULL);
-        CREATE TABLE counter (id INTEGER PRIMARY KEY CHECK (id = 1), last_sequence INTEGER NOT NULL);
-        INSERT INTO counter (id, last_sequence) VALUES (1, 0);
+        CREATE TABLE counter (id INTEGER PRIMARY KEY CHECK (id = 1), last_sequence INTEGER NOT NULL, epoch TEXT NOT NULL);
+        INSERT INTO counter (id, last_sequence, epoch) VALUES (1, 0, $epoch);
         CREATE TABLE events (
             sequence INTEGER PRIMARY KEY NOT NULL, event_id TEXT NOT NULL UNIQUE, json TEXT NOT NULL, created TEXT NOT NULL,
             state TEXT NOT NULL, reason TEXT);
@@ -48,8 +48,15 @@ public sealed class HostAuditOutbox(string path, ISigningKey machineKey, TimePro
         return Write((connection, transaction) =>
         {
             long next = Convert.ToInt64(StateDatabase.Scalar(connection, transaction, "SELECT last_sequence FROM counter WHERE id = 1"), CultureInfo.InvariantCulture) + 1;
+            string epoch = (string)StateDatabase.Scalar(connection, transaction, "SELECT epoch FROM counter WHERE id = 1")!;
             Fault?.Invoke("before-sign");
-            AuditEvent item = AuditEvent.Create(facts, Guid.NewGuid().ToString("D"), next, _clock.GetUtcNow(), machineKey);
+            AuditEvent item = AuditEvent.Create(AuditRedaction.Bound(facts), Guid.NewGuid().ToString("D"), next, _clock.GetUtcNow(), machineKey, epoch);
+            if (item.Problem() is { } problem)
+            {
+                // Nothing the authority would refuse is signed: the run that this records does not go ahead.
+                throw new AuditOutboxException("the audit event is not valid: " + problem);
+            }
+
             StateDatabase.Execute(connection, transaction, "INSERT INTO events (sequence, event_id, json, created, state, reason) VALUES ($seq, $id, $json, $now, 'pending', NULL)",
                 ("$seq", next), ("$id", item.EventId), ("$json", item.ToJson()), ("$now", CanonicalJson.Time(_clock.GetUtcNow())));
             StateDatabase.Execute(connection, transaction, "UPDATE counter SET last_sequence = $seq WHERE id = 1", ("$seq", next));
@@ -65,6 +72,7 @@ public sealed class HostAuditOutbox(string path, ISigningKey machineKey, TimePro
         List<long> unreadable = [];
         List<AuditEvent> events = Use(false, connection =>
         {
+            Fault?.Invoke("pending");
             List<AuditEvent> found = [];
             if (connection is null)
             {
@@ -242,7 +250,7 @@ public sealed class HostAuditOutbox(string path, ISigningKey machineKey, TimePro
                 connection.Open();
                 StateDatabase.Execute(connection, null, "PRAGMA journal_mode = WAL");
                 using SqliteTransaction transaction = connection.BeginTransaction(deferred: false);
-                StateDatabase.Execute(connection, transaction, Schema);
+                StateDatabase.Execute(connection, transaction, Schema, ("$epoch", Guid.NewGuid().ToString("N")));
                 StateDatabase.Execute(connection, transaction, "INSERT INTO schema_version (version) VALUES ($version)", ("$version", SchemaVersion));
                 transaction.Commit();
             }
@@ -311,7 +319,7 @@ public sealed class AuditUploader(HostAuditOutbox outbox, Func<IAuditSink> sink,
             {
                 pending = outbox.Pending(batchSize);
             }
-            catch (AuditOutboxException error)
+            catch (Exception error) when (error is not (OutOfMemoryException or OperationCanceledException))
             {
                 AppLog.Warn("the audit outbox could not be read for upload: {Type}", error.GetType().Name);
 
@@ -336,14 +344,14 @@ public sealed class AuditUploader(HostAuditOutbox outbox, Func<IAuditSink> sink,
 
                 HashSet<string> sent = [.. pending.Select(item => item.EventId)];
                 List<string> done = [.. ack.Entries.Where(entry => sent.Contains(entry.EventId) && AuditStatus.Done(entry.Status)).Select(entry => entry.EventId).Distinct()];
-                List<AuditAckEntry> refused = [.. ack.Entries.Where(entry => sent.Contains(entry.EventId) && !AuditStatus.Done(entry.Status))];
+                List<AuditAckEntry> refused = [.. ack.Entries.Where(entry => sent.Contains(entry.EventId) && AuditStatus.Permanent(entry))];
                 outbox.Acknowledge(done);
                 outbox.Reject(refused);
                 acknowledged += done.Count;
                 rejected += refused.Count;
                 if (done.Count + refused.Count == 0)
                 {
-                    // The authority took nothing from this batch: stop, so that a broken answer is not repeated in a tight loop.
+                    // The authority took nothing for good from this batch (or only refused it for now, e.g. the machine is not enrolled yet): stop, so that it is not repeated in a tight loop.
                     return new AuditUploadResult(acknowledged, rejected, true);
                 }
             }
@@ -414,8 +422,19 @@ public sealed class HostAudit(HostAuditOutbox outbox, AuditUploader uploader) : 
         {
             while (!stop.IsCancellationRequested)
             {
-                AuditUploadResult result = await uploader.DrainAsync(stop);
-                delay = result.Failed ? TimeSpan.FromTicks(Math.Min(maxBackoff.Ticks, delay.Ticks * 2)) : interval;
+                bool failed;
+                try
+                {
+                    failed = (await uploader.DrainAsync(stop)).Failed;
+                }
+                catch (Exception error) when (error is not (OutOfMemoryException or OperationCanceledException))
+                {
+                    // Whatever went wrong, the loop goes on (the events are still in the outbox); the type only is logged.
+                    AppLog.Warn("the audit upload loop met an error and will retry: {Type}", error.GetType().Name);
+                    failed = true;
+                }
+
+                delay = failed ? TimeSpan.FromTicks(Math.Min(maxBackoff.Ticks, delay.Ticks * 2)) : interval;
                 await _wake.WaitAsync(delay, stop);
             }
         }

@@ -25,14 +25,14 @@ public sealed partial class AuthorityStore
 
     private const string AuditSchema = """
         CREATE TABLE IF NOT EXISTS audit_events (
-            event_id TEXT PRIMARY KEY NOT NULL, fingerprint TEXT NOT NULL, sequence INTEGER NOT NULL, time TEXT NOT NULL, type TEXT NOT NULL, outcome TEXT NOT NULL,
+            fingerprint TEXT NOT NULL, event_id TEXT NOT NULL, epoch TEXT NOT NULL, sequence INTEGER NOT NULL, time TEXT NOT NULL, type TEXT NOT NULL, outcome TEXT NOT NULL,
             reason TEXT NOT NULL, request_id TEXT NOT NULL, folder TEXT NOT NULL, program TEXT NOT NULL, arguments TEXT NOT NULL, grant_id TEXT NOT NULL,
-            exit_code INTEGER, event_json TEXT NOT NULL, received TEXT NOT NULL, acknowledged TEXT NOT NULL);
+            exit_code INTEGER, event_json TEXT NOT NULL, received TEXT NOT NULL, acknowledged TEXT NOT NULL, PRIMARY KEY (fingerprint, event_id));
         CREATE INDEX IF NOT EXISTS audit_events_machine ON audit_events (fingerprint, sequence);
         CREATE INDEX IF NOT EXISTS audit_events_time ON audit_events (time);
-        CREATE TABLE IF NOT EXISTS audit_machine_state (fingerprint TEXT PRIMARY KEY NOT NULL, highest INTEGER NOT NULL, updated TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS audit_machine_state (fingerprint TEXT NOT NULL, epoch TEXT NOT NULL, highest INTEGER NOT NULL, updated TEXT NOT NULL, PRIMARY KEY (fingerprint, epoch));
         CREATE TABLE IF NOT EXISTS audit_gaps (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, fingerprint TEXT NOT NULL, kind TEXT NOT NULL, from_sequence INTEGER NOT NULL, to_sequence INTEGER NOT NULL,
+            id INTEGER PRIMARY KEY AUTOINCREMENT, fingerprint TEXT NOT NULL, epoch TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, from_sequence INTEGER NOT NULL, to_sequence INTEGER NOT NULL,
             detected TEXT NOT NULL, resolved TEXT);
         CREATE TABLE IF NOT EXISTS authority_settings (name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
         """;
@@ -124,8 +124,11 @@ public sealed partial class AuthorityStore
 
             List<AuditAckEntry> entries = [];
             int accepted = 0;
+            int expired = 0;
             long first = long.MaxValue;
             long last = 0;
+            long expiredFirst = long.MaxValue;
+            long expiredLast = 0;
             foreach (AuditEvent item in batch.Events.Take(MaxAuditBatch))
             {
                 AuditAckEntry entry = RecordOne(connection, transaction, machine, item, cutoff, nowText);
@@ -136,12 +139,24 @@ public sealed partial class AuthorityStore
                     first = Math.Min(first, item.Sequence);
                     last = Math.Max(last, item.Sequence);
                 }
+                else if (entry.Status == AuditStatus.Expired)
+                {
+                    expired++;
+                    expiredFirst = Math.Min(expiredFirst, item.Sequence);
+                    expiredLast = Math.Max(expiredLast, item.Sequence);
+                }
             }
 
             Fault?.Invoke("after-audit-events");
             if (accepted > 0)
             {
                 Audit(connection, transaction, "audit-events-received", batch.MachineFingerprint, batch.BatchId, "authority", $"{accepted} event(s), sequence {first} to {last}");
+            }
+
+            if (expired > 0)
+            {
+                // Acknowledged but not stored (older than the retention by the machine's own clock): the drop leaves this trace, so a machine with a wrong clock shows.
+                Audit(connection, transaction, "audit-events-expired", batch.MachineFingerprint, batch.BatchId, "authority", $"{expired} event(s) dated before the retention, acknowledged without being stored, sequence {expiredFirst} to {expiredLast}");
             }
 
             Fault?.Invoke("before-commit");
@@ -156,7 +171,7 @@ public sealed partial class AuthorityStore
 
         if (machine is null)
         {
-            return Refuse("unknown-machine");
+            return Refuse(AuditStatus.UnknownMachine);
         }
 
         if (!string.Equals(item.MachineFingerprint, machine.Fingerprint, StringComparison.Ordinal))
@@ -174,7 +189,7 @@ public sealed partial class AuthorityStore
             return Refuse("bad-signature");
         }
 
-        if (StateDatabase.Scalar(connection, transaction, "SELECT event_json FROM audit_events WHERE event_id = $id", ("$id", item.EventId)) is string stored)
+        if (StateDatabase.Scalar(connection, transaction, "SELECT event_json FROM audit_events WHERE fingerprint = $fp AND event_id = $id", ("$fp", item.MachineFingerprint), ("$id", item.EventId)) is string stored)
         {
             return string.Equals(stored, item.ToJson(), StringComparison.Ordinal) ? new AuditAckEntry(item.EventId, AuditStatus.Duplicate, "") : Refuse("event-id-reused");
         }
@@ -182,14 +197,14 @@ public sealed partial class AuthorityStore
         if (cutoff is { } limit && item.Time < limit)
         {
             // Not stored. Its number still counts (it may be the next one, or fill a hole), but it can be one the authority already pruned, so it is never recorded as reused.
-            TrackSequence(connection, transaction, item.MachineFingerprint, item.Sequence, nowText, recordReuse: false);
+            TrackSequence(connection, transaction, item.MachineFingerprint, item.Epoch, item.Sequence, nowText, recordReuse: false);
 
             return new AuditAckEntry(item.EventId, AuditStatus.Expired, "older than the retention");
         }
 
-        TrackSequence(connection, transaction, item.MachineFingerprint, item.Sequence, nowText, recordReuse: true);
-        StateDatabase.Execute(connection, transaction, "INSERT INTO audit_events (event_id, fingerprint, sequence, time, type, outcome, reason, request_id, folder, program, arguments, grant_id, exit_code, event_json, received, acknowledged) VALUES ($id, $fp, $seq, $time, $type, $outcome, $reason, $request, $folder, $program, $arguments, $grant, $exit, $json, $now, $now)",
-            ("$id", item.EventId), ("$fp", item.MachineFingerprint), ("$seq", item.Sequence), ("$time", Time(item.Time)), ("$type", item.Type), ("$outcome", item.Outcome), ("$reason", item.Reason),
+        TrackSequence(connection, transaction, item.MachineFingerprint, item.Epoch, item.Sequence, nowText, recordReuse: true);
+        StateDatabase.Execute(connection, transaction, "INSERT INTO audit_events (event_id, fingerprint, epoch, sequence, time, type, outcome, reason, request_id, folder, program, arguments, grant_id, exit_code, event_json, received, acknowledged) VALUES ($id, $fp, $epoch, $seq, $time, $type, $outcome, $reason, $request, $folder, $program, $arguments, $grant, $exit, $json, $now, $now)",
+            ("$id", item.EventId), ("$fp", item.MachineFingerprint), ("$epoch", item.Epoch), ("$seq", item.Sequence), ("$time", Time(item.Time)), ("$type", item.Type), ("$outcome", item.Outcome), ("$reason", item.Reason),
             ("$request", item.RequestId), ("$folder", item.Folder), ("$program", item.Program), ("$arguments", ArgumentsText(item.Arguments)), ("$grant", item.GrantId), ("$exit", item.ExitCode),
             ("$json", item.ToJson()), ("$now", nowText));
 
@@ -205,24 +220,32 @@ public sealed partial class AuthorityStore
     }
 
     /// <summary>
-    /// Moves the machine's sequence state for one new event: the next number advances it; a number past the next records a missing range (and advances); a number at or below
-    /// the highest either fills a recorded hole (shrinking or splitting it) or is a number used before (recorded as reused).
+    /// Moves the machine's sequence state for one new event. The numbers are tracked per (machine, epoch), the epoch being the id of the host's outbox: the next number advances it;
+    /// a number past the next records a missing range (and advances); a number at or below the highest either fills a recorded hole of the SAME epoch (shrinking or splitting it) or
+    /// is a number used before (recorded as reused). The first event of a new epoch of a known machine records an epoch gap (its outbox was recreated), and a recreated outbox can
+    /// never close a hole its predecessor left, because its numbers belong to another epoch.
     /// </summary>
-    private static void TrackSequence(SqliteConnection connection, SqliteTransaction transaction, string fingerprint, long sequence, string now, bool recordReuse)
+    private static void TrackSequence(SqliteConnection connection, SqliteTransaction transaction, string fingerprint, string epoch, long sequence, string now, bool recordReuse)
     {
-        long highest = StateDatabase.Scalar(connection, transaction, "SELECT highest FROM audit_machine_state WHERE fingerprint = $fp", ("$fp", fingerprint)) is { } known ? Convert.ToInt64(known, CultureInfo.InvariantCulture) : 0;
+        object? known = StateDatabase.Scalar(connection, transaction, "SELECT highest FROM audit_machine_state WHERE fingerprint = $fp AND epoch = $epoch", ("$fp", fingerprint), ("$epoch", epoch));
+        long highest = known is { } value ? Convert.ToInt64(value, CultureInfo.InvariantCulture) : 0;
+        if (known is null && StateDatabase.Scalar(connection, transaction, "SELECT COUNT(*) FROM audit_machine_state WHERE fingerprint = $fp", ("$fp", fingerprint)) is { } others && Convert.ToInt64(others, CultureInfo.InvariantCulture) > 0)
+        {
+            AddGap(connection, transaction, fingerprint, epoch, "epoch", sequence, sequence, now);
+        }
+
         if (sequence == highest + 1)
         {
             highest = sequence;
         }
         else if (sequence > highest + 1)
         {
-            AddGap(connection, transaction, fingerprint, "missing", highest + 1, sequence - 1, now);
+            AddGap(connection, transaction, fingerprint, epoch, "missing", highest + 1, sequence - 1, now);
             highest = sequence;
         }
         else
         {
-            using SqliteCommand find = StateDatabase.Command(connection, transaction, "SELECT id, from_sequence, to_sequence, detected FROM audit_gaps WHERE fingerprint = $fp AND kind = 'missing' AND resolved IS NULL AND from_sequence <= $seq AND to_sequence >= $seq LIMIT 1", ("$fp", fingerprint), ("$seq", sequence));
+            using SqliteCommand find = StateDatabase.Command(connection, transaction, "SELECT id, from_sequence, to_sequence, detected FROM audit_gaps WHERE fingerprint = $fp AND epoch = $epoch AND kind = 'missing' AND resolved IS NULL AND from_sequence <= $seq AND to_sequence >= $seq LIMIT 1", ("$fp", fingerprint), ("$epoch", epoch), ("$seq", sequence));
             (long Id, long From, long To, string Detected)? gap = null;
             using (SqliteDataReader reader = find.ExecuteReader())
             {
@@ -249,32 +272,32 @@ public sealed partial class AuthorityStore
                 else
                 {
                     StateDatabase.Execute(connection, transaction, "UPDATE audit_gaps SET to_sequence = $to WHERE id = $id", ("$to", sequence - 1), ("$id", hole.Id));
-                    StateDatabase.Execute(connection, transaction, "INSERT INTO audit_gaps (fingerprint, kind, from_sequence, to_sequence, detected, resolved) VALUES ($fp, 'missing', $from, $to, $detected, NULL)",
-                        ("$fp", fingerprint), ("$from", sequence + 1), ("$to", hole.To), ("$detected", hole.Detected));
+                    StateDatabase.Execute(connection, transaction, "INSERT INTO audit_gaps (fingerprint, epoch, kind, from_sequence, to_sequence, detected, resolved) VALUES ($fp, $epoch, 'missing', $from, $to, $detected, NULL)",
+                        ("$fp", fingerprint), ("$epoch", epoch), ("$from", sequence + 1), ("$to", hole.To), ("$detected", hole.Detected));
                 }
             }
             else if (recordReuse)
             {
-                AddGap(connection, transaction, fingerprint, "reused", sequence, sequence, now);
+                AddGap(connection, transaction, fingerprint, epoch, "reused", sequence, sequence, now);
             }
         }
 
-        StateDatabase.Execute(connection, transaction, "INSERT INTO audit_machine_state (fingerprint, highest, updated) VALUES ($fp, $highest, $now) ON CONFLICT(fingerprint) DO UPDATE SET highest = $highest, updated = $now",
-            ("$fp", fingerprint), ("$highest", highest), ("$now", now));
+        StateDatabase.Execute(connection, transaction, "INSERT INTO audit_machine_state (fingerprint, epoch, highest, updated) VALUES ($fp, $epoch, $highest, $now) ON CONFLICT(fingerprint, epoch) DO UPDATE SET highest = $highest, updated = $now",
+            ("$fp", fingerprint), ("$epoch", epoch), ("$highest", highest), ("$now", now));
     }
 
-    private static void AddGap(SqliteConnection connection, SqliteTransaction transaction, string fingerprint, string kind, long from, long to, string now)
+    private static void AddGap(SqliteConnection connection, SqliteTransaction transaction, string fingerprint, string epoch, string kind, long from, long to, string now)
     {
-        StateDatabase.Execute(connection, transaction, "INSERT INTO audit_gaps (fingerprint, kind, from_sequence, to_sequence, detected, resolved) VALUES ($fp, $kind, $from, $to, $now, NULL)",
-            ("$fp", fingerprint), ("$kind", kind), ("$from", from), ("$to", to), ("$now", now));
+        StateDatabase.Execute(connection, transaction, "INSERT INTO audit_gaps (fingerprint, epoch, kind, from_sequence, to_sequence, detected, resolved) VALUES ($fp, $epoch, $kind, $from, $to, $now, NULL)",
+            ("$fp", fingerprint), ("$epoch", epoch), ("$kind", kind), ("$from", from), ("$to", to), ("$now", now));
     }
 
     // ---- history ----
 
-    /// <summary>The highest sequence number the authority has seen from the machine (0: none).</summary>
+    /// <summary>The highest sequence number the authority has seen from the machine in its latest epoch (0: none).</summary>
     public long AuditHighestSequence(string fingerprint)
     {
-        return Read(connection => connection is null ? 0L : StateDatabase.Scalar(connection, null, "SELECT highest FROM audit_machine_state WHERE fingerprint = $fp", ("$fp", fingerprint)) is { } value ? Convert.ToInt64(value, CultureInfo.InvariantCulture) : 0L);
+        return Read(connection => connection is null ? 0L : StateDatabase.Scalar(connection, null, "SELECT highest FROM audit_machine_state WHERE fingerprint = $fp ORDER BY rowid DESC LIMIT 1", ("$fp", fingerprint)) is { } value ? Convert.ToInt64(value, CultureInfo.InvariantCulture) : 0L);
     }
 
     /// <summary>The recorded gaps (holes and reused numbers), oldest first; by default only those still open.</summary>
@@ -289,8 +312,8 @@ public sealed partial class AuthorityStore
 
             string prefix = Escape(Hex(machinePrefix)) + "%";
 
-            return Query(connection, null, "SELECT id, fingerprint, kind, from_sequence, to_sequence, detected, resolved FROM audit_gaps WHERE fingerprint LIKE $fp ESCAPE '\\' AND ($all OR resolved IS NULL) ORDER BY id",
-                reader => new AuditGap(reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetInt64(3), reader.GetInt64(4), ParseTime(reader.GetString(5)), reader.IsDBNull(6) ? null : ParseTime(reader.GetString(6))),
+            return Query(connection, null, "SELECT id, fingerprint, kind, from_sequence, to_sequence, detected, resolved, epoch FROM audit_gaps WHERE fingerprint LIKE $fp ESCAPE '\\' AND ($all OR resolved IS NULL) ORDER BY id",
+                reader => new AuditGap(reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetInt64(3), reader.GetInt64(4), ParseTime(reader.GetString(5)), reader.IsDBNull(6) ? null : ParseTime(reader.GetString(6)), reader.GetString(7)),
                 ("$fp", prefix), ("$all", openOnly ? 0 : 1));
         });
     }
@@ -350,7 +373,9 @@ public sealed partial class AuthorityStore
 
             if (!string.IsNullOrEmpty(query.Text))
             {
-                Add("(program LIKE $text ESCAPE '\\' OR arguments LIKE $text ESCAPE '\\' OR folder LIKE $text ESCAPE '\\' OR outcome LIKE $text ESCAPE '\\' OR reason LIKE $text ESCAPE '\\' OR request_id LIKE $text ESCAPE '\\')", "$text", "%" + Escape(query.Text) + "%");
+                // The arguments are stored as JSON text (backslashes, quotes and non-ASCII letters escaped): the search text is escaped the same way for them.
+                parameters.Add(("$argtext", "%" + Escape(JsonEscaped(query.Text)) + "%"));
+                Add("(program LIKE $text ESCAPE '\\' OR arguments LIKE $argtext ESCAPE '\\' OR folder LIKE $text ESCAPE '\\' OR outcome LIKE $text ESCAPE '\\' OR reason LIKE $text ESCAPE '\\' OR request_id LIKE $text ESCAPE '\\')", "$text", "%" + Escape(query.Text) + "%");
             }
 
             int limit = Math.Clamp(query.Limit, 1, AuditQuery.MaxLimit);
@@ -367,6 +392,13 @@ public sealed partial class AuthorityStore
                 return new AuditHistoryRecord(parsed!, ParseTime(reader.GetString(1)));
             }, [.. parameters]);
         });
+    }
+
+    private static string JsonEscaped(string text)
+    {
+        string quoted = ArgumentsText([text]);
+
+        return quoted[2..^2];
     }
 
     private static string Hex(string? text) => text is null ? "" : new string([.. text.Where(letter => letter is not (' ' or ':' or '-')).Select(char.ToUpperInvariant)]);

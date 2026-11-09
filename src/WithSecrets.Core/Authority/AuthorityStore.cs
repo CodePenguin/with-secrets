@@ -52,7 +52,7 @@ public sealed record DecisionPlan(AuthorityResponse Response, string? HostMismat
 public sealed partial class AuthorityStore
 {
     public const string FileName = "authority.db";
-    public const int SchemaVersion = 4;
+    public const int SchemaVersion = 5;
 
     /// <summary>How long the stored answer of a durable grant request is kept for retries (much longer than an answer is valid).</summary>
     public static readonly TimeSpan ProcessedGrantRetention = TimeSpan.FromHours(1);
@@ -791,7 +791,7 @@ public sealed partial class AuthorityStore
                 found = -1;
             }
 
-            if (found is 1 or 2 or 3)
+            if (found is 1 or 2 or 3 or 4)
             {
                 Migrate(connection);
                 found = SchemaVersion;
@@ -813,12 +813,12 @@ public sealed partial class AuthorityStore
         }
     }
 
-    /// <summary>Schema 1 (Phase 2) or 2 to 3: its grants table only had the structure (nothing wrote it); it is replaced and the new tables are made, in one transaction.</summary>
+    /// <summary>Schema 1 (Phase 2) or 2 to 4: its grants table only had the structure (nothing wrote it); it is replaced and the new tables are made, in one transaction.</summary>
     private static void Migrate(SqliteConnection connection)
     {
         using SqliteTransaction transaction = connection.BeginTransaction(deferred: false);
         long from = Convert.ToInt64(StateDatabase.Scalar(connection, transaction, "SELECT version FROM schema_version"), CultureInfo.InvariantCulture);
-        if (from is not (1 or 2 or 3))
+        if (from is not (1 or 2 or 3 or 4))
         {
             // Another process migrated first.
             return;
@@ -829,6 +829,13 @@ public sealed partial class AuthorityStore
             StateDatabase.Execute(connection, transaction, "DROP TABLE grants");
             int start = Schema.IndexOf("CREATE TABLE grants (", StringComparison.Ordinal);
             StateDatabase.Execute(connection, transaction, Schema[start..Schema.IndexOf(from == 1 ? "CREATE TABLE authority_keys (" : "CREATE TABLE grant_events (", StringComparison.Ordinal)]);
+        }
+
+        if (from == 4)
+        {
+            // Schema 4 was the first cut of the audit trail (never released): its events carry no epoch and cannot be verified in the signed format of schema 5, and its tables are keyed
+            // differently, so they are replaced. Nothing else is touched.
+            StateDatabase.Execute(connection, transaction, "DROP TABLE IF EXISTS audit_events; DROP TABLE IF EXISTS audit_machine_state; DROP TABLE IF EXISTS audit_gaps;");
         }
 
         StateDatabase.Execute(connection, transaction, AuditSchema);

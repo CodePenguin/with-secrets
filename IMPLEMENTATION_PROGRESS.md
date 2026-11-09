@@ -192,7 +192,7 @@ Brief: `.superpowers/sdd/2026-11-01-web-approval-passkey/task-p4-brief.md`. New 
 
 - `Authority/AuditEvents.cs`: `AuditEventTypes` (authorization, launch, execution), `AuditFacts`, `AuditEvent` (canonical JSON, domain "with-secrets audit event v1", ECDSA P-256 by the machine key, P1363 like Phase 2; strict `TryParse`; `Problem()` shape checks), `AuditBatch` (+digest), `AuditAck` (authority-signed, an `ISignedAnswer`, valid 60 s), `AuditStatus`, `IAuditSink`, `AuditQuery`, `AuditHistoryRecord`, `AuditGap`, `AuditRedaction`.
 - `Authority/HostAudit.cs`: `HostAuditOutbox` (`audit-outbox.db`, WAL, `synchronous=FULL`, schema 1, mismatch or damage = error naming the delete-it remedy; one write transaction = read counter, sign, insert, bump counter, so the sequence is monotonic and gapless and a failed commit uses no number), `AuditUploader` (batches of 50, removes an event only after a verified ack names it accepted/duplicate/expired; rejected ones are parked), `HostAudit` (`TryRecord` never throws and never waits for the upload; loop with a doubling pause up to 60 s, woken by each new event), `IHostAudit`.
-- `AuthorityStore` is now `partial`; `AuthorityStore.AuditEvents.cs` adds schema 4 tables (`audit_events`, `audit_machine_state`, `audit_gaps`, `authority_settings`; version 1 to 3 files are migrated in place, `IF NOT EXISTS`), `RecordAuditEvents` (one transaction: machine signature, shape, dedup by id, expiry, sequence tracking), gap shrink/split/reused, retention (`AuditRetentionDays`, `SetAuditRetentionDays`, `PruneAuditEvents`), `AuditHistory(AuditQuery)`, `AuditGaps`, `AuditHighestSequence`.
+- `AuthorityStore` is now `partial`; `AuthorityStore.AuditEvents.cs` adds schema 4 tables (schema 5 after fix round 1) (`audit_events`, `audit_machine_state`, `audit_gaps`, `authority_settings`; version 1 to 3 files are migrated in place, `IF NOT EXISTS`), `RecordAuditEvents` (one transaction: machine signature, shape, dedup by id, expiry, sequence tracking), gap shrink/split/reused, retention (`AuditRetentionDays`, `SetAuditRetentionDays`, `PruneAuditEvents`), `AuditHistory(AuditQuery)`, `AuditGaps`, `AuditHighestSequence`.
 - `LocalAuthority` implements `IAuditSink` (acknowledgement signed only after the commit); `LocalDeployment.AuditSink` (tests can swap it, like `Link`); `HostAuthorization.VerifyAnswerAsync` reuses the pinned-key/transition/validity checks for the ack.
 - `HostService`: creates the outbox beside `authority.db`, runs the upload loop (`AuditUploadInterval` 2 s, `AuditMaxBackoff` 60 s), passes `Audit` in the `LaunchContext`, waits briefly for the loop on dispose.
 - `RunCommand` (service path only, `context.Audit != null`): authorization event (approved, granted + online/offline-lease + grant id, reused, denied with the authority's code, grant-approved for `approve`) is REQUIRED to commit before the store is opened: failure = exit 5 (`AuditError`), no decryption, no launch. Launch events (started; failed/cancelled with codes: files-changed, files-not-held, decrypt-failed, key-not-released, start-failed, not-committed, authorization-invalidated, cancelled, request-expired) and execution events (exited + exit code, or failed/internal-error) are best effort after the fact.
@@ -212,6 +212,19 @@ Brief: `.superpowers/sdd/2026-11-01-web-approval-passkey/task-p4-brief.md`. New 
 9. **Event time** is the host's clock when the event is made. The batch is not signed (each event is); the ack binds the batch id and a digest over event ids, sequences and signatures.
 10. **Local authority mode and the sink:** the same `IAuditSink` interface a remote authority will implement; the local one is called in process. The uploader does not block launches.
 11. **Timing choices (not security properties):** batch 50 sent / 200 processed, ack valid 60 s, loop interval 2 s with doubling to 60 s.
+
+### Fix round 1 (review of fa93cbc: 0 High, 2 Medium, 7 Low)
+
+- **M1** `AuditRedaction.Bound` (called by `HostAuditOutbox.Append`) cuts folder and program to 4096 characters with an "[N more characters omitted]" marker (no split surrogate pair) and bounds outcome, reason, request id, grant id and the arguments (256, 4096 each). `Append` also checks `Problem()` after signing and throws `AuditOutboxException` (fail closed, no number used) if an event would still be refused.
+- **M2** Signed `epoch` member (random id in the outbox's `counter` table; outbox schema 2). The authority tracks `audit_machine_state` and gaps per (machine, epoch); an event can only fill a hole of its own epoch; the first event of a new epoch of a known machine records a gap of kind `epoch`; reuse inside one epoch is still `reused`. Authority schema 5; a schema 4 file is migrated by replacing the three first-cut audit tables (their events lack the epoch and cannot be verified in the new format; the feature was never released). Decision: the `epoch` gap stays open (visible in `admin audit --gaps`) because an outbox reset is something an administrator should see.
+- **L1** `DrainAsync` catches every exception around `Pending`; `RunAsync` wraps each iteration (logs the type, backs off, continues).
+- **L2** Expired events are still acknowledged without being stored (judged by the host's signed time), but the authority writes `audit-events-expired` (count, sequence range, machine) to its `audit_history`. Not done: rejecting or flagging event times far from the receipt time (decision for the maintainer).
+- **L3** `approve` records an `approval-requested` authorization event BEFORE the tap and fails closed (exit 5); the result (`grant-approved` / `denied`) stays best effort. Decision: this adds one event per approve.
+- **L4** Only final refusals are parked. `unknown-machine`, `machine-pending` and any status the host does not know leave the event pending (the drain reports failure so the loop backs off). The service logs a warning at start when refused events are kept in the outbox. Not done: showing the count in a CLI command.
+- **L5** Redaction: quoted names (`{"password":"x"}`), `--user=NAME:PASS`, the value after `-u/-U/--user/--proxy-user` when it has `NAME:PASS`, and an attached `-pSECRET` (a few compiler flags starting with `-p` are left alone; `-p VALUE` and a bare `-u 1000` are not masked). Still heuristic.
+- **L6** `--text` escapes the search text like the stored JSON arguments.
+- **L7** `audit_events` is keyed by (fingerprint, event id); the duplicate check is per machine.
+- Tests: `AuditTrailTests.Review` (the suite is now 290 checks). Mutation evidence: M1 (no `Bound`, no backstop): 4 failures; M2 (epoch ignored in `TrackSequence`): 4 failures.
 
 ### Known limits
 
@@ -334,3 +347,7 @@ Suite `AuthorityLock` (196 checks; `WS_ONLY=AuthorityLock`), plus new checks in 
 - `dotnet build with-secrets.slnx --no-incremental`: 0 warnings, 0 errors.
 - Full unit suite: 3890 passed, 0 failed (AuditTrail 262 checks). The CSP/CRLF failures noted above no longer occur in this run.
 - E2E (`tests\WithSecrets.E2E`): ALL PASSED in 56.6 s.
+
+### Phase 4 fix round 1 verification
+
+- `dotnet build with-secrets.slnx --no-incremental`: 0 warnings, 0 errors. Full unit suite: 4069 passed, 0 failed. E2E: ALL PASSED.
