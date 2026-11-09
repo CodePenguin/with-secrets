@@ -47,7 +47,11 @@ This plan turns the accepted target design in [architecture.md](architecture.md#
 - Generate and OS-protect the host service's ECDSA P-256 machine identity.
 - Implement canonical public-key fingerprints and explicit enrollment/status transitions.
 - Implement local-authority mode with SQLite persistence for machine records, grants, security revisions, authority signing-key metadata, audit history, idempotency records, and pending invalidations.
-- Protect the authority signing private key outside plaintext SQLite.
+- Protect the authority signing private key and secret-data encryption/wrapping keys outside plaintext SQLite; keep protocol-signing and secret-encryption key purposes separate.
+- Implement authority startup in a locked state by default. Require an explicit administrator unlock before serving secret-related requests; keep unattended startup unlock as a separate, explicit opt-in and do not let it bypass administrator authentication.
+- Define and implement the authority's protected key hierarchy and platform-protection abstraction using the existing vault design as a reference. Validate the manual unlock ceremony, key wrapping, backup/recovery, and platform-specific limitations before treating any deployment mode as production-ready.
+- Implement fresh, operation-bound passkey authentication with user verification for sensitive administrative operations, including administrator credential management, machine trust/status transitions, grant changes, secret/provider credential changes, security-setting changes, and authority key recovery/rotation.
+- Ensure sensitive administrative operations fail closed when passkey authentication is unavailable or invalid; an unlocked authority or unattended-unlock mechanism is not an authentication substitute.
 - Implement the admin approval path for pending machines and the authority-controlled grant decision path.
 - Implement authority-issued signed responses and verify them at the host service.
 
@@ -63,8 +67,8 @@ This plan turns the accepted target design in [architecture.md](architecture.md#
 
 - Implement `with-secrets approve COMMAND` as the normal request validation and human approval flow that creates or updates a scoped grant without launching the command.
 - Implement `with-secrets run COMMAND` as normal validation plus use of an applicable, unexpired grant without interactive approval.
-- Implement grant extension, renewal, and revocation as authority-controlled operations.
-- Enforce grant scope and expiration independently from the finite offline-authorization lease.
+- Implement grant extension, renewal, and revocation as authority-controlled operations, each requiring fresh operation-bound administrator passkey authentication.
+- Ensure ordinary use of an applicable, unexpired grant does not prompt for another approval or passkey authentication. Enforce grant scope and expiration independently from the finite offline-authorization lease.
 - Implement authority-issued lease duration/expiration, monotonic-clock enforcement, and destruction of the in-memory lease on service restart.
 - Implement startup reconciliation and security-revision checks before accepting requests.
 - Permit offline use only for already synchronized grants and locally available encrypted material; no new authority-dependent retrieval, approval, extension, or renewal while disconnected.
@@ -113,7 +117,9 @@ This plan turns the accepted target design in [architecture.md](architecture.md#
 
 **Goal:** Complete the operational experience and validate real deployments.
 
-- Complete admin web views for machine management, grant management, authority settings, and searchable audit history.
+- Complete admin web views for machine management, grant management, authority settings, locked/unlocked status, explicit manual unlock, opt-in unattended-unlock configuration, and searchable audit history.
+- Validate that every sensitive administrative operation requires fresh operation-bound passkey authentication in both manual and unattended startup modes; validate that normal grant use requires no repeated passkey prompt.
+- Exercise lock/unlock, restart, key zeroization best-effort behavior, key backup/recovery, and fail-closed behavior when authentication or protected key access fails.
 - Validate machine rename/host-name change approval and authority signing-key rotation/recovery.
 - Test Windows and WSL as independently enrolled host-service identities.
 - Test Docker-launched commands through the host service.
@@ -127,6 +133,6 @@ This plan turns the accepted target design in [architecture.md](architecture.md#
 
 ## Implementation notes
 
-- Exact HTTP routes, DTO names, SQLite schema details, UI layout, and concrete offline-lease policy values are implementation choices unless they change an accepted security property. Keep them simple and testable.
+- Exact HTTP routes, DTO names, SQLite schema details, UI layout, concrete offline-lease policy values, and the specific platform key-protection adapters are implementation choices unless they change an accepted security property. Keep them simple and testable. Manual unlock is the default; unattended unlock is explicit opt-in. Sensitive administrator operations always require fresh passkey authentication, while routine use of a valid grant does not.
 - Do not add caller-process identity, separate local IPC authentication, a hash chain, audit export, a message broker, or Task 16 privilege separation as prerequisites for the initial build.
 - Prefer completing Phase 1 as a working vertical slice before broadening into remote networking. The local-authority path then provides a practical test harness for the same contracts used remotely.
