@@ -71,6 +71,12 @@ public static class RequestFingerprint
             text.Append('\u0001');
         }
 
+        // The environment the program inherits (a request over the API) is part of what was approved. Absent: the key is unchanged.
+        if (request.InheritedEnvironment is { } inherited)
+        {
+            text.Append((char)3).Append(EnvironmentBinding.Hash(inherited)).Append((char)3);
+        }
+
         foreach ((string path, string hash) in files)
         {
             text.Append(Normalize(path)).Append('\0').Append(hash).Append('\0');

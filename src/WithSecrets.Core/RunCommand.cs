@@ -35,6 +35,18 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             return await Fail(Usage, "invalid request: " + invalid);
         }
 
+        // The folder is where the program runs and where scripts are read: a full path to a folder that exists.
+        if (!Path.IsPathFullyQualified(launch.WorkingDirectory) || !Directory.Exists(launch.WorkingDirectory))
+        {
+            return await Fail(Usage, "the working directory must be a full path to an existing folder: " + ApprovalSummary.Clean(launch.WorkingDirectory));
+        }
+
+        // Two names that differ only in case are one variable on Windows, and the two readers of the block would disagree on which counts.
+        if (launch.InheritedEnvironment.Keys.GroupBy(name => name, OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal).FirstOrDefault(group => group.Count() > 1) is { } twice)
+        {
+            return await Fail(Usage, "the inherited environment names " + ApprovalSummary.Clean(twice.Key) + " more than once (names are compared without regard to case)");
+        }
+
         IReadOnlyList<string> available;
         try
         {
@@ -212,7 +224,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         // such a store never offers or uses saved approvals.
         ReuseOffer offer = !store.NeedsUnlock && grants is not null && reuse is { IsOn: true } ? reuse : ReuseOffer.Off;
         Dictionary<string, string> sources = names.ToDictionary(name => name, _ => store.Label, StringComparer.Ordinal);
-        ApprovalRequest request = new(program, resolved, arguments, workingDirectory, reason, names, offer.IsOn ? offer : null, typedArguments, links, Sources: sources, Unlock: store.NeedsUnlock, Script: script, ProgramFile: programFile, Mappings: plan.Mappings, EnvFiles: plan.Files, EnvNames: [.. plan.Ordinary.Keys.Order(StringComparer.Ordinal)], EnvValues: plan.Ordinary);
+        ApprovalRequest request = new(program, resolved, arguments, workingDirectory, reason, names, offer.IsOn ? offer : null, typedArguments, links, Sources: sources, Unlock: store.NeedsUnlock, Script: script, ProgramFile: programFile, Mappings: plan.Mappings, EnvFiles: plan.Files, EnvNames: [.. plan.Ordinary.Keys.Order(StringComparer.Ordinal)], EnvValues: plan.Ordinary, InheritedEnvironment: context.Environment);
         Fingerprint fingerprint = RequestFingerprint.Compute(request);
 
         // What the page shows must be the file the fingerprint covers; a file that changed in between is not approved unseen.
@@ -261,8 +273,15 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                 await stderr.WriteLineAsync("with-secrets: waiting for the user to approve this request...");
                 await stderr.WriteLineAsync(ApprovalSummary.BuildMessage(request, showValues: false));
 
-                ApprovalDecision decision = approver.Request(request);
+                ApprovalDecision decision = approver.Request(request, context.Cancel);
                 unlock = decision.Unlock;
+                if (!decision.Approved && context.Cancel.IsCancellationRequested)
+                {
+                    audit.TryWrite("denied", request, "cancelled by the client", files: fingerprint.Files);
+
+                    return await Cancelled();
+                }
+
                 if (decision.Approved && !offer.Allows(decision.ReuseMinutes))
                 {
                     decision = ApprovalDecision.Deny("the approval named a reuse time that was not offered");
@@ -302,8 +321,10 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             }
 
             // A launch that was cancelled while the page was open (the client left, or the service is stopping) decrypts nothing.
-            if (context.Cancel.IsCancellationRequested)
+            if (context.StaleReason() is { } stale)
             {
+                audit.TryWrite("finished", request, "cancelled before the program started (" + stale + ")", Denied, fingerprint.Files);
+
                 return await Cancelled();
             }
 
@@ -334,27 +355,74 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                 // cancelled and the local authorization did not change since it began. The loser of that race starts nothing and
                 // its prepared environment is thrown away. Once started, nothing here touches the child.
                 PreparedChild prepared = ChildRunner.Prepare(new ChildSpec(resolved, arguments, workingDirectory, injected, plan.Ordinary, context.Environment));
-                context.AfterPrepare?.Invoke(prepared);
                 System.Diagnostics.Process? process = null;
                 string? startFailure = null;
-                bool committed = context.Gate.TryCommit(context.Revision, context.Cancel, () => process = prepared.Start(out startFailure));
+                bool committed = false;
+                try
+                {
+                    context.AfterPrepare?.Invoke(prepared);
+                    committed = context.Gate.TryCommit(context.Revision, context.Cancel, () => process = prepared.Start(out startFailure), () => context.StaleReason() is null);
+                }
+                finally
+                {
+                    if (!committed)
+                    {
+                        prepared.Discard();
+                    }
+                }
+
                 if (!committed)
                 {
-                    prepared.Discard();
                     audit.TryWrite("finished", request, "cancelled before the program started", Denied, fingerprint.Files);
 
                     return await Cancelled();
                 }
 
-                context.AfterCommit?.Invoke();
                 if (process is null)
                 {
                     await stderr.WriteLineAsync(startFailure);
-                    exitCode = NotFound;
+                    Outcome = LaunchOutcome.Failed;
+                    audit.TryWrite("finished", request, "the program could not be started", NotFound, fingerprint.Files);
+
+                    return NotFound;
                 }
-                else
+
+                // The client's own cancel (Ctrl+C, a closed connection, the cancel route) ends the program and its children. An
+                // invalidation of the authorization never does: it is not this token.
+                System.Diagnostics.Process started = process;
+                using CancellationTokenRegistration kill = context.Cancel.Register(() =>
                 {
+                    try
+                    {
+                        started.Kill(true);
+                    }
+                    catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
+                    {
+                        // Already ended.
+                    }
+                });
+                try
+                {
+                    context.AfterCommit?.Invoke();
                     exitCode = await prepared.WaitAsync(process, stdout, stderr);
+                }
+                catch (Exception error) when (error is not OutOfMemoryException)
+                {
+                    try
+                    {
+                        started.Kill(true);
+                    }
+                    catch (Exception killError) when (killError is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException)
+                    {
+                        // Already ended.
+                    }
+
+                    AppLog.Warn("launch failed after the program started: {Type}", error.GetType().Name);
+                    Outcome = LaunchOutcome.Failed;
+                    audit.TryWrite("finished", request, "internal error after the program started", StoreError, fingerprint.Files);
+                    await stderr.WriteLineAsync("with-secrets: internal error after the program started; it may have run. Check its effects before retrying.");
+
+                    return StoreError;
                 }
             }
 
@@ -547,6 +615,25 @@ public sealed class LaunchContext
 
     /// <summary>The request that came over the API, when it did; the approval is checked against it.</summary>
     public LaunchRequest? Request { get; internal set; }
+
+    /// <summary>
+    /// Why the launch must not go on, or null: the client cancelled, the authorization was invalidated since it began, or the
+    /// request expired while it waited.
+    /// </summary>
+    internal string? StaleReason()
+    {
+        if (Cancel.IsCancellationRequested)
+        {
+            return "cancelled";
+        }
+
+        if (Gate.Revision != Revision)
+        {
+            return "authorization invalidated";
+        }
+
+        return Request is { } request && DateTimeOffset.UtcNow >= request.Expires ? "request expired" : null;
+    }
 
     /// <summary>Test hook: the child is prepared and not started, the gate is not yet taken.</summary>
     internal Action<PreparedChild>? AfterPrepare { get; init; }

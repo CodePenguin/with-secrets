@@ -57,7 +57,7 @@ public static class LaunchClient
             LaunchProtocol.Version,
             "req-" + Base64Url(16),
             created,
-            created.AddMinutes(5),
+            created.Add(LaunchProtocol.MaxLifetime),
             Base64Url(16),
             [.. plan.Mappings.Select(mapping => mapping.Secret).Distinct(StringComparer.Ordinal)],
             [.. plan.Mappings.Select(mapping => new LaunchMapping(mapping.Variable, mapping.Secret))],

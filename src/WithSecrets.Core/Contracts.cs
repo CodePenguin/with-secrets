@@ -79,7 +79,8 @@ public sealed record ApprovalRequest(
     IReadOnlyList<SecretMapping>? Mappings = null,
     IReadOnlyList<string>? EnvFiles = null,
     IReadOnlyList<string>? EnvNames = null,
-    IReadOnlyDictionary<string, string>? EnvValues = null);
+    IReadOnlyDictionary<string, string>? EnvValues = null,
+    IReadOnlyDictionary<string, string>? InheritedEnvironment = null);
 
 /// <summary>
 /// What a person signed on an approval page: the page nonce, the exact text that was bound (see <see cref="RequestBinding" />)
@@ -105,4 +106,7 @@ public sealed record ApprovalDecision(bool Approved, string Detail, int ReuseMin
 public interface IApprover
 {
     ApprovalDecision Request(ApprovalRequest request);
+
+    /// <summary>As <see cref="Request(ApprovalRequest)" />, and an approver that waits for a person closes its page and denies when <paramref name="cancel" /> is set.</summary>
+    ApprovalDecision Request(ApprovalRequest request, CancellationToken cancel) => Request(request);
 }

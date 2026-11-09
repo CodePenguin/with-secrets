@@ -380,7 +380,7 @@ public static class LaunchRequestBinding
             approval.EnvFiles ?? [],
             approval.EnvNames ?? [],
             approval.EnvValues ?? new Dictionary<string, string>(),
-            inheritedEnvironment ?? new Dictionary<string, string>());
+            inheritedEnvironment ?? approval.InheritedEnvironment ?? new Dictionary<string, string>());
 
     /// <summary>Null when the request is the approved one, else which part differs (names the part, never a value).</summary>
     public static string? Mismatch(LaunchRequest request, ApprovalRequest approval)
@@ -389,6 +389,11 @@ public static class LaunchRequestBinding
         if (request.Program != expected.Program)
         {
             return "program differs from the approval";
+        }
+
+        if (approval.InheritedEnvironment is { } approvedEnvironment && EnvironmentBinding.Hash(request.InheritedEnvironment) != EnvironmentBinding.Hash(approvedEnvironment))
+        {
+            return "inherited environment differs from the approval";
         }
 
         if (!request.Arguments.SequenceEqual(expected.Arguments, StringComparer.Ordinal))

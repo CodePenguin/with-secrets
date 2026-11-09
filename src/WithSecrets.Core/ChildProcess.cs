@@ -123,7 +123,11 @@ public static class ChildRunner
             RedirectStandardInput = true,
             StandardOutputEncoding = new UTF8Encoding(false),
             StandardErrorEncoding = new UTF8Encoding(false),
-            WorkingDirectory = spec.WorkingDirectory
+            WorkingDirectory = spec.WorkingDirectory,
+
+            // On Windows the child gets a console of its own instead of sharing the one of this process, so Ctrl+C in a service
+            // window does not reach it; only the client's cancel ends it. No effect elsewhere.
+            CreateNoWindow = true
         };
 
         if (raw is not null)

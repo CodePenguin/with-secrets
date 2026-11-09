@@ -38,11 +38,11 @@ public sealed class LaunchGate
     /// <paramref name="cancelled" /> is not set and the revision still equals <paramref name="expectedRevision" />. Otherwise
     /// nothing runs and the result is false. <paramref name="commit" /> must be short: it blocks <see cref="Invalidate" />.
     /// </summary>
-    public bool TryCommit(int expectedRevision, CancellationToken cancelled, Action commit)
+    public bool TryCommit(int expectedRevision, CancellationToken cancelled, Action commit, Func<bool>? stillValid = null)
     {
         lock (_lock)
         {
-            if (cancelled.IsCancellationRequested || _revision != expectedRevision)
+            if (cancelled.IsCancellationRequested || _revision != expectedRevision || stillValid is not null && !stillValid())
             {
                 return false;
             }

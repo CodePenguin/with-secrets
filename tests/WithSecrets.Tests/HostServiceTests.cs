@@ -51,6 +51,32 @@ internal static class HostServiceTests
         }
     }
 
+    /// <summary>An approver that waits and honours the cancellation token, as the page approver does.</summary>
+    private sealed class CancelAwareApprover : IApprover
+    {
+        public ManualResetEventSlim Asked { get; } = new(false);
+
+        public ManualResetEventSlim Release { get; } = new(false);
+
+        public ManualResetEventSlim SawCancel { get; } = new(false);
+
+        public ApprovalDecision Request(ApprovalRequest request) => Request(request, CancellationToken.None);
+
+        public ApprovalDecision Request(ApprovalRequest request, CancellationToken cancel)
+        {
+            Asked.Set();
+            int which = WaitHandle.WaitAny([Release.WaitHandle, cancel.WaitHandle], TimeSpan.FromSeconds(30));
+            if (which == 1)
+            {
+                SawCancel.Set();
+
+                return ApprovalDecision.Deny("cancelled by the client");
+            }
+
+            return ApprovalDecision.Allow();
+        }
+    }
+
     private sealed class ThrowingApprover : IApprover
     {
         public ApprovalDecision Request(ApprovalRequest request) => throw new InvalidOperationException("approver failed");
@@ -243,6 +269,7 @@ internal static class HostServiceTests
             await TwoClients(check, parent);
             await DockerStandIn(check, parent);
             await ApprovalOverHttp(check, parent);
+            await FixRound1(check, parent);
             await ClientAndCommandLine(check, parent);
         }
         finally
@@ -833,6 +860,239 @@ internal static class HostServiceTests
 
         (Raw denied, _, int deniedReads, _) = await Go(stranger);
         check(denied.Result is { Outcome: LaunchOutcome.Denied, ExitCode: RunCommand.Denied } && deniedReads == 0 && !denied.Stdout.Contains("t=", StringComparison.Ordinal), "approval over HTTP: a proof from a key that is not enrolled is a denial, nothing is decrypted and nothing runs (" + denied.Result + ")");
+    }
+
+    private static async Task FixRound1(Action<bool, string> check, string parent)
+    {
+        // H1: the inherited environment is part of what is approved: fingerprint, page line (names only), mismatch, audit prefix.
+        Dictionary<string, string> baseEnv = new() { ["PATH"] = "C:\\bin", ["LANG"] = "en", ["EDITOR_NOTE"] = "plain-value-1" };
+        Dictionary<string, string> evilEnv = new(baseEnv) { ["HTTPS_PROXY"] = "http://127.0.0.1:9999/secretish", ["npm_config_script_shell"] = "C:\\agent\\evil.cmd", ["JDK_JAVA_OPTIONS"] = "-javaagent:x", ["CORECLR_PROFILER"] = "{guid}", ["SSL_CERT_FILE"] = "C:\\agent\\ca.pem", ["GIT_CONFIG_COUNT"] = "1", ["HOME"] = "C:\\agent" };
+        string work = Path.Combine(parent, "h1");
+        Directory.CreateDirectory(work);
+        ApprovalRequest Make(IReadOnlyDictionary<string, string>? env) => new("prog", Path.Combine(work, "prog.cmd"), [], work, "why", ["TOKEN"], InheritedEnvironment: env);
+        string plain = RequestFingerprint.Compute(Make(null)).Key;
+        string a = RequestFingerprint.Compute(Make(baseEnv)).Key;
+        string b = RequestFingerprint.Compute(Make(evilEnv)).Key;
+        string reordered = RequestFingerprint.Compute(Make(new Dictionary<string, string> { ["EDITOR_NOTE"] = "plain-value-1", ["LANG"] = "en", ["PATH"] = "C:\\bin" })).Key;
+        check(a != b && a != plain && a == reordered, "environment binding: a different inherited environment is a different fingerprint, so it cannot reuse an approval or a grant; order does not matter");
+        string page = ApprovalSummary.BuildMessage(Make(evilEnv));
+        check(page.Contains("Environment: 10 inherited variables; notable names: ", StringComparison.Ordinal) && new[] { "CORECLR_PROFILER", "GIT_CONFIG_COUNT", "HOME", "HTTPS_PROXY", "JDK_JAVA_OPTIONS", "SSL_CERT_FILE", "npm_config_script_shell", "PATH" }.All(name => page.Contains(name, StringComparison.Ordinal)), "environment binding: the page shows the count and the notable names (" + page.Split('\n').FirstOrDefault(line => line.StartsWith("Environment:", StringComparison.Ordinal)) + ")");
+        check(!page.Contains("127.0.0.1:9999", StringComparison.Ordinal) && !page.Contains("evil.cmd", StringComparison.Ordinal) && !page.Contains("plain-value-1", StringComparison.Ordinal) && !page.Contains("EDITOR_NOTE", StringComparison.Ordinal), "environment binding: no value, and no plain variable name, is shown");
+        check(!ApprovalSummary.BuildMessage(Make(null)).Contains("Environment:", StringComparison.Ordinal), "environment binding: a run without a request environment shows no such line");
+        LaunchRequest sent = LaunchRequestBinding.From(Make(baseEnv), "req-1", "bm9uY2UtMDAwMDAwMDE", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddMinutes(1), baseEnv);
+        check(LaunchRequestBinding.Mismatch(sent, Make(baseEnv)) is null && LaunchRequestBinding.Mismatch(sent with { InheritedEnvironment = evilEnv }, Make(baseEnv)) is { } differs && differs.Contains("environment", StringComparison.Ordinal), "environment binding: a request whose environment is not the approved one is a mismatch");
+
+        {
+            using Rig rig = new(parent);
+            string show = rig.Script("hone", "echo ok", "echo ok");
+            await Post(rig, Req(rig, show, environment: Env(("HTTPS_PROXY", "http://127.0.0.1:9999/canary-proxy"))));
+            string text = string.Join("\n", rig.Approvers.OfType<FakeApprover>().SelectMany(item => item.Requests).Select(item => ApprovalSummary.BuildMessage(item)));
+            string audit = StateDatabaseTests.AuditText(rig.State.FilePath);
+            check(text.Contains("notable names: ", StringComparison.Ordinal) && text.Contains("HTTPS_PROXY", StringComparison.Ordinal) && !text.Contains("canary-proxy", StringComparison.Ordinal), "environment binding: through the service the approver sees the variable name and never its value");
+            check(audit.Contains("\"environmentHash\":\"", StringComparison.Ordinal) && !audit.Contains("canary-proxy", StringComparison.Ordinal), "environment binding: the audit row records a hash prefix and no value");
+        }
+
+        // M2: a client that leaves after the program started ends the program (and its children); the cancel route does the same.
+        foreach (bool viaRoute in new[] { false, true })
+        {
+            using Rig rig = new(parent);
+            string longRun = rig.Script("long", "echo started\nping -n 40 127.0.0.1 >nul\necho done > \"%~dpn0.marker.txt\"", "echo started\nsleep 40\necho done > \"$0.marker.txt\"");
+            using CancellationTokenSource leave = new();
+            LaunchRequest request = Req(rig, longRun);
+            Task<Raw> running = Post(rig, request, onEvent: item =>
+            {
+                if (item.Stream == "stdout" && item.Text!.Contains("started", StringComparison.Ordinal))
+                {
+                    if (viaRoute)
+                    {
+                        using HttpResponseMessage response = rig.Http.PostAsync(rig.Url("/v1/launch/" + request.RequestId + "/cancel"), new StringContent("")).GetAwaiter().GetResult();
+                    }
+                    else
+                    {
+                        leave.Cancel();
+                    }
+                }
+            }, cancel: leave.Token);
+            try
+            {
+                await running;
+            }
+            catch (OperationCanceledException)
+            {
+                // The client's side of the disconnect.
+            }
+
+            bool ended = await WaitFor(() => rig.Service.ActiveLaunches == 0, 15);
+            string audit = StateDatabaseTests.AuditText(rig.State.FilePath);
+            check(ended && Marker(rig).Length == 0 && audit.Contains("\"event\":\"finished\"", StringComparison.Ordinal), "client cancel: " + (viaRoute ? "the cancel route" : "a disconnect") + " after the start ends the program within seconds, not after its 40 s, and the finish is audited (" + ended + ")");
+        }
+
+        // L1/L2: a launch whose authorization was invalidated, or that expired, while its page was open decrypts nothing and is audited.
+        {
+            CancelAwareApprover waiting = new();
+            using Rig rig = new(parent, approver: () => waiting);
+            string ran = rig.Script("ran", "echo ran > \"%~dpn0.marker.txt\"", "echo ran > \"$0.marker.txt\"");
+            Task<Raw> pending = Post(rig, Req(rig, ran));
+            check(await WaitFor(() => waiting.Asked.IsSet), "stale launch: the approver was asked");
+            rig.Service.Gate.Invalidate();
+            waiting.Release.Set();
+            Raw result = await pending;
+            string audit = StateDatabaseTests.AuditText(rig.State.FilePath);
+            check(result.Result is { Outcome: LaunchOutcome.Cancelled } && rig.Store.Reads == 0 && Marker(rig).Length == 0 && audit.Contains("authorization invalidated", StringComparison.Ordinal), "stale launch: an invalidation while the page was open stops the decryption and is audited (" + result.Result + ", " + rig.Store.Reads + " reads)");
+        }
+
+        {
+            CancelAwareApprover waiting = new();
+            using Rig rig = new(parent, approver: () => waiting);
+            string ran = rig.Script("ran", "echo ran > \"%~dpn0.marker.txt\"", "echo ran > \"$0.marker.txt\"");
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+            Task<Raw> pending = Post(rig, Req(rig, ran) with { Created = now.AddSeconds(-5), Expires = now.AddSeconds(2) });
+            check(await WaitFor(() => waiting.Asked.IsSet), "expired launch: the approver was asked");
+            await Task.Delay(2500);
+            waiting.Release.Set();
+            Raw result = await pending;
+            check(result.Result is { Outcome: LaunchOutcome.Cancelled } && rig.Store.Reads == 0 && Marker(rig).Length == 0 && StateDatabaseTests.AuditText(rig.State.FilePath).Contains("request expired", StringComparison.Ordinal), "expired launch: a request that expired while its page was open decrypts nothing");
+        }
+
+        // L3: an exception between prepare and commit discards the prepared environment; one after the start is reported as a failure, not a denial.
+        {
+            PreparedChild? prepared = null;
+            using Rig rig = new(parent, afterPrepare: child =>
+            {
+                prepared = child;
+                throw new InvalidOperationException("hook failed");
+            });
+            Raw result = await Post(rig, Req(rig, rig.Script("ran", "echo ran > \"%~dpn0.marker.txt\"", "echo ran > \"$0.marker.txt\"")));
+            check(prepared is { IsDiscarded: true, EnvironmentCount: 0 } && Marker(rig).Length == 0 && result.Result is { Outcome: LaunchOutcome.Denied }, "exceptions: a failure between prepare and commit discards the prepared environment and starts nothing");
+        }
+
+        {
+            using Rig rig = new(parent, afterCommit: () => throw new InvalidOperationException("hook failed"));
+            Raw result = await Post(rig, Req(rig, rig.Script("slow", "echo started\nping -n 30 127.0.0.1 >nul", "echo started\nsleep 30")));
+            string audit = StateDatabaseTests.AuditText(rig.State.FilePath);
+            check(result.Result is { Outcome: LaunchOutcome.Failed, ExitCode: RunCommand.StoreError } && result.Stderr.Contains("after the program started", StringComparison.Ordinal) && !result.Stderr.Contains("did not approve (internal error)", StringComparison.Ordinal) && audit.Contains("internal error after the program started", StringComparison.Ordinal), "exceptions: a failure after the start is reported as failed (4), not as a denial, and is audited (" + result.Result + ")");
+        }
+
+        // L4: at most 8 launches at once; a cancelled client closes the approval page (the approver sees the token).
+        {
+            using Rig rig = new(parent, approver: () => new CancelAwareApprover());
+            string ran = rig.Script("ran", "echo ran", "echo ran");
+            using CancellationTokenSource leaveAll = new();
+            List<Task<Raw>> held = [];
+            for (int index = 0; index < HostService.MaxConcurrentLaunches; index++)
+            {
+                held.Add(Post(rig, Req(rig, ran), cancel: leaveAll.Token));
+            }
+
+            check(await WaitFor(() => rig.Service.ActiveLaunches == HostService.MaxConcurrentLaunches), "concurrency: eight launches are accepted");
+            Raw ninth = await Post(rig, Req(rig, ran));
+            check(ninth.Status == HttpStatusCode.ServiceUnavailable && ninth.Body.Contains("too many launches", StringComparison.Ordinal), "concurrency: the ninth is refused with a clear message (" + ninth.Status + ")");
+            await leaveAll.CancelAsync();
+            check(await WaitFor(() => rig.Service.ActiveLaunches == 0, 10) && rig.Approvers.OfType<CancelAwareApprover>().All(item => item.SawCancel.IsSet), "concurrency: clients that left close their approvals at once, the approvers saw the token");
+            foreach (Task<Raw> task in held)
+            {
+                try
+                {
+                    await task;
+                }
+                catch (OperationCanceledException)
+                {
+                    // Expected.
+                }
+            }
+
+            Raw after = await Post(rig, Req(rig, ran));
+            check(after.Result is { ExitCode: 0 }, "concurrency: after they left a new launch is accepted");
+        }
+
+        // L7: stopping the service cancels the launches in progress.
+        {
+            CancelAwareApprover waiting = new();
+            Rig rig = new(parent, approver: () => waiting);
+            Task<Raw> pending = Post(rig, Req(rig, rig.Script("ran", "echo ran", "echo ran")));
+            check(await WaitFor(() => waiting.Asked.IsSet), "shutdown: the approver was asked");
+            rig.Service.Dispose();
+            check(waiting.SawCancel.Wait(TimeSpan.FromSeconds(10)), "shutdown: stopping the service cancels a launch in progress");
+            try
+            {
+                await pending;
+            }
+            catch (HttpRequestException)
+            {
+                // The service went away.
+            }
+
+            rig.Dispose();
+        }
+
+        // The real page approver: a client that leaves closes the page at once (its link then finds nothing).
+        {
+            string folder = Path.Combine(parent, "page-" + Guid.NewGuid().ToString("N")[..8]);
+            Directory.CreateDirectory(Path.Combine(folder, "work"));
+            using TestAuthenticator key = TestAuthenticator.ES256();
+            StateDatabase db = StateDatabase.InFolder(Path.Combine(folder, "state"));
+            new PasskeyStore(db).Add(key.Record("localhost", "laptop"));
+            SecretStore store = new(db, new CountingCipher());
+            SecretStoreTests.Put(store, new Dictionary<string, string> { ["TOKEN"] = Value });
+            using HostService service = HostService.Start(new HostServiceOptions { State = db, Store = store, Port = 0, TimeLimit = TimeSpan.FromSeconds(60) });
+            using HttpClient client = new(new SocketsHttpHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(60) };
+            string program = OperatingSystem.IsWindows() ? "p.cmd" : "p.sh";
+            File.WriteAllText(Path.Combine(folder, "work", program), OperatingSystem.IsWindows() ? "@echo off\r\necho hi\r\n" : "#!/bin/sh\necho hi\n");
+            if (!OperatingSystem.IsWindows())
+            {
+                File.SetUnixFileMode(Path.Combine(folder, "work", program), UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            }
+
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+            LaunchRequest request = new(LaunchProtocol.Version, "page-" + Guid.NewGuid().ToString("N")[..8], now, now.AddMinutes(5), "bm9uY2UtMDAwMDAwMDEx" + Guid.NewGuid().ToString("N")[..6], ["TOKEN"], [new LaunchMapping("TOKEN", "TOKEN")], "page cancel", "./" + program, [], Path.Combine(folder, "work"), [], [], new Dictionary<string, string>(), Env());
+            using HttpRequestMessage message = new(HttpMethod.Post, "http://127.0.0.1:" + service.Port + "/v1/launch") { Content = new StringContent(request.Canonical(), new UTF8Encoding(false), new MediaTypeHeaderValue("application/json")) };
+            message.Headers.Add(HostService.DigestHeader, request.Digest());
+            using CancellationTokenSource leave = new();
+            string? link = null;
+            try
+            {
+                using HttpResponseMessage response = await client.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, leave.Token);
+                using StreamReader reader = new(await response.Content.ReadAsStreamAsync(leave.Token), new UTF8Encoding(false));
+                while (await reader.ReadLineAsync(leave.Token) is { } line)
+                {
+                    if (LaunchEvent.TryParse(line, out LaunchEvent? parsed, out _) && parsed!.Kind == LaunchEvent.ApprovalKind)
+                    {
+                        link = parsed.Link;
+                        leave.Cancel();
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // The client left.
+            }
+
+            bool closed = await WaitFor(() => service.ActiveLaunches == 0, 10);
+            string pageStatus = "none";
+            if (link is not null)
+            {
+                Uri uri = new(link);
+                pageStatus = TestState.Get(client, "http://127.0.0.1:" + uri.Port + uri.AbsolutePath).Status.ToString();
+            }
+
+            check(link is not null && closed && pageStatus != "200", "client cancel: a client that leaves closes the approval page and ends the launch long before the time limit (page: " + pageStatus + ")");
+        }
+
+        // L5, L6: duplicate names that differ in case, a relative or missing working directory.
+        {
+            using Rig rig = new(parent);
+            string show = rig.Script("hone", "echo ok", "echo ok");
+            if (OperatingSystem.IsWindows())
+            {
+                Raw duplicate = await Post(rig, Req(rig, show, environment: Env(("PATH", "C:\\x"), ("Path", "C:\\y"))));
+                check(duplicate.Result is { Outcome: LaunchOutcome.Failed, ExitCode: 2 } && duplicate.Stderr.Contains("more than once", StringComparison.Ordinal), "request rejection: PATH and Path together are refused (" + duplicate.Result + ")");
+            }
+
+            Raw relative = await Post(rig, Req(rig, show) with { WorkingDirectory = "relative\\folder" });
+            check(relative.Result is { Outcome: LaunchOutcome.Failed, ExitCode: 2 } && relative.Stderr.Contains("working directory", StringComparison.Ordinal), "request rejection: a relative working directory is refused with its own message (" + relative.Result + ")");
+            Raw missing = await Post(rig, Req(rig, show) with { WorkingDirectory = Path.Combine(rig.Work, "does-not-exist") });
+            check(missing.Result is { Outcome: LaunchOutcome.Failed, ExitCode: 2 } && missing.Stderr.Contains("existing folder", StringComparison.Ordinal), "request rejection: a working directory that does not exist is refused");
+        }
     }
 
     private static async Task ClientAndCommandLine(Action<bool, string> check, string parent)

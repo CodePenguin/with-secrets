@@ -57,7 +57,8 @@ public sealed partial class AuditLog
             links = request.Links,
             exitCode,
             reuseMinutes,
-            key = keyName
+            key = keyName,
+            environmentHash = request.InheritedEnvironment is { } environment ? EnvironmentBinding.Prefix(environment) : null
         });
 
         string outcome = Outcome(detail, exitCode);

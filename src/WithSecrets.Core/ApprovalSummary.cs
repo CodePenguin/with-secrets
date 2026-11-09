@@ -107,6 +107,11 @@ public static class ApprovalSummary
             }
         }
 
+        if (request.InheritedEnvironment is { } inherited)
+        {
+            text.Append((char)10).Append(EnvironmentBinding.Line(inherited));
+        }
+
         if (showValues && request.EnvValues is { Count: > 0 } values)
         {
             text.Append('\n').Append("Other variables from .env (values shown):");

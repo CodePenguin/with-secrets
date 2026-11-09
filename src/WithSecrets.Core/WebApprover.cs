@@ -45,10 +45,12 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
 
     public WebApprover With(IProofMethod other) => new(other, settings, announce, approveDelay);
 
-    public ApprovalDecision Request(ApprovalRequest request)
+    public ApprovalDecision Request(ApprovalRequest request) => Request(request, CancellationToken.None);
+
+    public ApprovalDecision Request(ApprovalRequest request, CancellationToken cancel)
     {
         // A run on a store with a key vault is approved by a passkey that also releases the secret store key (WebAuthn PRF).
-        return Serve(new ApprovalPrompt(RequestHeading, ApprovalSummary.BuildMessage(request)), request.Reuse ?? ReuseOffer.Off, null, null, request.Unlock).Decision;
+        return Serve(new ApprovalPrompt(RequestHeading, ApprovalSummary.BuildMessage(request)), request.Reuse ?? ReuseOffer.Off, null, null, request.Unlock, cancel: cancel).Decision;
     }
 
     /// <summary>
@@ -85,7 +87,7 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
         return Serve(prompt, ReuseOffer.Off, manifest, signing, false, rows, code);
     }
 
-    private ManifestApproval Serve(ApprovalPrompt prompt, ReuseOffer reuse, string? manifest, IProofMethod? signing = null, bool unlock = false, RowsCommit? rows = null, string? code = null)
+    private ManifestApproval Serve(ApprovalPrompt prompt, ReuseOffer reuse, string? manifest, IProofMethod? signing = null, bool unlock = false, RowsCommit? rows = null, string? code = null, CancellationToken cancel = default)
     {
         IProofMethod method = signing ?? this.method;
 
@@ -139,7 +141,7 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
                 announce($"{LinkPrefix}{context.Origin}/a/{server.Token}");
             }
 
-            return session.Wait(PageFlow.Left(settings.Timeout));
+            return session.Wait(PageFlow.Left(settings.Timeout), cancel);
         }
         catch (ProofUnavailableException error)
         {
@@ -189,9 +191,25 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
             }
         }
 
-        public ManifestApproval Wait(TimeSpan timeout)
+        public ManifestApproval Wait(TimeSpan timeout, CancellationToken cancel = default)
         {
-            if (!_decision.Task.Wait(timeout))
+            bool answered;
+            try
+            {
+                answered = _decision.Task.Wait(timeout, cancel);
+            }
+            catch (OperationCanceledException)
+            {
+                // The caller left: the page is closed and the request is denied.
+                lock (_gate)
+                {
+                    _decision.TrySetResult(ApprovalDecision.Deny("cancelled by the client"));
+                }
+
+                answered = true;
+            }
+
+            if (!answered)
             {
                 // A proof that finishes checking after this loses: the time limit came first.
                 lock (_gate)

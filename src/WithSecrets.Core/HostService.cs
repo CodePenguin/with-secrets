@@ -101,6 +101,10 @@ public sealed class HostService : IDisposable
     private readonly Dictionary<string, DateTimeOffset> _seen = new(StringComparer.Ordinal);
     private readonly Lock _lock = new();
     private int _disposed;
+    private bool _stopping;
+
+    /// <summary>The most launches in progress at once; each holds an approval page and a thread.</summary>
+    public const int MaxConcurrentLaunches = 8;
 
     private HostService(HostServiceOptions options, WebApplication app, int port)
     {
@@ -397,18 +401,27 @@ public sealed class HostService : IDisposable
 
         using CancellationTokenSource cancel = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
         bool accepted;
+        bool full;
         lock (_lock)
         {
+            full = _stopping || _active.Count >= MaxConcurrentLaunches;
             foreach (string old in _seen.Where(item => item.Value < now).Select(item => item.Key).ToList())
             {
                 _seen.Remove(old);
             }
 
-            accepted = _seen.TryAdd(launch.RequestId, launch.Expires);
+            accepted = !full && _seen.TryAdd(launch.RequestId, launch.Expires);
             if (accepted)
             {
                 _active[launch.RequestId] = cancel;
             }
+        }
+
+        if (full)
+        {
+            await Refuse(response, 503, "too many launches in progress (" + MaxConcurrentLaunches + "), or the service is stopping; try again later");
+
+            return;
         }
 
         if (!accepted)
@@ -527,6 +540,7 @@ public sealed class HostService : IDisposable
         CancellationTokenSource[] sources;
         lock (_lock)
         {
+            _stopping = true;
             sources = [.. _active.Values];
         }
 
