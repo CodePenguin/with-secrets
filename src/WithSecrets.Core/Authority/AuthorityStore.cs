@@ -46,13 +46,16 @@ public sealed record DecisionPlan(AuthorityResponse Response, string? HostMismat
 /// their rotation history, the authority-side audit history, processed request ids with their signed results (idempotency),
 /// and pending invalidation notifications. The authority signing private key is not here (see <see cref="CngSigningKey" />),
 /// and no secret value is. Every operation is one transaction that takes the write lock first, so it commits whole or leaves
-/// nothing; a database of another schema version is never migrated, except version 1 (Phase 2), whose grants table was never written
-/// by the program and is replaced by the Phase 3 tables: any other version: delete it and start over (machines then enroll again).
+/// nothing; a database of another schema version is never migrated, except versions 1 (Phase 2) and 2 (Phase 3 before grant evidence), whose
+/// grants tables are replaced (version 1 never had grants written; a version 2 grant has no approval evidence and would be ignored anyway): any other version: delete it and start over (machines then enroll again).
 /// </summary>
 public sealed class AuthorityStore
 {
     public const string FileName = "authority.db";
-    public const int SchemaVersion = 2;
+    public const int SchemaVersion = 3;
+
+    /// <summary>How long the stored answer of a durable grant request is kept for retries (much longer than an answer is valid).</summary>
+    public static readonly TimeSpan ProcessedGrantRetention = TimeSpan.FromHours(1);
 
     private const string Schema = """
         CREATE TABLE schema_version (version INTEGER NOT NULL);
@@ -65,7 +68,8 @@ public sealed class AuthorityStore
         CREATE TABLE grants (
             id TEXT PRIMARY KEY NOT NULL, fingerprint TEXT NOT NULL, scope_key TEXT NOT NULL, program TEXT NOT NULL, working_directory TEXT NOT NULL,
             secret_names TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL, expires TEXT, grant_revision INTEGER NOT NULL,
-            security_revision INTEGER NOT NULL, status TEXT NOT NULL, approved_by TEXT NOT NULL, revoked TEXT);
+            security_revision INTEGER NOT NULL, status TEXT NOT NULL, approved_by TEXT NOT NULL, revoked TEXT,
+            evidence_kind TEXT, evidence_nonce TEXT, evidence_text TEXT, evidence_proof TEXT, evidence_minutes INTEGER);
         CREATE TABLE grant_events (
             seq INTEGER PRIMARY KEY AUTOINCREMENT, fingerprint TEXT NOT NULL, grant_id TEXT NOT NULL, scope_key TEXT NOT NULL, kind TEXT NOT NULL,
             grant_revision INTEGER NOT NULL, state TEXT NOT NULL, created TEXT NOT NULL, acknowledged TEXT);
@@ -478,12 +482,13 @@ public sealed class AuthorityStore
 
     // ---- grants ----
 
-    private const string GrantColumns = "id, fingerprint, scope_key, program, working_directory, secret_names, created, updated, expires, grant_revision, security_revision, status, approved_by, revoked";
+    private const string GrantColumns = "id, fingerprint, scope_key, program, working_directory, secret_names, created, updated, expires, grant_revision, security_revision, status, approved_by, revoked, evidence_kind, evidence_nonce, evidence_text, evidence_proof, evidence_minutes";
 
     private static GrantRecord ReadGrant(SqliteDataReader reader)
     {
         return new GrantRecord(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetString(5), ParseTime(reader.GetString(6)), ParseTime(reader.GetString(7)),
-            reader.IsDBNull(8) ? null : ParseTime(reader.GetString(8)), reader.GetInt32(9), reader.GetInt32(10), reader.GetString(11), reader.GetString(12), reader.IsDBNull(13) ? null : ParseTime(reader.GetString(13)));
+            reader.IsDBNull(8) ? null : ParseTime(reader.GetString(8)), reader.GetInt32(9), reader.GetInt32(10), reader.GetString(11), reader.GetString(12), reader.IsDBNull(13) ? null : ParseTime(reader.GetString(13)),
+            reader.IsDBNull(14) || reader.IsDBNull(15) || reader.IsDBNull(16) || reader.IsDBNull(17) || reader.IsDBNull(18) ? null : new StoredEvidence(reader.GetString(14), reader.GetString(15), reader.GetString(16), reader.GetString(17), reader.GetInt32(18)));
     }
 
     /// <summary>Every grant (of one machine when <paramref name="fingerprint" /> is given), oldest first.</summary>
@@ -510,7 +515,7 @@ public sealed class AuthorityStore
         {
             int revision = Query(connection, transaction, "SELECT * FROM machines WHERE fingerprint = $fp", Machine, ("$fp", fingerprint)).Single().SecurityRevision;
             string now = Time(Now);
-            StateDatabase.Execute(connection, transaction, $"INSERT INTO grants ({GrantColumns}) VALUES ($id, $fp, $scope, 'test', 'test', 'TEST', $now, $now, $expires, 1, $revision, 'active', 'test', NULL)",
+            StateDatabase.Execute(connection, transaction, $"INSERT INTO grants ({GrantColumns}) VALUES ($id, $fp, $scope, 'test', 'test', 'TEST', $now, $now, $expires, 1, $revision, 'active', 'test', NULL, NULL, NULL, NULL, NULL, NULL)",
                 ("$id", id), ("$fp", fingerprint), ("$scope", scopeDigest), ("$now", now), ("$expires", expires is { } at ? Time(at) : null), ("$revision", revision));
 
             return 0;
@@ -539,22 +544,24 @@ public sealed class AuthorityStore
             return Query(_connection, _transaction, $"SELECT {GrantColumns} FROM grants WHERE fingerprint = $fp AND scope_key = $scope AND status = 'active' ORDER BY created DESC, id LIMIT 1", ReadGrant, ("$fp", fingerprint), ("$scope", scopeKey)).FirstOrDefault();
         }
 
-        public GrantRecord Create(string fingerprint, string scopeKey, string program, string workingDirectory, string secretNames, DateTimeOffset? expires, int securityRevision, string approvedBy)
+        public GrantRecord Create(string fingerprint, string scopeKey, string program, string workingDirectory, string secretNames, DateTimeOffset? expires, int securityRevision, string approvedBy, StoredEvidence evidence, DateTimeOffset at)
         {
             string id = "g-" + Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(9)).Replace('+', '-').Replace('/', '_');
-            string now = Time(_store.Now);
-            StateDatabase.Execute(_connection, _transaction, $"INSERT INTO grants ({GrantColumns}) VALUES ($id, $fp, $scope, $program, $dir, $names, $now, $now, $expires, 1, $revision, 'active', $by, NULL)",
-                ("$id", id), ("$fp", fingerprint), ("$scope", scopeKey), ("$program", program), ("$dir", workingDirectory), ("$names", secretNames), ("$now", now), ("$expires", expires is { } at ? Time(at) : null), ("$revision", securityRevision), ("$by", approvedBy));
+            string now = Time(at);
+            StateDatabase.Execute(_connection, _transaction, $"INSERT INTO grants ({GrantColumns}) VALUES ($id, $fp, $scope, $program, $dir, $names, $now, $now, $expires, 1, $revision, 'active', $by, NULL, $ek, $en, $et, $ep, $em)",
+                ("$id", id), ("$fp", fingerprint), ("$scope", scopeKey), ("$program", program), ("$dir", workingDirectory), ("$names", secretNames), ("$now", now), ("$expires", expires is { } end ? Time(end) : null), ("$revision", securityRevision), ("$by", approvedBy),
+                ("$ek", evidence.Kind), ("$en", evidence.Nonce), ("$et", evidence.Text), ("$ep", evidence.Proof), ("$em", evidence.Minutes));
             _store.Fault?.Invoke("after-grant");
 
             return Find(id)!;
         }
 
         /// <summary>Sets the end of an active grant (null: indefinite), raises the grant's revision and records who. Returns the grant as it is now.</summary>
-        public GrantRecord SetExpiry(string id, DateTimeOffset? expires, string approvedBy)
+        public GrantRecord SetExpiry(string id, DateTimeOffset? expires, string approvedBy, StoredEvidence evidence, DateTimeOffset at)
         {
-            StateDatabase.Execute(_connection, _transaction, "UPDATE grants SET expires = $expires, updated = $now, grant_revision = grant_revision + 1, approved_by = $by WHERE id = $id AND status = 'active'",
-                ("$expires", expires is { } at ? Time(at) : null), ("$now", Time(_store.Now)), ("$by", approvedBy), ("$id", id));
+            StateDatabase.Execute(_connection, _transaction, "UPDATE grants SET expires = $expires, updated = $now, grant_revision = grant_revision + 1, approved_by = $by, evidence_kind = $ek, evidence_nonce = $en, evidence_text = $et, evidence_proof = $ep, evidence_minutes = $em WHERE id = $id AND status = 'active'",
+                ("$expires", expires is { } end ? Time(end) : null), ("$now", Time(at)), ("$by", approvedBy), ("$id", id),
+                ("$ek", evidence.Kind), ("$en", evidence.Nonce), ("$et", evidence.Text), ("$ep", evidence.Proof), ("$em", evidence.Minutes));
             _store.Fault?.Invoke("after-grant");
 
             return Find(id)!;
@@ -565,7 +572,7 @@ public sealed class AuthorityStore
         {
             GrantRecord grant = Find(id)!;
             string now = Time(_store.Now);
-            StateDatabase.Execute(_connection, _transaction, "UPDATE grants SET status = 'revoked', revoked = $now, updated = $now, grant_revision = grant_revision + 1 WHERE id = $id AND status = 'active'", ("$now", now), ("$id", id));
+            StateDatabase.Execute(_connection, _transaction, "UPDATE grants SET status = 'revoked', revoked = $now, updated = $now, grant_revision = grant_revision + 1, evidence_kind = NULL, evidence_nonce = NULL, evidence_text = NULL, evidence_proof = NULL, evidence_minutes = NULL WHERE id = $id AND status = 'active'", ("$now", now), ("$id", id));
             _store.Fault?.Invoke("after-grant");
             StateDatabase.Execute(_connection, _transaction, "INSERT INTO grant_events (fingerprint, grant_id, scope_key, kind, grant_revision, state, created, acknowledged) VALUES ($fp, $id, $scope, 'revoked', $revision, 'Pending', $now, NULL)",
                 ("$fp", grant.Fingerprint), ("$id", id), ("$scope", grant.ScopeKey), ("$revision", grant.Revision + 1), ("$now", now));
@@ -596,13 +603,17 @@ public sealed class AuthorityStore
             GrantPlan plan = produce(new GrantTx(this, connection, transaction), machine);
             if (plan.Store)
             {
+                // Answers are kept so that a retry of a durable operation returns the committed answer; older ones are of no use (the host rejects an
+                // old answer) and are removed here so the table does not grow.
+                StateDatabase.Execute(connection, transaction, "DELETE FROM processed_grant_requests WHERE created < $cutoff", ("$cutoff", Time(Now - ProcessedGrantRetention)));
                 StateDatabase.Execute(connection, transaction, "INSERT INTO processed_grant_requests (request_id, fingerprint, request_digest, response, created) VALUES ($id, $fp, $digest, $response, $now)",
                     ("$id", requestId), ("$fp", fingerprint), ("$digest", requestDigest), ("$response", plan.Response.ToJson()), ("$now", Time(Now)));
                 Fault?.Invoke("after-result");
-                if (plan.AuditEvent is { } auditEvent)
-                {
-                    Audit(connection, transaction, auditEvent, fingerprint, requestId, "authority", plan.Response.ReasonCode + (plan.AuditDetail.Length > 0 ? "; " + plan.AuditDetail : "") + "; request " + requestDigest[..Math.Min(12, requestDigest.Length)]);
-                }
+            }
+
+            if (plan.AuditEvent is { } auditEvent)
+            {
+                Audit(connection, transaction, auditEvent, fingerprint, requestId, "authority", plan.Response.ReasonCode + (plan.AuditDetail.Length > 0 ? "; " + plan.AuditDetail : "") + "; request " + requestDigest[..Math.Min(12, requestDigest.Length)]);
             }
 
             Fault?.Invoke("before-commit");
@@ -780,7 +791,7 @@ public sealed class AuthorityStore
                 found = -1;
             }
 
-            if (found == 1)
+            if (found is 1 or 2)
             {
                 Migrate(connection);
                 found = SchemaVersion;
@@ -802,18 +813,20 @@ public sealed class AuthorityStore
         }
     }
 
-    /// <summary>Schema 1 (Phase 2) to 2: its grants table only had the structure (nothing wrote it); it is replaced and the new tables are made, in one transaction.</summary>
+    /// <summary>Schema 1 (Phase 2) or 2 to 3: its grants table only had the structure (nothing wrote it); it is replaced and the new tables are made, in one transaction.</summary>
     private static void Migrate(SqliteConnection connection)
     {
         using SqliteTransaction transaction = connection.BeginTransaction(deferred: false);
-        if (Convert.ToInt64(StateDatabase.Scalar(connection, transaction, "SELECT version FROM schema_version"), CultureInfo.InvariantCulture) != 1)
+        long from = Convert.ToInt64(StateDatabase.Scalar(connection, transaction, "SELECT version FROM schema_version"), CultureInfo.InvariantCulture);
+        if (from is not (1 or 2))
         {
             // Another process migrated first.
             return;
         }
 
         StateDatabase.Execute(connection, transaction, "DROP TABLE grants");
-        StateDatabase.Execute(connection, transaction, Schema[Schema.IndexOf("CREATE TABLE grants (", StringComparison.Ordinal)..Schema.IndexOf("CREATE TABLE authority_keys (", StringComparison.Ordinal)]);
+        int start = Schema.IndexOf("CREATE TABLE grants (", StringComparison.Ordinal);
+        StateDatabase.Execute(connection, transaction, Schema[start..Schema.IndexOf(from == 1 ? "CREATE TABLE authority_keys (" : "CREATE TABLE grant_events (", StringComparison.Ordinal)]);
         StateDatabase.Execute(connection, transaction, "UPDATE schema_version SET version = $version", ("$version", SchemaVersion));
         transaction.Commit();
     }

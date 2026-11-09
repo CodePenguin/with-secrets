@@ -80,7 +80,9 @@ public sealed record ApprovalRequest(
     IReadOnlyList<string>? EnvFiles = null,
     IReadOnlyList<string>? EnvNames = null,
     IReadOnlyDictionary<string, string>? EnvValues = null,
-    IReadOnlyDictionary<string, string>? InheritedEnvironment = null);
+    IReadOnlyDictionary<string, string>? InheritedEnvironment = null,
+    string? Heading = null,
+    IReadOnlyList<string>? ExtraLines = null);
 
 /// <summary>
 /// What a person signed on an approval page: the page nonce, the exact text that was bound (see <see cref="RequestBinding" />)

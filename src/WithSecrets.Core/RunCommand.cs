@@ -253,10 +253,14 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         // The request id goes into the text the person signs, so a saved approval names the request it covers.
         request = request with { RequestId = fingerprint.Key };
 
+        // A grant has its own scope key: the machine, the request fingerprint and the FULL argument list (inline code included), so a grant for one
+        // command line never covers another. The saved-approval key above ignores the other arguments and is not used for grants.
+        string? grantScope = context.Authorization is { } scopeHost ? GrantEvidence.Scope(scopeHost.Fingerprint, fingerprint.Key, arguments) : null;
+
         // approve: the same validation and the human approval, but the result is a grant for this scope and nothing is launched.
         if (approveOnly)
         {
-            return await ApproveGrantOnly(request, fingerprint, context);
+            return await ApproveGrantOnly(request, fingerprint, context, grantScope);
         }
 
         // A grant for exactly this request (the authority answers, or one this host synchronized, under a valid lease) stands in for the
@@ -264,7 +268,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         GrantUse? grantUse = null;
         if (context.Authorization is { } grantHost && context.Request is { } grantLaunch)
         {
-            grantUse = await grantHost.TryUseGrantAsync(grantLaunch, fingerprint.Key, context.Cancel);
+            grantUse = await grantHost.TryUseGrantAsync(grantLaunch, grantScope!, context.Cancel);
             if (grantUse.Kind == GrantUseKind.Denied)
             {
                 audit.TryWrite("denied", request, grantUse.Message, files: fingerprint.Files);
@@ -304,7 +308,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                 }
 
                 // What the store needs to open comes from the key provider: a passkey tap, or the key the service holds for this grant since an earlier tap.
-                KeyRelease release = _keys.Obtain(store, request, context.Cancel, line => stderr.WriteLine(line), granted.GrantId);
+                KeyRelease release = _keys.Obtain(store, request, context.Cancel, line => stderr.WriteLine(line), granted.GrantId, grantScope);
                 if (!release.Ok)
                 {
                     audit.TryWrite("denied", request, release.Detail, files: fingerprint.Files);
@@ -544,11 +548,16 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
     /// the request's scope (secrets, program, folder, script and .env plan: the fingerprint of the request) for that time and nothing is launched. A new
     /// approval needs the authority, so it fails while the authority cannot be reached. The page's unlock material is never used here.
     /// </summary>
-    private async Task<int> ApproveGrantOnly(ApprovalRequest request, Fingerprint fingerprint, LaunchContext context)
+    private async Task<int> ApproveGrantOnly(ApprovalRequest request, Fingerprint fingerprint, LaunchContext context, string? grantScope)
     {
-        if (context.Authorization is not { } host || context.Request is not { } launch)
+        if (context.Authorization is not { } host || context.Request is not { } launch || grantScope is null)
         {
             return await Fail(Denied, "no authority is configured for this host service. Nothing was saved.");
+        }
+
+        if (host.KnownRevision is not { } revision)
+        {
+            return await Fail(Denied, "this service has not yet checked in with its authority, so a grant cannot be made now. Try again in a moment.");
         }
 
         ReuseOffer times = reuse is { IsOn: true } ? reuse : ReuseOffer.Off;
@@ -558,8 +567,20 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         }
 
         // The page offers the times and no unlock: nothing is decrypted by an approval.
-        ApprovalRequest shown = request with { Reuse = times, Unlock = false };
-        GrantApproval result = await host.ApproveGrantAsync(launch, fingerprint.Key, () =>
+        // The page says plainly that this makes a grant (no program runs), what it covers, and what the first run under it will do with the key. What the
+        // person signs includes the grant's scope and the machine's security revision, so the authority can keep the assertion as the grant's proof.
+        List<string> lines =
+        [
+            "THIS CREATES A GRANT. No program runs now. If you approve, the agent may run exactly this command again without a page: the same program, EVERY argument shown above, the same folder, secrets and script, for the time you choose below, until it ends or is revoked.",
+        ];
+        if (store.NeedsUnlock)
+        {
+            lines.Add("The first run under the grant needs one passkey tap, and that tap makes the service keep the secret store key (it opens all your secrets) in memory until the grant ends (until restart for a grant with no end).");
+        }
+
+        lines.AddRange(GrantEvidence.ApproveLines(revision, grantScope));
+        ApprovalRequest shown = request with { RequestId = grantScope, Reuse = times, Unlock = false, Heading = "Create a GRANT for this exact command. No program runs now. Read all of it before you approve.", ExtraLines = lines };
+        GrantApproval result = await host.ApproveGrantAsync(launch, grantScope, () =>
         {
             stderr.WriteLine("with-secrets: waiting for the user to approve this request and choose how long the grant lasts...");
             stderr.WriteLine(ApprovalSummary.BuildMessage(shown, showValues: false));
@@ -594,10 +615,10 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         }
 
         Outcome = LaunchOutcome.Approved;
-        await stdout.WriteLineAsync($"with-secrets: grant {result.GrantId} approved {ends}. A run of this exact request (same secrets, program, folder, script and .env plan) needs no approval page decision while it lasts. Nothing was run.");
+        await stdout.WriteLineAsync($"with-secrets: grant {result.GrantId} approved {ends}. A run of this exact command (every argument, the same secrets, folder, script and .env plan) needs no approval page decision while it lasts. Nothing was run.");
         if (store.NeedsUnlock)
         {
-            await stdout.WriteLineAsync("with-secrets: this store's key still needs a passkey tap at each run.");
+            await stdout.WriteLineAsync("with-secrets: the first run under the grant needs a passkey tap; the service then keeps the store key for the grant (see the page).");
         }
 
         return 0;

@@ -726,7 +726,7 @@ internal static class AuthorityTests
             mismatch = error;
         }
 
-        check(mismatch is not null && mismatch.Message == "authority.db is not of schema version 2; delete authority.db to start over (machines then enroll again)", "schema: another schema version is refused with the delete-it message (" + mismatch?.Message + ")");
+        check(mismatch is not null && mismatch.Message == "authority.db is not of schema version 3; delete authority.db to start over (machines then enroll again)", "schema: another schema version is refused with the delete-it message (" + mismatch?.Message + ")");
         AuthorityDatabaseException? writing = null;
         try
         {

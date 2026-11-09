@@ -44,21 +44,37 @@ public static class AdminGrantCommand
                 return Deny(context, name, refusal);
             }
 
+            // What the page shows is exact: the new end is fixed here (counted from the present end, or from now) and is what the authority applies.
+            DateTimeOffset now = clock.GetUtcNow();
+            DateTimeOffset? newEnd = command.Action == GrantAdminAction.Revoke || command.Indefinite ? null
+                : command.Action == GrantAdminAction.Extend ? grant.Expires!.Value.AddMinutes(command.Minutes!.Value) : now.AddMinutes(command.Minutes!.Value);
             EnrollmentTarget? target = EnrollmentTarget.FirstThatCanProve(context.Primary.Admin(), context.Local.Admin());
             if (target is null)
             {
                 return Deny(context, name, Enrollment.NoTargetMessage(context.Primary.Admin().Method.Id, context.Primary.Admin().Host, context.Local.Admin().Host));
             }
 
-            ApprovalDecision asked = target.Approver.Ask(new ApprovalPrompt(Heading, PageText(command, grant, store, clock.GetUtcNow())));
+            ApprovalDecision asked = target.Approver.Ask(new ApprovalPrompt(Heading, PageText(command, grant, store, now, newEnd)));
             if (!asked.Approved)
             {
                 return Deny(context, name, asked.Detail);
             }
 
+            if (asked.Evidence is not { } evidence)
+            {
+                return Deny(context, name, "the passkey did not produce a signed approval, so nothing was changed");
+            }
+
             string actor = "admin passkey " + (AuditLog.KeyName(asked.Detail) is { Length: > 0 } key ? key : "(unnamed)");
-            GrantAdminCommand change = new("adm-" + Guid.NewGuid().ToString("N"), Operation(command.Action), grant.Id, command.Minutes, command.Indefinite, grant.Revision, actor);
-            GrantResponse response = new LocalAuthority(store, context.Keys, clock).AdminGrant(change);
+            GrantAdminCommand change = new("adm-" + Guid.NewGuid().ToString("N"), Operation(command.Action), grant.Id, command.Minutes, command.Indefinite, grant.Revision, actor, newEnd, evidence);
+            GrantResponse response = new LocalAuthority(store, context.Keys, clock) { Verifier = context.Verifier }.AdminGrant(change);
+
+            // The answer is signed by the authority key; it is checked here too, as a host checks one (key, signature, this request, this change).
+            if (!response.Verify(context.Keys.CurrentRecord().PublicKey) || response.RequestId != change.RequestId || response.RequestDigest != change.Digest())
+            {
+                return Deny(context, name, "the authority's answer did not verify; check this change with: with-secrets admin grant list");
+            }
+
             if (!response.HasGrant && response.Outcome != GrantOps.Revoked)
             {
                 return Deny(context, name, Reason(response.ReasonCode));
@@ -170,7 +186,7 @@ public static class AdminGrantCommand
     private static string Ends(GrantRecord grant, DateTimeOffset now) => grant.Expires is { } at ? (grant.IsExpired(now) ? "ended " : "ends ") + CanonicalJson.Time(at) : "no end";
 
     /// <summary>The text the page shows and the passkey signs: the action, the grant, its machine, what it covers, and the new end.</summary>
-    internal static string PageText(CliCommand.GrantAdmin command, GrantRecord grant, AuthorityStore store, DateTimeOffset now)
+    internal static string PageText(CliCommand.GrantAdmin command, GrantRecord grant, AuthorityStore store, DateTimeOffset now, DateTimeOffset? newEnd)
     {
         MachineRecord? machine = store.Find(grant.Fingerprint);
         string change = command.Action switch
@@ -180,6 +196,6 @@ public static class AdminGrantCommand
             _ => "revoke this grant (it ends now and its machine is told)",
         };
 
-        return $"Action: {change}\nGrant: {grant.Id} (revision {grant.Revision.ToString(CultureInfo.InvariantCulture)}), {State(grant, now)}, {Ends(grant, now)}\nMachine: {KeyIdentity.Display(grant.Fingerprint)}, host {(machine is null ? "(unknown)" : ApprovalSummary.Clean(machine.HostName))}\nSecrets: {ApprovalSummary.Clean(grant.SecretNames)}\nProgram: {ApprovalSummary.Clean(grant.Program)}\nFolder: {ApprovalSummary.Clean(grant.WorkingDirectory)}";
+        return $"Action: {change}\nGrant: {grant.Id} (revision {grant.Revision.ToString(CultureInfo.InvariantCulture)}), {State(grant, now)}, {Ends(grant, now)}\nMachine: {KeyIdentity.Display(grant.Fingerprint)}, host {(machine is null ? "(unknown)" : ApprovalSummary.Clean(machine.HostName))}\nSecrets: {ApprovalSummary.Clean(grant.SecretNames)}\nProgram: {ApprovalSummary.Clean(grant.Program)}\nFolder: {ApprovalSummary.Clean(grant.WorkingDirectory)}\nIt ends: {GrantEvidence.EndText(newEnd)}\n{GrantEvidence.AdminLines(Verb(command.Action), grant, grant.Revision + 1, newEnd)}";
     }
 }

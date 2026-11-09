@@ -87,7 +87,7 @@ public static class AdminActions
 }
 
 /// <summary>What the admin commands work with.</summary>
-public sealed record AdminContext(AuthorityStore Store, AuthorityKeyRing Keys, HostConfigFile Host, string? LocalFingerprint, EnrollmentTarget Primary, EnrollmentTarget Local, AuditLog Audit, TextWriter Stdout, TimeProvider? Clock = null);
+public sealed record AdminContext(AuthorityStore Store, AuthorityKeyRing Keys, HostConfigFile Host, string? LocalFingerprint, EnrollmentTarget Primary, EnrollmentTarget Local, AuditLog Audit, TextWriter Stdout, TimeProvider? Clock = null, IApprovalVerifier? Verifier = null);
 
 /// <summary>
 /// <c>with-secrets admin ...</c>: for a person in a terminal. <c>machines</c> lists what the authority knows. Every other action is shown on

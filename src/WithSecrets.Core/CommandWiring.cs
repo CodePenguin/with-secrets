@@ -116,7 +116,7 @@ public static class CommandWiring
         }
 
         (EnrollmentTarget primary, EnrollmentTarget local) = Targets(state, settings, TerminalPrompt.Line, null);
-        (int code, string detail) = AdminGrantCommand.Run(command, new AdminContext(store, LocalDeployment.ProductionKeyRing(store), HostConfigFile.InFolder(folder), null, primary, local, new AuditLog(state), output));
+        (int code, string detail) = AdminGrantCommand.Run(command, new AdminContext(store, LocalDeployment.ProductionKeyRing(store), HostConfigFile.InFolder(folder), null, primary, local, new AuditLog(state), output, null, new ManifestApprovalVerifier(state)));
         TerminalPrompt.Final(code == 0 ? detail : "with-secrets: " + detail);
 
         return code;

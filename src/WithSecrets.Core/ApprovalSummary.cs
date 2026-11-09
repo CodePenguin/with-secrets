@@ -125,9 +125,14 @@ public static class ApprovalSummary
             text.Append('\n').Append("Other variables from .env (names only): ").Append(string.Join(", ", others.Select(Clean)));
         }
 
-        if (request.Reuse is { IsOn: true } reuse)
+        if (request.Reuse is { IsOn: true } reuse && request.Heading is null)
         {
             text.Append('\n').Append($"Approve for a time (up to {reuse.Choices[^1]} min) also covers the same program, script, folder, and secrets until it ends, whatever the other arguments. Approve once covers only this run.");
+        }
+
+        foreach (string extra in request.ExtraLines ?? [])
+        {
+            text.Append((char)10).Append(Clean(extra));
         }
 
         if (request.RequestId is { Length: > 0 } id)

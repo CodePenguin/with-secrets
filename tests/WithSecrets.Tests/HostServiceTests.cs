@@ -104,7 +104,7 @@ internal static class HostServiceTests
         private readonly string _dir;
         private int _ids;
 
-        public Rig(string parent, Dictionary<string, string>? values = null, Func<IApprover>? approver = null, TimeSpan? bodyTimeout = null, Action<PreparedChild>? afterPrepare = null, Action? afterCommit = null, bool trusted = true, TestMachine? machine = null, TestAuthenticator? savedApprovalSigner = null, bool needsUnlock = false, Func<IApprover, IStoreKeyProvider>? keyProvider = null, IMonotonicClock? monotonic = null)
+        public Rig(string parent, Dictionary<string, string>? values = null, Func<IApprover>? approver = null, TimeSpan? bodyTimeout = null, Action<PreparedChild>? afterPrepare = null, Action? afterCommit = null, bool trusted = true, TestMachine? machine = null, TestAuthenticator? savedApprovalSigner = null, bool needsUnlock = false, Func<IApprover, IStoreKeyProvider>? keyProvider = null, IMonotonicClock? monotonic = null, TestAuthenticator? enrolled = null)
         {
             _dir = Path.Combine(parent, "svc-" + Guid.NewGuid().ToString("N")[..8]);
             Work = Path.Combine(_dir, "work");
@@ -114,6 +114,12 @@ internal static class HostServiceTests
             if (savedApprovalSigner is not null)
             {
                 TestState.Add(State, savedApprovalSigner.Record("localhost", "laptop") with { Created = DateTimeOffset.UtcNow });
+            }
+
+            if (enrolled is not null)
+            {
+                // The key whose assertions back grants (the authority checks them against the signed manifest of this state).
+                TestState.Add(State, enrolled.Record("localhost", "grant-test") with { Created = DateTimeOffset.UtcNow });
             }
 
             Store = new CountingStore(values ?? new Dictionary<string, string> { ["TOKEN"] = Value, ["OTHER_KEY"] = Other }, needsUnlock);

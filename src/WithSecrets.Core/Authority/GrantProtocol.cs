@@ -61,6 +61,8 @@ public static class GrantReasons
     public const string Expired = "grant-expired";
     public const string RevisionChanged = "grant-changed";
     public const string BadOperation = "bad-operation";
+    public const string NoEvidence = "no-evidence";
+    public const string BadEvidence = "bad-evidence";
     public const string Ok = "ok";
 }
 
@@ -256,7 +258,7 @@ public sealed record GrantResponse(
 public sealed record GrantInfo(string Id, string ScopeKey, int Revision, DateTimeOffset? Expires);
 
 /// <summary>A grant as the authority stores it. <see cref="Status"/> is active, revoked or invalidated; <see cref="Expires"/> null is an indefinite grant.</summary>
-public sealed record GrantRecord(string Id, string Fingerprint, string ScopeKey, string Program, string WorkingDirectory, string SecretNames, DateTimeOffset Created, DateTimeOffset Updated, DateTimeOffset? Expires, int Revision, int SecurityRevision, string Status, string ApprovedBy, DateTimeOffset? Revoked)
+public sealed record GrantRecord(string Id, string Fingerprint, string ScopeKey, string Program, string WorkingDirectory, string SecretNames, DateTimeOffset Created, DateTimeOffset Updated, DateTimeOffset? Expires, int Revision, int SecurityRevision, string Status, string ApprovedBy, DateTimeOffset? Revoked, StoredEvidence? Evidence = null)
 {
     public bool IsExpired(DateTimeOffset now) => Expires is { } at && now >= at;
 
@@ -272,13 +274,14 @@ public sealed record PendingGrantEvent(long Sequence, string Fingerprint, string
 /// <summary>
 /// An administrator's change to a grant (extend, renew, revoke), made in the authority after the admin passkey approved the page.
 /// <see cref="RequestId" /> makes a retry return the committed answer. <see cref="ExpectedRevision" /> is the grant revision the page showed.
+/// <see cref="NewEnd" /> is the absolute end the page showed (extend, renew; null for indefinite or revoke) and <see cref="Evidence" /> the admin passkey's assertion over that page: the authority applies the change only if the evidence verifies and says exactly this.
 /// </summary>
-public sealed record GrantAdminCommand(string RequestId, string Operation, string GrantId, int? Minutes, bool Indefinite, int? ExpectedRevision, string Actor)
+public sealed record GrantAdminCommand(string RequestId, string Operation, string GrantId, int? Minutes, bool Indefinite, int? ExpectedRevision, string Actor, DateTimeOffset? NewEnd = null, ApprovalEvidence? Evidence = null)
 {
     /// <summary>The digest of what is asked, so a request id cannot be reused for another change.</summary>
     public string Digest()
     {
-        string text = string.Join('\n', "with-secrets grant admin v1", Operation, GrantId, Minutes?.ToString(CultureInfo.InvariantCulture) ?? "", Indefinite ? "indefinite" : "", ExpectedRevision?.ToString(CultureInfo.InvariantCulture) ?? "");
+        string text = string.Join('\n', "with-secrets grant admin v1", Operation, GrantId, Minutes?.ToString(CultureInfo.InvariantCulture) ?? "", Indefinite ? "indefinite" : "", ExpectedRevision?.ToString(CultureInfo.InvariantCulture) ?? "", NewEnd is { } end ? CanonicalJson.Time(end) : "");
 
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
     }

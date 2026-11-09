@@ -177,6 +177,13 @@ Parsing of `approve` and `admin grant` and `NeedsTerminal`; grant creation, no-t
 
 (a) `OfflineUse` ignores the lease: 5 checks fail (lease expiry fails closed, wall clock set back, indefinite grant beyond the lease, grant expiry offline, service lease). (b) The authority's `UseGrant` ignores the grant's end: "expiry: after its end the grant covers nothing" fails. (c) `SweepKey` no longer drops the key when the lease ends: "drop: when the lease ends the key is dropped and zeroed" fails.
 
+### Phase 3 fix round 1 (review of 552dd9f)
+
+- H1: grant scope key `GrantEvidence.Scope(machine, request fingerprint, full argument list)` (length-prefixed, domain "with-secrets grant scope v1"); the old saved-approval key is no longer used for grants. Test that asserted "other arguments do not change it" now asserts they do.
+- H2: the held key is bound (`HeldKeyBinding`: grant id, scope, revision, end) at the tap and lent only to that scope; the host drops it when the synced grant differs. Grant rows carry the approver's passkey assertion (`StoredEvidence`, schema 3; schema 1 and 2 grants are discarded on migration), verified at each use by `GrantEvidence.RowProblem` against the manifest (`IApprovalVerifier`); extend, renew and revoke need an admin assertion over the new end (`AdminProblem`), checked in the transaction; a revoked row loses its evidence. Residual: whole-file rollback of authority.db; wall-clock based page-time windows (1 minute skew).
+- M1: the key-holding tap page now has its own heading and a "KEY HELD" line (until the end, or restart for indefinite); the contradicting note is gone. L1: only a transport failure is "offline"; database errors deny. L2: use is evaluated every time, never stored or replayed. L3: an exception in check-in drops the lease and key. L4: pinned arrays, zeroed on drop (the array from the page's tap is the caller's and zeroed on dispose). L5: admin answers are verified (signature, id, digest), revision read inside the transaction. L6: processed answers pruned after 1 hour. L7: approve page headed "Create a GRANT".
+- Mutation evidence (applied, GrantAuthority run, reverted): UseGrant skipping `RowProblem`: 7 checks fail; `Scope` ignoring arguments past the first: 1 fails; `Borrow` ignoring the scope key: 2 fail.
+
 ## Reconnaissance: who owns what today
 
 | Responsibility | Owner today (file / type) | Notes |

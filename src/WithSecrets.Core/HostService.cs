@@ -126,6 +126,8 @@ public sealed class HostService : IDisposable
         _options = options;
         _app = app;
         Port = port;
+        // The authority believes a grant only when a person's passkey assertion backs it: it checks those against the keys of the signed manifest.
+        options.Deployment.Authority.Verifier ??= options.State is { } verifierState ? new ManifestApprovalVerifier(verifierState) : null;
         Authorization = options.Deployment.CreateAuthorization(options.Gate, () => options.Grants?.TryClear(), options.Monotonic);
     }
 

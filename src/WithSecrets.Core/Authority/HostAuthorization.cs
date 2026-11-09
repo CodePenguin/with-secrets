@@ -45,21 +45,27 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
     {
         lock (_lock)
         {
-            if (Keys.GrantId is not { } held)
+            if (Keys.Binding is not { } bound)
             {
                 return;
             }
 
-            SyncedGrant? grant = _synced.Values.FirstOrDefault(item => item.GrantId == held);
+            // The key is bound to what was true at the tap (grant, scope, revision, end). Whatever the host learns later never moves that: a grant that
+            // changed (any new revision, even an authenticated extension) or a scope that differs ends the hold and the next run taps again.
+            SyncedGrant? grant = _synced.Values.FirstOrDefault(item => item.GrantId == bound.GrantId);
             if (grant is null)
             {
                 Keys.Drop("grant gone");
+            }
+            else if (grant.ScopeKey != bound.ScopeKey || grant.Revision != bound.Revision)
+            {
+                Keys.Drop("grant changed");
             }
             else if (!Lease.IsValid)
             {
                 Keys.Drop("lease ended");
             }
-            else if (grant.Expires is { } end && _clock.GetUtcNow() >= end)
+            else if (bound.Expires is { } end && _clock.GetUtcNow() >= end)
             {
                 Keys.Drop("grant expired");
             }
@@ -67,24 +73,36 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
     }
 
     /// <summary>A copy of the held key for a run under <paramref name="grantId" />, or null (swept first, so a stale key is never lent).</summary>
-    public Unlock? BorrowKey(string grantId)
+    public Unlock? BorrowKey(string grantId, string scopeKey)
     {
         lock (_lock)
         {
             SweepKey();
 
-            return Keys.Borrow(grantId);
+            return Keys.Borrow(grantId, scopeKey);
+        }
+    }
+
+    /// <summary>The end of a synchronized grant as the host knows it (null: no end) and whether the host vouches for it now, for the page of a key-holding tap.</summary>
+    public (bool Known, DateTimeOffset? Expires) GrantEnd(string grantId)
+    {
+        lock (_lock)
+        {
+            SyncedGrant? grant = _synced.Values.FirstOrDefault(item => item.GrantId == grantId);
+
+            return grant is null ? (false, null) : (true, grant.Expires);
         }
     }
 
     /// <summary>Holds a copy of the key a tap released for this grant, if the host still vouches for the grant.</summary>
-    public void HoldKey(string grantId, Unlock key)
+    public void HoldKey(string grantId, string scopeKey, Unlock key)
     {
         lock (_lock)
         {
-            if (Lease.IsValid && _synced.Values.Any(item => item.GrantId == grantId && (item.Expires is null || _clock.GetUtcNow() < item.Expires)))
+            SyncedGrant? grant = _synced.Values.FirstOrDefault(item => item.GrantId == grantId && item.ScopeKey == scopeKey && (item.Expires is null || _clock.GetUtcNow() < item.Expires));
+            if (Lease.IsValid && grant is not null)
             {
-                Keys.Hold(key, grantId);
+                Keys.Hold(key, new HeldKeyBinding(grant.GrantId, grant.ScopeKey, grant.Revision, grant.Expires));
             }
         }
     }
@@ -161,6 +179,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
         ReasonCodes.UnknownMachine => "the authority does not know this machine. Start the service again (with-secrets service); it enrolls the machine",
         ReasonCodes.HostNameMismatch => $"the host name {ApprovalSummary.Clean(hostName)} is not the one this machine was approved with. Ask the administrator to run: with-secrets admin approve-host-change {Fingerprint}",
         ReasonCodes.AuthorizationChanged => "the machine's authorization changed while the request was open. Ask again",
+        GrantReasons.NoEvidence or GrantReasons.BadEvidence => "the approval did not carry a passkey assertion that backs the grant, so none was made. Nothing was saved",
         GrantReasons.NoTime => "no grant time was chosen on the approval page (choose one of the times it offers). Nothing was saved",
         _ => "the authority refused the request (" + code + ")",
     };
@@ -485,6 +504,9 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
             catch (Exception error) when (error is not OutOfMemoryException)
             {
                 AppLog.Warn("the authority's check-in answer could not be checked: {Type}", error.GetType().Name);
+                Lease.Clear();
+                Keys.Drop("check-in failed");
+                Volatile.Write(ref _reconcileNotBefore, _monotonic.Milliseconds + 5000);
 
                 return Reconciliation.Unverified;
             }
@@ -494,6 +516,9 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
                 if (_knownRevision is { } known && response.SecurityRevision < known)
                 {
                     // An answer for an older revision than the one applied is not accepted, and no lease comes of it.
+                    Lease.Clear();
+                    Keys.Drop("check-in older than the applied revision");
+
                     return Reconciliation.Unverified;
                 }
 
@@ -575,6 +600,13 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
 
             AppLog.Warn("the authority could not be asked about a grant: {Type}", error.GetType().Name);
 
+            // Only a failed transport to a remote authority is "offline". The local authority has no network: its failure (a database or key error) is not
+            // an absence, so nothing is used on the strength of an earlier answer.
+            if (authority is LocalAuthority || !IsTransportFailure(error))
+            {
+                return new GrantUse(GrantUseKind.Denied, "the authority failed to answer about a grant (" + error.GetType().Name + "). Nothing was run");
+            }
+
             return OfflineUse(scopeKey);
         }
 
@@ -620,6 +652,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
             lock (_lock)
             {
                 _synced[scopeKey] = new SyncedGrant(response.GrantId, scopeKey, response.GrantRevision, response.Indefinite ? null : response.GrantExpires);
+                SweepKey();
             }
 
             return new GrantUse(GrantUseKind.Granted, "", response.GrantId);
@@ -634,6 +667,8 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
 
         return NoGrant();
     }
+
+    private static bool IsTransportFailure(Exception error) => error is System.Net.Http.HttpRequestException or System.Net.Sockets.SocketException or TimeoutException or IOException && error is not AuthorityDatabaseException;
 
     /// <summary>The authority cannot be reached: a grant this host already synchronized counts only while the lease runs (monotonic clock) and the grant has not ended.</summary>
     private GrantUse OfflineUse(string scopeKey)

@@ -50,7 +50,7 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
     public ApprovalDecision Request(ApprovalRequest request, CancellationToken cancel)
     {
         // A run on a store with a key vault is approved by a passkey that also releases the secret store key (WebAuthn PRF).
-        return Serve(new ApprovalPrompt(RequestHeading, ApprovalSummary.BuildMessage(request)), request.Reuse ?? ReuseOffer.Off, null, null, request.Unlock, cancel: cancel).Decision;
+        return Serve(new ApprovalPrompt(request.Heading ?? RequestHeading, ApprovalSummary.BuildMessage(request)), request.Reuse ?? ReuseOffer.Off, null, null, request.Unlock, cancel: cancel).Decision;
     }
 
     /// <summary>

@@ -16,7 +16,7 @@ internal static class GrantAuthorityTests
 {
     private sealed class TestClock : TimeProvider
     {
-        private DateTimeOffset _now = new(2026, 11, 8, 12, 0, 0, TimeSpan.Zero);
+        private DateTimeOffset _now = DateTimeOffset.UtcNow;
 
         public override DateTimeOffset GetUtcNow() => _now;
 
@@ -152,8 +152,21 @@ internal static class GrantAuthorityTests
             Clock = new TestClock();
             Machine = new TestMachine(Path.Combine(parent, "gx-" + Guid.NewGuid().ToString("N")[..8]), true, clock: Clock);
             Mono = new FakeMonotonic();
+
+            // The state the authority checks assertions against: an admin key (the first one enrolled) and an ordinary key.
+            AdminKey = TestAuthenticator.ES256();
+            UserKey = TestAuthenticator.ES256();
+            Db = StateDatabase.InFolder(Path.Combine(parent, "st-" + Guid.NewGuid().ToString("N")[..8]));
+            TestState.Add(Db, AdminKey.Record("localhost", "admin-key") with { Created = DateTimeOffset.UtcNow });
+            TestState.Add(Db, UserKey.Record("localhost", "user-key") with { Created = DateTimeOffset.UtcNow });
             Wire();
         }
+
+        public TestAuthenticator AdminKey { get; }
+
+        public TestAuthenticator UserKey { get; }
+
+        public StateDatabase Db { get; }
 
         public TestClock Clock { get; }
 
@@ -176,6 +189,7 @@ internal static class GrantAuthorityTests
         private void Wire()
         {
             Machine.Deployment.Authority.LeaseDuration = _lease;
+            Machine.Deployment.Authority.Verifier = new ManifestApprovalVerifier(Db);
             Link = new FlakyAuthority(Machine.Deployment.Authority);
             Gate = new LaunchGate();
             Host = new HostAuthorization(Link, Machine.Deployment.MachineKey, Machine.HostName, Machine.Deployment.HostConfig, Gate, Machine.Deployment.Authority.Offer, Clock, null, Mono);
@@ -191,13 +205,40 @@ internal static class GrantAuthorityTests
 
         public LaunchRequest Req(string? id = null) => IdentityTests.Sample(id ?? "gr-" + Interlocked.Increment(ref _ids), Clock.GetUtcNow());
 
-        public Task<GrantApproval> Approve(string scope, int minutes, bool approve = true, LaunchRequest? request = null)
-            => Host.ApproveGrantAsync(request ?? Req(), scope, () => approve ? ApprovalDecision.Allow("approved with passkey key-one", minutes) : ApprovalDecision.Deny("test denied"), CancellationToken.None);
+        /// <summary>A passkey assertion over <paramref name="text" /> (plus the page-issued line, as the page adds it) for the reuse <paramref name="minutes" />.</summary>
+        public ApprovalEvidence Sign(TestAuthenticator who, string text, int minutes)
+        {
+            string nonce = "nonce-" + Guid.NewGuid().ToString("N")[..8];
+            string full = text + "\n" + ApprovalSummary.IssuedLine(Clock.GetUtcNow());
+
+            return new ApprovalEvidence(nonce, full, who.Assert(ReuseBinding.Challenge(RequestBinding.Compute(nonce, full), minutes), TestState.Origin, "localhost", TestState.NextCount()));
+        }
+
+        /// <summary>The text an approve page carries for this scope and security revision, as the program builds it.</summary>
+        public static string ApproveText(string scope, int revision) => string.Join('\n', GrantEvidence.ApproveLines(revision, scope)) + "\n" + ApprovalSummary.RequestIdPrefix + scope;
+
+        public Task<GrantApproval> Approve(string scope, int minutes, bool approve = true, LaunchRequest? request = null, TestAuthenticator? who = null, string? textScope = null, int? textRevision = null, bool noEvidence = false)
+            => Host.ApproveGrantAsync(request ?? Req(), scope, () => approve
+                ? ApprovalDecision.Allow("approved with passkey key-one", minutes, minutes > 0 && !noEvidence ? Sign(who ?? UserKey, ApproveText(textScope ?? scope, textRevision ?? Host.KnownRevision ?? 1), minutes) : null)
+                : ApprovalDecision.Deny("test denied"), CancellationToken.None);
 
         public Task<GrantUse> Use(string scope, LaunchRequest? request = null) => Host.TryUseGrantAsync(request ?? Req(), scope, CancellationToken.None);
 
-        public GrantResponse Admin(string operation, string grantId, int? minutes = null, bool indefinite = false, string? requestId = null)
-            => Authority.AdminGrant(new GrantAdminCommand(requestId ?? "adm-" + Interlocked.Increment(ref _ids), operation, grantId, minutes, indefinite, null, "test admin"));
+        /// <summary>An admin change as the admin command makes it: the new end fixed up front, the page text signed by an admin key.</summary>
+        public GrantResponse Admin(string operation, string grantId, int? minutes = null, bool indefinite = false, string? requestId = null, TestAuthenticator? who = null, int? expectedRevision = null)
+            => Authority.AdminGrant(Command(operation, grantId, minutes, indefinite, requestId, who, expectedRevision));
+
+        public GrantAdminCommand Command(string operation, string grantId, int? minutes = null, bool indefinite = false, string? requestId = null, TestAuthenticator? who = null, int? expectedRevision = null, DateTimeOffset? endOverride = null)
+        {
+            GrantRecord? grant = Store.FindGrant(grantId);
+            DateTimeOffset now = Clock.GetUtcNow();
+            DateTimeOffset? newEnd = operation == GrantOps.Revoke || indefinite || minutes is not >= 1 or > 1440 || grant is null ? null
+                : operation == GrantOps.Extend ? grant.Expires?.AddMinutes(minutes.Value) : now.AddMinutes(minutes.Value);
+            newEnd = endOverride ?? newEnd;
+            ApprovalEvidence? evidence = grant is null ? null : Sign(who ?? AdminKey, "Admin change to a grant\n" + GrantEvidence.AdminLines(operation, grant, grant.Revision + 1, newEnd), 0);
+
+            return new GrantAdminCommand(requestId ?? "adm-" + Interlocked.Increment(ref _ids), operation, grantId, minutes, indefinite, expectedRevision, "test admin", newEnd, evidence);
+        }
 
         public async Task<HostAuthorization.Reconciliation> Start() => await Host.ReconcileAsync();
 
@@ -220,6 +261,7 @@ internal static class GrantAuthorityTests
             await Leases(check, parent);
             await Reconnection(check, parent);
             await Tampering(check, parent);
+            await Evidence(check, parent);
             await Atomicity(check, parent);
             await AdminGate(check, parent);
             await KeyHolding(check, parent);
@@ -565,13 +607,15 @@ internal static class GrantAuthorityTests
         LaunchRequest expired = fx.Req("tamper-expired") with { Created = fx.Clock.GetUtcNow().AddHours(-2), Expires = fx.Clock.GetUtcNow().AddHours(-1) };
         check((await fx.Authority.GrantAsync(GrantEnvelope.Create(GrantOps.Use, expired, S1, fx.Machine.HostName, machineKey))) is { ReasonCode: ReasonCodes.InvalidRequest }, "authority: an expired request gets nothing");
 
-        // Replay of a request id: the committed answer; another request under the same id is refused.
-        GrantEnvelope first = GrantEnvelope.Create(GrantOps.Use, fx.Req("replay-1"), S1, fx.Machine.HostName, machineKey);
+        // A use is a read of the present state: evaluated each time, never stored, so a replay cannot outlive a revocation (L2) and nothing grows with use (L6).
+        GrantApproval replayGrant = await fx.Approve(Scope("replay"), 60);
+        GrantEnvelope first = GrantEnvelope.Create(GrantOps.Use, fx.Req("replay-1"), Scope("replay"), fx.Machine.HostName, machineKey);
         GrantResponse one = await fx.Authority.GrantAsync(first);
         GrantResponse two = await fx.Authority.GrantAsync(first);
-        check(one.Outcome == GrantOps.Granted && one.ToJson() == two.ToJson() && fx.Store.Audit().Count(entry => entry.Event == "grant-use" && entry.RequestId == "replay-1") == 1, "replay: the same envelope again returns the stored answer and records one use");
-        GrantEnvelope other = GrantEnvelope.Create(GrantOps.Use, fx.Req("replay-1") with { Reason = "something else" }, S1, fx.Machine.HostName, machineKey);
-        check((await fx.Authority.GrantAsync(other)) is { Outcome: GrantOps.Denied, ReasonCode: ReasonCodes.RequestIdReused }, "replay: a different request under the same id is refused");
+        check(one.Outcome == GrantOps.Granted && two.Outcome == GrantOps.Granted && fx.Store.Audit().Count(entry => entry.Event == "grant-use" && entry.RequestId == "replay-1") >= 1 && fx.Store.GetProcessedGrant("replay-1") is null, "replay: a use is evaluated each time (audited, never stored)");
+        fx.Admin(GrantOps.Revoke, replayGrant.GrantId!);
+        GrantResponse replayed = await fx.Authority.GrantAsync(first);
+        check(replayed.Outcome == GrantOps.None && fx.Store.GetProcessedGrant("replay-1") is null, "replay: the same envelope after a revocation is not granted (no stored answer is replayed)");
 
         // Responses (authority to host).
         fx.Link.TamperGrant = r => r with { Signature = [.. r.Signature.Select((b, i) => i == 0 ? (byte)(b ^ 0x80) : b)] };
@@ -695,6 +739,27 @@ internal static class GrantAuthorityTests
             migrated.AddGrant("m1", machine.Fingerprint, S1, null);
             check(migrated.Grants().Count == 1 && migrated.ActiveGrants(machine.Fingerprint).SequenceEqual(["m1"]), "migration: the new grants table works");
         }
+
+        // Schema 2 (grants without approval evidence) is migrated too: its rows are dropped, as they would be ignored anyway.
+        string folder2 = Path.Combine(parent, "migrate2-" + Guid.NewGuid().ToString("N")[..6]);
+        using (TestMachine machine = new(folder2))
+        {
+            string path = machine.Deployment.Store.FilePath;
+            SqliteConnection.ClearAllPools();
+            using (SqliteConnection connection = new("Data Source=" + path + ";Pooling=False"))
+            {
+                connection.Open();
+                using SqliteCommand command = connection.CreateCommand();
+                command.CommandText = "DROP TABLE grants;"
+                    + "CREATE TABLE grants (id TEXT PRIMARY KEY NOT NULL, fingerprint TEXT NOT NULL, scope_key TEXT NOT NULL, program TEXT NOT NULL, working_directory TEXT NOT NULL, secret_names TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL, expires TEXT, grant_revision INTEGER NOT NULL, security_revision INTEGER NOT NULL, status TEXT NOT NULL, approved_by TEXT NOT NULL, revoked TEXT);"
+                    + "INSERT INTO grants VALUES ('old', '" + machine.Fingerprint + "', '" + S1 + "', 'p', 'd', 'N', '2026-01-01T00:00:00.0000000Z', '2026-01-01T00:00:00.0000000Z', NULL, 1, 1, 'active', 'x', NULL);"
+                    + "UPDATE schema_version SET version = 2;";
+                command.ExecuteNonQuery();
+            }
+
+            AuthorityStore migrated = AuthorityStore.InFolder(folder2);
+            check(migrated.Grants().Count == 0 && Version(path) == AuthorityStore.SchemaVersion && migrated.Machines().Count == 1, "migration: a schema 2 authority.db is migrated (machines kept, grants without evidence dropped)");
+        }
     }
 
     private static long Version(string path)
@@ -717,6 +782,197 @@ internal static class GrantAuthorityTests
         }
 
         return count;
+    }
+
+    // ---- grant scope, evidence and the held key's binding (security review H1, H2, L1, L5, L6) ----
+
+    /// <summary>Writes authority.db behind the program's back, as another process of the same user could.</summary>
+    private static void Sql(Fixture fx, string text, params (string Name, object? Value)[] args)
+    {
+        SqliteConnection.ClearAllPools();
+        using SqliteConnection connection = new("Data Source=" + fx.Store.FilePath + ";Pooling=False");
+        connection.Open();
+        using SqliteCommand command = connection.CreateCommand();
+        command.CommandText = text;
+        foreach ((string name, object? value) in args)
+        {
+            command.Parameters.AddWithValue(name, value ?? DBNull.Value);
+        }
+
+        command.ExecuteNonQuery();
+        SqliteConnection.ClearAllPools();
+    }
+
+    private static async Task Evidence(Action<bool, string> check, string parent)
+    {
+        // H1: the scope of a grant covers every argument (inline code too), the machine and the request fingerprint; not the reason.
+        string fp = new('A', 64);
+        string key = new('B', 64);
+        string baseScope = GrantEvidence.Scope(fp, key, ["-c", "print(1)"]);
+        check(GrantOps.IsScopeKey(baseScope) && baseScope == GrantEvidence.Scope(fp, key, ["-c", "print(1)"]), "scope: a grant scope is a 64-digit key and the same inputs give the same key");
+        check(baseScope != GrantEvidence.Scope(fp, key, ["-c", "print(2)"]) && baseScope != GrantEvidence.Scope(fp, key, ["-c"]) && baseScope != GrantEvidence.Scope(fp, key, ["-c", "print(1)", "x"]), "scope: other inline code (python -c, bash -c, node -e) or other arguments are another scope");
+        check(GrantEvidence.Scope(fp, key, ["a b"]) != GrantEvidence.Scope(fp, key, ["a", "b"]) && GrantEvidence.Scope(fp, key, ["ab", ""]) != GrantEvidence.Scope(fp, key, ["a", "b"]), "scope: the argument boundaries count (no two lists give one key)");
+        check(baseScope != GrantEvidence.Scope(new string('C', 64), key, ["-c", "print(1)"]) && baseScope != GrantEvidence.Scope(fp, new string('D', 64), ["-c", "print(1)"]), "scope: another machine or another request fingerprint is another scope");
+
+        // H2: the authority believes a grant only when a person's assertion backs its present state.
+        using (Fixture fx = new(parent))
+        {
+            await fx.Start();
+            string machine = fx.Fingerprint;
+
+            // A planted row (no evidence) is no grant.
+            fx.Store.AddGrant("planted", machine, Scope("planted"), null);
+            check((await fx.Use(Scope("planted"))).Kind == GrantUseKind.NoGrant && fx.Store.Audit().Any(entry => entry.Event == "grant-ignored" && entry.Detail.Contains("planted", StringComparison.Ordinal)), "evidence: a row written by anything but an approval (no assertion) is ignored, and says so in the audit");
+
+            // A row re-scoped behind the program's back.
+            GrantApproval made = await fx.Approve(S1, 60);
+            check((await fx.Use(S1)).Kind == GrantUseKind.Granted, "evidence: a grant made by a person's approval is used");
+            Sql(fx, "UPDATE grants SET scope_key = $scope WHERE id = $id", ("$scope", S2), ("$id", made.GrantId));
+            check((await fx.Use(S2)).Kind == GrantUseKind.NoGrant && (await fx.Use(S1)).Kind == GrantUseKind.NoGrant, "evidence: a grant whose scope was changed in the database covers neither scope");
+            Sql(fx, "UPDATE grants SET scope_key = $scope WHERE id = $id", ("$scope", S1), ("$id", made.GrantId));
+            check((await fx.Use(S1)).Kind == GrantUseKind.Granted, "evidence: put back as it was, the row verifies again (the evidence is the only thing that counts)");
+
+            // Stretched without the admin passkey.
+            Sql(fx, "UPDATE grants SET expires = NULL WHERE id = $id", ("$id", made.GrantId));
+            check((await fx.Use(S1)).Kind == GrantUseKind.NoGrant, "evidence: an end removed in the database (an extension with no admin passkey) makes the grant void");
+            Sql(fx, "UPDATE grants SET expires = $end WHERE id = $id", ("$end", CanonicalJson.Time(fx.Clock.GetUtcNow().AddDays(30))), ("$id", made.GrantId));
+            check((await fx.Use(S1)).Kind == GrantUseKind.NoGrant, "evidence: a later end written in the database makes the grant void");
+        }
+
+        // Revoked and revived.
+        using (Fixture fx = new(parent))
+        {
+            await fx.Start();
+            GrantApproval made = await fx.Approve(S1, 60);
+            fx.Admin(GrantOps.Revoke, made.GrantId!);
+            Sql(fx, "UPDATE grants SET status = 'active' WHERE id = $id", ("$id", made.GrantId));
+            check((await fx.Use(S1)).Kind == GrantUseKind.NoGrant, "evidence: a revoked grant set active again in the database stays void (a revocation takes its evidence with it)");
+        }
+
+        // Machine revision bump, then a row revived by hand.
+        using (Fixture fx = new(parent))
+        {
+            await fx.Start();
+            GrantApproval made = await fx.Approve(S1, 60);
+            fx.Store.Disable(fx.Fingerprint, "test");
+            fx.Store.Enable(fx.Fingerprint, "test");
+            Sql(fx, "UPDATE grants SET status = 'active', security_revision = $rev WHERE id = $id", ("$rev", fx.Store.Find(fx.Fingerprint)!.SecurityRevision), ("$id", made.GrantId));
+            await fx.Host.PumpAsync();
+            check((await fx.Use(S1)).Kind == GrantUseKind.NoGrant, "evidence: a grant invalidated by a revision change and revived in the database stays void (its assertion names the old revision)");
+        }
+
+        // Evidence moved between rows.
+        using (Fixture fx = new(parent))
+        {
+            await fx.Start();
+            GrantApproval a = await fx.Approve(S1, 60);
+            GrantApproval b = await fx.Approve(S2, 60);
+            GrantRecord rowA = fx.Store.FindGrant(a.GrantId!)!;
+            Sql(fx, "UPDATE grants SET evidence_nonce = $n, evidence_text = $t, evidence_proof = $p WHERE id = $id", ("$n", rowA.Evidence!.Nonce), ("$t", rowA.Evidence.Text), ("$p", rowA.Evidence.Proof), ("$id", b.GrantId));
+            check((await fx.Use(S2)).Kind == GrantUseKind.NoGrant && (await fx.Use(S1)).Kind == GrantUseKind.Granted, "evidence: the assertion of one grant does not back another scope");
+        }
+
+        // Approvals that do not carry a valid assertion make no grant.
+        using (Fixture fx = new(parent))
+        {
+            await fx.Start();
+            using TestAuthenticator stranger = TestAuthenticator.ES256();
+            GrantApproval wrongScope = await fx.Approve(S1, 10, textScope: S2);
+            GrantApproval wrongRevision = await fx.Approve(S1, 10, textRevision: 99);
+            GrantApproval none = await fx.Approve(S1, 10, noEvidence: true);
+            GrantApproval unknownKey = await fx.Approve(S1, 10, who: stranger);
+            check(!wrongScope.Granted && !wrongRevision.Granted && !none.Granted && !unknownKey.Granted && fx.Store.Grants().Count == 0, "evidence: an approval whose signed text names another scope or revision, has no assertion, or is signed by a key that is not enrolled makes no grant");
+            check(fx.Store.Audit().Count(entry => entry.Event == "grant-denied") >= 4, "evidence: each refusal is audited");
+        }
+
+        // Extensions, renewals and revocations need an admin assertion that says exactly this change.
+        using (Fixture fx = new(parent))
+        {
+            await fx.Start();
+            GrantApproval made = await fx.Approve(S1, 60);
+            string id = made.GrantId!;
+            GrantRecord before = fx.Store.FindGrant(id)!;
+            check(fx.Admin(GrantOps.Extend, id, 30, who: fx.UserKey) is { Outcome: GrantOps.Denied, ReasonCode: GrantReasons.BadEvidence } && fx.Store.FindGrant(id) == before, "admin evidence: a change signed by a key that is not an admin key is refused and changes nothing");
+            GrantAdminCommand good = fx.Command(GrantOps.Extend, id, 30);
+            check(fx.Authority.AdminGrant(good with { NewEnd = good.NewEnd!.Value.AddDays(1) }) is { ReasonCode: GrantReasons.BadEvidence } && fx.Authority.AdminGrant(good with { Evidence = null, RequestId = "adm-none" }) is { ReasonCode: GrantReasons.NoEvidence } && fx.Store.FindGrant(id) == before,
+                "admin evidence: an end other than the one the signed page showed, or no assertion, is refused");
+            GrantApproval other = await fx.Approve(S2, 60);
+            GrantAdminCommand forOther = fx.Command(GrantOps.Extend, other.GrantId!, 30);
+            check(fx.Authority.AdminGrant(forOther with { GrantId = id, RequestId = "adm-swap" }) is { ReasonCode: GrantReasons.BadEvidence } && fx.Store.FindGrant(id) == before, "admin evidence: an admin assertion for one grant does not change another");
+            GrantResponse applied = fx.Authority.AdminGrant(good);
+            check(applied is { Outcome: GrantOps.Extended } && fx.Store.FindGrant(id) is { Revision: 2, Evidence.Kind: GrantEvidence.AdminKind } && (await fx.Use(S1)).Kind == GrantUseKind.Granted, "admin evidence: the right assertion extends the grant, the row then carries the admin evidence, and it verifies on use");
+            check(applied.SecurityRevision == fx.Store.Find(fx.Fingerprint)!.SecurityRevision, "admin answer: the security revision in it is the machine's, read where the change was applied");
+            check(fx.Admin(GrantOps.Revoke, id, who: fx.UserKey) is { ReasonCode: GrantReasons.BadEvidence } && fx.Store.FindGrant(id) is { Status: "active" }, "admin evidence: a revocation needs the admin assertion too");
+        }
+
+        // The held key is bound to what was true at the tap.
+        using (Fixture fx = new(parent))
+        {
+            await fx.Start();
+            byte[] held = await Holding(fx, S1);
+            string id = fx.Host.Keys.GrantId!;
+            check(fx.Host.Keys.Binding is { } bound && bound.ScopeKey == S1 && bound.Revision == 1 && bound.Expires is not null && fx.Host.BorrowKey(id, S2) is null && fx.Host.Keys.IsHeld, "key binding: the key is bound to the grant's scope, revision and end at the tap, and is lent to no other scope");
+            check(GC.GetGeneration(held) == GC.MaxGeneration && fx.Host.BorrowKey(id, S1) is { } lent && GC.GetGeneration(lent.Output) == GC.MaxGeneration, "key memory: the held bytes and each copy lent to a run are in the pinned object heap (the collector never moves them)");
+            fx.Admin(GrantOps.Extend, id, 30);
+            check(fx.Host.Keys.IsHeld, "key binding: an extension the host has not seen yet changes nothing about the held key");
+            check((await fx.Use(S1)).Kind == GrantUseKind.Granted && !fx.Host.Keys.IsHeld && held.All(b => b == 0) && fx.Host.Keys.LastDropReason == "grant changed", "key binding: once the host learns that the grant changed (even by an admin) the key is dropped and zeroed, and the next run taps again");
+        }
+
+        // L1: an error of the authority is not "offline".
+        using (Fixture fx = new(parent))
+        {
+            await fx.Start();
+            await fx.Approve(S1, 60);
+            HostAuthorization direct = new(fx.Authority, fx.Machine.Deployment.MachineKey, fx.Machine.HostName, fx.Machine.Deployment.HostConfig, new LaunchGate(), fx.Authority.Offer, fx.Clock, null, fx.Mono);
+            await direct.ReconcileAsync();
+            check((await direct.TryUseGrantAsync(fx.Req(), S1, CancellationToken.None)).Kind == GrantUseKind.Granted, "local errors: against the local authority a synchronized grant is used online");
+            fx.Store.Fault = name =>
+            {
+                if (name == "before-commit")
+                {
+                    throw new IOException("the database failed (test)");
+                }
+            };
+            GrantUse failing = await direct.TryUseGrantAsync(fx.Req(), S1, CancellationToken.None);
+            fx.Store.Fault = name =>
+            {
+                if (name == "before-commit")
+                {
+                    throw new InvalidOperationException("an error that is not a transport failure (test)");
+                }
+            };
+            GrantUse flaky = await fx.Use(S1);
+            fx.Store.Fault = null;
+            check(failing.Kind == GrantUseKind.Denied && failing.Message.Contains("failed to answer", StringComparison.Ordinal), "local errors: a database error of the local authority is a refusal, never 'offline' (no use of an earlier answer) (" + failing.Kind + ")");
+            check(flaky.Kind == GrantUseKind.Denied, "local errors: nor is a non-transport error of any authority (" + flaky.Kind + ")");
+        }
+
+        // L3: a check-in that cannot be checked takes the lease and the key.
+        using (Fixture fx = new(parent))
+        {
+            await fx.Start();
+            byte[] held = await Holding(fx, S1);
+            fx.Link.TamperReconcile = r => r with { Signature = null! };
+            await fx.Host.ReconcileAsync();
+            check(!fx.Host.Lease.IsValid && !fx.Host.Keys.IsHeld && held.All(b => b == 0), "check-in: an answer that cannot be checked destroys the lease and the held key");
+        }
+
+        // L6: stored answers are pruned.
+        using (Fixture fx = new(parent))
+        {
+            await fx.Start();
+            await fx.Approve(Scope("old"), 10, request: fx.Req("keep-old"));
+            check(fx.Store.GetProcessedGrant("keep-old") is not null, "prune: the answer of a durable request is kept for retries");
+            fx.Clock.Advance(AuthorityStore.ProcessedGrantRetention + TimeSpan.FromMinutes(5));
+            await fx.Approve(Scope("new"), 10, request: fx.Req("keep-new"));
+            check(fx.Store.GetProcessedGrant("keep-old") is null && fx.Store.GetProcessedGrant("keep-new") is not null, "prune: answers older than the retention are removed when a new one is stored");
+            for (int i = 0; i < 5; i++)
+            {
+                await fx.Use(Scope("new"));
+            }
+
+            check(fx.Store.GetProcessedGrant("keep-new") is not null, "prune: uses store nothing, so the table does not grow with use");
+        }
     }
 
     // ---- the admin gate ----
@@ -745,7 +1001,7 @@ internal static class GrantAuthorityTests
             Interlocked.Increment(ref announced);
             line.TrySetResult(text);
         }, TimeSpan.Zero));
-        AdminContext context = new(fx.Store, fx.Machine.Deployment.Keys, fx.Machine.Deployment.HostConfig, fx.Fingerprint, target, target, new AuditLog(db), new StringWriter(), fx.Clock);
+        AdminContext context = new(fx.Store, fx.Machine.Deployment.Keys, fx.Machine.Deployment.HostConfig, fx.Fingerprint, target, target, new AuditLog(db), new StringWriter(), fx.Clock, new ManifestApprovalVerifier(db));
         Task<(int, string)> task = Task.Run(() => AdminGrantCommand.Run(command, context));
         if (await Task.WhenAny(line.Task, task, Task.Delay(TimeSpan.FromSeconds(20))) == line.Task && signer is not null)
         {
@@ -765,12 +1021,10 @@ internal static class GrantAuthorityTests
 
     private static async Task AdminGate(Action<bool, string> check, string parent)
     {
-        using TestAuthenticator laptop = TestAuthenticator.ES256();
-        using TestAuthenticator phone = TestAuthenticator.ES256();
-        StateDatabase db = StateDatabase.InFolder(Path.Combine(parent, "admin-state"));
-        TestState.Add(db, laptop.Record("localhost", "laptop") with { Created = new DateTimeOffset(2026, 11, 1, 10, 0, 0, TimeSpan.Zero) });
-        TestState.Add(db, phone.Record("localhost", "phone") with { Created = new DateTimeOffset(2026, 11, 1, 10, 0, 0, TimeSpan.Zero) });
         using Fixture fx = new(parent);
+        TestAuthenticator laptop = fx.AdminKey;
+        TestAuthenticator phone = fx.UserKey;
+        StateDatabase db = fx.Db;
         await fx.Start();
         GrantApproval made = await fx.Approve(S1, 60);
         string id = made.GrantId!;
@@ -782,9 +1036,9 @@ internal static class GrantAuthorityTests
         check(wrong.Result is { Code: RunCommand.Denied } && wrong.Status == 403 && fx.Store.FindGrant(id) is { Revision: 1 }, "admin grant extend: a key that is not an admin key is refused (403), nothing changes");
         PageResult ok = await RunGrantAdmin(fx, db, Cmd(GrantAdminAction.Extend, 30, grant: id[..6]), laptop);
         string text = WebUtility.HtmlDecode(ok.Html);
-        check(ok.Result is { Code: 0 } && fx.Store.FindGrant(id) is { Revision: 2 } extended && extended.Expires == fx.Clock.GetUtcNow().AddMinutes(90), "admin grant extend: the admin key's tap extends it (found by a prefix of its id) (" + ok.Result?.Detail + ")");
+        check(ok.Result is { Code: 0 } && fx.Store.FindGrant(id) is { Revision: 2 } extended && extended.Expires == fx.Clock.GetUtcNow().AddMinutes(90), "admin grant extend: the admin key's tap extends it (found by a prefix of its id) (" + ok.Result?.Detail + string.Join(" | ", fx.Store.Audit().Where(e => e.Event.StartsWith("grant", StringComparison.Ordinal)).Select(e => e.Event + ":" + e.Detail)) + ")");
         check(text.Contains("extend this grant by 30 minutes", StringComparison.Ordinal) && text.Contains(id, StringComparison.Ordinal) && text.Contains(KeyIdentity.Display(fx.Fingerprint), StringComparison.Ordinal) && text.Contains(fx.Machine.HostName, StringComparison.Ordinal), "admin grant extend: the page (which the passkey signs) shows the action, the grant, the machine's fingerprint and host name");
-        check(fx.Store.Audit().Any(entry => entry.Event == "grant-extended" && entry.Detail.Contains("admin passkey laptop", StringComparison.Ordinal)), "admin grant extend: the authority audit names the admin key that tapped");
+        check(fx.Store.Audit().Any(entry => entry.Event == "grant-extended" && entry.Detail.Contains("admin passkey admin-key", StringComparison.Ordinal)), "admin grant extend: the authority audit names the admin key that tapped");
 
         PageResult notYet = await RunGrantAdmin(fx, db, Cmd(GrantAdminAction.Renew, 30), laptop);
         check(notYet.Result is { Code: RunCommand.Denied } && notYet.Announced == 0, "admin grant renew: a grant that has not ended is refused before any page (" + notYet.Result?.Detail + ")");
@@ -799,9 +1053,8 @@ internal static class GrantAuthorityTests
         PageResult revoke = await RunGrantAdmin(fx, db, Cmd(GrantAdminAction.Revoke), laptop);
         check(revoke.Result is { Code: 0 } && fx.Store.FindGrant(id) is { Status: "revoked" } && WebUtility.HtmlDecode(revoke.Html).Contains("revoke this grant", StringComparison.Ordinal), "admin grant revoke: the tap revokes it and the page named exactly that action");
 
-        fx.Clock.Advance(TimeSpan.FromDays(1));
         GrantApproval short1 = await fx.Approve(Scope("short"), 10);
-        fx.Clock.Advance(TimeSpan.FromMinutes(30));
+        fx.Clock.Advance(TimeSpan.FromMinutes(11));
         PageResult renew = await RunGrantAdmin(fx, db, Cmd(GrantAdminAction.Renew, 15, grant: short1.GrantId), laptop);
         check(renew.Result is { Code: 0 } && fx.Store.FindGrant(short1.GrantId!) is { } renewed && renewed.Expires == fx.Clock.GetUtcNow().AddMinutes(15) && WebUtility.HtmlDecode(renew.Html).Contains("renew this ended grant for 15 minutes from now", StringComparison.Ordinal), "admin grant renew: an ended grant is renewed from now after the tap");
         PageResult indefinite = await RunGrantAdmin(fx, db, Cmd(GrantAdminAction.Extend, indefinite: true, grant: short1.GrantId), laptop);
@@ -822,7 +1075,7 @@ internal static class GrantAuthorityTests
         GrantApproval made = await fx.Approve(scope, minutes);
         await fx.Use(scope);
         using Unlock tapped = new("test-credential", [.. Enumerable.Range(1, 32).Select(i => (byte)(i * 5))]);
-        fx.Host.HoldKey(made.GrantId!, tapped);
+        fx.Host.HoldKey(made.GrantId!, scope, tapped);
 
         return fx.Host.Keys.HeldBytes!;
     }
@@ -833,17 +1086,17 @@ internal static class GrantAuthorityTests
         {
             await fx.Start();
             check(!fx.Host.Keys.IsHeld, "key: nothing is held before a tap");
-            fx.Host.HoldKey("g-unknown", new Unlock("c", [1, 2, 3]));
+            fx.Host.HoldKey("g-unknown", S1, new Unlock("c", [1, 2, 3]));
             check(!fx.Host.Keys.IsHeld, "key: a key is not held for a grant the host does not vouch for");
             byte[] held = await Holding(fx, S1);
             string id = fx.Host.Keys.GrantId!;
             check(fx.Host.Keys.IsHeld && id == fx.Host.SyncedGrants[0].GrantId, "key: after a tap under a valid grant the host holds the key for that grant");
-            using (Unlock lent = fx.Host.BorrowKey(id)!)
+            using (Unlock lent = fx.Host.BorrowKey(id, S1)!)
             {
                 check(lent.Output.SequenceEqual(held) && !ReferenceEquals(lent.Output, held), "key: a run is lent a copy");
             }
 
-            check(held.Any(b => b != 0) && fx.Host.BorrowKey("g-other") is null && fx.Host.Keys.IsHeld, "key: disposing the copy leaves the held key intact; another grant's run is lent nothing");
+            check(held.Any(b => b != 0) && fx.Host.BorrowKey("g-other", S1) is null && fx.Host.BorrowKey(id, S2) is null && fx.Host.Keys.IsHeld, "key: disposing the copy leaves the held key intact; another grant's run is lent nothing");
             fx.Host.DropKey("test");
             check(!fx.Host.Keys.IsHeld && held.All(b => b == 0), "key: dropping zeroes the held bytes");
         }
@@ -855,7 +1108,7 @@ internal static class GrantAuthorityTests
             byte[] held = await Holding(fx, S1, 30);
             string id = fx.Host.Keys.GrantId!;
             fx.Clock.Advance(TimeSpan.FromMinutes(31));
-            check(fx.Host.BorrowKey(id) is null && !fx.Host.Keys.IsHeld && held.All(b => b == 0) && fx.Host.Keys.LastDropReason == "grant expired", "drop: when the grant ends the key is dropped and zeroed (and a stale key is never lent)");
+            check(fx.Host.BorrowKey(id, S1) is null && !fx.Host.Keys.IsHeld && held.All(b => b == 0) && fx.Host.Keys.LastDropReason == "grant expired", "drop: when the grant ends the key is dropped and zeroed (and a stale key is never lent)");
         }
 
         using (Fixture fx = new(parent))
@@ -915,9 +1168,9 @@ internal static class GrantAuthorityTests
             byte[] held = await Holding(fx, S1);
             fx.Link.Offline = true;
             fx.Mono.Advance(TimeSpan.FromMinutes(9));
-            check(fx.Host.BorrowKey(fx.Host.Keys.GrantId!) is { } within && within.Output.Length == 32, "lease: within the lease the held key is still lent while the authority cannot be reached");
+            check(fx.Host.BorrowKey(fx.Host.Keys.GrantId!, S1) is { } within && within.Output.Length == 32, "lease: within the lease the held key is still lent while the authority cannot be reached");
             fx.Mono.Advance(TimeSpan.FromMinutes(2));
-            check(fx.Host.BorrowKey(fx.Host.Keys.GrantId ?? "") is null && !fx.Host.Keys.IsHeld && held.All(b => b == 0) && fx.Host.Keys.LastDropReason == "lease ended", "drop: when the lease ends the key is dropped and zeroed");
+            check(fx.Host.BorrowKey(fx.Host.Keys.GrantId ?? "", S1) is null && !fx.Host.Keys.IsHeld && held.All(b => b == 0) && fx.Host.Keys.LastDropReason == "lease ended", "drop: when the lease ends the key is dropped and zeroed");
         }
 
         // A restart holds nothing (the key lives only in the service's memory).
@@ -949,7 +1202,7 @@ internal static class GrantAuthorityTests
     private static string Marker(HostServiceTests.Rig rig) => HostServiceTests.Marker(rig);
 
     /// <summary>Approves; chooses a grant time only while <see cref="Minutes" /> is set (as a person would on the approve page), and counts the asks.</summary>
-    private sealed class Chooser(int minutes, bool approve = true, bool unlock = false) : IApprover
+    private sealed class Chooser(int minutes, bool approve = true, bool unlock = false, TestAuthenticator? signer = null) : IApprover
     {
         public int Minutes { get; set; } = minutes;
 
@@ -965,7 +1218,16 @@ internal static class GrantAuthorityTests
             // A tap that releases the store key (PRF) hands over 32 bytes the test can recognise; no real secret is involved.
             Unlock? released = unlock && request.Unlock ? new Unlock("test-credential", [.. Enumerable.Range(1, 32).Select(i => (byte)(i * 7))]) : null;
 
-            return approve ? ApprovalDecision.Allow("approved", Minutes, null, released) : ApprovalDecision.Deny("test denied");
+            // A grant is backed by the assertion the person made over the page text (as the page makes it).
+            ApprovalEvidence? evidence = null;
+            if (approve && Minutes > 0 && signer is not null)
+            {
+                string text = ApprovalSummary.BuildMessage(request) + "\n" + ApprovalSummary.IssuedLine(DateTimeOffset.UtcNow);
+                string nonce = "svc-nonce-" + Guid.NewGuid().ToString("N")[..8];
+                evidence = new ApprovalEvidence(nonce, text, signer.Assert(ReuseBinding.Challenge(RequestBinding.Compute(nonce, text), Minutes), TestState.Origin, "localhost", TestState.NextCount()));
+            }
+
+            return approve ? ApprovalDecision.Allow("approved", Minutes, evidence, released) : ApprovalDecision.Deny("test denied");
         }
     }
 
@@ -975,19 +1237,32 @@ internal static class GrantAuthorityTests
 
         public int Calls;
 
-        public KeyRelease Obtain(ISecretSource store, ApprovalRequest request, CancellationToken cancel, Action<string> note, string? grantId = null)
+        public KeyRelease Obtain(ISecretSource store, ApprovalRequest request, CancellationToken cancel, Action<string> note, string? grantId = null, string? scopeKey = null)
         {
             Interlocked.Increment(ref Calls);
 
-            return refuse ? KeyRelease.Refused("test refusal") : _tap.Obtain(store, request, cancel, note, grantId);
+            return refuse ? KeyRelease.Refused("test refusal") : _tap.Obtain(store, request, cancel, note, grantId, scopeKey);
         }
+    }
+
+    /// <summary>An admin revoke as the admin command makes it, signed by <paramref name="who" /> (an admin key of the rig's state).</summary>
+    private static GrantResponse ServiceRevoke(HostServiceTests.Rig rig, TestAuthenticator who, string grantId, string requestId)
+    {
+        AuthorityStore store = rig.Machine.Deployment.Store;
+        GrantRecord grant = store.FindGrant(grantId)!;
+        string text = "Admin change to a grant\n" + GrantEvidence.AdminLines(GrantOps.Revoke, grant, grant.Revision + 1, null) + "\n" + ApprovalSummary.IssuedLine(DateTimeOffset.UtcNow);
+        string nonce = "svc-admin-" + Guid.NewGuid().ToString("N")[..8];
+        ApprovalEvidence evidence = new(nonce, text, who.Assert(ReuseBinding.Challenge(RequestBinding.Compute(nonce, text), 0), TestState.Origin, "localhost", TestState.NextCount()));
+
+        return rig.Machine.Deployment.Authority.AdminGrant(new GrantAdminCommand(requestId, GrantOps.Revoke, grantId, null, false, null, "test admin", null, evidence));
     }
 
     private static async Task ThroughTheService(Action<bool, string> check, string parent)
     {
+        using TestAuthenticator svcKey = TestAuthenticator.ES256();
         // approve makes a grant and launches nothing; run then needs no page decision for the same request.
-        Chooser approver = new(60);
-        using (HostServiceTests.Rig rig = new(parent, approver: () => approver))
+        Chooser approver = new(60, signer: svcKey);
+        using (HostServiceTests.Rig rig = new(parent, approver: () => approver, enrolled: svcKey))
         {
             string program = Show(rig);
             HostServiceTests.Raw approved = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program), path: "/v1/approve");
@@ -1000,25 +1275,25 @@ internal static class GrantAuthorityTests
             approver.Minutes = 0;
             HostServiceTests.Raw run = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program));
             check(run.Result is { Outcome: LaunchOutcome.Exited, ExitCode: 0 } && approver.Requests.Count == 1 && rig.Store.Reads == 1 && File.Exists(Marker(rig)) && run.Stderr.Contains("a grant covers this request", StringComparison.Ordinal) && !run.Stdout.Contains("Canary", StringComparison.Ordinal),
-                "service run: a request in the scope of the grant runs with no approval page decision (the approver was asked once, for approve) (" + run.Stderr.Trim() + ")");
+                "service run: a request in the scope of the grant runs with no approval page decision (the approver was asked once, for approve) (" + run.Stderr.Trim() + string.Join(" | ", rig.Machine.Deployment.Store.Audit().Where(e => e.Event.StartsWith("grant", StringComparison.Ordinal)).Select(e => e.Event + ":" + e.Detail)) + ")");
             check(new AuditLog(rig.State).TryRead(20, null, out rows, out _) && rows.Any(row => row.Event == "granted") && rig.Machine.Deployment.Store.Audit().Any(entry => entry.Event == "grant-use"), "service run: the use of the grant is audited by the host and by the authority");
 
-            // Other arguments do not matter (as for a saved approval); other secrets, program or folder do.
+            // A grant covers exactly one command line: another argument (a different target, or inline code after -c / -e) is another command.
             File.Delete(Marker(rig));
             HostServiceTests.Raw flagged = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program, ["--extra"]));
-            check(flagged.Result is { Outcome: LaunchOutcome.Exited } && approver.Requests.Count == 1, "service run: other arguments of the same program, secrets and folder are still the scope");
+            check(flagged.Result is { Outcome: LaunchOutcome.Exited } && approver.Requests.Count == 2, "service run: another argument of the same program, secrets and folder is not covered: the approval page decides (" + approver.Requests.Count + ")");
             HostServiceTests.Raw otherSecret = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program, pairs: [("TOKEN", "TOKEN"), ("OTHER_KEY", "OTHER_KEY")]));
-            check(approver.Requests.Count == 2 && otherSecret.Result is { Outcome: LaunchOutcome.Exited }, "service run: a request with another set of secrets is not covered: the approval page decides (" + approver.Requests.Count + " " + otherSecret.Result?.Outcome + " " + otherSecret.Stderr.Trim() + ")");
+            check(approver.Requests.Count == 3 && otherSecret.Result is { Outcome: LaunchOutcome.Exited }, "service run: a request with another set of secrets is not covered: the approval page decides (" + approver.Requests.Count + " " + otherSecret.Result?.Outcome + " " + otherSecret.Stderr.Trim() + ")");
             string second = rig.Script("second", "echo two", "echo two");
             HostServiceTests.Raw otherProgram = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, second));
-            check(approver.Requests.Count == 3 && otherProgram.Result is { Outcome: LaunchOutcome.Exited }, "service run: another program is not covered: the approval page decides");
+            check(approver.Requests.Count == 4 && otherProgram.Result is { Outcome: LaunchOutcome.Exited }, "service run: another program is not covered: the approval page decides");
             File.AppendAllText(rig.FileOf(Path.GetFileName(program)), OperatingSystem.IsWindows() ? "rem edited\r\n" : "# edited\n");
             HostServiceTests.Raw edited = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program));
-            check(approver.Requests.Count == 4 && edited.Result is { Outcome: LaunchOutcome.Exited }, "service run: the same script with other contents is not covered: the approval page decides");
+            check(approver.Requests.Count == 5 && edited.Result is { Outcome: LaunchOutcome.Exited }, "service run: the same script with other contents is not covered: the approval page decides");
 
             // Revocation: the next run asks again.
             string grantId = rig.Machine.Deployment.Store.Grants().First(grant => grant.Program == program).Id;
-            rig.Machine.Deployment.Authority.AdminGrant(new GrantAdminCommand("adm-svc-1", GrantOps.Revoke, grantId, null, false, null, "test admin"));
+            ServiceRevoke(rig, svcKey, grantId, "adm-svc-1");
             await rig.Service.Authorization.PumpAsync();
             int asked = approver.Requests.Count;
             File.WriteAllText(rig.FileOf(Path.GetFileName(program)), File.ReadAllText(rig.FileOf(Path.GetFileName(program))).Replace("rem edited\r\n", "", StringComparison.Ordinal).Replace("# edited\n", "", StringComparison.Ordinal));
@@ -1045,8 +1320,8 @@ internal static class GrantAuthorityTests
         // A store whose key needs a tap. The first run under a grant gets the key from one passkey tap (the page the person taps) and the service
         // holds it for that grant; every later run under it needs no tap and no page. It is dropped on every end of the grant and on a failed run.
         {
-            Chooser tapper = new(60, unlock: true);
-            HostServiceTests.Rig rig = new(parent, approver: () => tapper, needsUnlock: true);
+            Chooser tapper = new(60, unlock: true, signer: svcKey);
+            HostServiceTests.Rig rig = new(parent, approver: () => tapper, needsUnlock: true, enrolled: svcKey);
             try
             {
                 string program = Show(rig);
@@ -1058,12 +1333,14 @@ internal static class GrantAuthorityTests
 
                 HostServiceTests.Raw first = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program));
                 check(first.Result is { Outcome: LaunchOutcome.Exited, ExitCode: 0 } && tapper.Requests.Count == 2 && rig.Store.KeyedReads == 1 && tapper.Requests[1].Unlock && tapper.Requests[1].Reuse is null, "held key: the first run under the grant gets the key from one tap (the page asks for the unlock, offers no reuse) (" + first.Stderr.Trim() + ")");
-                check(first.Stderr.Contains(TapStoreKeyProvider.TapNote, StringComparison.Ordinal) && host.Keys.IsHeld && host.Keys.GrantId == grantId, "held key: it says in one line that this run needs a tap, and the service now holds the key for that grant");
+                check(first.Stderr.Contains("keep the secret store key", StringComparison.Ordinal) && !first.Stderr.Contains("does not replace that tap", StringComparison.Ordinal) && host.Keys.IsHeld && host.Keys.GrantId == grantId, "held key: it says in one line that this run needs a tap that makes the service keep the key, and the service now holds the key for that grant");
+                check(tapper.Requests[1].Heading == HeldStoreKeyProvider.KeepHeading && tapper.Requests[1].ExtraLines is { } keepLines && keepLines.Any(line => line.StartsWith("KEY HELD:", StringComparison.Ordinal) && line.Contains(grantId, StringComparison.Ordinal) && line.Contains("until 20", StringComparison.Ordinal) && line.Contains("ALL your secrets", StringComparison.Ordinal)),
+                    "held key: the page of the key-holding tap says plainly (in the text the passkey signs) that the service keeps the key for this grant until its end");
                 byte[] heldBytes = host.Keys.HeldBytes!;
 
                 File.Delete(Marker(rig));
                 HostServiceTests.Raw second = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program));
-                check(second.Result is { Outcome: LaunchOutcome.Exited, ExitCode: 0 } && tapper.Requests.Count == 2 && rig.Store.KeyedReads == 2 && File.Exists(Marker(rig)) && second.Stderr.Contains(HeldStoreKeyProvider.HeldNote, StringComparison.Ordinal) && !second.Stderr.Contains(TapStoreKeyProvider.TapNote, StringComparison.Ordinal),
+                check(second.Result is { Outcome: LaunchOutcome.Exited, ExitCode: 0 } && tapper.Requests.Count == 2 && rig.Store.KeyedReads == 2 && File.Exists(Marker(rig)) && second.Stderr.Contains(HeldStoreKeyProvider.HeldNote, StringComparison.Ordinal) && !second.Stderr.Contains("needs a passkey tap", StringComparison.Ordinal),
                     "held key: a later run under the grant needs no tap and no page, and still opens the store with the key (" + second.Stderr.Trim() + ")");
                 check(heldBytes.Any(b => b != 0) && ReferenceEquals(heldBytes, host.Keys.HeldBytes), "held key: running does not use up or zero the held copy (each run gets its own copy)");
                 check(!second.Stdout.Contains("test-credential", StringComparison.Ordinal) && !second.Stderr.Contains(Convert.ToHexString(heldBytes), StringComparison.OrdinalIgnoreCase) && !second.Stderr.Contains(Convert.ToBase64String(heldBytes), StringComparison.Ordinal), "held key: nothing printed shows the key");
@@ -1083,7 +1360,7 @@ internal static class GrantAuthorityTests
 
                 // Revoking the grant drops the key at once.
                 byte[] before = host.Keys.HeldBytes!;
-                rig.Machine.Deployment.Authority.AdminGrant(new GrantAdminCommand("adm-key-1", GrantOps.Revoke, grantId, null, false, null, "test admin"));
+                ServiceRevoke(rig, svcKey, grantId, "adm-key-1");
                 await host.PumpAsync();
                 check(!host.Keys.IsHeld && before.All(b => b == 0) && host.Keys.LastDropReason == "grant revoked", "held key: revoking the grant drops and zeroes the key");
                 int tapsAfter = tapper.Requests.Count;
@@ -1107,8 +1384,8 @@ internal static class GrantAuthorityTests
         }
 
         // The provider's refusal stops the run before anything is decrypted.
-        Chooser plain = new(60);
-        using (HostServiceTests.Rig rig = new(parent, approver: () => plain, keyProvider: approver => new CountingProvider(approver, refuse: true)))
+        Chooser plain = new(60, signer: svcKey);
+        using (HostServiceTests.Rig rig = new(parent, approver: () => plain, enrolled: svcKey, keyProvider: approver => new CountingProvider(approver, refuse: true)))
         {
             string program = Show(rig);
             await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program), path: "/v1/approve");
@@ -1119,16 +1396,16 @@ internal static class GrantAuthorityTests
 
         // Revocation applied by a connected host cancels a launch that waits for the tap and has not committed.
         HostServiceTests.CancelAwareApprover waiting = new();
-        FakeApprover maker = new(true, reuseMinutes: 60);
+        Chooser maker = new(60, signer: svcKey);
         int phase = 0;
-        using (HostServiceTests.Rig rig = new(parent, approver: () => Interlocked.Increment(ref phase) == 1 ? maker : waiting, needsUnlock: true))
+        using (HostServiceTests.Rig rig = new(parent, approver: () => Interlocked.Increment(ref phase) == 1 ? maker : waiting, needsUnlock: true, enrolled: svcKey))
         {
             string program = Show(rig);
             await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program), path: "/v1/approve");
             Task<HostServiceTests.Raw> pending = HostServiceTests.Post(rig, HostServiceTests.Req(rig, program));
             check(await HostServiceTests.WaitFor(() => waiting.Asked.IsSet), "revoke while waiting: the launch under the grant reached the tap");
             string grantId = rig.Machine.Deployment.Store.Grants()[0].Id;
-            rig.Machine.Deployment.Authority.AdminGrant(new GrantAdminCommand("adm-svc-2", GrantOps.Revoke, grantId, null, false, null, "test admin"));
+            ServiceRevoke(rig, svcKey, grantId, "adm-svc-2");
             await rig.Service.Authorization.PumpAsync();
             waiting.Release.Set();
             HostServiceTests.Raw result = await pending;
@@ -1160,8 +1437,8 @@ internal static class GrantAuthorityTests
             FlakyAuthority link = new(machine.Deployment.Authority);
             machine.Deployment.Link = link;
             FakeMonotonic mono = new();
-            Chooser tap = new(60);
-            using HostServiceTests.Rig rig = new(parent, approver: () => tap, machine: machine, monotonic: mono);
+            Chooser tap = new(60, signer: svcKey);
+            using HostServiceTests.Rig rig = new(parent, approver: () => tap, machine: machine, monotonic: mono, enrolled: svcKey);
             string program = Show(rig);
             await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program), path: "/v1/approve");
             tap.Minutes = 0;

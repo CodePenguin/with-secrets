@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 
@@ -106,6 +107,9 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
 
     /// <summary>The longest a host may go on using what it synchronized while it cannot reach the authority: the authority's policy (a provisional default of 15 minutes), sent to the host in each reconcile answer. A connected host applies a change at its next check-in.</summary>
     public TimeSpan LeaseDuration { get; set; } = TimeSpan.FromMinutes(15);
+
+    /// <summary>Checks the passkey assertions that back grants. Without one no grant is made or used (a grant counts only when a person's assertion backs its present state).</summary>
+    public IApprovalVerifier? Verifier { get; set; }
 
     private static readonly TimeSpan ChallengeLifetime = TimeSpan.FromMinutes(2);
     private const int MaxChallenges = 64;
@@ -302,7 +306,8 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
             return Refuse(ReasonCodes.BadSignature, machine.SecurityRevision);
         }
 
-        if (store.GetProcessedGrant(request.RequestId) is { } done)
+        // A use is a read of the present state, evaluated each time and never stored or replayed: a stored answer could outlive a revocation.
+        if (envelope.Operation == GrantOps.Approve && store.GetProcessedGrant(request.RequestId) is { } done)
         {
             return done.Fingerprint == machine.Fingerprint && done.RequestDigest == digest ? done.Response : Refuse(ReasonCodes.RequestIdReused, machine.SecurityRevision);
         }
@@ -353,12 +358,18 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
                 return new AuthorityStore.GrantPlan(answer(GrantOps.None, GrantReasons.NoGrant, null, current.SecurityRevision), null, "", false);
             }
 
+            // A row that no person's assertion backs (written, changed or planted by anything else) is not a grant.
+            if (GrantEvidence.RowProblem(Verifier, grant) is { } rowProblem)
+            {
+                return new AuthorityStore.GrantPlan(answer(GrantOps.None, GrantReasons.NoGrant, null, current.SecurityRevision), "grant-ignored", $"grant {grant.Id}: {rowProblem}", false);
+            }
+
             if (grant.IsExpired(now))
             {
                 return new AuthorityStore.GrantPlan(answer(GrantOps.None, GrantReasons.Expired, null, current.SecurityRevision), null, "", false);
             }
 
-            return new AuthorityStore.GrantPlan(answer(GrantOps.Granted, GrantReasons.Ok, grant.Info, current.SecurityRevision), "grant-use", $"grant {grant.Id} revision {grant.Revision}");
+            return new AuthorityStore.GrantPlan(answer(GrantOps.Granted, GrantReasons.Ok, grant.Info, current.SecurityRevision), "grant-use", $"grant {grant.Id} revision {grant.Revision}", false);
         });
     }
 
@@ -410,13 +421,29 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
                 return new AuthorityStore.GrantPlan(refuse(GrantReasons.NoTime, current.SecurityRevision), "grant-denied", "no time was chosen on the approval page");
             }
 
+            // The grant is made only on the person's own assertion, which names this scope and this security revision and is kept with the grant.
             DateTimeOffset now = _clock.GetUtcNow();
+            if (answered.Evidence is not { } evidence)
+            {
+                return new AuthorityStore.GrantPlan(refuse(GrantReasons.NoEvidence, current.SecurityRevision), "grant-denied", "the approval carried no passkey assertion");
+            }
+
+            DateTimeOffset? pageIssued = GrantEvidence.Line(evidence.Text, ApprovalSummary.IssuedPrefix) is { } issuedText && DateTimeOffset.TryParseExact(issuedText, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTimeOffset parsed) ? parsed : null;
+            ApprovalCheck check = Verifier?.Verify(evidence, answered.ReuseMinutes) ?? new ApprovalCheck(false, "", false, "no verifier");
+            if (!check.Ok || pageIssued is null || now < pageIssued - GrantEvidence.Skew || now > pageIssued.Value.AddMinutes(ApprovalSettings.MaxTimeoutMinutes - 1)
+                || GrantEvidence.Line(evidence.Text, ApprovalSummary.RequestIdPrefix) != envelope.ScopeKey
+                || GrantEvidence.Line(evidence.Text, GrantEvidence.SecurityRevisionPrefix) != current.SecurityRevision.ToString(CultureInfo.InvariantCulture))
+            {
+                return new AuthorityStore.GrantPlan(refuse(GrantReasons.BadEvidence, current.SecurityRevision), "grant-denied", "the passkey assertion does not back this grant (" + (check.Ok ? "wrong text or time" : check.Detail) + ")");
+            }
+
             DateTimeOffset expires = now.AddMinutes(answered.ReuseMinutes);
+            StoredEvidence stored = new(GrantEvidence.ApproveKind, evidence.Nonce, evidence.Text, evidence.Proof, answered.ReuseMinutes);
             GrantRecord? existing = tx.FindByScope(machine.Fingerprint, envelope.ScopeKey);
             string names = string.Join(", ", request.SecretNames.Order(StringComparer.Ordinal));
             GrantRecord grant = existing is null
-                ? tx.Create(machine.Fingerprint, envelope.ScopeKey, Short(request.Program), Short(request.WorkingDirectory), Short(names), expires, current.SecurityRevision, approvedBy)
-                : tx.SetExpiry(existing.Id, expires, approvedBy);
+                ? tx.Create(machine.Fingerprint, envelope.ScopeKey, Short(request.Program), Short(request.WorkingDirectory), Short(names), expires, current.SecurityRevision, approvedBy, stored, now)
+                : tx.SetExpiry(existing.Id, expires, approvedBy, stored, now);
 
             return new AuthorityStore.GrantPlan(answer(GrantOps.Granted, GrantReasons.Ok, grant.Info, current.SecurityRevision), existing is null ? "grant-created" : "grant-updated", $"grant {grant.Id}, {answered.ReuseMinutes} min, by {approvedBy}");
         });
@@ -440,15 +467,16 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
         ISigningKey key = keys.Current();
         GrantRecord? first = store.FindGrant(command.GrantId);
         string fingerprint = first?.Fingerprint ?? "";
-        int machineRevision = first is null ? 0 : store.Find(first.Fingerprint)?.SecurityRevision ?? 0;
-        GrantResponse Answer(string outcome, string reason, GrantInfo? info)
+
+        // The machine's security revision in the answer is read inside the transaction that applies the change; outside it only a refusal reads it.
+        GrantResponse Answer(string outcome, string reason, GrantInfo? info, int revision)
         {
             DateTimeOffset issued = _clock.GetUtcNow();
 
-            return GrantResponse.Create(command.RequestId, digest, fingerprint, command.Operation, outcome, reason, info, machineRevision, issued, issued + ResponseLifetime, key);
+            return GrantResponse.Create(command.RequestId, digest, fingerprint, command.Operation, outcome, reason, info, revision, issued, issued + ResponseLifetime, key);
         }
 
-        GrantResponse Refuse(string reason) => Answer(GrantOps.Denied, reason, null);
+        GrantResponse Refuse(string reason) => Answer(GrantOps.Denied, reason, null, first is null ? 0 : store.Find(first.Fingerprint)?.SecurityRevision ?? 0);
 
         if (first is null)
         {
@@ -472,52 +500,62 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
 
         return store.ApplyGrant(command.RequestId, digest, fingerprint, (tx, machine) =>
         {
+            int revision = machine?.SecurityRevision ?? 0;
+            GrantResponse RefuseIn(string reason) => Answer(GrantOps.Denied, reason, null, revision);
             GrantRecord? grant = tx.Find(command.GrantId);
             if (grant is null)
             {
-                return new AuthorityStore.GrantPlan(Refuse(GrantReasons.NotFound), null, "", false);
+                return new AuthorityStore.GrantPlan(RefuseIn(GrantReasons.NotFound), null, "", false);
             }
 
             if (command.ExpectedRevision is { } expected && expected != grant.Revision)
             {
-                return new AuthorityStore.GrantPlan(Refuse(GrantReasons.RevisionChanged), null, "", false);
+                return new AuthorityStore.GrantPlan(RefuseIn(GrantReasons.RevisionChanged), null, "", false);
             }
 
             DateTimeOffset now = _clock.GetUtcNow();
             if (grant.Status != "active")
             {
-                return new AuthorityStore.GrantPlan(Refuse(GrantReasons.NotActive), null, "", false);
+                return new AuthorityStore.GrantPlan(RefuseIn(GrantReasons.NotActive), null, "", false);
             }
+
+            // Only an admin passkey's assertion over a page that says exactly this change to this grant (as it is now) changes it.
+            if (GrantEvidence.AdminProblem(Verifier, command, grant, now) is { } evidenceProblem)
+            {
+                return new AuthorityStore.GrantPlan(RefuseIn(command.Evidence is null ? GrantReasons.NoEvidence : GrantReasons.BadEvidence), "grant-denied", $"grant {grant.Id}: {evidenceProblem}", false);
+            }
+
+            StoredEvidence adminEvidence = new(GrantEvidence.AdminKind, command.Evidence!.Nonce, command.Evidence.Text, command.Evidence.Proof, 0);
 
             switch (command.Operation)
             {
                 case GrantOps.Revoke:
                     GrantRecord revoked = tx.Revoke(grant.Id);
 
-                    return new AuthorityStore.GrantPlan(Answer(GrantOps.Revoked, GrantReasons.Ok, revoked.Info), "grant-revoked", $"grant {grant.Id} by {command.Actor}");
+                    return new AuthorityStore.GrantPlan(Answer(GrantOps.Revoked, GrantReasons.Ok, revoked.Info, revision), "grant-revoked", $"grant {grant.Id} by {command.Actor}");
                 case GrantOps.Extend:
                     if (grant.IsExpired(now))
                     {
-                        return new AuthorityStore.GrantPlan(Refuse(GrantReasons.Expired), null, "", false);
+                        return new AuthorityStore.GrantPlan(RefuseIn(GrantReasons.Expired), null, "", false);
                     }
 
-                    if (grant.Expires is null)
+                    if (grant.Expires is null || !command.Indefinite && command.NewEnd <= grant.Expires)
                     {
-                        return new AuthorityStore.GrantPlan(Refuse(GrantReasons.NotExpired), null, "", false);
+                        return new AuthorityStore.GrantPlan(RefuseIn(GrantReasons.NotExpired), null, "", false);
                     }
 
-                    GrantRecord extended = tx.SetExpiry(grant.Id, command.Indefinite ? null : grant.Expires.Value.AddMinutes(command.Minutes!.Value), command.Actor);
+                    GrantRecord extended = tx.SetExpiry(grant.Id, command.Indefinite ? null : command.NewEnd, command.Actor, adminEvidence, now);
 
-                    return new AuthorityStore.GrantPlan(Answer(GrantOps.Extended, GrantReasons.Ok, extended.Info), "grant-extended", $"grant {grant.Id} by {command.Actor}; " + (command.Indefinite ? "indefinite" : $"{command.Minutes} min"));
+                    return new AuthorityStore.GrantPlan(Answer(GrantOps.Extended, GrantReasons.Ok, extended.Info, revision), "grant-extended", $"grant {grant.Id} by {command.Actor}; " + (command.Indefinite ? "indefinite" : $"{command.Minutes} min"));
                 default:
-                    if (!grant.IsExpired(now))
+                    if (!grant.IsExpired(now) || !command.Indefinite && command.NewEnd <= now)
                     {
-                        return new AuthorityStore.GrantPlan(Refuse(GrantReasons.NotExpired), null, "", false);
+                        return new AuthorityStore.GrantPlan(RefuseIn(GrantReasons.NotExpired), null, "", false);
                     }
 
-                    GrantRecord renewed = tx.SetExpiry(grant.Id, command.Indefinite ? null : now.AddMinutes(command.Minutes!.Value), command.Actor);
+                    GrantRecord renewed = tx.SetExpiry(grant.Id, command.Indefinite ? null : command.NewEnd, command.Actor, adminEvidence, now);
 
-                    return new AuthorityStore.GrantPlan(Answer(GrantOps.Renewed, GrantReasons.Ok, renewed.Info), "grant-renewed", $"grant {grant.Id} by {command.Actor}; " + (command.Indefinite ? "indefinite" : $"{command.Minutes} min"));
+                    return new AuthorityStore.GrantPlan(Answer(GrantOps.Renewed, GrantReasons.Ok, renewed.Info, revision), "grant-renewed", $"grant {grant.Id} by {command.Actor}; " + (command.Indefinite ? "indefinite" : $"{command.Minutes} min"));
             }
         });
     }
