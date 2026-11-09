@@ -4,7 +4,7 @@ Worktree `C:\Users\codep\Projects\with-secrets-impl`, branch `impl/host-service`
 
 ## Current phase
 
-Phase 0 (extract contracts, preserve behaviour): done, reviewed. Phase 1 (local host service and shared API): done, pending review. Phase 2 (machine identity and local authority): done, pending review. Phase 3 (the independent parts: grants, offline lease, startup reconciliation, plus the maintainer's decision to hold the store key in service memory for a grant's life): done, reviewed (fix round 1 applied). Phase 4 (durable audit trail): done, pending review. Phase 4b (authority lock, admin web app, sensitive operations): done, pending review. Next: Phase 5 onward.
+Phase 0 (extract contracts, preserve behaviour): done, reviewed. Phase 1 (local host service and shared API): done, pending review. Phase 2 (machine identity and local authority): done, pending review. Phase 3 (the independent parts: grants, offline lease, startup reconciliation, plus the maintainer's decision to hold the store key in service memory for a grant's life): done, reviewed (fix round 1 applied). Phase 4 (durable audit trail): done, pending review. Phase 4b (authority lock, admin web app, sensitive operations): done, pending review. Phase 5 (remote authority protocol and relay): done, pending review. Next: Phase 6.
 
 ## Commands
 
@@ -351,3 +351,10 @@ Suite `AuthorityLock` (196 checks; `WS_ONLY=AuthorityLock`), plus new checks in 
 ### Phase 4 fix round 1 verification
 
 - `dotnet build with-secrets.slnx --no-incremental`: 0 warnings, 0 errors. Full unit suite: 4069 passed, 0 failed. E2E: ALL PASSED.
+
+## Phase 5: remote authority protocol and relay (done, pending review)
+
+- New `src/WithSecrets.Core/Remote/`: `SecureChannel.cs` (handshake, HKDF session keys, AES-256-GCM frames), `RemoteWire.cs` (canonical versioned messages), `Relay.cs` (opaque in-memory router), `RemoteTransport.cs` (URL and TLS rules, WebSocket channel), `AuthorityEndpoint.cs` (authority side over the same `LocalAuthority`), `RemoteAuthority.cs` (host side `IAuthority` and `IAuditSink`). `with-secrets relay` runs the relay. `host.json` has an optional `remote` member; `LocalDeployment.UseRemote` and the service start select remote mode.
+- Tests: suite `Remote` (`WS_ONLY=Remote`, 182 checks): handshake, mutual authentication, key substitution, tampering at every layer, replay, order, gaps, reflection, fresh keys on reconnect, rotation chain, relay restart, duplicates, wrong-machine binding, invalidation push/ack/retry across an endpoint restart, locked authority, relay blindness (canary scan), config and TLS rules, and a full run through host service, relay and endpoint.
+- Mutation evidence (change, run, revert): removing the sequence check fails 4 checks (replay, out of order, gap, replayed frame at the authority); skipping the authority handshake signature check fails the changed-signature check; making the endpoint's machine binding always true fails 3 binding checks.
+- Decisions and open items for the maintainer: see the Phase 5 paragraph in `docs/architecture.md` (approval page and secret delivery for a truly separate remote authority are undecided; no command starts the endpoint; the host still has its own lock in remote mode).

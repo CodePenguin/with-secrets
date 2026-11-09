@@ -632,6 +632,26 @@ internal sealed class ContractReader
         return Text(name, out string? text) && DateTimeOffset.TryParseExact(text, "O", CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out value) || Bad(name, "a time in the round-trip (O) format");
     }
 
+    public bool Bool(string name, out bool value)
+    {
+        value = false;
+        if (_members[name].ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+        {
+            return Bad(name, "true or false");
+        }
+
+        value = _members[name].GetBoolean();
+
+        return true;
+    }
+
+    public bool Object(string name, out JsonElement element)
+    {
+        element = _members[name];
+
+        return element.ValueKind == JsonValueKind.Object || Bad(name, "an object");
+    }
+
     public bool Array(string name, out JsonElement array)
     {
         array = _members[name];

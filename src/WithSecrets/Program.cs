@@ -41,6 +41,12 @@ internal static class Program
         // Diagnostics: warnings go to the log file always; --debug (or WITH_SECRETS_DEBUG=1) adds the Debug events, to the terminal too.
         AppLog.Configure(AppLog.DebugRequested(command.Debug));
 
+        // The relay is an opaque router: no store, no state.db, no keys.
+        if (command is CliCommand.Relay relay)
+        {
+            return await RunRelay(relay);
+        }
+
         // A run is a client of the host service: it opens no store and no state.db, decrypts nothing and starts nothing itself.
         if (command is CliCommand.Run run)
         {
@@ -161,6 +167,53 @@ internal static class Program
         return await LaunchClient.RunAsync(args, Directory.GetCurrentDirectory(), port.Value, command.Port, outWriter, errWriter, trust, approve: approve);
     }
 
+    /// <summary>The relay in the foreground, until Ctrl+C. It keeps registrations in memory only and logs nothing about payloads.</summary>
+    private static async Task<int> RunRelay(CliCommand.Relay command)
+    {
+        System.Security.Cryptography.X509Certificates.X509Certificate2? certificate = null;
+        if (command.CertificateFile is { } file)
+        {
+            try
+            {
+                certificate = System.Security.Cryptography.X509Certificates.X509CertificateLoader.LoadPkcs12FromFile(file, command.CertificatePasswordVariable is { } name ? Environment.GetEnvironmentVariable(name) : null);
+            }
+            catch (Exception failure) when (failure is System.Security.Cryptography.CryptographicException or IOException or UnauthorizedAccessException)
+            {
+                TerminalPrompt.Final("with-secrets: the relay certificate cannot be read (" + failure.GetType().Name + ").");
+
+                return RunCommand.StoreError;
+            }
+        }
+
+        RelayServer server;
+        try
+        {
+            server = await RelayServer.StartAsync(new RelayOptions { Port = command.ListenPort, Bind = System.Net.IPAddress.Parse(command.Bind), Certificate = certificate });
+        }
+        catch (Exception failure)
+        {
+            TerminalPrompt.Final($"with-secrets: the relay cannot listen on {command.Bind}:{command.ListenPort} ({failure.GetType().Name}).");
+
+            return RunCommand.StoreError;
+        }
+
+        await using (server)
+        {
+            using ManualResetEventSlim stop = new(false);
+            ConsoleCancelEventHandler handler = (_, e) =>
+            {
+                e.Cancel = true;
+                stop.Set();
+            };
+            Console.CancelKeyPress += handler;
+            TerminalPrompt.Line($"with-secrets relay: listening on {server.Url} ({(certificate is null ? "no TLS: loopback only" : "TLS")}). It routes opaque frames by registration id and keeps nothing. Press Ctrl+C to stop.");
+            stop.Wait();
+            Console.CancelKeyPress -= handler;
+        }
+
+        return 0;
+    }
+
     /// <summary>The host service in the foreground, until Ctrl+C. Windows service installation and start at logon come later.</summary>
     private static string StorePath() => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), StoreFolder);
 
@@ -187,7 +240,22 @@ internal static class Program
         {
             // The machine identity key is made on the first start (non-exportable, kept by Windows) and never leaves it.
             deployment = LocalDeployment.OpenProduction(folder);
-            enrolled = deployment.EnrollAsync().GetAwaiter().GetResult();
+
+            // host.json may select a remote authority (public data only: the relay, the registration id and the authority key fingerprint to trust).
+            if (deployment.HostConfig.Load().Config?.Remote is { } remoteConfig)
+            {
+                deployment.UseRemote(new RemoteAuthority(remoteConfig, deployment.MachineKey, deployment.HostConfig));
+                TerminalPrompt.Line("with-secrets service: remote authority mode: the authority is reached through the relay " + ApprovalSummary.Clean(remoteConfig.RelayUrl) + " (end-to-end encrypted; the authority key must have fingerprint " + KeyIdentity.Display(remoteConfig.AuthorityFingerprint) + ").");
+            }
+
+            try
+            {
+                enrolled = deployment.EnrollAsync().GetAwaiter().GetResult();
+            }
+            catch (Exception failure) when (deployment.Remote is not null && failure is RemoteTransportException or RemoteRefusedException)
+            {
+                enrolled = new EnrollmentResult(false, MachineStatus.Pending, deployment.Fingerprint, "the remote authority could not be reached; the service keeps trying, but runs fail until it can");
+            }
         }
         catch (Exception failure) when (failure is AuthorityDatabaseException or System.Security.Cryptography.CryptographicException)
         {

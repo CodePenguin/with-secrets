@@ -18,6 +18,9 @@ public abstract record CliCommand
     /// <summary>service [--port N]: run the host service in the foreground (loopback only).</summary>
     public sealed record Service : CliCommand;
 
+    /// <summary>relay [--port N] [--bind ADDRESS] [--cert FILE [--cert-password-env NAME]]: run the relay, an opaque in-memory router between host services and a remote authority.</summary>
+    public sealed record Relay(int ListenPort, string Bind, string? CertificateFile, string? CertificatePasswordVariable) : CliCommand;
+
     /// <summary>admin (no further words): go to the authority's admin web app, where status, lock and unlock, the unlock policy and the rest of the administration live.</summary>
     public sealed record AdminApp : CliCommand;
 
@@ -192,6 +195,11 @@ public static class CliArgs
         if (args.Count > 0 && args[0] == "service")
         {
             return ParseService(args, out error);
+        }
+
+        if (args.Count > 0 && args[0] == "relay")
+        {
+            return ParseRelay(args, out error);
         }
 
         if (args.Count > 0 && args[0] == "admin")
@@ -561,6 +569,60 @@ public static class CliArgs
         error = "";
 
         return new CliCommand.Admin(action.Value, fingerprint, action == AdminAction.Rename ? positional[1] : name) { Port = port, Debug = debug };
+    }
+
+    public const int DefaultRelayPort = 8780;
+
+    private static readonly string RelayUsage = $"Usage: with-secrets relay [--port N] [--bind ADDRESS] [--cert FILE [--cert-password-env NAME]] [--debug]. The relay listens on 127.0.0.1 by default (port {DefaultRelayPort}); any other address needs --cert (TLS: https and wss).";
+
+    /// <summary>relay [--port N] [--bind ADDRESS] [--cert FILE [--cert-password-env NAME]] [--debug].</summary>
+    private static CliCommand? ParseRelay(IReadOnlyList<string> args, out string error)
+    {
+        int port = DefaultRelayPort;
+        string bind = "127.0.0.1";
+        string? cert = null;
+        string? passwordVariable = null;
+        bool debug = false;
+        for (int index = 1; index < args.Count; index++)
+        {
+            if (args[index] == "--debug")
+            {
+                debug = true;
+            }
+            else if (args[index] == "--port" && index + 1 < args.Count && int.TryParse(args[++index], NumberStyles.None, CultureInfo.InvariantCulture, out int parsed) && parsed is >= 1 and <= ToolSettings.MaxPort)
+            {
+                port = parsed;
+            }
+            else if (args[index] == "--bind" && index + 1 < args.Count && System.Net.IPAddress.TryParse(args[++index], out _))
+            {
+                bind = args[index];
+            }
+            else if (args[index] == "--cert" && index + 1 < args.Count)
+            {
+                cert = args[++index];
+            }
+            else if (args[index] == "--cert-password-env" && index + 1 < args.Count)
+            {
+                passwordVariable = args[++index];
+            }
+            else
+            {
+                error = RelayUsage;
+
+                return null;
+            }
+        }
+
+        if (cert is null && (!System.Net.IPAddress.IsLoopback(System.Net.IPAddress.Parse(bind)) || passwordVariable is not null))
+        {
+            error = cert is null && passwordVariable is not null ? "--cert-password-env goes with --cert." : "A relay that listens beyond this machine needs --cert FILE (TLS: https and wss).";
+
+            return null;
+        }
+
+        error = "";
+
+        return new CliCommand.Relay(port, bind, cert, passwordVariable) { Debug = debug };
     }
 
     /// <summary>service [--port N] [--debug]: nothing else.</summary>

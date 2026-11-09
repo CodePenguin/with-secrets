@@ -21,6 +21,22 @@ public sealed class LocalDeployment(AuthorityStore store, AuthorityKeyRing keys,
     /// <summary>Where the host sends its audit events: the local authority itself. Tests put a sink in its place that can fail, delay or answer wrongly.</summary>
     public IAuditSink AuditSink { get; set; } = authority;
 
+    /// <summary>
+    /// Remote-authority mode: the host talks to the authority through <paramref name="remote" /> (the encrypted session through the relay) for decisions, grants, check-ins, invalidations
+    /// and audit upload. The signed contracts and the host's checks are unchanged. Disposed with the deployment.
+    /// </summary>
+    public void UseRemote(RemoteAuthority remote)
+    {
+        Link = remote;
+        AuditSink = remote;
+        _remote = remote;
+    }
+
+    private RemoteAuthority? _remote;
+
+    /// <summary>The remote authority client when the host is in remote mode, else null.</summary>
+    public RemoteAuthority? Remote => _remote;
+
     public ISigningKey MachineKey => machineKey;
 
     public string HostName => hostName;
@@ -73,12 +89,16 @@ public sealed class LocalDeployment(AuthorityStore store, AuthorityKeyRing keys,
     /// <summary>First contact with the authority: proves possession of the machine key and records the machine (Pending when new). Idempotent.</summary>
     public async Task<EnrollmentResult> EnrollAsync(CancellationToken cancel = default)
     {
-        byte[] challenge = await authority.BeginEnrollmentAsync(cancel);
+        byte[] challenge = await Link.BeginEnrollmentAsync(cancel);
 
-        return await authority.EnrollAsync(EnrollmentRequest.Create(hostName, challenge, machineKey), cancel);
+        return await Link.EnrollAsync(EnrollmentRequest.Create(hostName, challenge, machineKey), cancel);
     }
 
     public HostAuthorization CreateAuthorization(LaunchGate gate, Action? clearSaved = null, IMonotonicClock? monotonic = null) => new(Link, machineKey, hostName, hostConfig, gate, authority.Offer, clock, clearSaved, monotonic);
 
-    public void Dispose() => machineKey.Dispose();
+    public void Dispose()
+    {
+        _remote?.Dispose();
+        machineKey.Dispose();
+    }
 }

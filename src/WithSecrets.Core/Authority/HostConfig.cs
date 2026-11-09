@@ -7,8 +7,15 @@ namespace WithSecrets;
 /// <summary>The authority signing key a host service trusts: its fingerprint and public key. Public data only.</summary>
 public sealed record PinnedAuthorityKey(string Fingerprint, byte[] PublicKey, DateTimeOffset Pinned);
 
-/// <summary>What <c>host.json</c> holds: this machine's fingerprint (what the CLI checks the service against) and the pinned authority key.</summary>
-public sealed record HostConfig(string MachineFingerprint, PinnedAuthorityKey? Authority);
+/// <summary>
+/// Where a host service finds a remote authority: the relay (a http, https, ws or wss URL; plain http and ws only for a loopback relay), the authority's registration id at that relay,
+/// the fingerprint of the authority signing key to trust (given out of band by the administrator) and, optionally, the SHA-256 of the relay's TLS certificate as an extra pin (empty: none;
+/// the normal certificate validation always applies). Public data only.
+/// </summary>
+public sealed record RemoteAuthorityConfig(string RelayUrl, string RegistrationId, string AuthorityFingerprint, string TlsPin = "");
+
+/// <summary>What <c>host.json</c> holds: this machine's fingerprint (what the CLI checks the service against), the pinned authority key and, in remote-authority mode, where the authority is.</summary>
+public sealed record HostConfig(string MachineFingerprint, PinnedAuthorityKey? Authority, RemoteAuthorityConfig? Remote = null);
 
 /// <summary>The result of reading <c>host.json</c>: the config (null when the file is missing), or why it cannot be used.</summary>
 public sealed record HostConfigLoad(HostConfig? Config, string? Problem);
@@ -57,7 +64,8 @@ public sealed class HostConfigFile(string path)
 
         using (doc)
         {
-            ContractReader reader = new(doc!.RootElement, "version", "machineFingerprint", "authority");
+            bool hasRemote = doc!.RootElement.TryGetProperty("remote", out JsonElement remoteElement);
+            ContractReader reader = hasRemote ? new(doc!.RootElement, "version", "machineFingerprint", "authority", "remote") : new(doc!.RootElement, "version", "machineFingerprint", "authority");
             if (reader.Problem is not null || !reader.Int("version", out int version) || version != 1 || !reader.Text("machineFingerprint", out string? machine))
             {
                 return new HostConfigLoad(null, Damaged("is not a version 1 file"));
@@ -68,10 +76,23 @@ public sealed class HostConfigFile(string path)
                 return new HostConfigLoad(null, Damaged("has a fingerprint that is not 64 hex digits"));
             }
 
+            RemoteAuthorityConfig? remote = null;
+            if (hasRemote && remoteElement.ValueKind != JsonValueKind.Null)
+            {
+                ContractReader remoteReader = new(remoteElement, "relayUrl", "registrationId", "authorityFingerprint", "tlsPin");
+                if (remoteReader.Problem is not null || !remoteReader.Text("relayUrl", out string? relayUrl) || !remoteReader.Text("registrationId", out string? registration) || !remoteReader.Text("authorityFingerprint", out string? authorityFingerprint) || !remoteReader.Text("tlsPin", out string? tlsPin)
+                    || RemoteTarget.Problem(new RemoteAuthorityConfig(relayUrl!, registration!, authorityFingerprint!, tlsPin!)) is not null)
+                {
+                    return new HostConfigLoad(null, Damaged("has a remote authority setting that is not valid"));
+                }
+
+                remote = new RemoteAuthorityConfig(relayUrl!, registration!, KeyIdentity.ParseHex(authorityFingerprint!, true)!, tlsPin!);
+            }
+
             JsonElement authority = doc.RootElement.GetProperty("authority");
             if (authority.ValueKind == JsonValueKind.Null)
             {
-                return new HostConfigLoad(new HostConfig(machine!, null), null);
+                return new HostConfigLoad(new HostConfig(machine!, null, remote), null);
             }
 
             ContractReader key = new(authority, "keyFingerprint", "publicKey", "pinned");
@@ -95,7 +116,7 @@ public sealed class HostConfigFile(string path)
                 return new HostConfigLoad(null, Damaged("has an authority key whose fingerprint is not its key's"));
             }
 
-            return new HostConfigLoad(new HostConfig(machine!, new PinnedAuthorityKey(fingerprint!, publicKey, pinned)), null);
+            return new HostConfigLoad(new HostConfig(machine!, new PinnedAuthorityKey(fingerprint!, publicKey, pinned), remote), null);
         }
     }
 
@@ -105,7 +126,22 @@ public sealed class HostConfigFile(string path)
     /// </summary>
     public void Pin(string machineFingerprint, PinnedAuthorityKey authority)
     {
-        Write(new HostConfig(machineFingerprint, authority));
+        Write(new HostConfig(machineFingerprint, authority, Load().Config?.Remote));
+    }
+
+    /// <summary>
+    /// Selects remote-authority mode (or, with null, local mode) for this machine. Public data only: the relay, the registration id and the authority key fingerprint to trust.
+    /// The pinned key and the machine fingerprint are kept as they are. The file is replaced atomically.
+    /// </summary>
+    public void SetRemote(string machineFingerprint, RemoteAuthorityConfig? remote)
+    {
+        if (remote is not null && RemoteTarget.Problem(remote) is { } problem)
+        {
+            throw new ArgumentException(problem);
+        }
+
+        HostConfigLoad load = Load();
+        Write(new HostConfig(machineFingerprint, load.Config?.MachineFingerprint == machineFingerprint ? load.Config.Authority : null, remote is null ? null : remote with { AuthorityFingerprint = KeyIdentity.ParseHex(remote.AuthorityFingerprint, true)! }));
     }
 
     /// <summary>
@@ -135,7 +171,7 @@ public sealed class HostConfigFile(string path)
             return "the key transition is not signed by the pinned authority key";
         }
 
-        Write(new HostConfig(load.Config.MachineFingerprint, new PinnedAuthorityKey(transition.NewFingerprint, transition.NewPublicKey, transition.Created)));
+        Write(new HostConfig(load.Config.MachineFingerprint, new PinnedAuthorityKey(transition.NewFingerprint, transition.NewPublicKey, transition.Created), load.Config.Remote));
 
         return null;
     }
@@ -159,6 +195,19 @@ public sealed class HostConfigFile(string path)
         else
         {
             text.Append("null");
+        }
+
+        if (config.Remote is { } remote)
+        {
+            text.Append(",\"remote\":{\"relayUrl\":");
+            ToolSettings.QuoteJson(text, remote.RelayUrl);
+            text.Append(",\"registrationId\":");
+            ToolSettings.QuoteJson(text, remote.RegistrationId);
+            text.Append(",\"authorityFingerprint\":");
+            ToolSettings.QuoteJson(text, remote.AuthorityFingerprint);
+            text.Append(",\"tlsPin\":");
+            ToolSettings.QuoteJson(text, remote.TlsPin);
+            text.Append('}');
         }
 
         text.Append("}\n");

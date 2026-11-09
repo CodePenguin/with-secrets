@@ -358,6 +358,16 @@ The authorization event is committed to the host's own outbox, `audit-outbox.db`
 
 `with-secrets admin audit [--machine FINGERPRINT-PREFIX] [--since TIME] [--until TIME] [--type authorization|launch|execution] [--outcome WORD] [--grant ID] [--folder TEXT] [--text TEXT] [--last N]` lists the history (newest first, tab-separated); `admin audit --gaps` lists the holes. It is read-only and, like the other admin commands, for a person in a terminal. The admin web view of the same history comes later. If `audit-outbox.db` reports another schema or is damaged, delete it to start over (the numbering then restarts at 1 under a new epoch id, which the authority records as an "epoch" gap; the holes an earlier epoch left stay open). Limit: a process of the same OS user can still delete the outbox or tamper with `authority.db`; the trail does not prove that a compromised host reported truthfully.
 
+## Remote authority and the relay
+
+A host service can use a **remote authority** instead of the local one, with no change to the CLI or the local API. `host.json` (public data only) selects it:
+
+```json
+"remote": { "relayUrl": "http://127.0.0.1:8780", "registrationId": "my-authority", "authorityFingerprint": "<64 hex digits of the authority key>", "tlsPin": "" }
+```
+
+`with-secrets relay [--port N] [--bind ADDRESS] [--cert FILE [--cert-password-env NAME]]` runs the relay: an opaque, in-memory router that pairs a host and an authority (both connect outward, WebSocket) by registration id and copies encrypted frames. It cannot read them, keeps nothing on disk, makes no decision, and a restart loses only live connections (both sides reconnect and handshake again). Plain http/ws is accepted only for a loopback relay; any other relay must be https/wss (the relay itself refuses a non-loopback address without `--cert`). Certificate validation is the system's and is never weakened (`tlsPin`, the SHA-256 of the relay certificate, can only narrow it). HTTPS is an added layer: the host and authority always run their own mutually authenticated, end-to-end encrypted session (ECDH P-256, identity signatures over the transcript, HKDF-SHA-256, AES-256-GCM with sequence numbers), so the relay and the network see only routing metadata. The authority key to trust is the configured fingerprint (given out of band); it is pinned in `host.json` on the first successful handshake. A locked authority serves nothing and refuses new sessions. The authority side is `AuthorityEndpoint`, which serves the same local authority logic and `authority.db`; no command starts it yet (see `docs/architecture.md`, Phase 5).
+
 ## Known limits
 
 - **The page shows the code, but only so much of it.** It shows the whole command line, the inline code, and the first 200 lines (at most 16 KB) of each script file, with a `...cut` notice when there is more. A long or obfuscated script can still be hard to judge, and an agent can write a script that prints `$DB_URL` in a form that is not redacted. Approve only code you have read and understood.
