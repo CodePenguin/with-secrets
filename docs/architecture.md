@@ -1,6 +1,6 @@
 # with-secrets: architecture
 
-The code and README describe the current single-process prototype. Sections 10.1 and 10.2 describe later work; Section 10.2 is the accepted target design, not implemented behavior. For current behavior, the source of truth is the code (`src/WithSecrets.Core`, `src/WithSecrets`), then `README.md`. For the accepted service/authority/relay design, use Section 10.2 and the decisions recorded there. This page links to the README for current implementation limits instead of repeating them.
+The code and README describe the current single-process prototype. Sections 10.1 and 10.2 describe later work; Section 10.2 is the accepted target design, not implemented behavior. For current behavior, the source of truth is the code (`src/WithSecrets.Core`, `src/WithSecrets`), then `README.md`. For the accepted service/authority design, use Section 10.2 and the decisions recorded there. This page links to the README for current implementation limits instead of repeating them.
 
 ## 1. What it is (current prototype)
 
@@ -364,9 +364,9 @@ Every web session ends on the first outcome. Deny, error and silence all end in 
 
 | Item | State |
 | --- | --- |
-| Task 20: remote mode for sandboxes (relay, pairing, end-to-end encrypted values) | Accepted target design in 10.2; implementation remains future work |
+| Task 20: remote mode for sandboxes (direct authority connection, machine identity, grants, and secret delivery) | Accepted target design in 10.2; implementation remains future work |
 | Task 19: project `.env` declarations and invocation environment overrides | **Phase A built**; accepted `--env` layering and Dotenvx encrypted-value integration remain implementation work (see 10.1) |
-| Local service, machine identity, end-to-end encrypted relay (10.2) | Accepted target design; implementation not started. Task 16 (privilege separation) remains separate |
+| Local service, machine identity, direct HTTPS/mTLS authority communication (10.2) | Accepted target design; implementation not started. Task 16 (privilege separation) remains separate |
 | Task 16: privilege separation (service or daemon under another OS account) | Future, priority not decided |
 | Serilog logging (normal run quiet, `--debug` verbose, warnings and errors to a rolling file under `~/.with-secrets/logs`) | **Built** (`AppLog.cs`): Debug events to the terminal and file only with `--debug` or `WITH_SECRETS_DEBUG=1`; warnings and above always to the file (daily, 1 MB roll, 7 files); call sites use constant templates with route words, sizes and type names only |
 | Hand tests (real browsers, phones, tunnel) | Open, see README "Checks" |
@@ -445,37 +445,52 @@ DATABASE_PASSWORD=secret://personal/database/password
 | Dotenvx profile selection | Open pending verification against current Dotenvx behavior |
 | Additional `--env NAME` layering | Deferred |
 
-### 10.2 Local service, machine identity and end-to-end encrypted relay (planned)
+### 10.2 Local service, machine identity and direct authority communication (planned)
 
 Status: design only. This section records the accepted design. It supersedes the earlier proposal and review notes; it does not change the Phase A \`.env\` model. Task 16 (privilege separation) remains a separate future decision.
 
 #### Goals and operating model
 
-- The CLI is backend-agnostic. It communicates only with its local host service through one shared API/protocol, whether the service uses a local authority/store or connects to a remote authority through the relay.
-- The host service is the trusted execution boundary: it validates the request, obtains authorization, resolves and decrypts approved secrets, prepares the child environment, and owns the final launch decision. The CLI is a client; it does not independently retrieve secret values or make the final launch decision.
-- Each independently installed host service has its own machine identity. Windows and WSL installations are separate identities. Docker launched through the host-side CLI uses the host service and host identity; the host service launches the Docker client with approved values in its environment and passes variable names, not secret values, in Docker command arguments. Values are not written to Docker volumes or secret files. The container receives them as environment variables; it does not run an independently enrolled service or hold a machine key.
-- A host service operates in one of two modes:
-  - **Local authority:** the host service also performs the authority role, owns/accesses the local encrypted store, and handles approval and resolution.
-  - **Remote authority:** the host service authenticates to a remote authority and communicates with it through the relay. The remote authority owns the authoritative store, grants, machine records, and approval decisions; the local host service retains only its permitted in-memory cache and working authorization state.
-- The relay is a minimal message router between the host service and remote authority. It does not understand application messages, store session state or payloads, or make authorization decisions.
+- The CLI is backend-agnostic. It communicates only with its local host service through one shared API/protocol, whether the service fulfills requests from a local authority or connects directly to one configured remote authority.
+- The host service is the trusted execution boundary: it validates requests, obtains authorization, resolves and decrypts approved secrets, prepares the child environment, and owns the final launch decision. The CLI is a client; it does not independently retrieve secret values or make the final launch decision.
+- Each independently installed host service has its own machine identity. Windows and WSL installations are separate identities. Docker launched through the host-side CLI uses the host service and host identity; the host service launches the Docker client with approved values in its process environment and passes variable names, not secret values, in Docker command arguments. Values are not written to Docker volumes or secret files. The container receives them as environment variables; it does not run an independently enrolled service or hold a machine key.
+- A host service operates with one authority:
+  - **Local authority:** the host service also performs the authority role and owns/accesses the local provider/store and authoritative security state.
+  - **Remote authority:** the host service connects directly to its one configured remote authority. That authority owns authoritative machine records, grants, provider access, and approval decisions; the local host service retains only its permitted in-memory cache and working authorization state.
+- Each host has exactly one configured authority identity and endpoint. There is no authority selection, automatic fallback, alternate authority, relay, reverse tunnel, or multi-hop routing in the initial design. Changing authority requires an explicit administrative operation.
+- The authority endpoint address is routing information only. The enrolled authority machine identity is the trust identity; changing DNS name or IP address does not change that identity or silently change trust.
+- Remote hosts are assumed to be directly addressable at their configured endpoint. Multi-hop routing and intermediaries are deferred until a concrete requirement exists.
 - Secret delivery to a child remains ordinary environment variables. The agent does not receive secret values, private keys, or recovery codes.
 
 #### Local clients and transport
 
-All local clients use the same HTTP API and application protocol. The CLI sends launch requests to the host service; the service prepares and launches the requested child process and returns its exit status and redacted output. Do not introduce separate named-pipe, Unix-socket, or Docker-specific authentication protocols.
+All local clients use the same HTTP API and application protocol. The CLI sends launch requests to the local host service; the service prepares and launches the requested child process and returns its exit status and redacted output. Do not introduce separate named-pipe, Unix-socket, or Docker-specific authentication protocols.
 
-- The local service binds to loopback interfaces only. Localhost alone is not treated as client authentication.
-- Do not embed a client signing key or shared authentication secret in the executable. An executable cannot keep an embedded private key secret.
-- Secret disclosure remains controlled by request validation, a human approval page that displays the trustworthy request context, and grant rules. Local API access does not itself grant access to secrets.
-- This is a developer-machine trust model, not isolation from malicious processes already running with the developer's privileges. Such processes may be able to interact with the local service or inspect same-user process memory.
-- Docker is launched through a host-side CLI request, but the host service owns the launch and supplies approved values to the Docker client through its process environment. The container does not need direct service access, a separate machine identity, an identity-key volume, or secret files.
+- The Windows host service exposes its local client API on loopback HTTP. Localhost alone is not treated as machine authentication or human administrator authentication.
+- WSL uses its own independently enrolled WSL host service. The intended client path is `WSL CLI → WSL host service → Windows host service`; the WSL host service authenticates to the Windows host service using the existing machine identity and HTTPS/mTLS protocol. Do not trust a request merely because it originates on a WSL network interface.
+- The browser administration listener is separate from the machine-to-machine listener. It is enabled only on the authority host, binds only to loopback, and uses HTTP for the local browser. Non-authority host services do not enable or expose the browser administration interface.
+- The authority host runs a separate machine-to-machine HTTPS listener. It does not serve the browser SPA on that listener. The machine listener is not a privileged browser endpoint.
+- The browser listener uses the browser session, origin/CSRF protections, and fresh operation-bound passkey authorization defined in Section 10.5. Browser passkeys authorize human administrative operations; they are not used as machine credentials.
+- The machine-to-machine listener requires TLS 1.3 mutual authentication before accepting any HTTP request. It has zero unauthenticated endpoints, without exception, including health, status, diagnostics, and discovery.
+- The machine listener uses HTTP/2 only. It does not fall back to HTTP/1.1 or TLS 1.2. The browser listener remains independently compatible with ordinary browser-supported HTTP.
+- The machine API uses the shared, versioned HTTP API and OpenAPI contract. Transport authentication identifies the calling machine; application authorization still evaluates every request independently.
+- This is a developer-machine trust model, not isolation from malicious processes already running with the developer's privileges. Such processes may be able to interact with local services or inspect same-user process memory.
+- Docker is launched through a host-side CLI request. The host service owns the launch and supplies approved values to the Docker client through its process environment. The container does not need direct service access, a separate machine identity, an identity-key volume, or secret files.
 
 #### Machine identity and enrollment
 
 - Each host service generates and securely retains its own ECDSA P-256 machine identity private key. The key signs; it is not used to encrypt or wrap secrets.
-- The machine fingerprint is SHA-256 of the canonical public key and is the cryptographic identity. A friendly name is authority-managed display metadata, not identity.
+- The machine fingerprint is SHA-256 of the canonical public key (SubjectPublicKeyInfo) and is the stable cryptographic identity. It is not a certificate thumbprint. A friendly name is authority-managed display metadata, not identity.
+- Initial machine identity creation also creates a required self-signed X.509 identity certificate using the existing persistent ECDSA P-256 identity key. It introduces no additional persistent private key. The certificate is a CA-capable trust anchor (`BasicConstraints CA=true`, `pathLen=0`) with `DigitalSignature` and `KeyCertSign` key usage and a 10-year validity period. Its public certificate is stored as machine metadata and included in enrollment.
+- Enrollment verifies that the identity certificate contains exactly the public key supplied for the machine identity, verifies its self-signature and required CA/key-usage properties, and then follows the normal Pending/Trusted approval process. Possession of a valid certificate does not itself establish trust.
+- Each running host-service instance creates a separate temporary ECDSA P-256 TLS key pair in memory. Its temporary leaf certificate is signed by the persistent machine identity key, is not a CA, has `DigitalSignature` key usage and both `serverAuth` and `clientAuth` EKUs, and is valid for 24 hours. The same temporary certificate/key is used for TLS server and client authentication. The temporary key is distinct from the persistent identity key and is never persisted.
+- The temporary certificate's SAN contains a URI identifying the machine, in the form `urn:with-secrets:machine:<identity-fingerprint>`. The SAN is a lookup hint only; certificate signature/chain validation proves that the identified machine issued the certificate. Missing, malformed, or ambiguous identity SANs are rejected without trying other identities.
+- A temporary certificate is rotated in memory one hour before expiry. New TLS handshakes use the replacement; existing connections may finish. A service restart generates a new temporary key and certificate.
+- No external CA, OS trust-store installation, or separate persistent TLS private key is required. Peers validate the temporary leaf against the enrolled machine identity certificate as a custom trust anchor.
+- Identity-certificate renewal uses the same persistent identity key and therefore preserves the machine fingerprint. A replacement certificate with the same public key, valid self-signature, required certificate profile, and acceptable validity is accepted without administrator re-enrollment. A different public key is a new machine identity and requires explicit enrollment/approval.
+- Machine identity key replacement is a separate security-sensitive trust transition. It is never automatic; the old identity is revoked and the new identity is explicitly enrolled and approved. Existing grants do not transfer automatically. If the old key is unavailable, the replacement is treated as a new machine identity; there is no automatic recovery or hostname/IP-based continuity.
 - The private key is kept outside ordinary application data. On a developer machine it is protected by the host OS. For Docker-launched workloads, the host service retains the key; no Docker volume contains it.
-- Losing or regenerating the key creates a new fingerprint and requires fresh enrollment. There is no silent identity transfer or recovery.
+
 - Enrollment uses the existing CLI \`admin\` verb. A newly discovered fingerprint is **Pending** and cannot request secrets or create grants until an administrator approves it and assigns a friendly name through the authority's admin web interface.
 - First contact presents a newly generated machine public key, its fingerprint, and host name, with proof of possession of the private key. The authority may record that identity as Pending, but it grants no secret access. An administrator explicitly approves the pending identity and pins the authority's public signing key through the authenticated enrollment flow; the host must not accept an untrusted authority key merely because it was presented by the network.
 - The authority records the host name established at enrollment. Requests present both fingerprint and current host name; both must match. A mismatch is rejected and recorded as pending for administrator review. The administrator explicitly approves a legitimate host-name change in the admin web interface. A mismatch does not silently change the binding or delete the enrollment.
@@ -501,6 +516,7 @@ The authority retains machine records and their history. A previously known Untr
 - Every administrative action that invalidates a machine's authorization increments a monotonically increasing security revision for that machine fingerprint. The revision is per machine, not global. Display-only friendly-name changes do not increment it.
 - A revision change invalidates the machine's entire cache and all grants. No selective preservation is attempted.
 - Status changes, revision changes, grant invalidation, and cancellation of pending work are recorded in the authority audit history.
+- Disabling or untrusting a machine also invalidates its active authenticated machine connections. The receiving host stops accepting new requests on those connections, initiates HTTP/2 `GOAWAY`, and closes remaining connections after a bounded grace period. Per-request authorization and the secret-release checkpoint remain authoritative; connection closure is defense-in-depth, not an authorization cache.
 
 #### Cache, grants, startup, and reconnection
 
@@ -512,7 +528,7 @@ The authority retains machine records and their history. A previously known Untr
 - After successful startup reconciliation, if the security revision is unchanged, the authority may restore still-valid grants into host-service memory. Secret values are fetched on demand and cached in memory. If the revision changed, old grants are not restored.
 - If the authority becomes temporarily unavailable while the service is already running, existing in-memory cache and grants may continue to be used only within a finite offline-authorization lease. The authority is the sole source of policy and sets the lease duration; hosts cannot choose, extend, or override it. A connected host applies an authority policy change immediately. An offline host remains bound by its already-issued lease and must reconnect and reconcile before obtaining a new lease or continuing after expiry. In local-authority mode, the local authority sets the policy. The authority issues each offline lease with an explicit duration/expiration. The host measures elapsed lease time with a monotonic clock, never the wall clock, so changing the system date or time cannot extend offline access. A service restart destroys the in-memory lease and requires fresh authority reconciliation before secret requests are accepted. An indefinite durable grant does not create an indefinite offline lease. When the lease expires, the host must fail closed for secret use until it can reconnect and reconcile with the authority. New retrievals or approvals that require authority participation cannot proceed while disconnected.
 - Losing connectivity alone does not immediately invalidate the cache. However, the authority records revocations durably and distributes them to every host; a host must apply a received revocation immediately, clear affected grants/cache, and refuse the revoked fingerprint. An offline host that has not received the event is still bounded by its finite offline-authorization lease and must reconcile before resuming use.
-- The authority invalidates grants and in-flight requests when a security transition occurs, sends an authenticated, end-to-end protected invalidation event, and retries unacknowledged events while the connection is active.
+- The authority invalidates grants and in-flight requests when a security transition occurs, sends an authenticated invalidation event over the machine HTTPS connection, and retries unacknowledged events while the connection is active.
 - The host cancels its own affected pending work and clears the affected cache and authorization state before acknowledging. It never inspects, signals, suspends, terminates, or otherwise interacts with already-launched child processes.
 - Invalidation events are notifications, not the source of truth. On every reconnect, the host authenticates and obtains current status and security revision before resuming requests. If the revision differs from the last successfully synchronized revision, it purges all cached secret values and authorization state even if the machine is Trusted again.
 - Duplicate or older invalidation events are ignored by revision. An acknowledgment is sent only after cleanup and cancellation of pending pre-launch work completes. If cleanup fails, no acknowledgment is sent; reconnect reconciliation remains the fallback.
@@ -527,50 +543,74 @@ The authority retains machine records and their history. A previously known Untr
 - If launch wins, the child is considered launched. Later invalidation must not inspect, signal, suspend, terminate, or otherwise interact with it.
 - An authority cannot prevent a launch that occurs while the host is disconnected and has not yet received an invalidation. This is consistent with the offline-cache policy. In remote-authority mode, the host service's offline freshness and expiration policy remains the limit on cached use; a new retrieval or new approval requiring the authority cannot proceed.
 
-#### Authority authentication and cryptographic protocol
+#### Machine-to-machine HTTPS, TLS, and certificate validation
 
-Application-level authenticated encryption is mandatory for authority communication. HTTPS is an additional transport layer, not a substitute for the application protocol.
+Machine-to-machine communication uses ordinary HTTPS with TLS 1.3 mutual authentication. TLS replaces the former custom application-level ECDH handshake, transcript signatures, HKDF session-key derivation, AES-GCM message wrapping, and per-message sequence encryption. Do not implement a second encrypted channel inside HTTPS.
 
-- Local developer deployments may use HTTP; they do not require developers to create or install self-signed HTTPS certificates.
-- Connections to externally hosted authorities require HTTPS in addition to application-level authenticated encryption.
-- Machine identity private keys authenticate the machine. Authority signing keys authenticate authority-issued messages and responses. The authority public key is pinned during the administrator-approved enrollment flow. The host rejects unknown authority keys and does not treat TLS server identity alone as authority-message authorization.
-- The host accepts authority messages only when signed by a pinned, trusted authority key. Routine key rotation is authorized by a transition signed by the currently trusted key. If the current key is compromised or unavailable, replacement requires an explicit authenticated administrator recovery/re-enrollment process; an unknown key is never trusted automatically.
-- Each connection performs a fresh mutually authenticated handshake. Both parties prove possession of their identity private keys.
-- The handshake uses fresh ephemeral ECDH P-256 key pairs. Identity signatures bind the ephemeral public keys and handshake transcript to the authenticated identities, preventing key substitution and active man-in-the-middle attacks.
-- Derive fresh session keys using HKDF-SHA-256 over the ephemeral shared secret and transcript context. Use an established AEAD construction (AES-256-GCM) with separate directional keys.
-- Use built-in .NET cryptographic primitives and standard formats. Do not add a third-party cryptography dependency or invent cryptographic algorithms.
-- Every encrypted message is bound to its session and sequence number. Reject duplicate, out-of-order, invalid, or wrong-session messages. Reconnection always creates a new session with new keys. Application-level authority messages that affect trust, grants, revisions, or secret release are also authenticated as authority-issued data; the relay cannot forge them.
-- The authority-facing application protocol uses canonical JSON and includes a protocol version. The request digest binds the exact request approved by the human. The host service verifies authority signatures and request binding before releasing approved values to the local child-launch path.
-- Dotenvx/store encryption and transport encryption are separate layers. Existing store ciphertext format is not changed by this protocol.
-- Application encryption protects message contents, not all traffic metadata. Network addresses, connection times, message sizes, and traffic timing may remain visible.
+**TLS and HTTP requirements**
 
-#### Relay privacy and behavior
+- Require TLS 1.3 and HTTP/2 for every machine-to-machine connection. Do not fall back to TLS 1.2, HTTP/1.1, or plaintext.
+- Use the platform TLS implementation through .NET. Do not implement TLS, invent cipher suites, or add third-party cryptography dependencies.
+- Disable TLS 0-RTT and TLS session resumption initially. A new connection performs a fresh certificate-authenticated handshake.
+- Keep healthy HTTP/2 connections persistent. Do not impose maximum connection age or idle timeouts. Ordinary network failure detection still applies.
+- Kestrel selects the current temporary certificate for each new server handshake. Clients use a new connection pool after their temporary certificate rotates; existing connections in the old pool may drain and finish in-flight work. Dispose the old pool after draining, with a bounded shutdown timeout. Do not interrupt healthy connections solely because the certificate used at their handshake later expires.
+- Disable automatic HTTP redirects and ambient system HTTP proxy use for machine connections. A 3xx response is an unexpected protocol response, not permission to connect to another endpoint. Endpoint changes require explicit configuration/administration. Never forward machine credentials or client certificates to another destination.
+- Disable all HTTP caching for the machine API, on both clients and servers. Every response uses `Cache-Control: no-store`; do not emit `ETag`, `Last-Modified`, or other cache validators, and do not support conditional requests. No intermediary/reverse-proxy caching is permitted.
+- Disable HTTP compression in both directions. Do not negotiate compressed request or response bodies.
+- Use `application/json` with UTF-8 for machine API requests and responses. Reject unsupported media types and content encodings. Do not support multipart, form-encoded, XML, or alternative representations.
+- Use the existing canonical JSON rules wherever signatures or request digests depend on serialization. Keep the API versioned under `/api/v1/` and described by the shared OpenAPI contract.
+- Every endpoint on the machine listener requires a successfully authenticated client certificate before HTTP processing. There are zero anonymous exceptions, including health/status or diagnostics.
+- Machine API errors use standard HTTP status codes and structured JSON error codes with a correlation/request ID. Never return stack traces, filesystem paths, secret values, provider credentials, private keys, or internal cryptographic details. Do not redirect to browser login pages.
 
-The relay forwards end-to-end encrypted application messages and does not possess endpoint private keys or session keys.
+**Machine certificate validation**
 
-The relay can see:
-- Connected machine fingerprints and routing destinations.
-- Network addresses of connected machines.
-- Connection times, message sizes, and traffic timing.
-- Whether a machine is connected.
+- The persistent machine identity key remains the stable identity. The 10-year self-signed identity certificate is the enrolled trust anchor; the 24-hour temporary leaf certificate is used for TLS handshakes.
+- For an inbound client certificate, read the machine identity fingerprint from its SAN URI, locate that exact enrolled identity certificate, and validate the temporary leaf chain against that certificate using a narrowly scoped custom-root trust policy. Verify the leaf signature, validity, CA=false constraint, key usage, both required EKUs, and expected identity. Then check that the machine is currently trusted and enabled.
+- For an outbound connection, validate the server's temporary certificate against the one configured authority identity certificate. Verify the SAN identity and chain against that exact expected identity. Do not try other enrolled identities or accept an arbitrary valid certificate.
+- DNS names and IP addresses are routing information only, not machine identity. A hostname mismatch may be accepted only after the expected enrolled machine identity and certificate chain have been successfully verified. Never disable certificate validation globally.
+- Endpoint address and expected authority identity are separate configuration values. Changing an address does not change trust; changing authority identity requires an explicit administrative operation.
+- The authority's public signing key remains separately pinned through administrator-approved enrollment. It is not replaced by the TLS certificate or machine identity key.
 
-The relay cannot see:
-- Secret names or values.
-- Reasons, commands, approval details, or grant contents.
-- Application message types or payload contents.
-- Machine or authority private keys.
+**Authentication, authorization, and release**
 
-The relay keeps registrations in memory only, replaces stale registrations on reconnect, and does not persist or log message payloads. It does not make authorization decisions.
+- The server derives the caller's machine identity exclusively from the successfully validated TLS client certificate. The client cannot select or override its identity through an HTTP header, URL, or JSON field. Any machine identifier supplied as a target/resource is untrusted input and is independently authorized.
+- Machine authentication identifies the calling host; it does not grant blanket access. The authority checks current machine status, grant scope/expiration, policy, and security revision independently for every API request. An established connection is never a standing authorization.
+- The authority performs a final authorization checkpoint immediately before releasing a secret. This checkpoint is the linearization point for concurrent release and revocation: if revocation takes effect first, release is denied; if the checkpoint succeeds first, that release may complete. A secret already delivered cannot be recalled.
+- Revocation stops new requests, closes active connections, and cancels pending work where practical. It does not inspect, signal, suspend, or terminate already-launched child processes, and cannot retract a secret already delivered.
 
-#### Replay protection, retries, and durable authority state
+**Connection recovery, retries, and resource limits**
 
-- Every connection has fresh session keys and per-session monotonically increasing message sequence numbers. Old-session messages are never accepted in a new session.
-- Every logical operation has a unique request ID. A retry of the same operation reuses that ID.
-- Durable operations are idempotent. The authority records processed request IDs and their results in the same SQLite transaction as the operation, so a retry returns the committed result rather than executing it twice. These stored results are operation metadata, not secret values or decrypted payloads.
-- If a connection drops and the outcome is unknown, the client retries with the same request ID. It does not create a new logical operation.
-- Invalidation notifications and their acknowledgment state are durable at the authority. Unacknowledged notifications are retried after authority restart; reconnect revision reconciliation remains the source of truth.
-- SQLite is the authority's durable store. Ordinary database transactions provide atomicity for security-sensitive operations; no distributed transaction system or message broker is required.
-- Machine records and statuses, host-name bindings, friendly names, public keys, security revisions, grants and expirations, signing-key metadata and rotation history, audit history, processed request IDs/results, and pending invalidation delivery state are durable.
+- If a persistent connection fails, the client reconnects directly to the same configured authority using the current temporary certificate, with bounded exponential backoff and jitter. There is no alternate authority, insecure fallback, reverse tunnel, or relay.
+- Each logical operation has a unique request ID. Retries of durable/idempotent operations reuse the same ID; the authority records processed IDs and results atomically with the operation so a committed mutation is not executed twice.
+- Read-only metadata requests may be retried when safe. Administrative mutations use the existing idempotency mechanism. A secret release whose response is lost has an ambiguous outcome and is not automatically retried; the client may make a new request, which is independently authorized at the current release checkpoint. Do not persist secret values merely to replay a response.
+- Use fixed, built-in resource safeguards appropriate for a development tool: modest global and per-machine concurrent-request limits, bounded request bodies, and operation-specific timeout defaults. These are implementation constants, not user settings, environment variables, or deployment configuration. Do not add request-per-second quotas, adaptive throttling, reputation scoring, or elaborate abuse detection. Reject excess concurrent work rather than queueing it without bound.
+- Cancellation propagates to server work where safe. A timeout or disconnect does not prove that an operation did not complete.
+- Durable authority operations remain atomic in SQLite. Machine records/statuses, security revisions, grants, signing-key metadata/rotation history, audit history, processed request IDs/results, and pending invalidation state are durable. Secret values and host working authorization/cache state remain memory-only.
+- A machine disable/untrust operation atomically updates status, increments security revision, invalidates grants, and records the audit event. Grant approval atomically records approved scope, expiration, and audit event.
+- Do not add a message broker or distributed transaction system.
+
+**Application-level signatures and key separation**
+
+- TLS authenticates live connections and protects ordinary API traffic. Do not sign every ordinary HTTP request or response on top of TLS.
+- Retain application-level signatures for durable authority-issued records whose authenticity must survive beyond a live connection, including grants and other durable authority-issued security records. Verify these signatures against the separately pinned authority public signing key.
+- Continue signing durable host audit events with the machine identity signing key. The authority verifies those signatures, deduplicates event IDs, and tracks per-machine sequence numbers.
+- Keep machine identity signing keys, authority signing keys, and secret-data encryption/wrapping keys cryptographically separate. The machine identity key also signs its temporary TLS leaf certificates; it is not used to encrypt or wrap secrets. The authority signing key is not the machine TLS key.
+- Routine authority signing-key rotation is authorized by a transition signed by the currently trusted authority key. If that key is compromised or unavailable, replacement requires explicit authenticated administrator recovery; an unknown key is never trusted automatically.
+- Dotenvx/store encryption remains separate from transport encryption. The existing store ciphertext format is unchanged.
+
+#### Direct authority routing
+
+- The initial design connects each host directly to its one configured authority over HTTPS/mTLS.
+- No relay, opaque forwarding service, central router, HTTP CONNECT tunnel, reverse tunnel, mesh discovery, or multi-hop routing is part of the initial implementation.
+- The configured endpoint is directly addressable. The host validates the expected authority machine identity independently of the endpoint address.
+- A future intermediary or multi-hop route may be considered only when a concrete requirement exists. It must preserve the same end-to-end machine identity, authorization, and API contract; it must not become an authority or policy layer.
+
+#### Request replay protection and durable authority state
+
+- Every logical operation has a unique request ID. A retry of the same durable operation reuses that ID; the authority records processed IDs and results in the same SQLite transaction as the operation, so a committed operation is not executed twice.
+- Secret-release requests are not automatically replayed after an ambiguous transport failure. The client must not infer success or failure from a timeout; a new release request requires current authorization and a new release checkpoint.
+- Durable operations are idempotent. Stored results are operation metadata, not secret values or decrypted payloads.
+- Machine records and statuses, host-name bindings, friendly names, public keys and identity certificates, security revisions, grants and expirations, signing-key metadata and rotation history, audit history, processed request IDs/results, and pending invalidation delivery state are durable.
 - A machine disable/untrust operation atomically updates status, increments security revision, invalidates grants, and records the audit event.
 - Grant approval atomically records the approved scope, expiration, and audit event.
 - Authority key rotation atomically records the new key and its authenticated trust transition.
@@ -625,7 +665,7 @@ The authority has two distinct security concerns: making its protected key hiera
 
 #### Current implementation boundary
 
-This section is the accepted target design, not a claim that the service, authority, relay, or protocol is already implemented. The current prototype uses SQLite. Task 16 (service account and privilege separation) remains separate and is not expanded here. The existing Phase A \`.env\` behavior in Section 10.1 remains unchanged.
+This section is the accepted target design, not a claim that the service, authority, or machine-to-machine protocol is already implemented. The current prototype uses SQLite. Task 16 (service account and privilege separation) remains separate and is not expanded here. The existing Phase A \`.env\` behavior in Section 10.1 remains unchanged.
 ### 10.3 Secret providers, logical mounts, and namespaces
 
 **Status:** Agreed architecture direction; provider implementations and mount configuration are not yet built.
