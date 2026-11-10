@@ -74,8 +74,6 @@ internal static class RemoteLaunchTests
 
     private sealed class Auth : IDisposable
     {
-        private readonly List<byte[]> _frames = [];
-
         private Auth()
         {
         }
@@ -96,20 +94,12 @@ internal static class RemoteLaunchTests
 
         public Func<IApprover> Maker { get; set; } = () => new FakeApprover(true);
 
-        public string Url => "http://127.0.0.1:" + Service.MachinePort;
+        public string Url => "https://127.0.0.1:" + Service.MachinePort;
 
         public string Fingerprint => KeyIdentity.Fingerprint(Machine.Deployment.Keys.CurrentRecord().PublicKey);
 
-        public List<byte[]> Frames
-        {
-            get
-            {
-                lock (_frames)
-                {
-                    return [.. _frames];
-                }
-            }
-        }
+        /// <summary>What a host is configured with to reach this authority: its address and its identity certificate.</summary>
+        public RemoteAuthorityConfig Config => new(Url, MachineCertificates.FingerprintOf(Machine.Deployment.IdentityCertificate)!, Machine.Deployment.IdentityCertificate);
 
         public IReadOnlyList<ApprovalRequest> Pages => [.. Approvers.OfType<FakeApprover>().SelectMany(item => item.Requests)];
 
@@ -141,12 +131,7 @@ internal static class RemoteLaunchTests
 
                     return made;
                 },
-                MachineEndpoint = new MachineEndpointOptions
-                {
-                    Port = 0,
-                    Endpoint = new AuthorityEndpointOptions { PushInterval = Fast, MaxReconnectPause = TimeSpan.FromMilliseconds(300), SessionIdleTimeout = idle ?? TimeSpan.FromMinutes(5) },
-                    Relay = new RelayOptions { CaptureRecords = true, Tap = (_, frame) => { lock (auth._frames) { auth._frames.Add(frame); } } },
-                },
+                MachineEndpoint = new MachineListenerOptions { Port = 0 },
                 AuditUploadInterval = TimeSpan.FromMilliseconds(300),
             });
 
@@ -161,7 +146,7 @@ internal static class RemoteLaunchTests
     }
 
     /// <summary>Forwards everything to the real remote authority and can change what a launch gets back.</summary>
-    private sealed class LaunchProxy(RemoteAuthority inner) : IAuthority, IAuditSink, ILaunchAuthority
+    private sealed class LaunchProxy(RemoteAuthority inner) : IAuthority, IAuditSink, ILaunchAuthority, INoticeSource
     {
         public Func<LaunchAuthorize, Task<LaunchAnswer>?>? Override { get; set; }
 
@@ -203,6 +188,10 @@ internal static class RemoteLaunchTests
         public Task AcknowledgeGrantEventAsync(string machineFingerprint, long sequence, CancellationToken cancel = default) => inner.AcknowledgeGrantEventAsync(machineFingerprint, sequence, cancel);
 
         public Task<AuditAck> UploadAsync(AuditBatch batch, CancellationToken cancel = default) => inner.UploadAsync(batch, cancel);
+
+        public Task<bool> EnsureAuthorityKeyPinnedAsync(CancellationToken cancel) => inner.EnsureAuthorityKeyPinnedAsync(cancel);
+
+        public Task<AuthorityNotices> PollAsync(string machineFingerprint, CancellationToken cancel) => inner.PollAsync(machineFingerprint, cancel);
     }
 
     private sealed class Host : IDisposable
@@ -230,17 +219,15 @@ internal static class RemoteLaunchTests
         {
             Host host = new();
             host.Machine = new TestMachine(Path.Combine(root, "wsl-" + Guid.NewGuid().ToString("N")[..8], "state"), trusted: false, hostName: hostName);
-            RemoteAuthorityConfig config = new(auth.Url, MachineEndpointOptions.RegistrationId, auth.Fingerprint);
+            RemoteAuthorityConfig config = auth.Config;
             host.Machine.Deployment.HostConfig.SetRemote(host.Machine.Fingerprint, config);
-            host.Remote = new RemoteAuthority(config, host.Machine.MachineKey, host.Machine.Deployment.HostConfig) { RetryPause = TimeSpan.FromMilliseconds(50), Retries = 6 };
+            host.Remote = new RemoteAuthority(config, host.Machine.Deployment.Tls, host.Machine.Deployment.HostConfig) { RetryPause = TimeSpan.FromMilliseconds(50), Retries = 6 };
             host.Machine.Deployment.UseRemote(host.Remote);
             host.Proxy = new LaunchProxy(host.Remote);
             host.Machine.Deployment.Link = host.Proxy;
-            EnrollmentResult enrolled = await host.Machine.Deployment.EnrollAsync();
-            if (!enrolled.Accepted)
-            {
-                throw new InvalidOperationException("the host was not enrolled: " + enrolled.Message);
-            }
+
+            // Pairing is task M2: until it exists the authority is told about the machine directly (its identity certificate included), as pairing will leave it: Pending.
+            auth.Machine.Deployment.Store.Register(host.Machine.MachineKey.PublicKey, hostName, "test pairing", host.Machine.Deployment.IdentityCertificate);
 
             if (approve)
             {
@@ -360,7 +347,6 @@ internal static class RemoteLaunchTests
             await RequestedRecordFailsClosed(check, root);
             await LockCancelsUncommitted(check, root);
             await GrantContents(check, root);
-            await EndpointAbuse(check, root);
             await TwoHosts(check, root);
             await Exposure(check, root);
             await Pairing(check, root);
@@ -413,26 +399,6 @@ internal static class RemoteLaunchTests
             && !(delivery with { SecurityRevision = 4 }).Verify(authority.PublicKey) && !(delivery with { Via = SecretsDelivery.ViaGrant }).Verify(authority.PublicKey) && !(delivery with { GrantId = "g1" }).Verify(authority.PublicKey), "wire: the request id, digest, machine, revision, how it was authorized and the grant are each bound by the signature");
         check(!LaunchAnswer.TryRead("{\"delivery\":{},\"refusal\":{}}", out _) && !LaunchAnswer.TryRead("{}", out _) && !LaunchAnswer.TryRead(new LaunchAnswer(delivery, null).ToJson().Replace("\"value\":\"", "\"value\":\"!", StringComparison.Ordinal), out _), "wire: an answer with both parts, none, or a value that is not base64 is refused");
 
-        // L6: a session wipes the raw key arrays it was given and, when disposed, its nonce prefixes; a disposed session refuses to seal.
-        byte[] sendKey = Enumerable.Repeat((byte)7, 32).ToArray();
-        byte[] receiveKey = Enumerable.Repeat((byte)9, 32).ToArray();
-        byte[] sendIv = [1, 2, 3, 4];
-        byte[] receiveIv = [5, 6, 7, 8];
-        SecureSession session = new(new byte[ChannelFormat.SessionIdLength], ChannelFormat.HostToAuthority, sendKey, sendIv, receiveKey, receiveIv);
-        bool wiped = sendKey.All(b => b == 0) && receiveKey.All(b => b == 0);
-        byte[] sealedBefore = session.Seal("x"u8);
-        session.Dispose();
-        bool refusedAfter = false;
-        try
-        {
-            session.Seal("x"u8);
-        }
-        catch (SecureChannelException)
-        {
-            refusedAfter = true;
-        }
-
-        check(wiped && sealedBefore.Length > 0 && sendIv.All(b => b == 0) && receiveIv.All(b => b == 0) && refusedAfter, "session keys: the raw key arrays are wiped at construction, the nonce prefixes at dispose, and a disposed session seals nothing");
         check(ApprovalLinkNotice.IsSafe("http://127.0.0.1:5000/a?b=c") && !ApprovalLinkNotice.IsSafe("javascript:alert(1)") && !ApprovalLinkNotice.IsSafe("http://user:pw@host/x") && !ApprovalLinkNotice.IsSafe("http://host/x\nInjected line") && !ApprovalLinkNotice.IsSafe("file:///etc/passwd") && !ApprovalLinkNotice.IsSafe(""), "wire: only a plain http or https link without user info or control characters is passed on to a client");
         check(ApprovalLinkNotice.TryRead(new ApprovalLinkNotice("r1", 2, "http://x/y").ToJson(), out ApprovalLinkNotice? notice) && notice is { RequestId: "r1", Sequence: 2 }, "wire: an approval link notice round-trips");
     }
@@ -472,13 +438,9 @@ internal static class RemoteLaunchTests
 
         bool uploaded = await HostServiceTests.WaitFor(() => auth.Machine.Deployment.Store.AuditHistory(new AuditQuery(Limit: 50)).Count >= 2);
         string audit = string.Join("\n", auth.Machine.Deployment.Store.AuditHistory(new AuditQuery(Limit: 50)).Select(item => item.Event.ToJson()));
-        check(uploaded && audit.Contains(host.Fingerprint, StringComparison.Ordinal) && audit.Contains("requested", StringComparison.Ordinal), "audit: the host's signed events (the request is recorded before the authority is asked) (authorization, launch, execution) reached the authority through the encrypted session");
+        check(uploaded && audit.Contains(host.Fingerprint, StringComparison.Ordinal) && audit.Contains("requested", StringComparison.Ordinal), "audit: the host's signed events (the request is recorded before the authority is asked) (authorization, launch, execution) reached the authority over the mutually authenticated connection");
         check(host.Authorization.Lease.IsValid, "lease: the host holds the authority's lease from the remote check-in");
 
-        // No value (or decoy) anywhere it must not be.
-        List<byte[]> frames = auth.Frames;
-        check(frames.Count >= 8 && !frames.Any(frame => Leaks(frame, Real) || Leaks(frame, RealOther) || Leaks(frame, Decoy)), "canary: across " + frames.Count + " raw frames the relay handled the values are absent in plaintext, base64, hex and URL forms");
-        check(!frames.Any(frame => Leaks(frame, "echo") || Leaks(frame, "service test") || Leaks(frame, "wsl-one") || Leaks(frame, link)), "canary: the relay also sees no script text, reason, host name or approval link");
         check(!Leaks(string.Join("\n", raw.Lines), Real) && !Leaks(raw.Stdout + raw.Stderr, Real), "canary: the client's events and output carry no value");
         AppLog.Close();
         string logText = string.Join("\n", FilesUnder(logs).Select(file => File.ReadAllText(file))) + "\n" + capture.Everything();
@@ -666,9 +628,18 @@ internal static class RemoteLaunchTests
         check(answer.Delivery is not null && code == "request-id-reused" && auth.Pages.Count == pagesAfterFirst && auth.Store.Reads == 1, "replay: the same launch message again in the same session is refused with request-id-reused; no second page, no second decryption (" + code + ")");
 
         // Same message in a new session (a new connection with new keys): the authority's committed answer is not a new approval, so no values.
-        using RemoteAuthority second = new(new RemoteAuthorityConfig(auth.Url, MachineEndpointOptions.RegistrationId, auth.Fingerprint), host.Machine.MachineKey, host.Machine.Deployment.HostConfig) { RetryPause = Fast, Retries = 3 };
-        LaunchAnswer replay = await second.AuthorizeLaunchAsync(first, _ => { }, CancellationToken.None);
-        check(replay.Delivery is null && replay.Refusal is { Decision: AuthorityDecision.Denied, ReasonCode: ReasonCodes.RequestIdReused } && auth.Store.Reads == 1 && auth.Pages.Count == pagesAfterFirst, "replay: the same launch message in a new session is refused and delivers nothing (the committed answer is not an approval to deliver again)");
+        using RemoteAuthority second = new(auth.Config, host.Machine.Deployment.Tls, host.Machine.Deployment.HostConfig) { RetryPause = Fast, Retries = 3 };
+        string replayCode = "";
+        try
+        {
+            await second.AuthorizeLaunchAsync(first, _ => { }, CancellationToken.None);
+        }
+        catch (RemoteRefusedException error)
+        {
+            replayCode = error.Code;
+        }
+
+        check(replayCode == "request-id-reused" && auth.Store.Reads == 1 && auth.Pages.Count == pagesAfterFirst, "replay: the same launch message on a new connection is refused and delivers nothing (the id is spent for this machine, whatever the connection) (" + replayCode + ")");
 
         // L5: the authority restarts (a new handler with nothing in memory): the same message is not delivered again, because the one-time record is durable.
         using AuthorityLaunchHandler restarted = new(auth.Machine.Deployment.Authority, auth.Machine.Deployment.Keys, auth.Machine.Deployment.Store, auth.Store, _ => new FakeApprover(true), null);
@@ -705,7 +676,7 @@ internal static class RemoteLaunchTests
         string idCode = "";
         try
         {
-            using RemoteAuthority raw = new(new RemoteAuthorityConfig(auth.Url, MachineEndpointOptions.RegistrationId, auth.Fingerprint), host.Machine.MachineKey, host.Machine.Deployment.HostConfig);
+            using RemoteAuthority raw = new(auth.Config, host.Machine.Deployment.Tls, host.Machine.Deployment.HostConfig);
             MethodCall(raw);
         }
         catch (Exception error) when (error is not OutOfMemoryException)
@@ -715,16 +686,22 @@ internal static class RemoteLaunchTests
 
         _ = idCode;
 
-        // A machine nobody enrolled: its key proves possession at the handshake, but the authority does not know it.
-        using SoftwareSigningKey unknown = new();
-        string fresh = Path.Combine(root, "unknown-" + Guid.NewGuid().ToString("N")[..6]);
-        HostConfigFile unknownConfig = HostConfigFile.InFolder(fresh);
-        RemoteAuthorityConfig config = new(auth.Url, MachineEndpointOptions.RegistrationId, auth.Fingerprint);
-        unknownConfig.SetRemote(KeyIdentity.Fingerprint(unknown.PublicKey), config);
-        using RemoteAuthority stranger = new(config, unknown, unknownConfig) { RetryPause = Fast, Retries = 3 };
+        // A machine nobody enrolled: its certificate is well formed (it reaches the pairing route) but it is not a known machine, so it gets nothing else.
+        using TestMachine unknown = new(Path.Combine(root, "unknown-" + Guid.NewGuid().ToString("N")[..6], "state"), trusted: false, hostName: "stranger");
+        unknown.Deployment.HostConfig.SetRemote(unknown.Fingerprint, auth.Config);
+        using RemoteAuthority stranger = new(auth.Config, unknown.Deployment.Tls, unknown.Deployment.HostConfig) { RetryPause = Fast, Retries = 3 };
         LaunchRequest strangerRequest = HostServiceTests.Req(host.Rig, "./tool", id: "stranger-" + Guid.NewGuid().ToString("N")[..8]);
-        LaunchAnswer strangerAnswer = await stranger.AuthorizeLaunchAsync(LaunchAuthorize.Create(strangerRequest, GrantEvidence.Scope(KeyIdentity.Fingerprint(unknown.PublicKey), Scope("c"), []), new PageContext("/x", [], [], null, null, Scope("c")), "stranger", unknown), _ => { }, CancellationToken.None);
-        check(strangerAnswer.Delivery is null && strangerAnswer.Refusal is { ReasonCode: ReasonCodes.UnknownMachine } && auth.Store.Reads == 1, "machine: a machine the authority never enrolled gets unknown-machine, no page, no decryption");
+        string strangerCode = "";
+        try
+        {
+            await stranger.AuthorizeLaunchAsync(LaunchAuthorize.Create(strangerRequest, GrantEvidence.Scope(unknown.Fingerprint, Scope("c"), []), new PageContext("/x", [], [], null, null, Scope("c")), "stranger", unknown.MachineKey), _ => { }, CancellationToken.None);
+        }
+        catch (RemoteRefusedException error)
+        {
+            strangerCode = error.Code;
+        }
+
+        check(strangerCode == "unknown-machine" && auth.Store.Reads == 1, "machine: a machine the authority never enrolled gets unknown-machine, no page, no decryption (" + strangerCode + ")");
         _ = now;
     }
 
@@ -815,7 +792,18 @@ internal static class RemoteLaunchTests
             Ran ended = await Run(host, "lock-send");
             await Task.Delay(300);
             string events = string.Join(",", auth.Machine.Deployment.Store.Audit(500).Select(item => item.Event));
-            check(!ended.Started && auth.Store.Reads == 1 && !auth.Frames.Any(frame => Leaks(frame, Real)) && !events.Contains("delivery-sent", StringComparison.Ordinal), "locked: a lock between the decryption and the send sends nothing (the signing key is locked too) and no delivery is recorded as sent (" + events + ")");
+            check(!ended.Started && auth.Store.Reads == 1 && !events.Contains("delivery-sent", StringComparison.Ordinal), "locked: a lock between the decryption and the send sends nothing (the signing key is locked too) and no delivery is recorded as sent (" + events + ")");
+        }
+
+        // Revocation racing the release: the machine is disabled between the decryption and the send. The final authorization checkpoint at the authority holds the values back; nothing runs and no delivery is recorded as sent.
+        using (Auth auth = Auth.Create(root))
+        {
+            using Host host = await Host.Create(root, auth, "wsl-revoke-send");
+            auth.Store.OnRead = () => auth.Machine.Deployment.Store.Disable(host.Fingerprint, "test admin");
+            Ran ended = await Run(host, "revoke-send");
+            await Task.Delay(300);
+            string events = string.Join(",", auth.Machine.Deployment.Store.Audit(500).Select(item => item.Event));
+            check(!ended.Started && auth.Store.Reads == 1 && !events.Contains("delivery-sent", StringComparison.Ordinal) && !Leaks(ended.Everything, Real), "revocation race: a machine disabled between the decryption and the send gets no values (final checkpoint), nothing runs, and no delivery is recorded as sent (" + events + ")");
         }
 
         // L4: approved at the authority but the session ended first: the record says approved-not-delivered.
@@ -912,7 +900,7 @@ internal static class RemoteLaunchTests
             check(silent.Started && silent.Value == Real && auth.Pages.Count == pages && auth.Store.KeyedReads == 3, "key: later runs under the grant need no tap and no page; the held key opens the store each time");
             byte[]? held = auth.Service.Launches!.HeldBytes(host.Fingerprint);
             check(held is not null && held.Any(b => b != 0), "key: the held key is in the authority's memory only");
-            check(!DiskLeaks(host.Folder, Real, KeyCanary) && !auth.Frames.Any(frame => Leaks(frame, KeyCanary) || Leaks(frame, Real)), "key: it is never on the host's disk and never in a frame the relay saw");
+            check(!DiskLeaks(host.Folder, Real, KeyCanary), "key: it is never on the host's disk and");
 
             auth.Machine.Deployment.Store.Disable(host.Fingerprint, "test admin");
             auth.Service.Launches!.Sweep();
@@ -1069,103 +1057,6 @@ internal static class RemoteLaunchTests
         check(!forged.Started, "grant contents: a signed text edited to say other contents no longer verifies: no grant");
     }
 
-    // ---------- who may use the machine endpoint (M1 of the review) ----------
-
-    private static async Task<string> TryWebSocket(string url, string? origin = null)
-    {
-        using ClientWebSocket client = new();
-        client.Options.Proxy = null;
-        if (origin is not null)
-        {
-            client.Options.SetRequestHeader("Origin", origin);
-        }
-
-        using CancellationTokenSource limit = new(TimeSpan.FromSeconds(10));
-        try
-        {
-            await client.ConnectAsync(new Uri(url), limit.Token);
-
-            return "connected";
-        }
-        catch (WebSocketException error)
-        {
-            return error.Message.Contains("403", StringComparison.Ordinal) ? "403" : error.Message.Contains("421", StringComparison.Ordinal) ? "421" : error.Message;
-        }
-    }
-
-    private static async Task<EnrollmentResult> Enroll(string root, Auth auth, string hostName)
-    {
-        TestMachine machine = new(Path.Combine(root, "cap-" + Guid.NewGuid().ToString("N")[..8], "state"), trusted: false, hostName: hostName);
-        RemoteAuthorityConfig config = new(auth.Url, MachineEndpointOptions.RegistrationId, auth.Fingerprint);
-        machine.Deployment.HostConfig.SetRemote(machine.Fingerprint, config);
-        using RemoteAuthority remote = new(config, machine.MachineKey, machine.Deployment.HostConfig) { RetryPause = Fast, Retries = 2 };
-        machine.Deployment.UseRemote(remote);
-
-        return await machine.Deployment.EnrollAsync();
-    }
-
-    private static async Task EndpointAbuse(Action<bool, string> check, string root)
-    {
-        using Auth auth = Auth.Create(root, idle: TimeSpan.FromSeconds(1));
-        string ws = "ws://127.0.0.1:" + auth.Service.MachinePort;
-        check(await TryWebSocket(ws + "/relay/v1/authority?registration=machine", "http://evil.example") == "403" && await TryWebSocket(ws + "/relay/v1/host?registration=machine", "http://evil.example") == "403", "endpoint abuse: a request that carries an Origin header (a web page; WebSocket has no CORS) is refused on both paths");
-        check(await TryWebSocket(ws + "/relay/v1/authority?registration=machine") == "403", "endpoint abuse: a local process without the in-process capability cannot register as the authority, even from loopback");
-        using HttpClient client = new(new SocketsHttpHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(10) };
-        using HttpRequestMessage rebound = new(HttpMethod.Get, "http://127.0.0.1:" + auth.Service.MachinePort + "/relay/v1/host?registration=machine");
-        rebound.Headers.Host = "evil.example:" + auth.Service.MachinePort;
-        using HttpResponseMessage answer = await client.SendAsync(rebound);
-        check((int)answer.StatusCode == 421, "endpoint abuse: a request by another host name (DNS rebinding) is refused with 421 (" + (int)answer.StatusCode + ")");
-
-        // The real thing still works after the attempts: the genuine endpoint is registered and serves a host.
-        using Host host = await Host.Create(root, auth, "wsl-abuse");
-        Ran ok = await Run(host, "after-abuse");
-        check(ok.Started && ok.Value == Real, "endpoint abuse: the genuine endpoint kept its registration and serves a host after the attempts");
-
-        // Sessions that do nothing are closed.
-        TestMachine lonely = new(Path.Combine(root, "idle-" + Guid.NewGuid().ToString("N")[..8], "state"), trusted: false, hostName: "wsl-idle");
-        RemoteAuthorityConfig config = new(auth.Url, MachineEndpointOptions.RegistrationId, auth.Fingerprint);
-        lonely.Deployment.HostConfig.SetRemote(lonely.Fingerprint, config);
-        using RemoteAuthority idleRemote = new(config, lonely.MachineKey, lonely.Deployment.HostConfig) { RetryPause = Fast, Retries = 2 };
-        await idleRemote.KeyTransitionsAsync(auth.Fingerprint);
-        int open = auth.Service.MachineSessions;
-        bool closed = await HostServiceTests.WaitFor(() => auth.Service.MachineSessions < open, 15);
-        check(open >= 1 && closed, "endpoint abuse: a session that finished the handshake and then does nothing is closed after the idle time (" + open + " -> " + auth.Service.MachineSessions + ")");
-
-        string challengeCode = "";
-        try
-        {
-            for (int index = 0; index < 5; index++)
-            {
-                await idleRemote.BeginEnrollmentAsync();
-            }
-        }
-        catch (RemoteRefusedException error)
-        {
-            challengeCode = error.Code;
-        }
-
-        check(challengeCode == "too-many-enrollments", "endpoint abuse: one session may ask for only a few enrollment challenges (" + challengeCode + ")");
-
-        // Enrollment is bounded: per session, per host name and in all.
-        int accepted = 0;
-        for (int index = 0; index < 6; index++)
-        {
-            if ((await Enroll(root, auth, "copycat")).Accepted)
-            {
-                accepted++;
-            }
-        }
-
-        check(accepted == LocalAuthority.MaxPendingPerHostName, "endpoint abuse: no more than " + LocalAuthority.MaxPendingPerHostName + " machines may wait Pending under one host name (" + accepted + " were taken of 6)");
-        int total = auth.Machine.Deployment.Store.Machines().Count(item => item.Status == MachineStatus.Pending);
-        for (int index = 0; index < LocalAuthority.MaxPendingMachines + 4; index++)
-        {
-            await Enroll(root, auth, "host-" + index);
-        }
-
-        check(auth.Machine.Deployment.Store.Machines().Count(item => item.Status == MachineStatus.Pending) <= LocalAuthority.MaxPendingMachines && total < LocalAuthority.MaxPendingMachines, "endpoint abuse: the Pending list is bounded overall (" + auth.Machine.Deployment.Store.Machines().Count(item => item.Status == MachineStatus.Pending) + ")");
-    }
-
     // ---------- two hosts, one authority ----------
 
     private static async Task TwoHosts(Action<bool, string> check, string root)
@@ -1208,37 +1099,19 @@ internal static class RemoteLaunchTests
     private static async Task Exposure(Action<bool, string> check, string root)
     {
         using Auth auth = Auth.Create(root);
-        using HttpClient client = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(10) };
-        string machine = "http://127.0.0.1:" + auth.Service.MachinePort;
-        List<int> statuses = [];
-        foreach (string path in new[] { "/", "/admin", "/admin/", "/api/v1/status", "/api/v1/machines", "/v1/status", "/v1/identity", "/relay/v1/other", "/relay/v1/host", "/relay/v1/authority" })
-        {
-            using HttpResponseMessage got = await client.GetAsync(machine + path);
-            statuses.Add((int)got.StatusCode);
-        }
-
-        using HttpResponseMessage posted = await client.PostAsync(machine + "/v1/launch", new StringContent("{}", Encoding.UTF8, "application/json"));
-        statuses.Add((int)posted.StatusCode);
-        check(statuses.All(status => status == 400), "exposure: the machine endpoint answers 400 to the admin app, the API, the loopback launch API and anything else that is not a WebSocket of the machine protocol (" + string.Join(",", statuses) + ")");
-        using HttpResponseMessage admin = await client.GetAsync("http://127.0.0.1:" + auth.Service.Port + "/api/v1/status");
         check(auth.Service.MachinePort != auth.Service.Port, "exposure: the machine endpoint is its own listener, not the API's");
+        check(new MachineListenerOptions { Bind = IPAddress.Any }.Problem() is { } any && any.Contains("every interface", StringComparison.Ordinal) && new MachineListenerOptions { Bind = IPAddress.IPv6Any }.Problem() is not null, "exposure: it will not listen on 0.0.0.0 or [::]");
+        check(new MachineListenerOptions { Bind = IPAddress.Loopback, Port = 8790 }.Problem() is null && new MachineListenerOptions { Port = 70000 }.Problem() is not null, "exposure: loopback and a port in range are fine, a port out of range is not");
 
-        check(new MachineEndpointOptions { Bind = IPAddress.Any }.Problem() is { } any && any.Contains("every interface", StringComparison.Ordinal) && new MachineEndpointOptions { Bind = IPAddress.IPv6Any }.Problem() is not null, "exposure: it will not listen on 0.0.0.0 or [::]");
-        check(new MachineEndpointOptions { Bind = IPAddress.Parse("172.30.208.1") }.Problem() is { } plain && plain.Contains("certificate", StringComparison.Ordinal) && new MachineEndpointOptions { Bind = IPAddress.Loopback, Port = 8790 }.Problem() is null && new MachineEndpointOptions { Port = 70000 }.Problem() is not null, "exposure: beyond loopback it needs a certificate (blocker recorded); loopback and a port in range are fine");
-
-        // Command line.
         CliCommand? Parse(params string[] args) => CliArgs.Parse(args, out _);
-        string Error(params string[] args) { CliArgs.Parse(args, out string error); return error; }
         check(Parse("service", "--machine-port", "8790") is CliCommand.Service { MachinePort: 8790, MachineBind: "127.0.0.1" } && Parse("service") is CliCommand.Service { MachinePort: null }, "command line: service --machine-port N serves the machine endpoint on loopback; plain service serves none");
-        check(Parse("service", "--machine-port", "8790", "--machine-bind", "0.0.0.0") is null && Parse("service", "--machine-cert", "x.pfx") is null && Parse("service", "--machine-port", "8790", "--machine-bind", "172.30.208.1") is null, "command line: 0.0.0.0 is never accepted; a bind without a port, and a bind beyond loopback without a certificate, are refused (" + Error("service", "--machine-port", "8790", "--machine-bind", "172.30.208.1") + ")");
-        check(Parse("service", "--machine-port", "8790", "--machine-bind", "172.30.208.1", "--machine-cert", "x.pfx") is CliCommand.Service { MachineCertificate: "x.pfx" }, "command line: a specific address with a certificate file is accepted");
-        string hex = new('A', 64);
-        check(Parse("admin", "http://127.0.0.1:8790", "--authority-fingerprint", hex) is CliCommand.AdminPair { Url: "http://127.0.0.1:8790" } && Parse("admin") is CliCommand.AdminApp && Parse("admin", "--service-port", "9000") is CliCommand.AdminApp, "command line: admin ADDRESS --authority-fingerprint HEX points a host at an authority; bare admin is still the local app");
-        check(Parse("admin", "http://127.0.0.1:8790") is null && Error("admin", "http://127.0.0.1:8790").Contains("fingerprint", StringComparison.Ordinal) && Parse("admin", "http://127.0.0.1:8790", "--authority-fingerprint", "zz") is null && Parse("admin", "http://evil.example:80", "--authority-fingerprint", hex) is null && Parse("admin", "list") is null, "command line: an address needs the fingerprint of the key it will trust, a plain http address beyond loopback is refused, and admin keeps no verbs");
+        check(Parse("service", "--machine-port", "8790", "--machine-bind", "0.0.0.0") is null && Parse("service", "--machine-cert", "x.pfx") is null && Parse("service", "--machine-bind", "127.0.0.1") is null, "command line: 0.0.0.0 is never accepted, a bind without a port is refused and there is no certificate flag (the certificate is the machine's own)");
+        check(Parse("admin", "https://127.0.0.1:8790") is CliCommand.AdminPair { Url: "https://127.0.0.1:8790" } && Parse("admin") is CliCommand.AdminApp && Parse("admin", "--service-port", "9000") is CliCommand.AdminApp, "command line: admin ADDRESS names an authority (pairing is task M2); bare admin is still the local app");
+        check(Parse("admin", "http://127.0.0.1:8790") is null && Parse("admin", "list") is null && Parse("admin", "https://127.0.0.1:8790", "--authority-fingerprint", new string('A', 64)) is null, "command line: a plain http address is refused, admin keeps no verbs and the 5b --authority-fingerprint pairing is gone");
         await Task.CompletedTask;
     }
 
-    // ---------- pairing a host ----------
+    // ---------- pairing is a seam ----------
 
     private static async Task Pairing(Action<bool, string> check, string root)
     {
@@ -1247,32 +1120,7 @@ internal static class RemoteLaunchTests
         using LocalDeployment deployment = machine.Deployment;
         StringWriter output = new();
         StringWriter error = new();
-        int wrong = await AuthorityPairing.RunAsync(new CliCommand.AdminPair(auth.Url, new string('1', 64)), deployment, output, error);
-        HostConfigLoad afterWrong = deployment.HostConfig.Load();
-        check(wrong == 0 && afterWrong.Config is { Remote: not null, Authority: null } && output.ToString().Contains("could not be reached", StringComparison.Ordinal) && auth.Machine.Deployment.Store.Find(machine.Fingerprint) is null, "pairing: a wrong authority fingerprint is saved but never trusted: the handshake fails, nothing is pinned and the authority never hears of this machine (" + output.ToString().Replace("\r\n", " | ", StringComparison.Ordinal).Trim() + ")");
-
-        TestMachine second = new(Path.Combine(root, "paired2-" + Guid.NewGuid().ToString("N")[..6], "state"), trusted: false, hostName: "wsl-paired-2");
-        using LocalDeployment deployment2 = second.Deployment;
-        StringWriter output2 = new();
-        int ok = await AuthorityPairing.RunAsync(new CliCommand.AdminPair(auth.Url, auth.Fingerprint), deployment2, output2, new StringWriter());
-        string text = output2.ToString();
-        MachineRecord? record = auth.Machine.Deployment.Store.Find(second.Fingerprint);
-        HostConfigLoad load = deployment2.HostConfig.Load();
-        check(ok == 0 && record is { Status: MachineStatus.Pending } && load.Config is { Remote: not null, Authority: not null } && load.Config.Authority.Fingerprint == auth.Fingerprint, "pairing: the machine is registered as Pending at the authority, host.json has the address, and the authority key is pinned at the first matching handshake");
-        check(text.Contains(KeyIdentity.Display(second.Fingerprint), StringComparison.Ordinal) && text.Contains("Approve this machine", StringComparison.Ordinal) && text.Contains("with-secrets admin", StringComparison.Ordinal), "pairing: it prints this machine's fingerprint and says where an administrator approves it");
-        string json = File.ReadAllText(Path.Combine(Path.GetDirectoryName(second.Deployment.HostConfig.FilePath)!, "host.json"));
-        check(!json.Contains("PRIVATE", StringComparison.OrdinalIgnoreCase) && json.Contains("relayUrl", StringComparison.Ordinal) && json.Contains(MachineEndpointOptions.RegistrationId, StringComparison.Ordinal), "pairing: host.json holds public data only");
-
-        // M2: an authority key already pinned in host.json (here this machine's own local authority) is not silently overruled.
-        TestMachine pinned = new(Path.Combine(root, "pinned-" + Guid.NewGuid().ToString("N")[..6], "state"), trusted: true, hostName: "wsl-pinned");
-        using LocalDeployment pinnedDeployment = pinned.Deployment;
-        string pinnedBefore = File.ReadAllText(pinnedDeployment.HostConfig.FilePath);
-        StringWriter pinnedOut = new();
-        StringWriter pinnedErr = new();
-        int refused = await AuthorityPairing.RunAsync(new CliCommand.AdminPair(auth.Url, auth.Fingerprint), pinnedDeployment, pinnedOut, pinnedErr);
-        string pinnedText = pinnedErr.ToString();
-        string localFingerprint = KeyIdentity.Fingerprint(pinnedDeployment.Keys.CurrentRecord().PublicKey);
-        check(refused != 0 && pinnedText.Contains(KeyIdentity.Display(localFingerprint), StringComparison.Ordinal) && pinnedText.Contains(KeyIdentity.Display(auth.Fingerprint), StringComparison.Ordinal) && pinnedText.Contains("NOT trusted", StringComparison.Ordinal)
-            && File.ReadAllText(pinnedDeployment.HostConfig.FilePath) == pinnedBefore && auth.Machine.Deployment.Store.Find(pinned.Fingerprint) is null, "pairing: a pinned authority key that differs from --authority-fingerprint refuses the pairing, names both keys, says the new one is not trusted and changes nothing");
+        int code = await AuthorityPairing.RunAsync(new CliCommand.AdminPair(auth.Url), output, error);
+        check(code != 0 && (output.ToString() + error.ToString()).Contains("not available", StringComparison.OrdinalIgnoreCase) && auth.Machine.Deployment.Store.Find(machine.Fingerprint) is null && deployment.HostConfig.Load().Config is null, "pairing: the admin ADDRESS command is a stub for now: it says pairing is not available and changes nothing");
     }
 }
