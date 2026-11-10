@@ -456,3 +456,32 @@ Phase 6a built the back end and the session and authorization model, as server-r
 - H1: a grant covers exactly the names, program and folder that were approved (signed digest `Grant contents:`, row columns untruncated), enforced at the authority in `UseGrant`; the scope key of a remote launch is recomputed from the signed context. Grants made before this round are ignored and must be approved again.
 - M1: Origin refused, Host validated, authority-registration capability, per-source host slots, idle timeout, enrollment caps (per session, per host name, in all). M2: pairing refuses a differing existing pin and names both keys. L1 to L6 and L8 as in `docs/architecture.md` (fix round paragraph). L7: in-process loopback listener added, untested live; plain ws to private addresses stays refused, pending the maintainer's confirmation (needs an explicit setting).
 - Tests: `RemoteLaunch` suite extended (grant contents, endpoint abuse, pairing pin, locked exit 8, own lock, delivery records, session keys). Mutation evidence is in `task-p5b-report.md`.
+
+## Phase 6c: operations exercised, documentation, release verification (done, pending review)
+
+Operations guide: `docs/operations.md` (install, first run, enrollment of passkeys and machines, day to day, backup and restore, recovery, offline lease, host name changes, Docker and WSL, troubleshooting with every exit code). Acceptance script: `scripts/verify-all.ps1` (build with 0 warnings, the .NET suite, frontend verify, single-EXE publish and verification, E2E rebuilt first; one pass or fail line per stage, full output in `artifacts\verify-all`).
+
+- **Exercised, not only documented** (suite `Operations`, `tests\WithSecrets.Tests\OperationsTests.cs`): (1) backup of `state.db` and `authority.db` restored on a second machine with new keys (store and manifest open, admin passkeys verify, machine records, history, grants with their assertions and audit rows unchanged, rotation chain verifies, a host pinned to the first key follows it, the restored authority is locked, then unlocked-but-unable-to-sign and runs nothing, Recover by tap, the new identity Pending then approved by tap, a run, audit continues); the backup holds no master key, recovery code or secret value (scanned, with a planted-code control). (2) Two rotations then a recovery through the admin API (each its own tap, a non-admin key refused, the host follows the signed transitions with no tap for the run, a host not re-pinned refuses the recovered key and decrypts nothing). (3) The key store losing the authority key while the machine stays Trusted: refused, nothing decrypted, Recover by tap, the service checks in again and runs. (4) Three lock, restart, unlock cycles (held key zeroed by lock and by stop, locked after restart, no session survives, a non-admin key cannot unlock). (5) Host name change end to end (refused with the name waiting, non-admin refused, tap binds exactly the shown name, revision unchanged, then runs) and browser scenario `i8-spa-accept-host-name`. (6) Docker stand-in (arguments exactly as asked, value only in the client's environment, no extra variable, no value in any service file, a request naming `host.docker.internal` or a bridge address refused with 421).
+- **Test harness**: `AdminApp` gained `restoreFrom` and `approver`, `HostServiceTests.Rig` a `seedState` hook and a settable `Service`, `TestMachine.LoseAuthorityKeys`.
+- **Finding, no change made**: the CNG keys are non-exportable, so a backup cannot carry the authority signing key and none is invented; a restored authority fails closed until Recover (a fresh tap). After the key store loses the key the service answers 503 until its startup check-in succeeds, which happens by itself once the key is recovered (test waits for it).
+- **Mutation evidence** (applied, `WS_ONLY=Operations`, reverted): (a) key-ring check that the key store's key is the one authority.db names disabled: 2 failures (restore error that says to recover; a Trusted machine with a lost key would be served by another key); (b) the pinned-key signature check of `TryApplyTransition` disabled: 2 failures (forged transition moves the pin; a host pinned before a recovery follows it); (c) `RecordHostMismatch` rebinds the host name at once: 3 failures (refusal, non-admin approval, run after approval).
+
+### Maintainer checklist for a real WSL run (Windows-only code is untested on WSL)
+
+Recorded blocker: the Linux machine key store does not exist (CNG only), so a WSL host service cannot start. It is a security decision and is not invented here.
+
+1. Decide the Linux key protection; build for `linux-x64` and start the WSL service.
+2. Windows: `with-secrets service --machine-port 8790` (mirrored networking: loopback works; NAT: `--machine-bind` the vEthernet(WSL) address with `--machine-cert`, and add the firewall rule yourself).
+3. WSL: `with-secrets admin https://HOST:8790 --authority-fingerprint HEX`.
+4. Windows admin app: compare the fingerprint and approve the pending machine.
+5. WSL: run a command that needs a secret; open the printed authority link on Windows and tap the passkey.
+6. Confirm the child saw the value and the Windows audit history has the signed events.
+7. Lock the authority; confirm a run is refused and nothing starts.
+8. Confirm no secret value is in the WSL home folder, `host.json` or the logs.
+
+### Open items for the maintainer after Phase 6c
+
+- A container client cannot reach the service (loopback-only listener and Host check, 421 for `host.docker.internal` and bridge addresses). Supporting it means listening beyond loopback: a decision, not made. Docker commands launched on the host through the service are supported and tested.
+- Provider instances, mounts and write-only provider credential entry (plan Phase 6) are not built because no provider code exists; recorded as not applicable until providers are built.
+- Not built: Windows service installation (start at logon), the Linux machine key store, grant creation from a remote host, unattended unlock with a TPM-sealed key.
+- The manual keyboard and screen-reader checklist (Phase 6b-2) and a real remote relay/authority deployment test across machines remain the maintainer's.
