@@ -690,6 +690,13 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
             return Task.FromResult(Refuse("the proof of possession does not verify"));
         }
 
+        // The identity certificate, when the machine sends one, must contain exactly the machine's public key and have the profile of 10.2 (a CA-capable self-signed anchor, valid now). Possession of a
+        // certificate trusts nothing by itself: the machine is Pending until an administrator approves it.
+        if (request.IdentityCertificate is { } identityCertificate && MachineCertificates.ValidateIdentity(identityCertificate, _clock.GetUtcNow(), request.PublicKey) is { } certificateProblem)
+        {
+            return Task.FromResult(Refuse(certificateProblem));
+        }
+
         // A machine that is not yet known can wait for approval only while there is room: any process that reaches the endpoint may enroll, so the list an administrator reviews is bounded
         // (in all, and per host name, so one name cannot crowd the list or copy the name of a real host many times).
         if (store.Find(request.Fingerprint) is null)
@@ -701,7 +708,7 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
             }
         }
 
-        MachineRecord machine = store.Register(request.PublicKey, request.HostName, request.Fingerprint);
+        MachineRecord machine = store.Register(request.PublicKey, request.HostName, request.Fingerprint, request.IdentityCertificate);
         if (machine.HostName != request.HostName)
         {
             store.RecordHostMismatch(machine.Fingerprint, request.HostName);

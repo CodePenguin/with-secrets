@@ -55,7 +55,7 @@ public sealed class HostServiceOptions
     /// <summary>This machine's identity, the authority and <c>host.json</c>. Every launch is answered for by the authority; there is no way to start the service without one.</summary>
     public required LocalDeployment Deployment { get; init; }
 
-    /// <summary>How often the service asks the authority for invalidations of this machine that it has not applied (a launch also asks before it begins).</summary>
+    /// <summary>Local authority: how often the service looks for invalidations of this machine that it has not applied (a launch also looks before it begins). Remote authority: no timer asks; this is only the first pause before a reconnect (it grows to a bound, with jitter) and how often the lease is checked for renewal.</summary>
     public TimeSpan InvalidationPoll { get; init; } = TimeSpan.FromSeconds(1);
 
     /// <summary>For tests: the clock that measures the offline lease (default: the system's monotonic clock).</summary>
@@ -112,50 +112,13 @@ public sealed class HostServiceOptions
     internal Func<IApprover, IStoreKeyProvider>? KeyProviderFactory { get; init; }
 
     /// <summary>
-    /// Serve the machine-protocol endpoint (an opaque relay for the encrypted machine connection, and this authority's own registration at it) so that another machine's host service, for example the one in WSL,
-    /// can be enrolled and ask this authority for launches. Null (the default): nothing listens beyond the loopback API. It serves nothing but the machine protocol: never the administration application, the
-    /// API, the approval pages or a run (those stay on the loopback listener).
+    /// Serve the machine listener (HTTPS: TLS 1.3 mutual authentication, HTTP/2 only) so that another machine's host service, for example the one in WSL, can ask this authority for launches. Null (the default): nothing listens
+    /// beyond the loopback API. It serves nothing but the machine API: never the administration application, the API, the approval pages or a run (those stay on the loopback listener).
     /// </summary>
-    public MachineEndpointOptions? MachineEndpoint { get; init; }
+    public MachineListenerOptions? MachineEndpoint { get; init; }
 }
 
 
-/// <summary>Where the machine-protocol endpoint of an authority listens. Configuration only; nothing here is secret.</summary>
-public sealed class MachineEndpointOptions
-{
-    /// <summary>The registration name the endpoint uses at its own relay (a public label; the authority key's fingerprint is the trust anchor, not this).</summary>
-    public const string RegistrationId = "machine";
-
-    /// <summary>The address to listen on: loopback (the default; WSL with mirrored networking reaches it as its own localhost), or one specific address of a virtual network, which needs <see cref="Certificate" />. Never 0.0.0.0 or [::].</summary>
-    public IPAddress Bind { get; init; } = IPAddress.Loopback;
-
-    /// <summary>The port; 0 picks a free one (tests).</summary>
-    public int Port { get; init; }
-
-    public System.Security.Cryptography.X509Certificates.X509Certificate2? Certificate { get; init; }
-
-    /// <summary>For tests: the relay's own settings hooks (a raw-frame tap, record capture); the program never sets it.</summary>
-    internal RelayOptions? Relay { get; init; }
-
-    /// <summary>For tests: the endpoint's timing.</summary>
-    internal AuthorityEndpointOptions? Endpoint { get; init; }
-
-    /// <summary>Null when the address may be listened on, else why not (the endpoint never listens on every interface, and only on a loopback address without a certificate).</summary>
-    public string? Problem()
-    {
-        if (IPAddress.Any.Equals(Bind) || IPAddress.IPv6Any.Equals(Bind))
-        {
-            return "the machine endpoint will not listen on every interface (0.0.0.0 or [::]); name the one address of the virtual network it is for";
-        }
-
-        if (!IPAddress.IsLoopback(Bind) && Certificate is null)
-        {
-            return "the machine endpoint listens beyond loopback only with a TLS certificate, which this build cannot be given yet (see IMPLEMENTATION_PROGRESS.md, blockers); use a loopback address";
-        }
-
-        return Port is < 0 or > ToolSettings.MaxPort ? "the machine endpoint port must be 0 to " + ToolSettings.MaxPort : null;
-    }
-}
 /// <summary>
 /// The host service: the trusted side of a run. It listens on loopback only, takes a <see cref="LaunchRequest" /> over HTTP, gets
 /// the approval from the person on the one-use page, decrypts, builds the child's environment, starts the program and streams
@@ -237,15 +200,14 @@ public sealed class HostService : IDisposable
     }
 
     private Task _auditLoop = Task.CompletedTask;
-    private RelayServer? _relay;
-    private AuthorityEndpoint? _machineEndpoint;
+    private MachineListener? _machineListener;
     private AuthorityLaunchHandler? _launches;
 
-    /// <summary>The port of the machine-protocol endpoint, or null when this service serves none.</summary>
-    public int? MachinePort => _relay?.Port;
+    /// <summary>The port of the machine listener, or null when this service serves none.</summary>
+    public int? MachinePort => _machineListener?.Port;
 
-    /// <summary>For tests: how many sessions the machine endpoint has open.</summary>
-    internal int MachineSessions => _machineEndpoint?.Sessions ?? 0;
+    /// <summary>For tests: the machine listener (null when none is served).</summary>
+    internal MachineListener? MachineListener => _machineListener;
 
     /// <summary>For tests: the authority-side launch handler (null when no machine endpoint is served).</summary>
     internal AuthorityLaunchHandler? Launches => _launches;
@@ -357,10 +319,10 @@ public sealed class HostService : IDisposable
     }
 
     /// <summary>
-    /// Serves the machine-protocol endpoint of this authority: a relay (opaque router, host connections only from outside; the authority's own registration only from this machine) and the
-    /// <see cref="AuthorityEndpoint" /> with the launch handler that approves and decrypts here. A machine with no authority key yet, or an address that may not be listened on, serves none and says so in the log.
+    /// Serves the machine listener of this authority (see <see cref="MachineListener" />): TLS 1.3 mutual authentication and HTTP/2 on its own address, with the launch handler that approves and decrypts here. A machine with no
+    /// authority key yet serves none and says so in the log; an address that may not be listened on is an error.
     /// </summary>
-    private void StartMachineEndpoint(MachineEndpointOptions endpoint)
+    private void StartMachineEndpoint(MachineListenerOptions endpoint)
     {
         if (Authorization.IsRemote)
         {
@@ -372,37 +334,16 @@ public sealed class HostService : IDisposable
             throw new InvalidOperationException(problem);
         }
 
-        byte[]? authorityKey = _options.Deployment.Keys.ActivePublicKey();
-        if (authorityKey is null)
+        if (_options.Deployment.Keys.ActivePublicKey() is null)
         {
             AppLog.Warn("no machine endpoint: this authority has no signing key yet");
 
             return;
         }
 
-        RelayOptions template = endpoint.Relay ?? new RelayOptions();
-
-        // Only this process's endpoint may register as the authority at its relay: it holds a random capability that no other process is given.
-        string capability = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
-        _relay = RelayServer.StartAsync(new RelayOptions
-        {
-            Bind = endpoint.Bind,
-            Port = endpoint.Port,
-            Certificate = endpoint.Certificate,
-            AuthorityLoopbackOnly = true,
-            AuthorityCapability = capability,
-            BindHostOnly = true,
-            InProcessLoopback = true,
-            CaptureRecords = template.CaptureRecords,
-            Tap = template.Tap,
-        }).GetAwaiter().GetResult();
-        RemoteAuthorityConfig config = new($"http://127.0.0.1:{(_relay.LoopbackPort > 0 ? _relay.LoopbackPort : _relay.Port)}", MachineEndpointOptions.RegistrationId, KeyIdentity.Fingerprint(authorityKey));
-        AuthorityEndpointOptions endpointOptions = endpoint.Endpoint is { } given ? new AuthorityEndpointOptions { PushInterval = given.PushInterval, HandshakeTimeout = given.HandshakeTimeout, MaxSessions = given.MaxSessions, MaxReconnectPause = given.MaxReconnectPause, SessionIdleTimeout = given.SessionIdleTimeout, MaxEnrollmentsPerSession = given.MaxEnrollmentsPerSession, RelayCapability = capability } : new AuthorityEndpointOptions { RelayCapability = capability };
         _launches = new AuthorityLaunchHandler(_options.Deployment.Authority, _options.Deployment.Keys, _options.Deployment.Store, _options.Store, MachineApprover, Lock, _options.Deployment.Clock);
-        _machineEndpoint = new AuthorityEndpoint(_options.Deployment.Authority, _options.Deployment.Keys, _options.Deployment.Store, config, endpointOptions, _launches);
-        _machineEndpoint.Start();
+        _machineListener = MachineListener.Start(_options.Deployment.Authority, _options.Deployment.Keys, _options.Deployment.Store, _options.Deployment.Tls, endpoint, _launches);
     }
-
     /// <summary>The approver for a launch another machine asked for: the same page, passkeys and settings as a local launch, shown here.</summary>
     private IApprover MachineApprover(Action<string> announce)
     {
@@ -433,6 +374,7 @@ public sealed class HostService : IDisposable
         try
         {
             using CancellationTokenSource limit = new(TimeSpan.FromSeconds(10));
+            _options.Deployment.Remote?.EnsureAuthorityKeyPinnedAsync(limit.Token).GetAwaiter().GetResult();
             Volatile.Write(ref _ready, Authorization.ReconcileAsync(limit.Token).GetAwaiter().GetResult() != HostAuthorization.Reconciliation.Unreachable);
         }
         catch (Exception error) when (error is not OutOfMemoryException)
@@ -748,8 +690,118 @@ public sealed class HostService : IDisposable
         await response.WriteAsync(answer.Append('}').ToString());
     }
 
+    /// <summary>
+    /// A remote authority's invalidations and grant revocations arrive by ONE outstanding long poll (no timer, no heartbeat, no empty polling): the authority holds the request until the existing protocol has a message, the host
+    /// applies it (cleanup and cancellation first), acknowledges through the existing operation and polls again at once. On every (re)connect the host first authenticates and checks in (status and security revision), which purges
+    /// everything held when the revision differs. A failure backs off with bounded exponential delay and jitter; there is no other address to try. A machine the authority no longer trusts keeps nothing.
+    /// </summary>
+    private async Task RemoteLoop()
+    {
+        TimeSpan floor = _options.InvalidationPoll;
+        TimeSpan pause = floor;
+        bool reconnected = true;
+        Task lease = Task.Run(LeaseLoop);
+        try
+        {
+            while (!_stop.IsCancellationRequested)
+            {
+                try
+                {
+                    if (reconnected || !Ready)
+                    {
+                        await _options.Deployment.Remote!.EnsureAuthorityKeyPinnedAsync(_stop.Token);
+                        if (await Authorization.ReconcileAsync(_stop.Token) == HostAuthorization.Reconciliation.Unreachable)
+                        {
+                            throw new RemoteTransportException("the authority could not be reached");
+                        }
+
+                        Volatile.Write(ref _ready, true);
+                        reconnected = false;
+                    }
+
+                    await Authorization.PollAsync(_stop.Token);
+                    pause = floor;
+                }
+                catch (OperationCanceledException) when (_stop.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception error) when (error is not OutOfMemoryException)
+                {
+                    reconnected = true;
+                    if (error is RemoteRefusedException { Code: "machine-not-trusted" })
+                    {
+                        // The authority turns this machine away: whatever it was told, it is not trusted now. Nothing it holds may be used; the next check-in says what it is now.
+                        Authorization.Discard("the authority no longer trusts this machine");
+                    }
+
+                    AppLog.Warn("the authority link failed: {Type}", error is RemoteRefusedException refused ? "refused " + refused.Code : error.GetType().Name);
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromTicks((long)(pause.Ticks * (0.5 + Random.Shared.NextDouble() / 2))), _stop.Token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        return;
+                    }
+
+                    pause = TimeSpan.FromTicks(Math.Min(pause.Ticks * 2, Math.Max(TimeSpan.FromSeconds(10).Ticks, floor.Ticks)));
+                }
+                finally
+                {
+                    Authorization.SweepKey();
+                }
+            }
+        }
+        finally
+        {
+            try
+            {
+                await lease.WaitAsync(TimeSpan.FromSeconds(1));
+            }
+            catch (Exception error) when (error is OperationCanceledException or TimeoutException)
+            {
+                // Stopping.
+            }
+        }
+    }
+
+    /// <summary>The offline lease is renewed when it is half gone (a local check; the authority is asked only then): the existing lease rule, not an invalidation poll.</summary>
+    private async Task LeaseLoop()
+    {
+        using PeriodicTimer timer = new(_options.InvalidationPoll);
+        try
+        {
+            while (await timer.WaitForNextTickAsync(_stop.Token))
+            {
+                try
+                {
+                    if (Ready)
+                    {
+                        await Authorization.RenewLeaseAsync(_stop.Token);
+                    }
+                }
+                catch (Exception error) when (error is not OperationCanceledException)
+                {
+                    AppLog.Warn("renewing the lease failed: {Type}", error.GetType().Name);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // The service is stopping.
+        }
+    }
+
     private async Task PumpLoop()
     {
+        if (Authorization.IsRemote)
+        {
+            await RemoteLoop();
+
+            return;
+        }
+
         using PeriodicTimer timer = new(_options.InvalidationPoll);
         try
         {
@@ -1066,9 +1118,8 @@ public sealed class HostService : IDisposable
             // The loop was cancelled or failed; nothing more to wait for.
         }
 
-        _machineEndpoint?.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        _machineListener?.Dispose();
         _launches?.Dispose();
-        _relay?.DisposeAsync().AsTask().GetAwaiter().GetResult();
         Authorization.Keys.Dispose();
         CancellationTokenSource[] sources;
         lock (_lock)

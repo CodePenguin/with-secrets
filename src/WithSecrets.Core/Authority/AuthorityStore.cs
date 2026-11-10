@@ -151,7 +151,7 @@ public sealed partial class AuthorityStore
     /// First contact: records the machine as Pending (with its host name) and returns the record. A machine that is already known
     /// is returned as it is; nothing changes. The caller has checked the proof of possession.
     /// </summary>
-    public MachineRecord Register(byte[] publicKey, string hostName, string actor)
+    public MachineRecord Register(byte[] publicKey, string hostName, string actor, byte[]? identityCertificate = null)
     {
         string fingerprint = KeyIdentity.Fingerprint(publicKey);
 
@@ -159,12 +159,23 @@ public sealed partial class AuthorityStore
         {
             if (Query(connection, transaction, "SELECT * FROM machines WHERE fingerprint = $fp", Machine, ("$fp", fingerprint)).FirstOrDefault() is { } known)
             {
+                // The same key presents a (renewed) identity certificate: the stored one is replaced, the machine is otherwise untouched (the caller has validated it for this key).
+                if (identityCertificate is not null)
+                {
+                    SetCertificate(connection, transaction, fingerprint, identityCertificate);
+                }
+
                 return known;
             }
 
             string now = Time(Now);
             StateDatabase.Execute(connection, transaction, "INSERT INTO machines (fingerprint, public_key, host_name, friendly_name, status, security_revision, pending_host_name, created, updated) VALUES ($fp, $key, $host, NULL, 'Pending', 1, NULL, $now, $now)",
                 ("$fp", fingerprint), ("$key", Convert.ToBase64String(publicKey)), ("$host", hostName), ("$now", now));
+            if (identityCertificate is not null)
+            {
+                SetCertificate(connection, transaction, fingerprint, identityCertificate);
+            }
+
             Fault?.Invoke("after-update");
             History(connection, transaction, fingerprint, "registered", null, MachineStatus.Pending, 1, actor, "first contact, proof of possession verified; host name " + hostName);
             Audit(connection, transaction, "machine-registered", fingerprint, null, actor, "Pending; host name " + hostName);
@@ -172,6 +183,20 @@ public sealed partial class AuthorityStore
 
             return Query(connection, transaction, "SELECT * FROM machines WHERE fingerprint = $fp", Machine, ("$fp", fingerprint)).Single();
         });
+    }
+
+    private const string CertificateSchema = "CREATE TABLE IF NOT EXISTS machine_certificates (fingerprint TEXT PRIMARY KEY NOT NULL, certificate TEXT NOT NULL, updated TEXT NOT NULL);";
+
+    private void SetCertificate(SqliteConnection connection, SqliteTransaction transaction, string fingerprint, byte[] certificate)
+    {
+        StateDatabase.Execute(connection, transaction, "INSERT INTO machine_certificates (fingerprint, certificate, updated) VALUES ($fp, $cert, $now) ON CONFLICT(fingerprint) DO UPDATE SET certificate = $cert, updated = $now",
+            ("$fp", fingerprint), ("$cert", Convert.ToBase64String(certificate)), ("$now", Time(Now)));
+    }
+
+    /// <summary>The public identity certificate (DER) the machine enrolled with, or null (a machine enrolled without one cannot connect over TLS). Public data only.</summary>
+    public byte[]? Certificate(string fingerprint)
+    {
+        return Read(connection => connection is null ? null : Query(connection, null, "SELECT certificate FROM machine_certificates WHERE fingerprint = $fp", reader => Convert.FromBase64String(reader.GetString(0)), ("$fp", fingerprint)).FirstOrDefault());
     }
 
     /// <summary>Null when the action (approve, disable, enable, untrust, trust, rename, approve-host-change) may be applied to the machine as it is now, else why not. The rules of the status table.</summary>
@@ -749,15 +774,23 @@ public sealed partial class AuthorityStore
     /// <summary>One write transaction, committed when <paramref name="work" /> returns and rolled back when it throws. Creates the database when it is missing.</summary>
     private T Write<T>(Func<SqliteConnection, SqliteTransaction, T> work)
     {
-        return Use(true, connection =>
+        T result = Use(true, connection =>
         {
             using SqliteTransaction transaction = connection!.BeginTransaction(deferred: false);
-            T result = work(connection, transaction);
+            T done = work(connection, transaction);
             transaction.Commit();
 
-            return result;
+            return done;
         });
+
+        // After the commit only: a long poll waiting for news and the check for a withdrawn trust look again (they read the committed state).
+        Changed?.Invoke();
+
+        return result;
     }
+
+    /// <summary>Raised after every committed write. Handlers must return quickly (they signal; they do not read the database on this thread).</summary>
+    public event Action? Changed;
 
     private T Read<T>(Func<SqliteConnection?, T> work) => Use(false, work);
 
@@ -820,6 +853,12 @@ public sealed partial class AuthorityStore
             if (found != SchemaVersion)
             {
                 throw new AuthorityDatabaseException($"{FileLabel} is not of schema version {SchemaVersion}; delete {FileLabel} to start over (machines then enroll again)");
+            }
+
+            if (Volatile.Read(ref _checked) == 0)
+            {
+                // An additive table (the identity certificates enrolled machines presented): no schema version change, so a database from before it just gains the table.
+                StateDatabase.Execute(connection, null, CertificateSchema);
             }
 
             Volatile.Write(ref _checked, 1);

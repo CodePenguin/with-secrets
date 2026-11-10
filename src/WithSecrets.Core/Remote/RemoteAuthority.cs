@@ -1,106 +1,120 @@
-using System.Collections.Concurrent;
-using System.Net.WebSockets;
+using System.Net;
+using System.Net.Http.Headers;
+using System.Net.Security;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 
 namespace WithSecrets;
 
-/// <summary>The authority could not be reached, or the session broke (connection, handshake, a frame that did not authenticate). The host treats it as "authority unavailable".</summary>
-public sealed class RemoteTransportException(string message, bool reportsLocked = false) : IOException(message)
-{
-    /// <summary>The authority said "locked" before the session was authenticated. It proves nothing (anyone on the path can send it), so it only chooses the wording; the run is denied either way.</summary>
-    public bool ReportsLocked { get; } = reportsLocked;
-}
+/// <summary>The authority could not be reached, or what came back is not what the protocol allows (a refused handshake, a redirect, a body that is not the one JSON form). The host treats it as "authority unavailable".</summary>
+public sealed class RemoteTransportException(string message) : IOException(message);
 
-/// <summary>The authority answered over a good session with a refusal code (for example <c>locked</c> or <c>wrong-machine</c>). Retrying the same message would not help.</summary>
+
+/// <summary>The authority answered over the authenticated connection with a refusal code (for example <c>locked</c>, <c>machine-not-trusted</c> or <c>wrong-machine</c>). Retrying the same message would not help.</summary>
 public sealed class RemoteRefusedException(string code) : InvalidOperationException("the remote authority refused the request: " + code)
 {
     public string Code { get; } = code;
 }
 
-/// <summary>
-/// The host service's client of a remote authority: <see cref="IAuthority" /> and <see cref="IAuditSink" /> over an end-to-end encrypted session through the relay. It performs a
-/// fresh mutually authenticated handshake for each connection (the machine key proves the host; the authority must be signed by the key this host trusts), sends the canonical,
-/// versioned messages of the existing contracts and nothing else, and on a dropped connection reconnects with new keys and repeats the operation under the SAME id, which the authority
-/// answers from its committed results. It adds no trust of its own: the host still verifies every signed answer exactly as it does for the local authority.
-/// </summary>
-public sealed class RemoteAuthority : IAuthority, IAuditSink, ILaunchAuthority, IDisposable
+/// <summary>What the long poll brought: the existing invalidation payload or the existing grant-revocation payload (one of them is not empty).</summary>
+public sealed record AuthorityNotices(IReadOnlyList<PendingInvalidation> Invalidations, IReadOnlyList<PendingGrantEvent> GrantEvents);
+
+/// <summary>Where a host gets its invalidation and grant-revocation messages from a remote authority: by one outstanding long poll, not by asking on a timer.</summary>
+public interface INoticeSource
 {
+    /// <summary>Holds one request at the authority until the existing protocol has a message for this machine and returns its payload. A request that ends without one (cancelled, the connection broke) throws.</summary>
+    Task<AuthorityNotices> PollAsync(string machineFingerprint, CancellationToken cancel);
+}
+
+/// <summary>
+/// The host service's client of a remote authority: <see cref="IAuthority" /> and <see cref="IAuditSink" /> over HTTPS (TLS 1.3 mutual authentication, HTTP/2 only) directly to the ONE configured authority. TLS authenticates both
+/// sides: this host presents its temporary certificate (signed by its machine identity key), and the authority's temporary certificate is validated against the configured authority identity certificate ALONE (never a trust
+/// store, never an accept-anything callback; DNS names and addresses are routing, not identity). There is no relay, no redirect, no ambient proxy, no cache, no compression and no fallback address. The canonical, versioned
+/// messages of the existing contracts travel in the request and response bodies; the host verifies every signed answer exactly as it does for the local authority.
+/// <para>
+/// Connections are kept (no idle or age limit). When the temporary certificate is replaced a new connection pool is made for new requests and the old one is drained and disposed after a bounded wait; a healthy connection
+/// is never cut because the certificate it started with has since been replaced. A message that fails in transport is repeated under the SAME id up to <see cref="Retries" /> times with bounded exponential backoff and jitter
+/// (the authority answers a repeat from its committed results); a launch is sent once and never repeated after the send began.
+/// </para>
+/// </summary>
+public sealed class RemoteAuthority : IAuthority, IAuditSink, ILaunchAuthority, INoticeSource, IDisposable
+{
+    private const int MaxResponseBytes = 16 * 1024 * 1024;
+
     private readonly RemoteAuthorityConfig _config;
-    private readonly ISigningKey _machineKey;
+    private readonly TemporaryCertificate _tls;
     private readonly HostConfigFile _hostConfig;
-    private readonly Func<CancellationToken, Task<IMessageChannel>> _connect;
     private readonly TimeProvider _clock;
-    private readonly SemaphoreSlim _connecting = new(1, 1);
+    private readonly Uri _endpoint;
     private readonly Lock _lock = new();
-    private Link? _link;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Action<ApprovalLinkNotice>> _links = new(StringComparer.Ordinal);
+    private Pool? _pool;
+    private CancellationTokenSource _rotation = new();
+    private ITimer? _timer;
     private int _disposed;
     private int _connections;
-    private int _pushed;
-    private readonly ConcurrentDictionary<string, Action<ApprovalLinkNotice>> _links = new(StringComparer.Ordinal);
+    private int _pools;
 
-    public RemoteAuthority(RemoteAuthorityConfig config, ISigningKey machineKey, HostConfigFile hostConfig, TimeProvider? clock = null)
-        : this(config, machineKey, hostConfig, async cancel => await WebSocketChannel.ConnectAsync(config, RelayServer.HostPath, cancel), clock)
-    {
-    }
-
-    internal RemoteAuthority(RemoteAuthorityConfig config, ISigningKey machineKey, HostConfigFile hostConfig, Func<CancellationToken, Task<IMessageChannel>> connect, TimeProvider? clock = null)
+    public RemoteAuthority(RemoteAuthorityConfig config, TemporaryCertificate tls, HostConfigFile hostConfig, TimeProvider? clock = null)
     {
         if (RemoteTarget.Problem(config) is { } problem)
         {
             throw new ArgumentException(problem);
         }
 
+        RemoteTarget.Address(config.Endpoint, out Uri? endpoint);
         _config = config;
-        _machineKey = machineKey;
+        _tls = tls;
         _hostConfig = hostConfig;
-        _connect = connect;
         _clock = clock ?? TimeProvider.System;
+        _endpoint = endpoint!;
+        ArmRotationTimer();
     }
 
-    /// <summary>How often a message is repeated (same id, a new session) after the connection broke before the call fails.</summary>
+    /// <summary>How often a message is repeated (same id) after the connection broke before the call fails.</summary>
     public int Retries { get; init; } = 2;
 
-    /// <summary>How long the handshake may take.</summary>
-    public TimeSpan HandshakeTimeout { get; init; } = TimeSpan.FromSeconds(15);
-
-    /// <summary>The pause before a retry.</summary>
+    /// <summary>The first pause before a repeat; it doubles each time (with jitter) up to <see cref="MaxRetryPause" />.</summary>
     public TimeSpan RetryPause { get; init; } = TimeSpan.FromMilliseconds(150);
 
-    /// <summary>How many sessions were established (each with new keys).</summary>
+    public TimeSpan MaxRetryPause { get; init; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>How long an ordinary request may take.</summary>
+    public TimeSpan RequestTimeout { get; init; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>How long a connection of a replaced certificate may finish its requests before it is closed.</summary>
+    public TimeSpan DrainTimeout { get; init; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>How long a TCP/TLS connect may take.</summary>
+    public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>The configured endpoint address (routing information; trust comes from the identity certificate).</summary>
+    public Uri Endpoint => _endpoint;
+
+    /// <summary>How many TLS connections were established (each a full certificate-authenticated handshake).</summary>
     public int Connections => Volatile.Read(ref _connections);
 
-    /// <summary>The id (public) of the session in use, or an empty string.</summary>
-    public string SessionId
-    {
-        get
-        {
-            lock (_lock)
-            {
-                return _link is { Dead: false } link ? link.Session.Id : "";
-            }
-        }
-    }
+    /// <summary>How many connection pools were made (one per temporary certificate used).</summary>
+    public int Pools => Volatile.Read(ref _pools);
 
-    /// <summary>How many invalidation notices the authority pushed.</summary>
-    public int Pushed => Volatile.Read(ref _pushed);
-
-    /// <summary>Raised when the authority pushes an invalidation notice (a prompt to look at the pending list; the list is the source of truth).</summary>
-    public event Action<PendingInvalidation>? InvalidationNotified;
-
-    /// <summary>Raised when the encrypted session to the authority ends (the authority locked and dropped it, the network broke, an idle timeout). A host cancels the launches that have not started when it happens.</summary>
+    /// <summary>Raised when the connection to the authority ended unexpectedly (a poll or a request failed in transport, or the authority said <c>locked</c>): a host cancels the launches that have not started.</summary>
     public event Action? LinkEnded;
 
-    /// <summary>Ends the current session (the next call connects again with new keys).</summary>
+    /// <summary>Raised when a new TLS connection was established after an earlier one (a reconnect). The host then checks in again (status and security revision) before relying on what it holds.</summary>
+    public event Action? Reconnected;
+
+    /// <summary>Closes every connection (the next call connects again with a fresh handshake).</summary>
     public void Disconnect()
     {
-        Link? link;
+        Pool? pool;
         lock (_lock)
         {
-            link = _link;
-            _link = null;
+            pool = _pool;
+            _pool = null;
         }
 
-        link?.Kill();
+        pool?.Dispose();
     }
 
     public void Dispose()
@@ -110,291 +124,362 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, ILaunchAuthority, 
             return;
         }
 
+        _timer?.Dispose();
         Disconnect();
-        _connecting.Dispose();
+        try
+        {
+            _rotation.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Done.
+        }
     }
 
-    private sealed class Link(IMessageChannel channel, SecureSession session) : IDisposable
+    // ---- the connection pool ----
+
+    private sealed class Pool : IDisposable
     {
-        private readonly CancellationTokenSource _ended = new();
-        private int _dead;
+        private readonly HttpClient _client;
+        private readonly SocketsHttpHandler _handler;
+        private int _inFlight;
+        private int _retired;
+        private int _disposed;
 
-        public IMessageChannel Channel { get; } = channel;
-
-        public SecureSession Session { get; } = session;
-
-        public SemaphoreSlim SendLock { get; } = new(1, 1);
-
-        public ConcurrentDictionary<string, TaskCompletionSource<WireMessage>> Pending { get; } = new(StringComparer.Ordinal);
-
-        public bool Dead => Volatile.Read(ref _dead) == 1;
-
-        public CancellationToken Ended => _ended.Token;
-
-        public void Kill()
+        public Pool(SocketsHttpHandler handler, string thumbprint)
         {
-            if (Interlocked.Exchange(ref _dead, 1) == 1)
+            _handler = handler;
+            _client = new HttpClient(handler, disposeHandler: false)
+            {
+                DefaultRequestVersion = HttpVersion.Version20,
+                DefaultVersionPolicy = HttpVersionPolicy.RequestVersionExact,
+                Timeout = Timeout.InfiniteTimeSpan,
+            };
+            Thumbprint = thumbprint;
+        }
+
+        public string Thumbprint { get; }
+
+        public HttpClient Client => _client;
+
+        public TaskCompletionSource Idle { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public int InFlight => Volatile.Read(ref _inFlight);
+
+        public void Enter() => Interlocked.Increment(ref _inFlight);
+
+        public void Exit()
+        {
+            if (Interlocked.Decrement(ref _inFlight) == 0 && Volatile.Read(ref _retired) == 1)
+            {
+                Idle.TrySetResult();
+            }
+        }
+
+        public void Retire()
+        {
+            Volatile.Write(ref _retired, 1);
+            if (InFlight == 0)
+            {
+                Idle.TrySetResult();
+            }
+        }
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 1)
             {
                 return;
             }
 
-            _ended.Cancel();
-            Channel.Dispose();
-            Session.Dispose();
-            foreach (TaskCompletionSource<WireMessage> waiting in Pending.Values)
-            {
-                waiting.TrySetException(new RemoteTransportException("the session ended"));
-            }
+            _client.Dispose();
+            _handler.Dispose();
         }
-
-        public void Dispose() => Kill();
     }
 
-    private int _warnedPin;
-
-    private TrustedAuthority Trusted()
+    private Pool CurrentPool()
     {
-        HostConfigLoad load = _hostConfig.Load();
-        if (load.Problem is not null)
-        {
-            throw new RemoteTransportException("host.json cannot be used");
-        }
-
-        if (load.Config?.Authority is { } pinned)
-        {
-            if (!string.Equals(pinned.Fingerprint, _config.AuthorityFingerprint, StringComparison.OrdinalIgnoreCase) && Interlocked.Exchange(ref _warnedPin, 1) == 0)
-            {
-                AppLog.Warn("host.json names authority key {Configured} but this host trusts the pinned key {Pinned}; only a rotation signed by the pinned key can change that", _config.AuthorityFingerprint, pinned.Fingerprint);
-            }
-
-            return new TrustedAuthority(pinned.Fingerprint, pinned.PublicKey);
-        }
-
-        return new TrustedAuthority(_config.AuthorityFingerprint, null);
-    }
-
-    private async Task<Link> EnsureLinkAsync(CancellationToken cancel)
-    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) == 1, this);
+        X509Certificate2 certificate = _tls.Current;
+        Pool? retired = null;
         lock (_lock)
         {
-            if (_link is { Dead: false } alive)
+            if (_pool is { } existing && existing.Thumbprint == certificate.Thumbprint)
             {
-                return alive;
+                return existing;
+            }
+
+            Pool next = MakePool(certificate);
+            retired = _pool;
+            _pool = next;
+            if (retired is not null)
+            {
+                // New requests use the new pool; a poll that is waiting on the old one is cancelled so it is asked again on the new connection (nothing is lost: the authority keeps the message until it is acknowledged).
+                CancellationTokenSource old = _rotation;
+                _rotation = new CancellationTokenSource();
+                old.Cancel();
+                old.Dispose();
             }
         }
 
-        await _connecting.WaitAsync(cancel);
+        if (retired is not null)
+        {
+            DrainAsync(retired);
+        }
+
+        lock (_lock)
+        {
+            return _pool!;
+        }
+    }
+
+    private async void DrainAsync(Pool old)
+    {
+        old.Retire();
         try
         {
-            lock (_lock)
-            {
-                if (_link is { Dead: false } alive)
-                {
-                    return alive;
-                }
-            }
-
-            Link link = await HandshakeAsync(cancel);
-            lock (_lock)
-            {
-                _link = link;
-            }
-
-            Interlocked.Increment(ref _connections);
-            _ = Task.Run(() => ReadAsync(link));
-
-            return link;
+            await Task.WhenAny(old.Idle.Task, Task.Delay(DrainTimeout, _clock));
+        }
+        catch (OperationCanceledException)
+        {
+            // Disposing anyway.
         }
         finally
         {
-            _connecting.Release();
+            old.Dispose();
         }
     }
 
-    private async Task<Link> HandshakeAsync(CancellationToken cancel)
+    private Pool MakePool(X509Certificate2 certificate)
     {
-        IMessageChannel channel;
+        SocketsHttpHandler handler = new()
+        {
+            UseProxy = false,
+            AllowAutoRedirect = false,
+            UseCookies = false,
+            AutomaticDecompression = DecompressionMethods.None,
+            PooledConnectionLifetime = Timeout.InfiniteTimeSpan,
+            PooledConnectionIdleTimeout = Timeout.InfiniteTimeSpan,
+            EnableMultipleHttp2Connections = false,
+            ConnectTimeout = ConnectTimeout,
+
+            // Ordinary network failure detection only: a dead path is noticed, a healthy one is never cut.
+            KeepAlivePingPolicy = HttpKeepAlivePingPolicy.Always,
+            KeepAlivePingDelay = TimeSpan.FromSeconds(30),
+            KeepAlivePingTimeout = TimeSpan.FromSeconds(20),
+            SslOptions = new SslClientAuthenticationOptions
+            {
+                EnabledSslProtocols = SslProtocols.Tls13,
+                ClientCertificates = [certificate],
+                AllowTlsResume = false,
+                ApplicationProtocols = [SslApplicationProtocol.Http2],
+                CertificateRevocationCheckMode = X509RevocationMode.NoCheck,
+                RemoteCertificateValidationCallback = ValidateAuthority,
+            },
+        };
+        Interlocked.Increment(ref _pools);
+
+        return new Pool(handler, certificate.Thumbprint);
+    }
+
+    /// <summary>
+    /// The only certificate rule of an outbound connection: the authority's temporary certificate must validate against the ONE configured authority identity certificate (its signature, validity, CA=false, key usage, both EKUs, and its
+    /// SAN naming exactly that identity). The system's verdict (an untrusted root, a name that does not match the address) is ignored on purpose: the address is routing, the identity is the certificate.
+    /// </summary>
+    private bool ValidateAuthority(object sender, X509Certificate? certificate, X509Chain? chain, SslPolicyErrors errors)
+    {
+        if (certificate is null)
+        {
+            return false;
+        }
+
         try
         {
-            channel = await _connect(cancel);
+            using X509Certificate2 leaf = X509CertificateLoader.LoadCertificate(certificate.GetRawCertData());
+            if (MachineCertificates.ValidateLeaf(leaf, _config.AuthorityIdentityCertificate, _clock.GetUtcNow(), _config.AuthorityIdentityFingerprint) is not null)
+            {
+                return false;
+            }
         }
-        catch (Exception error) when (error is WebSocketException or IOException or HttpRequestException or System.Security.Authentication.AuthenticationException or InvalidOperationException || error is OperationCanceledException && !cancel.IsCancellationRequested)
+        catch (Exception error) when (error is System.Security.Cryptography.CryptographicException or ArgumentException)
         {
-            throw new RemoteTransportException("the relay cannot be reached (" + error.GetType().Name + ")");
+            return false;
         }
 
-        try
+        if (Interlocked.Increment(ref _connections) > 1)
         {
-            using CancellationTokenSource limit = CancellationTokenSource.CreateLinkedTokenSource(cancel);
-            limit.CancelAfter(HandshakeTimeout);
-            TrustedAuthority trust = Trusted();
-            using InitiatorHandshake handshake = new(_machineKey, trust);
-            await channel.SendAsync(handshake.Hello(), limit.Token);
-            byte[] serverHello = await channel.ReceiveAsync(limit.Token) ?? throw new RemoteTransportException("the relay closed the connection");
-            if (ChannelFormat.ErrorCode(serverHello) is { } refused)
+            Reconnected?.Invoke();
+        }
+
+        return true;
+    }
+
+    private void ArmRotationTimer()
+    {
+        TimeSpan due = _tls.NextRotation - _clock.GetUtcNow();
+        if (due < TimeSpan.FromSeconds(1))
+        {
+            due = TimeSpan.FromSeconds(1);
+        }
+
+        _timer?.Dispose();
+        _timer = _clock.CreateTimer(_ =>
+        {
+            if (Volatile.Read(ref _disposed) == 1)
             {
-                throw new RemoteTransportException("the authority refused the connection (" + refused + ")", refused == "locked");
+                return;
             }
 
-            (byte[] auth, SecureSession session, byte[] authorityKey, byte[] expectedReady) = handshake.Complete(serverHello);
-            await channel.SendAsync(auth, limit.Token);
-            byte[] first = await channel.ReceiveAsync(limit.Token) ?? throw new RemoteTransportException("the connection closed before the authority confirmed the keys");
-            if (!session.Open(first).AsSpan().SequenceEqual(expectedReady))
+            try
             {
-                throw new SecureChannelException("the authority's confirmation is not for this session");
+                // Asking for the pool makes the replacement certificate and the new pool; the long poll moves to it.
+                _ = CurrentPool();
+                ArmRotationTimer();
             }
-
-            // The authority is who the configured fingerprint says. Until an administrator's approval pins the whole key (the enrollment flow does), the key that proved it is pinned here.
-            if (trust.PublicKey is null)
+            catch (Exception error) when (error is ObjectDisposedException or System.Security.Cryptography.CryptographicException)
             {
-                HostConfigLoad load = _hostConfig.Load();
-                if (load.Config is { Authority: null } config && string.Equals(config.MachineFingerprint, KeyIdentity.Fingerprint(_machineKey.PublicKey), StringComparison.Ordinal))
-                {
-                    _hostConfig.Pin(config.MachineFingerprint, new PinnedAuthorityKey(KeyIdentity.Fingerprint(authorityKey), authorityKey, _clock.GetUtcNow()));
-                }
+                // Stopping.
             }
+        }, null, due, Timeout.InfiniteTimeSpan);
+    }
 
-            return new Link(channel, session);
-        }
-        catch (Exception error) when (error is SecureChannelException or WebSocketException or IOException or System.Security.Cryptography.CryptographicException || error is OperationCanceledException && !cancel.IsCancellationRequested)
+    // ---- requests ----
+
+    private static bool IsJson(HttpContentHeaders headers) => headers.ContentType is { } type && string.Equals(type.MediaType, "application/json", StringComparison.OrdinalIgnoreCase) && (type.CharSet is null || string.Equals(type.CharSet, "utf-8", StringComparison.OrdinalIgnoreCase));
+
+    private HttpRequestMessage Build(string op, string frame)
+    {
+        return new HttpRequestMessage(HttpMethod.Post, new Uri(_endpoint, MachineApi.OpPath(op)))
         {
-            channel.Dispose();
-            if (error is RemoteTransportException)
-            {
-                throw;
-            }
+            Version = HttpVersion.Version20,
+            VersionPolicy = HttpVersionPolicy.RequestVersionExact,
+            Content = new StringContent(frame, new UTF8Encoding(false), "application/json"),
+        };
+    }
 
-            throw new RemoteTransportException("the authority could not be authenticated or reached (" + error.GetType().Name + ")");
-        }
-        catch
+    /// <summary>Checks what the protocol allows of a response (HTTP/2, no redirect, the one JSON form) before anything is read.</summary>
+    private static void CheckResponse(HttpResponseMessage response)
+    {
+        if (response.Version != HttpVersion.Version20)
         {
-            channel.Dispose();
+            throw new RemoteTransportException("the authority did not answer over HTTP/2");
+        }
 
-            throw;
+        if ((int)response.StatusCode is >= 300 and < 400)
+        {
+            throw new RemoteTransportException("the authority answered with a redirect, which is not followed");
+        }
+
+        if (response.Headers.Contains("Set-Cookie") || response.Content.Headers.ContentEncoding.Count > 0)
+        {
+            throw new RemoteTransportException("the authority's answer used a feature this protocol does not have");
+        }
+
+        if (!IsJson(response.Content.Headers))
+        {
+            throw new RemoteTransportException("the authority's answer is not UTF-8 JSON (HTTP " + (int)response.StatusCode + ")");
         }
     }
 
-    private async Task ReadAsync(Link link)
+    private static async Task<WireMessage> ReadFrameAsync(HttpResponseMessage response, CancellationToken cancel)
     {
-        try
+        CheckResponse(response);
+        using Stream stream = await response.Content.ReadAsStreamAsync(cancel);
+        using MemoryStream body = new();
+        byte[] buffer = new byte[16 * 1024];
+        int read;
+        while ((read = await stream.ReadAsync(buffer, cancel)) > 0)
         {
-            while (await link.Channel.ReceiveAsync(link.Ended) is { } frame)
+            if (body.Length + read > MaxResponseBytes)
             {
-                if (ChannelFormat.ErrorCode(frame) is not null)
-                {
-                    break;
-                }
-
-                byte[] plaintext = link.Session.Open(frame);
-                if (!RemoteWire.TryReadMessage(plaintext, out WireMessage? message) || message is null)
-                {
-                    break;
-                }
-
-                if (message.IsRequest)
-                {
-                    if (message.Op == RemoteOps.PushInvalidation && RemoteWire.TryReadAck(message.Body, true, out string fingerprint, out long revision) && revision is >= 0 and <= int.MaxValue)
-                    {
-                        Interlocked.Increment(ref _pushed);
-                        InvalidationNotified?.Invoke(new PendingInvalidation(fingerprint, (int)revision));
-                    }
-
-                    if (message.Op == RemoteOps.ApprovalLink && ApprovalLinkNotice.TryRead(message.Body, out ApprovalLinkNotice? notice) && notice is not null && _links.TryGetValue(notice.RequestId, out Action<ApprovalLinkNotice>? listener))
-                    {
-                        listener(notice);
-                    }
-
-                    continue;
-                }
-
-                if (link.Pending.TryGetValue(message.Id, out TaskCompletionSource<WireMessage>? waiting))
-                {
-                    waiting.TrySetResult(message);
-                }
-            }
-        }
-        catch (Exception error) when (error is SecureChannelException or OperationCanceledException or IOException or WebSocketException or ObjectDisposedException)
-        {
-            // The session ended or broke; every waiting call fails and the next one reconnects.
-        }
-        finally
-        {
-            lock (_lock)
-            {
-                if (ReferenceEquals(_link, link))
-                {
-                    _link = null;
-                }
+                throw new RemoteTransportException("the authority's answer is too large");
             }
 
-            link.Kill();
-            LinkEnded?.Invoke();
+            body.Write(buffer, 0, read);
         }
+
+        return Frame(body.ToArray(), response);
     }
 
-    /// <summary>Sends one operation and returns the body of the answer. A broken session is replaced and the message sent again under the same id, up to <see cref="Retries" /> times.</summary>
-    private async Task<string> CallAsync(string op, string id, string body, CancellationToken cancel, bool repeatAfterSend = true)
+    private static WireMessage Frame(byte[] bytes, HttpResponseMessage response)
     {
-        if (Volatile.Read(ref _disposed) == 1)
+        if (!RemoteWire.TryReadMessage(bytes, out WireMessage? message) || message is null || message.IsRequest)
         {
-            throw new ObjectDisposedException(nameof(RemoteAuthority));
+            throw new RemoteTransportException("the authority's answer could not be read (HTTP " + (int)response.StatusCode + ")");
         }
 
-        string request = RemoteWire.Request(id, op, body);
+        if (message.Ok != response.IsSuccessStatusCode)
+        {
+            throw new RemoteTransportException("the authority's answer contradicts its status");
+        }
+
+        return message;
+    }
+
+    private async Task<string> CallAsync(string op, string id, string body, CancellationToken cancel, bool repeatAfterSend = true, bool bounded = true)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) == 1, this);
+        string frame = RemoteWire.Request(id, op, body);
+        TimeSpan pause = RetryPause;
         for (int attempt = 0; ; attempt++)
         {
-            Link? link = null;
             bool sent = false;
             try
             {
-                link = await EnsureLinkAsync(cancel);
-                TaskCompletionSource<WireMessage> waiting = link.Pending.GetOrAdd(id, _ => new TaskCompletionSource<WireMessage>(TaskCreationOptions.RunContinuationsAsynchronously));
-                await link.SendLock.WaitAsync(cancel);
+                Pool pool = CurrentPool();
+                pool.Enter();
                 try
                 {
+                    using CancellationTokenSource limit = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+                    if (bounded)
+                    {
+                        limit.CancelAfter(RequestTimeout);
+                    }
+
+                    using HttpRequestMessage request = Build(op, frame);
                     sent = true;
-                    await link.Channel.SendAsync(link.Session.Seal(Encoding.UTF8.GetBytes(request)), cancel);
+                    using HttpResponseMessage response = await pool.Client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, limit.Token);
+                    WireMessage answer = await ReadFrameAsync(response, limit.Token);
+                    if (!answer.Ok)
+                    {
+                        // A refusal that came before the request was read carries the listener's own correlation id instead of ours.
+                        throw new RemoteRefusedException(answer.Error);
+                    }
+
+                    if (!string.Equals(answer.Id, id, StringComparison.Ordinal))
+                    {
+                        throw new RemoteTransportException("the authority's answer is for another request");
+                    }
+
+                    return answer.Body;
                 }
                 finally
                 {
-                    link.SendLock.Release();
+                    pool.Exit();
                 }
-
-                WireMessage answer = await waiting.Task.WaitAsync(cancel);
-                link.Pending.TryRemove(id, out _);
-                if (!answer.Ok)
-                {
-                    throw new RemoteRefusedException(answer.Error);
-                }
-
-                return answer.Body;
             }
-            catch (Exception error) when ((error is RemoteTransportException or SecureChannelException or IOException or WebSocketException or ObjectDisposedException) && Volatile.Read(ref _disposed) == 0)
+            catch (Exception error) when ((error is RemoteTransportException or HttpRequestException or IOException or AuthenticationException or ObjectDisposedException or OperationCanceledException) && !cancel.IsCancellationRequested)
             {
-                link?.Pending.TryRemove(id, out _);
-                if (link is not null)
+                if (Volatile.Read(ref _disposed) == 1)
                 {
-                    lock (_lock)
-                    {
-                        if (ReferenceEquals(_link, link))
-                        {
-                            _link = null;
-                        }
-                    }
-
-                    link.Kill();
+                    throw new RemoteTransportException("the authority link was closed");
                 }
 
                 // A message that must not be repeated (a launch: a second one could show a second page or deliver twice) is never sent again once its send began.
-                if (attempt >= Retries || cancel.IsCancellationRequested || sent && !repeatAfterSend)
+                if (attempt >= Retries || sent && !repeatAfterSend || error is RemoteTransportException)
                 {
                     throw error as RemoteTransportException ?? new RemoteTransportException("the authority could not be reached (" + error.GetType().Name + ")");
                 }
 
-                await Task.Delay(RetryPause, cancel);
+                await Task.Delay(Jitter(pause), _clock, cancel);
+                pause = TimeSpan.FromTicks(Math.Min(pause.Ticks * 2, MaxRetryPause.Ticks));
             }
         }
     }
+
+
+    /// <summary>Between half and the whole of the pause (decorrelates hosts that lost the same authority at the same moment).</summary>
+    private static TimeSpan Jitter(TimeSpan pause) => TimeSpan.FromTicks((long)(pause.Ticks * (0.5 + Random.Shared.NextDouble() / 2)));
 
     private static string Unreadable() => "the authority's answer could not be read";
 
@@ -407,19 +492,11 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, ILaunchAuthority, 
         return AuthorityResponse.TryParse(body, out AuthorityResponse? response, out _) ? response! : throw new RemoteTransportException(Unreadable());
     }
 
-    public async Task<byte[]> BeginEnrollmentAsync(CancellationToken cancel = default)
-    {
-        string body = await CallAsync(RemoteOps.BeginEnrollment, "begin-enrollment:" + Guid.NewGuid().ToString("N"), RemoteWire.Empty, cancel);
+    /// <summary>First contact is pairing, which is not built yet: a machine becomes known to the authority only through the pairing route. This always refuses.</summary>
+    public Task<byte[]> BeginEnrollmentAsync(CancellationToken cancel = default) => throw new RemoteRefusedException("not-implemented");
 
-        return RemoteWire.TryReadChallenge(body, out byte[] challenge) ? challenge : throw new RemoteTransportException(Unreadable());
-    }
-
-    public async Task<EnrollmentResult> EnrollAsync(EnrollmentRequest request, CancellationToken cancel = default)
-    {
-        string body = await CallAsync(RemoteOps.Enroll, "enroll:" + Guid.NewGuid().ToString("N"), RemoteWire.Write(request), cancel);
-
-        return RemoteWire.TryRead(body, out EnrollmentResult? result) ? result! : throw new RemoteTransportException(Unreadable());
-    }
+    /// <summary>See <see cref="BeginEnrollmentAsync" />.</summary>
+    public Task<EnrollmentResult> EnrollAsync(EnrollmentRequest request, CancellationToken cancel = default) => throw new RemoteRefusedException("not-implemented");
 
     public async Task<IReadOnlyList<KeyTransition>> KeyTransitionsAsync(string afterKeyFingerprint, CancellationToken cancel = default)
     {
@@ -466,10 +543,101 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, ILaunchAuthority, 
         await CallAsync(RemoteOps.AcknowledgeGrantEvent, "ack-grant-event:" + machineFingerprint + ":" + sequence, RemoteWire.WriteAck(machineFingerprint, sequence, false), cancel);
     }
 
+    // ---- the long poll ----
+
+    public async Task<AuthorityNotices> PollAsync(string machineFingerprint, CancellationToken cancel)
+    {
+        while (true)
+        {
+            CancellationToken rotation;
+            lock (_lock)
+            {
+                rotation = _rotation.Token;
+            }
+
+            using CancellationTokenSource both = CancellationTokenSource.CreateLinkedTokenSource(cancel, rotation);
+            try
+            {
+                // One attempt: a failed poll is not repeated here (the host's loop reconnects with backoff and checks in again). Not bounded in time: it ends with a message or a broken connection.
+                string body = await CallAsync(RemoteOps.Poll, "poll:" + Guid.NewGuid().ToString("N"), RemoteWire.WriteFingerprint(machineFingerprint), both.Token, repeatAfterSend: false, bounded: false);
+                if (RemoteWire.TryReadInvalidations(body, out List<PendingInvalidation> invalidations))
+                {
+                    return new AuthorityNotices(invalidations, []);
+                }
+
+                return RemoteWire.TryReadGrantEvents(body, out List<PendingGrantEvent> events) ? new AuthorityNotices([], events) : throw new RemoteTransportException(Unreadable());
+            }
+            catch (OperationCanceledException) when (rotation.IsCancellationRequested && !cancel.IsCancellationRequested)
+            {
+                // The certificate was replaced: ask again on the new connection.
+                continue;
+            }
+            catch (Exception error) when (error is RemoteTransportException or RemoteRefusedException { Code: "locked" or "machine-not-trusted" })
+            {
+                LinkEnded?.Invoke();
+
+                throw;
+            }
+        }
+    }
+
+    // ---- the authority's signing key ----
+
+    /// <summary>
+    /// A host that has no authority signing key pinned yet (its administrator approved it; nothing else was needed) learns it from the authority over the authenticated connection and pins it in host.json: the connection is
+    /// to the authority identity this host was paired with, so the key it names is that authority's. Returns true when a key is pinned afterwards. Only a Trusted machine can ask; nothing changes when it cannot.
+    /// </summary>
+    public async Task<bool> EnsureAuthorityKeyPinnedAsync(CancellationToken cancel)
+    {
+        HostConfigLoad load = _hostConfig.Load();
+        if (load.Problem is not null || load.Config is null)
+        {
+            return false;
+        }
+
+        if (load.Config.Authority is not null)
+        {
+            return true;
+        }
+
+        if (!string.Equals(load.Config.MachineFingerprint, _tls.IdentityFingerprint, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        try
+        {
+            string body = await CallAsync(RemoteOps.AuthorityKey, "authority-key:" + Guid.NewGuid().ToString("N"), RemoteWire.Empty, cancel);
+            if (!RemoteWire.TryReadText(body, "publicKey", out string text))
+            {
+                return false;
+            }
+
+            byte[] key = Convert.FromBase64String(text);
+            if (!KeyIdentity.IsCanonicalP256(key))
+            {
+                return false;
+            }
+
+            // Re-read: nothing is pinned over a pin that appeared meanwhile.
+            if (_hostConfig.Load().Config is { Authority: null } config && string.Equals(config.MachineFingerprint, _tls.IdentityFingerprint, StringComparison.Ordinal))
+            {
+                _hostConfig.Pin(config.MachineFingerprint, new PinnedAuthorityKey(KeyIdentity.Fingerprint(key), key, _clock.GetUtcNow()));
+            }
+
+            return true;
+        }
+        catch (Exception error) when (error is RemoteTransportException or RemoteRefusedException or FormatException)
+        {
+            return false;
+        }
+    }
+
     // ---- ILaunchAuthority ----
 
     public async Task<LaunchAnswer> AuthorizeLaunchAsync(LaunchAuthorize message, Action<ApprovalLinkNotice> onLink, CancellationToken cancel)
     {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) == 1, this);
         string requestId = message.Decide.Request.RequestId;
         if (!_links.TryAdd(requestId, onLink))
         {
@@ -478,9 +646,75 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, ILaunchAuthority, 
 
         try
         {
-            string body = await CallAsync(RemoteOps.LaunchAuthorize, "launch:" + requestId, RemoteWire.Write(message), cancel, repeatAfterSend: false);
+            string frame = RemoteWire.Request("launch:" + requestId, RemoteOps.LaunchAuthorize, RemoteWire.Write(message));
+            Pool pool;
+            try
+            {
+                pool = CurrentPool();
+            }
+            catch (Exception error) when (error is System.Security.Cryptography.CryptographicException or AuthenticationException)
+            {
+                throw new RemoteTransportException("the authority link could not be made (" + error.GetType().Name + ")");
+            }
 
-            return LaunchAnswer.TryRead(body, out LaunchAnswer? answer) ? answer! : throw new RemoteTransportException(Unreadable());
+            pool.Enter();
+            try
+            {
+                using HttpRequestMessage request = Build(RemoteOps.LaunchAuthorize, frame);
+
+                // Sent once: nothing below repeats it, whatever happens to the connection.
+                using HttpResponseMessage response = await pool.Client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancel);
+                CheckResponse(response);
+                using Stream stream = await response.Content.ReadAsStreamAsync(cancel);
+                using StreamReader lines = new(stream, new UTF8Encoding(false, true));
+                long total = 0;
+                while (await lines.ReadLineAsync(cancel) is { } line)
+                {
+                    total += line.Length;
+                    if (total > MaxResponseBytes)
+                    {
+                        throw new RemoteTransportException("the authority's answer is too large");
+                    }
+
+                    if (!RemoteWire.TryReadMessage(Encoding.UTF8.GetBytes(line), out WireMessage? frameIn) || frameIn is null)
+                    {
+                        throw new RemoteTransportException(Unreadable());
+                    }
+
+                    if (frameIn.IsRequest)
+                    {
+                        if (frameIn.Op == RemoteOps.ApprovalLink && ApprovalLinkNotice.TryRead(frameIn.Body, out ApprovalLinkNotice? notice) && notice is not null && _links.TryGetValue(notice.RequestId, out Action<ApprovalLinkNotice>? listener))
+                        {
+                            listener(notice);
+                        }
+
+                        continue;
+                    }
+
+                    if (!frameIn.Ok)
+                    {
+                        throw new RemoteRefusedException(frameIn.Error);
+                    }
+
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        throw new RemoteTransportException("the authority's answer contradicts its status");
+                    }
+
+                    return LaunchAnswer.TryRead(frameIn.Body, out LaunchAnswer? answer) ? answer! : throw new RemoteTransportException(Unreadable());
+                }
+
+                // A refusal before the stream started is one frame with an error status and no trailing newline: ReadLineAsync returned it above. Nothing came: the connection ended.
+                throw new RemoteTransportException("the connection ended before the authority answered");
+            }
+            catch (Exception error) when (error is HttpRequestException or IOException or AuthenticationException or ObjectDisposedException)
+            {
+                throw new RemoteTransportException("the authority could not be reached (" + error.GetType().Name + ")");
+            }
+            finally
+            {
+                pool.Exit();
+            }
         }
         finally
         {

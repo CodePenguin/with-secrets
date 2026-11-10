@@ -4,11 +4,9 @@ using System.Text.Json;
 
 namespace WithSecrets;
 
-/// <summary>The operations of the authority protocol, one word each. They travel only inside the encrypted session: the relay never sees them.</summary>
+/// <summary>The operations of the machine API, one word each: each is a route (<c>POST /api/v1/machine/ops/WORD</c>) on the machine listener, carried over mutually authenticated TLS 1.3 and HTTP/2. Pairing (a machine's first contact) is not one of them: it has its own route.</summary>
 internal static class RemoteOps
 {
-    public const string BeginEnrollment = "begin-enrollment";
-    public const string Enroll = "enroll";
     public const string Decide = "decide";
     public const string KeyTransitions = "key-transitions";
     public const string PendingInvalidations = "pending-invalidations";
@@ -19,22 +17,27 @@ internal static class RemoteOps
     public const string AcknowledgeGrantEvent = "ack-grant-event";
     public const string AuditUpload = "audit-upload";
 
-    /// <summary>Host to authority: authorize one launch at the authority (approval, decryption there), answered with a <see cref="LaunchAnswer" />. Never repeated under the same id.</summary>
+    /// <summary>Host to authority: authorize one launch at the authority (approval, decryption there), answered with a <see cref="LaunchAnswer" />. Never repeated under the same id. The answer is streamed: the approval-link notices as they are made, then the answer.</summary>
     public const string LaunchAuthorize = "launch-authorize";
 
-    /// <summary>Authority to host: where the approval page for a waiting launch is (a notification).</summary>
+    /// <summary>Authority to host, inside the launch-authorize response: where the approval page for a waiting launch is (a notification).</summary>
     public const string ApprovalLink = "approval-link";
 
-    /// <summary>Authority to host: an invalidation has not been acknowledged yet (a notification; the pending list is the source of truth).</summary>
-    public const string PushInvalidation = "push-invalidation";
+    /// <summary>
+    /// Host to authority: the long poll. One outstanding request per host: the authority holds it until the existing protocol has a message for this machine (an invalidation, or a grant revocation) and answers with that
+    /// message's existing payload (the pending-invalidations or the pending-grant-events body). The host cleans up, acknowledges through the existing acknowledgment operation and polls again at once.
+    /// </summary>
+    public const string Poll = "poll";
+
+    /// <summary>Host to authority: the authority's current signing public key (over the pinned authority identity), for a host that has not pinned it yet.</summary>
+    public const string AuthorityKey = "authority-key";
 
     public static readonly string[] Requests =
     [
-        BeginEnrollment, Enroll, Decide, KeyTransitions, PendingInvalidations, AcknowledgeInvalidation, Grant, Reconcile, PendingGrantEvents, AcknowledgeGrantEvent, AuditUpload, LaunchAuthorize,
+        Decide, KeyTransitions, PendingInvalidations, AcknowledgeInvalidation, Grant, Reconcile, PendingGrantEvents, AcknowledgeGrantEvent, AuditUpload, LaunchAuthorize, Poll, AuthorityKey,
     ];
 }
-
-/// <summary>One application message (a request, a push, or a response) after decryption.</summary>
+/// <summary>One application message (a request, a notification, or a response): the body of an HTTP request or response, or one line of a streamed response.</summary>
 internal sealed record WireMessage(string Id, string? Op, bool Ok, string Body, string Error)
 {
     public bool IsRequest => Op is not null;
@@ -372,101 +375,6 @@ internal static class RemoteWire
             ack = new AuditAck(version, id!, digest!, machine!, entries, issued, expires, keyId!, signature);
 
             return true;
-        }
-    }
-
-    // ---- enrollment ----
-
-    public static string Write(EnrollmentRequest request)
-    {
-        StringBuilder text = new("{\"fingerprint\":");
-        ToolSettings.QuoteJson(text, request.Fingerprint);
-        text.Append(",\"publicKey\":");
-        ToolSettings.QuoteJson(text, Convert.ToBase64String(request.PublicKey));
-        text.Append(",\"hostName\":");
-        ToolSettings.QuoteJson(text, request.HostName);
-        text.Append(",\"challenge\":");
-        ToolSettings.QuoteJson(text, Convert.ToBase64String(request.Challenge));
-        text.Append(",\"signature\":");
-        ToolSettings.QuoteJson(text, Convert.ToBase64String(request.Signature));
-
-        return text.Append('}').ToString();
-    }
-
-    public static bool TryRead(string json, out EnrollmentRequest? request)
-    {
-        request = null;
-        if (!Open(json, out JsonDocument? doc))
-        {
-            return false;
-        }
-
-        using (doc)
-        {
-            ContractReader reader = new(doc!.RootElement, "fingerprint", "publicKey", "hostName", "challenge", "signature");
-            if (reader.Problem is not null || !reader.Text("fingerprint", out string? fingerprint) || !reader.Text("publicKey", out string? keyText) || !Base64(keyText!, 256, out byte[] key) || !reader.Text("hostName", out string? host)
-                || !reader.Text("challenge", out string? challengeText) || !Base64(challengeText!, 256, out byte[] challenge) || !reader.Text("signature", out string? signatureText) || !Signature(signatureText!, out byte[] signature))
-            {
-                return false;
-            }
-
-            request = new EnrollmentRequest(fingerprint!, key, host!, challenge, signature);
-
-            return true;
-        }
-    }
-
-    public static string Write(EnrollmentResult result)
-    {
-        StringBuilder text = new("{\"accepted\":");
-        text.Append(result.Accepted ? "true" : "false").Append(",\"status\":");
-        ToolSettings.QuoteJson(text, result.Status.ToString());
-        text.Append(",\"fingerprint\":");
-        ToolSettings.QuoteJson(text, result.Fingerprint);
-        text.Append(",\"message\":");
-        ToolSettings.QuoteJson(text, result.Message);
-
-        return text.Append('}').ToString();
-    }
-
-    public static bool TryRead(string json, out EnrollmentResult? result)
-    {
-        result = null;
-        if (!Open(json, out JsonDocument? doc))
-        {
-            return false;
-        }
-
-        using (doc)
-        {
-            ContractReader reader = new(doc!.RootElement, "accepted", "status", "fingerprint", "message");
-            if (reader.Problem is not null || !reader.Bool("accepted", out bool accepted) || !reader.Text("status", out string? statusText) || !Enum.TryParse(statusText, false, out MachineStatus status) || !Enum.IsDefined(status)
-                || !reader.Text("fingerprint", out string? fingerprint) || !reader.Text("message", out string? message))
-            {
-                return false;
-            }
-
-            result = new EnrollmentResult(accepted, status, fingerprint!, message!);
-
-            return true;
-        }
-    }
-
-    public static string WriteChallenge(byte[] challenge) => "{\"challenge\":" + Q(Convert.ToBase64String(challenge)) + "}";
-
-    public static bool TryReadChallenge(string json, out byte[] challenge)
-    {
-        challenge = [];
-        if (!Open(json, out JsonDocument? doc))
-        {
-            return false;
-        }
-
-        using (doc)
-        {
-            ContractReader reader = new(doc!.RootElement, "challenge");
-
-            return reader.Problem is null && reader.Text("challenge", out string? text) && Base64(text!, 256, out challenge) && challenge.Length > 0;
         }
     }
 

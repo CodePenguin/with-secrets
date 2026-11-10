@@ -215,18 +215,19 @@ public sealed record AuthorityResponse(
 }
 
 /// <summary>First contact of a machine: its public key, fingerprint and host name, and a signature over the authority's challenge (proof of possession).</summary>
-public sealed record EnrollmentRequest(string Fingerprint, byte[] PublicKey, string HostName, byte[] Challenge, byte[] Signature)
+public sealed record EnrollmentRequest(string Fingerprint, byte[] PublicKey, string HostName, byte[] Challenge, byte[] Signature, byte[]? IdentityCertificate = null)
 {
-    public static EnrollmentRequest Create(string hostName, byte[] challenge, ISigningKey machineKey)
+    /// <summary>The request, signed with the machine key. With <paramref name="identityCertificate" /> (the machine's self-signed identity certificate, public data) the signature covers its hash too.</summary>
+    public static EnrollmentRequest Create(string hostName, byte[] challenge, ISigningKey machineKey, byte[]? identityCertificate = null)
     {
         byte[] publicKey = machineKey.PublicKey;
         string fingerprint = KeyIdentity.Fingerprint(publicKey);
-        EnrollmentRequest unsigned = new(fingerprint, publicKey, hostName, challenge, []);
+        EnrollmentRequest unsigned = new(fingerprint, publicKey, hostName, challenge, [], identityCertificate);
 
         return unsigned with { Signature = machineKey.Sign(unsigned.SigningBytes()) };
     }
 
-    internal byte[] SigningBytes() => WireText.Bytes(WireText.EnrollmentDomain, Fingerprint + "\n" + HostName + "\n" + Convert.ToBase64String(Challenge));
+    internal byte[] SigningBytes() => WireText.Bytes(WireText.EnrollmentDomain, Fingerprint + "\n" + HostName + "\n" + Convert.ToBase64String(Challenge) + (IdentityCertificate is null ? "" : "\n" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(IdentityCertificate))));
 }
 
 /// <summary>What the authority says about an enrolling machine: a code and the status it has (Pending for a new one).</summary>

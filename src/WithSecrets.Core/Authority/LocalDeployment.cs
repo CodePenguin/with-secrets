@@ -22,7 +22,7 @@ public sealed class LocalDeployment(AuthorityStore store, AuthorityKeyRing keys,
     public IAuditSink AuditSink { get; set; } = authority;
 
     /// <summary>
-    /// Remote-authority mode: the host talks to the authority through <paramref name="remote" /> (the encrypted session through the relay) for decisions, grants, check-ins, invalidations
+    /// Remote-authority mode: the host talks to the authority through <paramref name="remote" /> (HTTPS: TLS 1.3 mutual authentication, HTTP/2) for decisions, grants, check-ins, invalidations
     /// and audit upload. The signed contracts and the host's checks are unchanged. Disposed with the deployment.
     /// </summary>
     public void UseRemote(RemoteAuthority remote)
@@ -46,6 +46,11 @@ public sealed class LocalDeployment(AuthorityStore store, AuthorityKeyRing keys,
     public TimeProvider Clock => clock;
 
     public string Fingerprint => KeyIdentity.Fingerprint(machineKey.PublicKey);
+
+    private byte[]? _identityCertificate;
+
+    /// <summary>This machine's self-signed identity certificate (DER, public data), made from the identity key on first need and kept beside host.json; it is what enrollment presents and what peers validate temporary TLS certificates against.</summary>
+    public byte[] IdentityCertificate => _identityCertificate ??= MachineIdentityFile.LoadOrCreate(Path.GetDirectoryName(hostConfig.FilePath)!, machineKey, clock);
 
     /// <summary>A deployment over any keys (tests, tools). <paramref name="authorityKey" /> opens the authority key of a generation.</summary>
     public static LocalDeployment Create(string folder, ISigningKey machineKey, Func<int, ISigningKey> authorityKey, string hostName, TimeProvider? clock = null, Func<int, ISigningKey>? create = null)
@@ -91,14 +96,20 @@ public sealed class LocalDeployment(AuthorityStore store, AuthorityKeyRing keys,
     {
         byte[] challenge = await Link.BeginEnrollmentAsync(cancel);
 
-        return await Link.EnrollAsync(EnrollmentRequest.Create(hostName, challenge, machineKey), cancel);
+        return await Link.EnrollAsync(EnrollmentRequest.Create(hostName, challenge, machineKey, IdentityCertificate), cancel);
     }
 
     public HostAuthorization CreateAuthorization(LaunchGate gate, Action? clearSaved = null, IMonotonicClock? monotonic = null) => new(Link, machineKey, hostName, hostConfig, gate, authority.Offer, clock, clearSaved, monotonic);
 
+    private TemporaryCertificate? _tls;
+
+    /// <summary>This running instance's temporary TLS certificate (a fresh in-memory key, a 24-hour leaf signed by the machine identity key, replaced one hour before it expires): the client certificate of a host talking to a remote authority and the server certificate of the machine listener of an authority. Made on first use, gone with this deployment.</summary>
+    public TemporaryCertificate Tls => _tls ??= new TemporaryCertificate(machineKey, IdentityCertificate, clock);
+
     public void Dispose()
     {
         _remote?.Dispose();
+        _tls?.Dispose();
         machineKey.Dispose();
     }
 }

@@ -405,4 +405,9 @@ public interface ILaunchAuthority
     /// a broken connection after the send ends the call with an exception (the host then launches nothing); it is never sent again under the same id.
     /// </summary>
     Task<LaunchAnswer> AuthorizeLaunchAsync(LaunchAuthorize message, Action<ApprovalLinkNotice> onLink, CancellationToken cancel);
+
+    /// <summary>
+    /// A host with no authority signing key pinned yet learns it from the authority (over the identity-pinned connection, and only when the authority trusts this machine) and pins it. True when a key is pinned afterwards.
+    /// </summary>
+    Task<bool> EnsureAuthorityKeyPinnedAsync(CancellationToken cancel);
 }

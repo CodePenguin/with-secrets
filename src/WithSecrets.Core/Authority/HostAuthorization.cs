@@ -431,7 +431,28 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
     /// </summary>
     public async Task PumpAsync(CancellationToken cancel = default)
     {
-        foreach (PendingInvalidation invalidation in await authority.PendingInvalidationsAsync(Fingerprint, cancel))
+        await ApplyAsync(await authority.PendingInvalidationsAsync(Fingerprint, cancel), await authority.PendingGrantEventsAsync(Fingerprint, cancel), cancel);
+        await RenewLeaseAsync(cancel);
+    }
+
+    /// <summary>
+    /// A remote authority's messages arrive by one outstanding long poll, not by asking on a timer: this waits for the next message of the existing protocol (an invalidation or a grant revocation), applies it exactly as
+    /// <see cref="PumpAsync" /> does (cleanup and cancellation first, then the existing acknowledgment) and returns, so the caller polls again at once. Throws when the authority cannot be reached or does not support polling.
+    /// </summary>
+    public async Task PollAsync(CancellationToken cancel = default)
+    {
+        if (authority is not INoticeSource source)
+        {
+            throw new InvalidOperationException("this authority is not polled");
+        }
+
+        AuthorityNotices notices = await source.PollAsync(Fingerprint, cancel);
+        await ApplyAsync(notices.Invalidations, notices.GrantEvents, cancel);
+    }
+
+    private async Task ApplyAsync(IReadOnlyList<PendingInvalidation> invalidations, IReadOnlyList<PendingGrantEvent> grantEvents, CancellationToken cancel)
+    {
+        foreach (PendingInvalidation invalidation in invalidations)
         {
             lock (_lock)
             {
@@ -448,7 +469,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
             await authority.AcknowledgeInvalidationAsync(Fingerprint, invalidation.Revision, cancel);
         }
 
-        foreach (PendingGrantEvent notice in await authority.PendingGrantEventsAsync(Fingerprint, cancel))
+        foreach (PendingGrantEvent notice in grantEvents)
         {
             lock (_lock)
             {
@@ -464,7 +485,11 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
 
             await authority.AcknowledgeGrantEventAsync(Fingerprint, notice.Sequence, cancel);
         }
+    }
 
+    /// <summary>A lease that is half gone, or none, is renewed now; then a held key that outlived its grant or the lease is dropped. Asks the authority only when a renewal is due.</summary>
+    public async Task RenewLeaseAsync(CancellationToken cancel = default)
+    {
         // A lease that is half gone, or none, is renewed now (the local authority always answers; a remote one that does not leaves the lease to run out).
         if (!Lease.IsValid && _monotonic.Milliseconds >= Volatile.Read(ref _reconcileNotBefore) || Lease.IsValid && Lease.Remaining < Lease.Duration / 2)
         {
@@ -838,6 +863,21 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
             return Deny("host-config", load.Problem);
         }
 
+        if (load.Config?.Authority is null && load.Config?.Remote is not null)
+        {
+            // Approved since the host last looked: ask the authority for its key now rather than wait for the next check-in. Only a Trusted machine is told.
+            try
+            {
+                await remote.EnsureAuthorityKeyPinnedAsync(cancel);
+            }
+            catch (Exception error) when (error is RemoteTransportException or RemoteRefusedException)
+            {
+                // Not reachable or not trusted: the answer below says so.
+            }
+
+            load = config.Load();
+        }
+
         if (load.Config?.Authority is null || load.Config.MachineFingerprint != Fingerprint)
         {
             return Deny(ReasonCodes.MachinePending, Message(ReasonCodes.MachinePending));
@@ -859,10 +899,10 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
         {
             return Deny("authority-locked", AuthorityLock.LockedMessage);
         }
-        catch (RemoteTransportException reported) when (reported.ReportsLocked)
+        catch (RemoteRefusedException refused) when (refused.Code is "machine-not-trusted" or "authorization-changed")
         {
-            // Said before the session was authenticated: not proof, but nothing can be asked of a locked authority either way.
-            return Deny("authority-locked", "the authority reports that it is locked (unverified). " + AuthorityLock.LockedMessage);
+            // The authority turns this machine away at the door (Pending, Disabled or Untrusted), or its trust changed while the request was being decided: nothing was delivered.
+            return refused.Code == "machine-not-trusted" ? Deny(ReasonCodes.MachinePending, Message(ReasonCodes.MachinePending)) : Deny(ReasonCodes.AuthorizationChanged, "the machine's authorization changed while the request was being decided. Ask again");
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
