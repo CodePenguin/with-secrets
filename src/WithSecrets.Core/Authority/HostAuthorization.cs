@@ -205,6 +205,9 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
         ReasonCodes.UnknownMachine => "the authority does not know this machine. Start the service again (with-secrets service); it enrolls the machine",
         ReasonCodes.HostNameMismatch => $"the host name {ApprovalSummary.Clean(hostName)} is not the one this machine was approved with. Ask the administrator to approve the host name change for fingerprint {Fingerprint} in the authority's admin web app (with-secrets admin prints its link)",
         ReasonCodes.AuthorizationChanged => "the machine's authorization changed while the request was open. Ask again",
+        ReasonCodes.UnknownSecret => "the authority has no secret with one of the requested names. Ask the user to add it at the authority",
+        ReasonCodes.RequestIdReused => "the authority already answered this request id. Ask again",
+        ReasonCodes.UserDenied or ReasonCodes.Cancelled => "The user did not approve (" + code + "). Do not retry. Ask the user.",
         GrantReasons.NoEvidence or GrantReasons.BadEvidence => "the approval did not carry a passkey assertion that backs the grant, so none was made. Nothing was saved",
         GrantReasons.NoTime => "no grant time was chosen on the approval page (choose one of the times it offers). Nothing was saved",
         _ => "the authority refused the request (" + code + ")",
@@ -807,6 +810,147 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
             local?.Unlock?.Dispose();
         }
     }
+
+    // ---- a launch whose approval and decryption happen at the authority (remote mode) ----
+
+    private readonly Dictionary<string, DateTimeOffset> _delivered = new(StringComparer.Ordinal);
+
+    /// <summary>True when the authority this host talks to approves and decrypts for it (a remote authority): the page is shown there and the values come back in a signed delivery.</summary>
+    public bool IsRemote => authority is ILaunchAuthority;
+
+    /// <summary>
+    /// Asks the authority to authorize and decrypt <paramref name="launch" />: it shows the page, takes the passkey tap and decrypts at its side, and answers with a signed refusal or a
+    /// <see cref="SecretsDelivery" />. Nothing is launched here. A delivery counts only when the pinned authority key (or a rotation it signed) signed it for exactly this request id, digest
+    /// and machine, it has not expired, the names are exactly the requested ones, the security revision is not older than the one applied, this host holds a valid lease, and the id was not delivered before;
+    /// otherwise every value is zeroed and the answer is a denial. <paramref name="onLink" /> receives the authority's page link (checked to be a plain http or https address).
+    /// </summary>
+    public async Task<RemoteAuthorization> AuthorizeRemoteAsync(LaunchRequest launch, string scopeKey, PageContext context, Action<string> onLink, CancellationToken cancel)
+    {
+        RemoteAuthorization Deny(string code, string message) => new(false, message, code, null, "", "");
+        if (authority is not ILaunchAuthority remote)
+        {
+            return Deny("no-remote-authority", "this host has no remote authority to ask. Nothing was run");
+        }
+
+        HostConfigLoad load = config.Load();
+        if (load.Problem is not null)
+        {
+            return Deny("host-config", load.Problem);
+        }
+
+        if (load.Config?.Authority is null || load.Config.MachineFingerprint != Fingerprint)
+        {
+            return Deny(ReasonCodes.MachinePending, Message(ReasonCodes.MachinePending));
+        }
+
+        LaunchAnswer answer;
+        try
+        {
+            LaunchAuthorize message = LaunchAuthorize.Create(launch, scopeKey, context, hostName, machineKey);
+            answer = await remote.AuthorizeLaunchAsync(message, notice =>
+            {
+                if (notice.RequestId == launch.RequestId && ApprovalLinkNotice.IsSafe(notice.Link))
+                {
+                    onLink(notice.Link);
+                }
+            }, cancel);
+        }
+        catch (RemoteRefusedException refused) when (refused.Code == "locked")
+        {
+            return Deny("authority-locked", AuthorityLock.LockedMessage);
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            AppLog.Warn("the authority did not answer a launch: {Type}", error.GetType().Name);
+
+            return Deny("authority-unavailable", "the authority could not be asked (" + error.GetType().Name + "). Nothing was run");
+        }
+
+        string digest = launch.Digest();
+        if (answer.Refusal is { } refusal)
+        {
+            string? problem = await Verify(refusal, launch.RequestId, digest, cancel);
+            if (problem is not null)
+            {
+                return Deny("response-invalid", "the authority's answer could not be verified (" + problem + "). Nothing was run");
+            }
+
+            if (refusal.Decision == AuthorityDecision.Approved)
+            {
+                return Deny("response-invalid", "the authority's answer could not be verified (an approval without values). Nothing was run");
+            }
+
+            if (RevisionProblem(refusal.SecurityRevision) is { } revision)
+            {
+                return Deny(ReasonCodes.AuthorizationChanged, revision);
+            }
+
+            return Deny(refusal.ReasonCode, Message(refusal.ReasonCode));
+        }
+
+        SecretsDelivery delivery = answer.Delivery!;
+        bool accepted = false;
+        try
+        {
+            string? problem = await Verify(delivery, launch.RequestId, digest, cancel);
+            if (problem is null && delivery.Expires - delivery.Issued > SecretsDelivery.MaxLifetime)
+            {
+                problem = "valid for too long";
+            }
+
+            if (problem is null && !delivery.Values.Select(item => item.Name).Order(StringComparer.Ordinal).SequenceEqual(launch.SecretNames.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal), StringComparer.Ordinal))
+            {
+                problem = "other secrets than the ones asked for";
+            }
+
+            if (problem is not null)
+            {
+                return Deny("response-invalid", "the authority's delivery could not be verified (" + problem + "). Nothing was run");
+            }
+
+            if (RevisionProblem(delivery.SecurityRevision) is { } revisionProblem)
+            {
+                return Deny(ReasonCodes.AuthorizationChanged, revisionProblem);
+            }
+
+            // No valid lease, no use of secrets: the same rule as in local mode.
+            if (!await EnsureLeaseAsync(cancel))
+            {
+                return Deny("no-lease", NoLeaseMessage);
+            }
+
+            if (cancel.IsCancellationRequested)
+            {
+                return Deny(ReasonCodes.Cancelled, "the launch was cancelled before the program started. Nothing was run");
+            }
+
+            lock (_lock)
+            {
+                DateTimeOffset now = _clock.GetUtcNow();
+                foreach (string old in _delivered.Where(item => item.Value < now).Select(item => item.Key).ToList())
+                {
+                    _delivered.Remove(old);
+                }
+
+                if (!_delivered.TryAdd(launch.RequestId, launch.Expires.AddMinutes(1)))
+                {
+                    return Deny(ReasonCodes.RequestIdReused, "a delivery for this request id was already received. Nothing was run");
+                }
+            }
+
+            SecretValues values = new(delivery.Values.ToDictionary(item => item.Name, item => item.Value, StringComparer.Ordinal));
+            accepted = true;
+
+            return new RemoteAuthorization(true, "", ReasonCodes.Approved, values, delivery.Via, delivery.GrantId);
+        }
+        finally
+        {
+            if (!accepted)
+            {
+                delivery.Zero();
+            }
+        }
+    }
 }
 
 /// <summary>A grant this host has synchronized: its id, scope key, the grant revision it saw, and when it ends (null: indefinite).</summary>
@@ -829,3 +973,6 @@ public sealed record GrantUse(GrantUseKind Kind, string Message, string GrantId 
 
 /// <summary>The result of an approval that makes a grant: the grant (id and end, null for indefinite) or why not (a message with no value in it).</summary>
 public sealed record GrantApproval(bool Granted, string Message, string Code, string? GrantId, DateTimeOffset? Expires = null);
+
+/// <summary>The result of <see cref="HostAuthorization.AuthorizeRemoteAsync" />: either the verified values (the caller owns and disposes them) and how the authority authorized, or a denial with a message that has no value in it.</summary>
+public sealed record RemoteAuthorization(bool Ok, string Message, string Code, SecretValues? Values, string Via, string GrantId);

@@ -64,7 +64,8 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         IReadOnlyList<string> available;
         try
         {
-            available = store.ListNames();
+            // A remote authority holds the store: this host reads none, and the authority refuses a name it does not have.
+            available = context.Authorization is { IsRemote: true } ? launch.SecretNames : store.ListNames();
         }
         catch (Exception error)
         {
@@ -236,7 +237,9 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
 
         // A store whose key is released by the approving passkey (PRF) gets that release at every run, and a saved approval has none:
         // such a store never offers or uses saved approvals.
-        ReuseOffer offer = !store.NeedsUnlock && grants is not null && reuse is { IsOn: true } ? reuse : ReuseOffer.Off;
+        // A remote authority approves and decrypts: a saved approval is a host-local record of an approval given here, so it is neither offered nor used (the authority's grants take its place).
+        bool remote = context.Authorization is { IsRemote: true };
+        ReuseOffer offer = !remote && !store.NeedsUnlock && grants is not null && reuse is { IsOn: true } ? reuse : ReuseOffer.Off;
         Dictionary<string, string> sources = names.ToDictionary(name => name, _ => store.Label, StringComparer.Ordinal);
         ApprovalRequest request = new(program, resolved, arguments, workingDirectory, reason, names, offer.IsOn ? offer : null, typedArguments, links, Sources: sources, Unlock: store.NeedsUnlock, Script: script, ProgramFile: programFile, Mappings: plan.Mappings, EnvFiles: plan.Files, EnvNames: [.. plan.Ordinary.Keys.Order(StringComparer.Ordinal)], EnvValues: plan.Ordinary, InheritedEnvironment: context.Environment);
         Fingerprint fingerprint = RequestFingerprint.Compute(request);
@@ -273,9 +276,58 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         string auditRequestId = context.Request?.RequestId ?? "";
         bool Record(string type, string outcome, string reason, string grantId = "", int? exit = null) => hostAudit is null || hostAudit.TryRecord(new AuditFacts(type, outcome, reason, auditRequestId, workingDirectory, auditProgram, auditArguments, grantId, exit));
 
+        // Remote authority: the page, the passkey tap and the decryption happen at the authority; what comes back is the verified, signed delivery. Nothing is decrypted here.
+        async Task<(int? Exit, SecretValues? Values, string Grant)> RemoteAuthorizeAsync()
+        {
+            await stderr.WriteLineAsync("with-secrets: waiting for the authority to approve this request...");
+            await stderr.WriteLineAsync(ApprovalSummary.BuildMessage(request, showValues: false));
+            RemoteAuthorization outcome = await context.Authorization!.AuthorizeRemoteAsync(context.Request!, GrantEvidence.Scope(context.Authorization.Fingerprint, fingerprint.Key, arguments), new PageContext(resolved, arguments, links, script, programFile, fingerprint.Key), link => context.OnApprovalLink?.Invoke(link), context.Cancel);
+            if (!outcome.Ok)
+            {
+                audit.TryWrite("denied", request, outcome.Message, files: fingerprint.Files);
+                Record(AuditEventTypes.Authorization, "denied", context.Cancel.IsCancellationRequested ? "cancelled" : outcome.Code);
+
+                return (context.Cancel.IsCancellationRequested ? await Cancelled() : await Fail(Denied, outcome.Message), null, "");
+            }
+
+            SecretValues values = outcome.Values!;
+            bool viaGrant = outcome.Via == SecretsDelivery.ViaGrant;
+            string grant = viaGrant ? outcome.GrantId : "";
+            if (!audit.TryWrite(viaGrant ? "granted" : "approved", request, viaGrant ? $"grant {grant}, checked with the authority" : "approved at the authority", files: fingerprint.Files))
+            {
+                values.Dispose();
+
+                return (await Fail(AuditError, "cannot write the audit log, so nothing was run."), null, "");
+            }
+
+            // The authorization event is committed before the program starts (the values are only in memory until then); a run whose event cannot be committed does not go on.
+            if (!Record(AuditEventTypes.Authorization, viaGrant ? "granted" : "approved", viaGrant ? "online" : ReasonCodes.Approved, grant))
+            {
+                values.Dispose();
+
+                return (await Fail(AuditError, AuditEventMessage), null, "");
+            }
+
+            // A script can change while the prompt is open. The person approved what they saw, so run only that.
+            if (RequestFingerprint.Compute(request).Key != fingerprint.Key)
+            {
+                values.Dispose();
+                Record(AuditEventTypes.Launch, "failed", "files-changed", grant);
+
+                return (await Fail(Denied, "A file named in the command changed while the prompt was open, so nothing was run. Ask again."), null, "");
+            }
+
+            return (null, values, grant);
+        }
+
         // approve: the same validation and the human approval, but the result is a grant for this scope and nothing is launched.
         if (approveOnly)
         {
+            if (remote)
+            {
+                return await Fail(Usage, "creating a grant from a host whose authority is remote is not built yet (a grant that exists for this machine at the authority is used by runs here). Nothing was saved.");
+            }
+
             // Approving binds the store key to a grant at the tap, so the request for it is committed first, like the authorization of a run: without it, no tap is asked for.
             if (!Record(AuditEventTypes.Authorization, "approval-requested", "grant"))
             {
@@ -291,7 +343,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         // A grant for exactly this request (the authority answers, or one this host synchronized, under a valid lease) stands in for the
         // approval page's decision. A request that is not covered, or whose grant ended, goes through the page as before.
         GrantUse? grantUse = null;
-        if (context.Authorization is { } grantHost && context.Request is { } grantLaunch)
+        if (!remote && context.Authorization is { } grantHost && context.Request is { } grantLaunch)
         {
             grantUse = await grantHost.TryUseGrantAsync(grantLaunch, grantScope!, context.Cancel);
             if (grantUse.Kind == GrantUseKind.Denied)
@@ -318,6 +370,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         Unlock? unlock = null;
         bool keyFromGrant = false;
         string runGrant = grantUse is { Kind: GrantUseKind.Granted } usedGrant ? usedGrant.GrantId : "";
+        SecretValues? delivered = null;
         try
         {
             if (saved.Rejected is not null)
@@ -325,7 +378,15 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                 await stderr.WriteLineAsync($"with-secrets: {GrantStore.RejectedMessage} ({saved.Rejected}).");
             }
 
-            if (grantUse is { Kind: GrantUseKind.Granted } granted)
+            if (remote)
+            {
+                (int? exit, delivered, runGrant) = await RemoteAuthorizeAsync();
+                if (exit is { } remoteExit)
+                {
+                    return remoteExit;
+                }
+            }
+            else if (grantUse is { Kind: GrantUseKind.Granted } granted)
             {
                 string how = granted.Offline ? "offline, within the lease" : "checked with the authority";
                 await stderr.WriteLineAsync($"with-secrets: a grant covers this request (grant {granted.GrantId}, {how}); no approval page decision is needed.");
@@ -483,7 +544,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             SecretValues secrets;
             try
             {
-                secrets = store.GetValues(names, unlock);
+                secrets = delivered ?? store.GetValues(names, unlock);
             }
             catch (Exception error)
             {
@@ -596,6 +657,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         finally
         {
             unlock?.Dispose();
+            delivered?.Dispose();
 
             // A run under a grant that did not end normally (any refusal, failure or cancel) drops whatever key is held for it.
             if (keyFromGrant && Outcome != LaunchOutcome.Exited)
@@ -865,6 +927,9 @@ public sealed class LaunchContext
 
     /// <summary>The host's side of the authority protocol. A launch that came over the API asks the authority through it before anything is decrypted; null only for the in-process runs of tests.</summary>
     public HostAuthorization? Authorization { get; init; }
+
+    /// <summary>Told the link of the approval page when the authority shows it (remote mode); the service sends it to the client as an approval event.</summary>
+    public Action<string>? OnApprovalLink { get; init; }
 
     /// <summary>
     /// The host's signed audit trail. A secret-bearing run must commit its authorization event here before anything is decrypted, and does not run when it cannot.

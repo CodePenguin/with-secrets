@@ -19,12 +19,18 @@ internal static class RemoteOps
     public const string AcknowledgeGrantEvent = "ack-grant-event";
     public const string AuditUpload = "audit-upload";
 
+    /// <summary>Host to authority: authorize one launch at the authority (approval, decryption there), answered with a <see cref="LaunchAnswer" />. Never repeated under the same id.</summary>
+    public const string LaunchAuthorize = "launch-authorize";
+
+    /// <summary>Authority to host: where the approval page for a waiting launch is (a notification).</summary>
+    public const string ApprovalLink = "approval-link";
+
     /// <summary>Authority to host: an invalidation has not been acknowledged yet (a notification; the pending list is the source of truth).</summary>
     public const string PushInvalidation = "push-invalidation";
 
     public static readonly string[] Requests =
     [
-        BeginEnrollment, Enroll, Decide, KeyTransitions, PendingInvalidations, AcknowledgeInvalidation, Grant, Reconcile, PendingGrantEvents, AcknowledgeGrantEvent, AuditUpload,
+        BeginEnrollment, Enroll, Decide, KeyTransitions, PendingInvalidations, AcknowledgeInvalidation, Grant, Reconcile, PendingGrantEvents, AcknowledgeGrantEvent, AuditUpload, LaunchAuthorize,
     ];
 }
 
@@ -151,6 +157,33 @@ internal static class RemoteWire
     }
 
     private static bool Open(string json, out JsonDocument? doc) => CanonicalJson.Open(json, out doc, out _);
+
+    // ---- launch authorization ----
+
+    public static string Write(LaunchAuthorize message) => "{\"decide\":" + Write(message.Decide) + ",\"use\":" + Write(message.Use) + ",\"context\":" + message.Context.Canonical() + ",\"contextSignature\":" + Q(Convert.ToBase64String(message.ContextSignature)) + "}";
+
+    public static bool TryRead(string json, out LaunchAuthorize? message)
+    {
+        message = null;
+        if (!Open(json, out JsonDocument? doc))
+        {
+            return false;
+        }
+
+        using (doc)
+        {
+            ContractReader reader = new(doc!.RootElement, "decide", "use", "context", "contextSignature");
+            if (reader.Problem is not null || !reader.Object("decide", out JsonElement decideElement) || !reader.Object("use", out JsonElement useElement) || !reader.Object("context", out JsonElement contextElement) || !reader.Text("contextSignature", out string? signatureText)
+                || !Signature(signatureText!, out byte[] signature) || !TryRead(decideElement.GetRawText(), out MachineRequestEnvelope? decide) || !TryRead(useElement.GetRawText(), out GrantEnvelope? use) || !PageContext.TryRead(contextElement, out PageContext? context))
+            {
+                return false;
+            }
+
+            message = new LaunchAuthorize(decide!, use!, context!, signature);
+
+            return true;
+        }
+    }
 
     // ---- machine messages ----
 

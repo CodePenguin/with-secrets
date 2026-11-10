@@ -29,6 +29,7 @@ public static class ReasonCodes
     public const string NoApprovalChannel = "no-approval-channel";
     public const string AuthorizationChanged = "authorization-changed";
     public const string Internal = "internal-error";
+    public const string UnknownSecret = "unknown-secret";
 }
 
 /// <summary>Shared text rules of the authority messages.</summary>

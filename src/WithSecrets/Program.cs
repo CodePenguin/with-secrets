@@ -65,6 +65,12 @@ internal static class Program
             return await AdminAppCommand.RunAsync(app.ServicePort, Console.Out, Console.Error, ServiceTrust.From(HostConfigFile.InFolder(StorePath())), OpenInBrowser(app));
         }
 
+        // admin ADDRESS --authority-fingerprint HEX: point this machine at an authority and enroll it there (Pending). Opens no store and no state.db.
+        if (command is CliCommand.AdminPair pair)
+        {
+            return await RunPairAsync(pair);
+        }
+
         // approve takes the same road to the service: the service shows the page and the authority records the grant; nothing is launched.
         if (command is CliCommand.Approve approve)
         {
@@ -235,6 +241,29 @@ internal static class Program
     /// <summary>The host service in the foreground, until Ctrl+C. Windows service installation and start at logon come later.</summary>
     private static string StorePath() => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), StoreFolder);
 
+    private static async Task<int> RunPairAsync(CliCommand.AdminPair command)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            TerminalPrompt.Final("with-secrets: the machine identity needs Windows CNG for now; this machine cannot be enrolled with an authority from this system.");
+
+            return RunCommand.StoreError;
+        }
+
+        try
+        {
+            using LocalDeployment deployment = LocalDeployment.OpenProduction(StorePath());
+
+            return await AuthorityPairing.RunAsync(command, deployment, Console.Out, Console.Error);
+        }
+        catch (Exception failure) when (failure is AuthorityDatabaseException or System.Security.Cryptography.CryptographicException)
+        {
+            TerminalPrompt.Final("with-secrets: the machine identity cannot be used: " + failure.Message);
+
+            return RunCommand.StoreError;
+        }
+    }
+
     private static int RunService(CliCommand command, StateDatabase state, SecretStore store, GrantStore grants, string folder)
     {
         int? port = ServiceEndpoint.Resolve(command.ServicePort, Environment.GetEnvironmentVariable, out string? portError);
@@ -250,6 +279,34 @@ internal static class Program
             TerminalPrompt.Final("with-secrets: the machine identity needs Windows CNG for now; the host service cannot start on this system.");
 
             return RunCommand.StoreError;
+        }
+
+        // The machine endpoint (an authority serving another machine's host service, such as WSL's): nothing but the encrypted machine protocol, never the admin app, the API or a page.
+        MachineEndpointOptions? machineEndpoint = null;
+        if (command is CliCommand.Service { MachinePort: { } machinePort } machineCommand)
+        {
+            System.Security.Cryptography.X509Certificates.X509Certificate2? certificate = null;
+            if (machineCommand.MachineCertificate is { } certificateFile)
+            {
+                try
+                {
+                    certificate = System.Security.Cryptography.X509Certificates.X509CertificateLoader.LoadPkcs12FromFile(certificateFile, machineCommand.MachineCertificatePasswordVariable is { } name ? Environment.GetEnvironmentVariable(name) : null);
+                }
+                catch (Exception failure) when (failure is System.Security.Cryptography.CryptographicException or IOException or UnauthorizedAccessException)
+                {
+                    TerminalPrompt.Final("with-secrets: the machine endpoint certificate cannot be read (" + failure.GetType().Name + ").");
+
+                    return RunCommand.StoreError;
+                }
+            }
+
+            machineEndpoint = new MachineEndpointOptions { Bind = System.Net.IPAddress.Parse(machineCommand.MachineBind), Port = machinePort, Certificate = certificate };
+            if (machineEndpoint.Problem() is { } endpointProblem)
+            {
+                TerminalPrompt.Final("with-secrets: " + endpointProblem);
+
+                return RunCommand.Usage;
+            }
         }
 
         LocalDeployment deployment;
@@ -282,10 +339,18 @@ internal static class Program
             return RunCommand.StoreError;
         }
 
+        if (deployment.Remote is not null && machineEndpoint is not null)
+        {
+            TerminalPrompt.Final("with-secrets: this machine is paired with another machine's authority (see host.json), so it is not an authority and serves no machine endpoint.");
+            deployment.Dispose();
+
+            return RunCommand.Usage;
+        }
+
         HostService service;
         try
         {
-            service = HostService.Start(new HostServiceOptions { State = state, Store = store, Grants = grants, Port = port.Value, Deployment = deployment });
+            service = HostService.Start(new HostServiceOptions { State = state, Store = store, Grants = grants, Port = port.Value, Deployment = deployment, MachineEndpoint = machineEndpoint });
         }
         catch (Exception failure)
         {
@@ -311,6 +376,11 @@ internal static class Program
             foreach (string line in ServiceStartup.LockLines(service.Lock.IsLocked, deployment.Store.GetUnlockPolicy(), service.StartupUnlockNote, service.Admin.PageUrl))
             {
                 TerminalPrompt.Line(line);
+            }
+
+            if (service.MachinePort is { } machinePortNow)
+            {
+                TerminalPrompt.Line($"with-secrets service: machine endpoint on {machineEndpoint!.Bind}:{machinePortNow} (the encrypted machine protocol only: no administration, no pages). A firewall rule for that port is the administrator's to make.");
             }
 
             TerminalPrompt.Line($"with-secrets service: listening on 127.0.0.1 and [::1], port {service.Port} (this machine only). Press Ctrl+C to stop.");

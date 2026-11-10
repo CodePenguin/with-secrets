@@ -38,6 +38,9 @@ public sealed class AuthorityLock
     {
     }
 
+    /// <summary>The lock of a host whose authority is remote: it guards nothing here (this host holds no store and no keys); the authority's own lock decides, at its endpoint.</summary>
+    internal static AuthorityLock Delegated() => UnlockedForTests();
+
     /// <summary>The test seam: an already unlocked lock, passed in <see cref="HostServiceOptions.Lock" />. The program never makes one.</summary>
     internal static AuthorityLock UnlockedForTests()
     {

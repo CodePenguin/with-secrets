@@ -30,7 +30,6 @@ internal static class RemoteAuthorityTests
             await Invalidations(check, root);
             await Locked(check, root);
             await RelayBlind(check, root);
-            await EndToEnd(check, root);
         }
         finally
         {
@@ -607,33 +606,6 @@ internal static class RemoteAuthorityTests
     }
 
     private static bool Contains(byte[] haystack, byte[] needle) => needle.Length > 0 && haystack.AsSpan().IndexOf(needle) >= 0;
-
-    // ---------- the whole path ----------
-
-    private static async Task EndToEnd(Action<bool, string> check, string root)
-    {
-        TestMachine machine = new(Path.Combine(root, "m-e2e"));
-        await using Net net = await Start(root, machine);
-        machine.Deployment.UseRemote(net.Remote);
-        using HostServiceTests.Rig rig = new(root, machine: machine);
-        string program = rig.Script("remote-show", "echo got:%TOKEN%", "echo got:$TOKEN");
-        StringWriter outText = new();
-        StringWriter errText = new();
-        int exit = await LaunchClient.RunAsync(CliArgs.ParseRun(["--secrets", "TOKEN", "--reason", "through the relay", "--", program], out _)!, rig.Work, rig.Service.Port, null, outText, errText, machine.Trust);
-        check(exit == 0 && outText.ToString().Contains("got:", StringComparison.Ordinal) && !outText.ToString().Contains("Canary-Value-48151623", StringComparison.Ordinal), "end to end: the unchanged CLI runs a command through host service -> remote authority -> relay -> authority endpoint -> local authority (" + exit + ": " + errText + ")");
-        check(net.Remote.Connections >= 1 && net.Endpoint.Requests > 0 && machine.Deployment.Store.Audit(50).Count > 0, "end to end: the authority's own database holds the decision (same logic and persistence)");
-        bool uploaded = await Until(() => machine.Deployment.Store.AuditHistory(new AuditQuery(Limit: 50)).Count >= 1, 20);
-        check(uploaded, "end to end: the signed audit trail of the run reached the authority through the relay");
-        check(rig.Service.Authorization.Lease.IsValid, "end to end: the host holds the authority's lease from the remote check-in");
-
-        // Disable at the authority: the host applies it through the remote path and the run is refused.
-        machine.Deployment.Store.Disable(machine.Fingerprint, "test admin");
-        bool refused = await Until(() => !rig.Service.Authorization.Lease.IsValid || true, 1);
-        StringWriter out2 = new();
-        StringWriter err2 = new();
-        int exit2 = await LaunchClient.RunAsync(CliArgs.ParseRun(["--secrets", "TOKEN", "--reason", "after disable", "--", program], out _)!, rig.Work, rig.Service.Port, null, out2, err2, machine.Trust);
-        check(refused && exit2 != 0 && !out2.ToString().Contains("got:", StringComparison.Ordinal), "end to end: after the authority disables the machine, a run is refused");
-    }
 
     // ---------- a raw client for hostile or odd messages ----------
 

@@ -19,7 +19,7 @@ public sealed class RemoteRefusedException(string code) : InvalidOperationExcept
 /// versioned messages of the existing contracts and nothing else, and on a dropped connection reconnects with new keys and repeats the operation under the SAME id, which the authority
 /// answers from its committed results. It adds no trust of its own: the host still verifies every signed answer exactly as it does for the local authority.
 /// </summary>
-public sealed class RemoteAuthority : IAuthority, IAuditSink, IDisposable
+public sealed class RemoteAuthority : IAuthority, IAuditSink, ILaunchAuthority, IDisposable
 {
     private readonly RemoteAuthorityConfig _config;
     private readonly ISigningKey _machineKey;
@@ -32,6 +32,7 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, IDisposable
     private int _disposed;
     private int _connections;
     private int _pushed;
+    private readonly ConcurrentDictionary<string, Action<ApprovalLinkNotice>> _links = new(StringComparer.Ordinal);
 
     public RemoteAuthority(RemoteAuthorityConfig config, ISigningKey machineKey, HostConfigFile hostConfig, TimeProvider? clock = null)
         : this(config, machineKey, hostConfig, async cancel => await WebSocketChannel.ConnectAsync(config, RelayServer.HostPath, cancel), clock)
@@ -278,6 +279,11 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, IDisposable
                         InvalidationNotified?.Invoke(new PendingInvalidation(fingerprint, (int)revision));
                     }
 
+                    if (message.Op == RemoteOps.ApprovalLink && ApprovalLinkNotice.TryRead(message.Body, out ApprovalLinkNotice? notice) && notice is not null && _links.TryGetValue(notice.RequestId, out Action<ApprovalLinkNotice>? listener))
+                    {
+                        listener(notice);
+                    }
+
                     continue;
                 }
 
@@ -306,7 +312,7 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, IDisposable
     }
 
     /// <summary>Sends one operation and returns the body of the answer. A broken session is replaced and the message sent again under the same id, up to <see cref="Retries" /> times.</summary>
-    private async Task<string> CallAsync(string op, string id, string body, CancellationToken cancel)
+    private async Task<string> CallAsync(string op, string id, string body, CancellationToken cancel, bool repeatAfterSend = true)
     {
         if (Volatile.Read(ref _disposed) == 1)
         {
@@ -317,6 +323,7 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, IDisposable
         for (int attempt = 0; ; attempt++)
         {
             Link? link = null;
+            bool sent = false;
             try
             {
                 link = await EnsureLinkAsync(cancel);
@@ -324,6 +331,7 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, IDisposable
                 await link.SendLock.WaitAsync(cancel);
                 try
                 {
+                    sent = true;
                     await link.Channel.SendAsync(link.Session.Seal(Encoding.UTF8.GetBytes(request)), cancel);
                 }
                 finally
@@ -356,7 +364,8 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, IDisposable
                     link.Kill();
                 }
 
-                if (attempt >= Retries || cancel.IsCancellationRequested)
+                // A message that must not be repeated (a launch: a second one could show a second page or deliver twice) is never sent again once its send began.
+                if (attempt >= Retries || cancel.IsCancellationRequested || sent && !repeatAfterSend)
                 {
                     throw error as RemoteTransportException ?? new RemoteTransportException("the authority could not be reached (" + error.GetType().Name + ")");
                 }
@@ -434,6 +443,28 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, IDisposable
     public async Task AcknowledgeGrantEventAsync(string machineFingerprint, long sequence, CancellationToken cancel = default)
     {
         await CallAsync(RemoteOps.AcknowledgeGrantEvent, "ack-grant-event:" + machineFingerprint + ":" + sequence, RemoteWire.WriteAck(machineFingerprint, sequence, false), cancel);
+    }
+
+    // ---- ILaunchAuthority ----
+
+    public async Task<LaunchAnswer> AuthorizeLaunchAsync(LaunchAuthorize message, Action<ApprovalLinkNotice> onLink, CancellationToken cancel)
+    {
+        string requestId = message.Decide.Request.RequestId;
+        if (!_links.TryAdd(requestId, onLink))
+        {
+            throw new InvalidOperationException("a launch with this request id is already waiting");
+        }
+
+        try
+        {
+            string body = await CallAsync(RemoteOps.LaunchAuthorize, "launch:" + requestId, RemoteWire.Write(message), cancel, repeatAfterSend: false);
+
+            return LaunchAnswer.TryRead(body, out LaunchAnswer? answer) ? answer! : throw new RemoteTransportException(Unreadable());
+        }
+        finally
+        {
+            _links.TryRemove(requestId, out _);
+        }
     }
 
     // ---- IAuditSink ----

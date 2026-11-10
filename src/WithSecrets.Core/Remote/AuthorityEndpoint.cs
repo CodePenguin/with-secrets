@@ -24,8 +24,10 @@ public sealed class AuthorityEndpointOptions
 /// machine's registered key; the endpoint only binds a session to the one machine that proved its key in the handshake (a request naming another machine is refused), refuses
 /// everything while the authority is locked, and pushes the machine's unacknowledged invalidations until they are acknowledged.
 /// </summary>
-public sealed class AuthorityEndpoint(LocalAuthority authority, AuthorityKeyRing keys, AuthorityStore store, RemoteAuthorityConfig relay, AuthorityEndpointOptions? options = null) : IAsyncDisposable
+public sealed class AuthorityEndpoint(LocalAuthority authority, AuthorityKeyRing keys, AuthorityStore store, RemoteAuthorityConfig relay, AuthorityEndpointOptions? options = null, IRemoteLaunchHandler? launches = null) : IAsyncDisposable
 {
+    private const int MaxLaunchesPerSession = 4096;
+
     private const int MaxRemembered = 512;
 
     private readonly AuthorityEndpointOptions _options = options ?? new AuthorityEndpointOptions();
@@ -127,6 +129,9 @@ public sealed class AuthorityEndpoint(LocalAuthority authority, AuthorityKeyRing
         public Dictionary<string, (string Digest, Task<string> Result)> Known { get; } = new(StringComparer.Ordinal);
 
         public Queue<string> Order { get; } = new();
+
+        /// <summary>The launch ids this session ran: a launch runs once per id, and its answer (which carries values) is never kept.</summary>
+        public HashSet<string> LaunchIds { get; } = new(StringComparer.Ordinal);
     }
 
     private async Task ServeAsync(WebSocketChannel channel, CancellationToken stop)
@@ -303,12 +308,15 @@ public sealed class AuthorityEndpoint(LocalAuthority authority, AuthorityKeyRing
     private static async Task SendSealedAsync(WebSocketChannel channel, Peer peer, SecureSession session, string message, CancellationToken stop)
     {
         await peer.SendLock.WaitAsync(stop);
+        byte[] plaintext = System.Text.Encoding.UTF8.GetBytes(message);
         try
         {
-            await SendAsync(channel, RelayServer.KindData, peer.Id, session.Seal(System.Text.Encoding.UTF8.GetBytes(message)), stop);
+            await SendAsync(channel, RelayServer.KindData, peer.Id, session.Seal(plaintext), stop);
         }
         finally
         {
+            // What was sealed may carry values (a delivery): the plaintext copy of the frame is zeroed.
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(plaintext);
             peer.SendLock.Release();
         }
     }
@@ -318,12 +326,17 @@ public sealed class AuthorityEndpoint(LocalAuthority authority, AuthorityKeyRing
         Interlocked.Increment(ref _requests);
         string reply;
         bool close = false;
+        SecretsDelivery? delivery = null;
         try
         {
             if (Locked)
             {
                 reply = RemoteWire.Failure(message.Id, "locked");
                 close = true;
+            }
+            else if (message.Op == RemoteOps.LaunchAuthorize)
+            {
+                (reply, delivery) = await LaunchAsync(channel, peer, message, stop);
             }
             else
             {
@@ -363,6 +376,64 @@ public sealed class AuthorityEndpoint(LocalAuthority authority, AuthorityKeyRing
         {
             // The session or the relay is gone.
         }
+        finally
+        {
+            // Sent or not, the values of a delivery are zeroed here, and the reply (the only other holder) is dropped.
+            delivery?.Zero();
+        }
+    }
+
+    /// <summary>
+    /// A launch at this authority: approval and decryption happen here (see <see cref="AuthorityLaunchHandler" />). It is not run through <see cref="Remembered" />: an answer that carries values is never kept,
+    /// and an id that was used in this session gets <c>request-id-reused</c> and nothing else (a delivery is one-time). The approval link goes to the host as soon as the page exists.
+    /// </summary>
+    private async Task<(string Reply, SecretsDelivery? Delivery)> LaunchAsync(WebSocketChannel channel, Peer peer, WireMessage message, CancellationToken stop)
+    {
+        if (launches is null)
+        {
+            return (RemoteWire.Failure(message.Id, "unsupported"), null);
+        }
+
+        if (!RemoteWire.TryRead(message.Body, out LaunchAuthorize? launch) || launch is null || message.Id != "launch:" + launch.Decide.Request.RequestId)
+        {
+            return (RemoteWire.Failure(message.Id, "bad-request"), null);
+        }
+
+        if (!string.Equals(launch.Decide.MachineFingerprint, peer.Machine, StringComparison.Ordinal) || !string.Equals(launch.Use.MachineFingerprint, peer.Machine, StringComparison.Ordinal))
+        {
+            return (RemoteWire.Failure(message.Id, "wrong-machine"), null);
+        }
+
+        lock (peer.Gate)
+        {
+            if (peer.LaunchIds.Count >= MaxLaunchesPerSession || !peer.LaunchIds.Add(message.Id))
+            {
+                return (RemoteWire.Failure(message.Id, "request-id-reused"), null);
+            }
+        }
+
+        int sequence = 0;
+        void Link(string link)
+        {
+            // Told to the host as the page exists; a link that cannot be sent leaves the person without it, and the request ends at its time limit.
+            try
+            {
+                SecureSession? session = peer.Session;
+                if (session is not null && ApprovalLinkNotice.IsSafe(link))
+                {
+                    string push = RemoteWire.Request("link-" + Guid.NewGuid().ToString("N"), RemoteOps.ApprovalLink, new ApprovalLinkNotice(launch.Decide.Request.RequestId, Interlocked.Increment(ref sequence), link).ToJson());
+                    SendSealedAsync(channel, peer, session, push, stop).GetAwaiter().GetResult();
+                }
+            }
+            catch (Exception error) when (error is SecureChannelException or OperationCanceledException or IOException or System.Net.WebSockets.WebSocketException or ObjectDisposedException)
+            {
+                // The session is gone.
+            }
+        }
+
+        LaunchAnswer answer = await launches.AuthorizeAsync(peer.Machine, launch, Link, peer.Ended.Token);
+
+        return (RemoteWire.Response(message.Id, answer.ToJson()), answer.Delivery);
     }
 
     /// <summary>

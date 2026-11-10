@@ -41,6 +41,9 @@ public sealed class RelayOptions
     public int MaxRegistrations { get; init; } = 1024;
 
     public int MaxHostsPerRegistration { get; init; } = 64;
+
+    /// <summary>The authority path accepts only a connection that comes from this machine's loopback address (the authority registers from inside the same process; a process reaching the relay from another address can connect as a host only). Off for a general relay.</summary>
+    public bool AuthorityLoopbackOnly { get; init; }
 }
 
 /// <summary>
@@ -167,6 +170,13 @@ public sealed class RelayServer : IAsyncDisposable
 
         if (path == AuthorityPath)
         {
+            if (_options.AuthorityLoopbackOnly && (context.Connection.RemoteIpAddress is not { } remote || !IPAddress.IsLoopback(remote)))
+            {
+                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+
+                return;
+            }
+
             await HandleAuthorityAsync(context, id);
         }
         else

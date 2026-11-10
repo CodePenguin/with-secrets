@@ -15,8 +15,11 @@ public abstract record CliCommand
     /// <summary>--service-port N with a run, or --port N with <c>service</c>: the port of the host service. Null: WITH_SECRETS_PORT, then the default.</summary>
     public int? ServicePort { get; init; }
 
-    /// <summary>service [--port N]: run the host service in the foreground (loopback only).</summary>
-    public sealed record Service : CliCommand;
+    /// <summary>service [--port N] [--machine-port N [--machine-bind ADDRESS] [--machine-cert FILE [--machine-cert-password-env NAME]]]: run the host service in the foreground (loopback only for the API; the optional machine endpoint serves only the encrypted machine protocol for another machine's host service, such as the one in WSL).</summary>
+    public sealed record Service(int? MachinePort = null, string MachineBind = "127.0.0.1", string? MachineCertificate = null, string? MachineCertificatePasswordVariable = null) : CliCommand;
+
+    /// <summary>admin URL --authority-fingerprint HEX: point this machine's host service at an authority (public data into host.json), enroll this machine there as Pending and say where an administrator approves it.</summary>
+    public sealed record AdminPair(string Url, string? AuthorityFingerprint) : CliCommand;
 
     /// <summary>relay [--port N] [--bind ADDRESS] [--cert FILE [--cert-password-env NAME]]: run the relay, an opaque in-memory router between host services and a remote authority.</summary>
     public sealed record Relay(int ListenPort, string Bind, string? CertificateFile, string? CertificatePasswordVariable) : CliCommand;
@@ -202,6 +205,11 @@ public static class CliArgs
                 return ParseAdminApp(args, out error);
             }
 
+            if (args[1].Contains("://", StringComparison.Ordinal))
+            {
+                return ParseAdminPair(args, out error);
+            }
+
             error = "admin has no subcommands: all administration is in the authority's admin web app. Run: with-secrets admin   (it prints the link and the service's status)";
 
             return null;
@@ -293,6 +301,51 @@ public static class CliArgs
         return new CliCommand.AdminApp { ServicePort = port, Debug = debug };
     }
 
+    private const string AdminPairUsage = "Usage: with-secrets admin ADDRESS --authority-fingerprint HEX [--debug]. ADDRESS is where the authority's machine endpoint listens (for example http://127.0.0.1:8790); HEX is the authority key's SHA-256 fingerprint as the authority's admin web app shows it (64 hex digits). It points this machine's host service at that authority and enrolls this machine there as Pending.";
+
+    /// <summary>admin ADDRESS --authority-fingerprint HEX [--debug].</summary>
+    private static CliCommand? ParseAdminPair(IReadOnlyList<string> args, out string error)
+    {
+        string? fingerprint = null;
+        bool debug = false;
+        for (int index = 2; index < args.Count; index++)
+        {
+            if (args[index] == "--debug")
+            {
+                debug = true;
+            }
+            else if (args[index] == "--authority-fingerprint" && index + 1 < args.Count && fingerprint is null)
+            {
+                fingerprint = args[++index];
+            }
+            else
+            {
+                error = AdminPairUsage;
+
+                return null;
+            }
+        }
+
+        if (fingerprint is null || KeyIdentity.ParseHex(fingerprint, true) is null)
+        {
+            error = (fingerprint is null ? "The authority's key fingerprint is required: this machine trusts only the key it names." : "The fingerprint must be 64 hex digits.") + " " + AdminPairUsage;
+
+            return null;
+        }
+
+        string url = args[1].TrimEnd('/');
+        if (RemoteTarget.Base(url, out _) is { } problem)
+        {
+            error = "ADDRESS: " + problem;
+
+            return null;
+        }
+
+        error = "";
+
+        return new CliCommand.AdminPair(url, fingerprint) { Debug = debug };
+    }
+
     public const int DefaultRelayPort = 8780;
 
     private static readonly string RelayUsage = $"Usage: with-secrets relay [--port N] [--bind ADDRESS] [--cert FILE [--cert-password-env NAME]] [--debug]. The relay listens on 127.0.0.1 by default (port {DefaultRelayPort}); any other address needs --cert (TLS: https and wss).";
@@ -351,35 +404,83 @@ public static class CliArgs
     private static CliCommand? ParseService(IReadOnlyList<string> args, out string error)
     {
         int? port = null;
+        int? machinePort = null;
+        string machineBind = "127.0.0.1";
+        string? machineCertificate = null;
+        string? machinePasswordVariable = null;
         bool debug = false;
+        const string Usage = "Usage: with-secrets service [--port N] [--machine-port N [--machine-bind ADDRESS] [--machine-cert FILE [--machine-cert-password-env NAME]]]. The service listens on 127.0.0.1 and [::1] only; N is 1 to 65535 (default 8765, or WITH_SECRETS_PORT). --machine-port also serves the encrypted machine protocol (nothing else: no administration, no pages) for another machine's host service such as the one in WSL; it listens on 127.0.0.1 unless --machine-bind names one address (never 0.0.0.0), which needs --machine-cert.";
+        int Number(string text) => int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out int parsed) && parsed >= 1 && parsed <= ToolSettings.MaxPort ? parsed : -1;
         for (int index = 1; index < args.Count; index++)
         {
             if (args[index] == "--debug")
             {
                 debug = true;
             }
-            else if (args[index] == "--port" && index + 1 < args.Count)
+            else if (args[index] is "--port" or "--machine-port" && index + 1 < args.Count)
             {
-                if (!int.TryParse(args[++index], NumberStyles.None, CultureInfo.InvariantCulture, out int parsed) || parsed < 1 || parsed > ToolSettings.MaxPort)
+                string option = args[index];
+                int parsed = Number(args[++index]);
+                if (parsed < 0)
                 {
-                    error = $"--port takes a number from 1 to {ToolSettings.MaxPort}.";
+                    error = $"{option} takes a number from 1 to {ToolSettings.MaxPort}.";
 
                     return null;
                 }
 
-                port = parsed;
+                if (option == "--port")
+                {
+                    port = parsed;
+                }
+                else
+                {
+                    machinePort = parsed;
+                }
+            }
+            else if (args[index] == "--machine-bind" && index + 1 < args.Count && System.Net.IPAddress.TryParse(args[++index], out System.Net.IPAddress? address) && !System.Net.IPAddress.Any.Equals(address) && !System.Net.IPAddress.IPv6Any.Equals(address))
+            {
+                machineBind = args[index];
+            }
+            else if (args[index] == "--machine-cert" && index + 1 < args.Count)
+            {
+                machineCertificate = args[++index];
+            }
+            else if (args[index] == "--machine-cert-password-env" && index + 1 < args.Count)
+            {
+                machinePasswordVariable = args[++index];
             }
             else
             {
-                error = "Usage: with-secrets service [--port N]. The service listens on 127.0.0.1 and [::1] only; N is 1 to 65535 (default " + ServiceEndpoint.DefaultPort + ", or WITH_SECRETS_PORT).";
+                error = Usage;
 
                 return null;
             }
         }
 
+        if (machinePort is null && (machineBind != "127.0.0.1" || machineCertificate is not null || machinePasswordVariable is not null))
+        {
+            error = "--machine-bind, --machine-cert and --machine-cert-password-env go with --machine-port.";
+
+            return null;
+        }
+
+        if (machinePort is not null && !System.Net.IPAddress.IsLoopback(System.Net.IPAddress.Parse(machineBind)) && machineCertificate is null)
+        {
+            error = "A machine endpoint that listens beyond loopback needs --machine-cert FILE (TLS).";
+
+            return null;
+        }
+
+        if (machinePasswordVariable is not null && machineCertificate is null)
+        {
+            error = "--machine-cert-password-env goes with --machine-cert.";
+
+            return null;
+        }
+
         error = "";
 
-        return new CliCommand.Service { ServicePort = port, Debug = debug };
+        return new CliCommand.Service(machinePort, machineBind, machineCertificate, machinePasswordVariable) { ServicePort = port, Debug = debug };
     }
 
     private static CliCommand? ParseCommand(IReadOnlyList<string> args, out int? portNumber, out bool debugRequested, out string error, out int? servicePortNumber)

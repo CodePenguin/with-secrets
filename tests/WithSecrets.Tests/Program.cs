@@ -376,6 +376,11 @@ internal static class Program
             RemoteAuthorityTests.Run(Check).GetAwaiter().GetResult();
         }
 
+        if (Wants("RemoteLaunch"))
+        {
+            RemoteLaunchTests.Run(Check).GetAwaiter().GetResult();
+        }
+
         if (Wants("AuditTrail"))
         {
             AuditTrailTests.Run(Check).GetAwaiter().GetResult();
