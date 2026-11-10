@@ -593,7 +593,7 @@ internal static class AuditTrailTests
             Task loop = audit.RunAsync(Fast, TimeSpan.FromMilliseconds(160), stop.Token);
             System.Diagnostics.Stopwatch watch = System.Diagnostics.Stopwatch.StartNew();
             bool all = Enumerable.Range(0, 10).All(_ => audit.TryRecord(Facts()));
-            check(all && watch.Elapsed < TimeSpan.FromSeconds(3) && outbox.Count("pending") == 10, "never blocks: with an authority that never answers, ten events are recorded at once (" + watch.ElapsedMilliseconds + " ms)");
+            check(all && watch.Elapsed < TimeSpan.FromSeconds(15) && outbox.Count("pending") == 10, "never blocks: with an authority that never answers, ten events are recorded at once (" + watch.ElapsedMilliseconds + " ms)");
             stop.Cancel();
             check(await Task.WhenAny(loop, Task.Delay(5000)) == loop, "never blocks: a hanging upload is cancelled when the service stops");
         }

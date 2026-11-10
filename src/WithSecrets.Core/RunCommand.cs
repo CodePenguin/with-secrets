@@ -83,7 +83,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         return await RunPlan(launch.Program, launch.Arguments, launch.Reason, launch.WorkingDirectory, plan, available, context, approveOnly);
     }
 
-    public async Task<int> ExecuteAsync(RunArgs args, string workingDirectory)
+    internal async Task<int> ExecuteAsync(RunArgs args, string workingDirectory)
     {
         IReadOnlyList<string> available;
         try
@@ -282,7 +282,11 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             await stderr.WriteLineAsync("with-secrets: waiting for the authority to approve this request...");
             await stderr.WriteLineAsync(ApprovalSummary.BuildMessage(request, showValues: false));
             // The host's own record that it asked is committed before the authority is asked (and before any value can arrive); the outcome follows as its own event.
-            Record(AuditEventTypes.Authorization, "requested", "remote");
+            if (!Record(AuditEventTypes.Authorization, "requested", "remote"))
+            {
+                return (await Fail(AuditError, AuditEventMessage), null, "");
+            }
+
             RemoteAuthorization outcome = await context.Authorization!.AuthorizeRemoteAsync(context.Request!, GrantEvidence.Scope(context.Authorization.Fingerprint, fingerprint.Key, arguments), new PageContext(resolved, arguments, links, script, programFile, fingerprint.Key), link => context.OnApprovalLink?.Invoke(link), context.Cancel);
             if (!outcome.Ok)
             {

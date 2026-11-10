@@ -39,6 +39,9 @@ public static class LaunchClient
     /// <summary>Exit code: the authority is locked (nothing was asked or run). Unlock it in the administration web app, whose link the line names.</summary>
     public const int AuthorityLocked = 8;
 
+    /// <summary>Exit code: the host service answered 503: it has not finished its startup check-in with the authority, or it is running as many launches as it allows (nothing was asked or run). Ask again in a moment.</summary>
+    public const int ServiceUnavailable = 9;
+
     /// <summary>How long the service has to answer the identity check.</summary>
     public static readonly TimeSpan IdentityTimeout = TimeSpan.FromSeconds(5);
 
@@ -129,6 +132,11 @@ public static class LaunchClient
             if (response.StatusCode == HttpStatusCode.Locked)
             {
                 return await Fail(stderr, AuthorityLocked, await ErrorText(response));
+            }
+
+            if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
+            {
+                return await Fail(stderr, ServiceUnavailable, "the host service is not ready or is busy (it checks in with its authority before it accepts requests, and runs only a few launches at once); nothing was asked or run. Ask again in a moment. " + await ErrorText(response));
             }
 
             if (response.StatusCode != HttpStatusCode.OK)

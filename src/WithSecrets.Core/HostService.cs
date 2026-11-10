@@ -205,6 +205,12 @@ public sealed class HostService : IDisposable
         Lock = options.Lock ?? new AuthorityLock();
         options.Deployment.Keys.LockState = Lock;
         Authorization.LockState = Authorization.IsRemote ? null : Lock;
+        if (options.Deployment.Remote is { } remoteAuthority)
+        {
+            // A lock at the authority ends its session with this host. A launch that already received its values but has not started must not start: the gate is invalidated, as a lock does in local mode.
+            remoteAuthority.LinkEnded += () => options.Gate.Invalidate();
+        }
+
         Lock.OnLock(reason =>
         {
             Volatile.Write(ref _ready, false);
@@ -298,6 +304,7 @@ public sealed class HostService : IDisposable
             port = ((IPEndPoint)probe.LocalEndpoint).Port;
         }
 
+        Exception? failure = null;
         foreach (bool withIpv6 in Socket.OSSupportsIPv6 ? new[] { true, false } : [false])
         {
             HostService? service = null;
@@ -338,14 +345,15 @@ public sealed class HostService : IDisposable
 
                 return service;
             }
-            catch (Exception) when (withIpv6)
+            catch (Exception error) when (withIpv6)
             {
-                // IPv6 loopback could not be held: try IPv4 alone.
+                // IPv6 loopback could not be held: try IPv4 alone (the failure is kept, so a start that fails for another reason is reported as that reason).
+                failure = error;
                 service?.Dispose();
             }
         }
 
-        throw new InvalidOperationException("The host service could not listen on the loopback address.");
+        throw new InvalidOperationException("The host service could not listen on the loopback address.", failure);
     }
 
     /// <summary>

@@ -356,6 +356,9 @@ internal static class RemoteLaunchTests
             await HostileAuthorityInput(check, root);
             await LockedAndGone(check, root);
             await Grants(check, root);
+            await ChangeDuringKeepTap(check, root);
+            await RequestedRecordFailsClosed(check, root);
+            await LockCancelsUncommitted(check, root);
             await GrantContents(check, root);
             await EndpointAbuse(check, root);
             await TwoHosts(check, root);
@@ -928,6 +931,70 @@ internal static class RemoteLaunchTests
             auth.Gate.Lock("test");
             check(was && auth.Service.Launches!.HeldKeys == 0 && held!.All(b => b == 0), "key: locking the authority drops and zeroes the held key at once");
         }
+    }
+
+    // ---------- a change while the keep-the-key page is open ----------
+
+    private sealed class HookedTap(Action during) : IApprover
+    {
+        public ApprovalDecision Request(ApprovalRequest request)
+        {
+            during();
+
+            return ApprovalDecision.Allow("approved", 0, null, new Unlock("cred", Encoding.UTF8.GetBytes(KeyCanary)));
+        }
+    }
+
+    private static async Task ChangeDuringKeepTap(Action<bool, string> check, string root)
+    {
+        foreach (string change in new[] { "disable", "untrust", "revoke" })
+        {
+            Action? during = null;
+            using Auth auth = Auth.Create(root, () => during is null ? new FakeApprover(true, unlock: () => new Unlock("cred", Encoding.UTF8.GetBytes(KeyCanary))) : new HookedTap(during), needsUnlock: true);
+            using Host host = await Host.Create(root, auth, "wsl-keep-" + change);
+            (string program, _) = ValueScript(host.Rig, "keep" + change);
+            Ran page = await Run(host, "keep" + change, existing: program);
+            string grantId = await MakeGrant(auth, host, auth.Pages[0], 60, page.Request);
+            check(page.Started && grantId.Length > 0, "keep tap (" + change + "): a run by page and a grant exist");
+
+            // The next run under the grant needs the keep-the-key tap; while that page is open the machine is disabled or untrusted, or the grant is revoked.
+            AuthorityStore store = auth.Machine.Deployment.Store;
+            during = change switch
+            {
+                "disable" => () => store.Disable(host.Fingerprint, "test admin"),
+                "untrust" => () => store.Untrust(host.Fingerprint, "test admin"),
+                _ => () => Sql(auth, "UPDATE grants SET status = 'revoked' WHERE id = $id", ("$id", grantId)),
+            };
+            int reads = auth.Store.Reads;
+            Ran tapped = await Run(host, "keep" + change, existing: program);
+            check(!tapped.Started && auth.Store.Reads == reads && auth.Service.Launches!.HeldKeys == 0, "keep tap (" + change + "): the tap arrives after the change; nothing is decrypted, nothing is delivered or run, no key is kept");
+        }
+    }
+
+    private static async Task LockCancelsUncommitted(Action<bool, string> check, string root)
+    {
+        using Auth auth = Auth.Create(root);
+        using Host host = await Host.Create(root, auth, "wsl-lock-cancel");
+        (string program, _) = ValueScript(host.Rig, "lockcancel");
+        Ran ok = await Run(host, "lockcancel", existing: program);
+        int revision = host.Rig.Service.Gate.Revision;
+        auth.Gate.Lock("test");
+        bool moved = await HostServiceTests.WaitFor(() => host.Rig.Service.Gate.Revision != revision, 20);
+        check(ok.Started && moved, "lock: a lock at the authority ends its session with the host and invalidates the host's launch gate, so a launch that has its values but has not started is cancelled");
+    }
+
+    private static async Task RequestedRecordFailsClosed(Action<bool, string> check, string root)
+    {
+        using Auth auth = Auth.Create(root);
+        using Host host = await Host.Create(root, auth, "wsl-requested");
+        (string program, _) = ValueScript(host.Rig, "requested");
+        Ran ok = await Run(host, "requested", existing: program);
+        int pages = auth.Pages.Count;
+        int reads = auth.Store.Reads;
+        host.Rig.Service.Audit!.Outbox.Fault = point => throw new IOException("the disk is full (test)");
+        Ran blocked = await Run(host, "requested", existing: program);
+        host.Rig.Service.Audit!.Outbox.Fault = null;
+        check(ok.Started && !blocked.Started && blocked.Raw.Result is { ExitCode: RunCommand.AuditError } && auth.Pages.Count == pages && auth.Store.Reads == reads, "remote audit: when the host cannot commit its 'requested' event the authority is not asked: no page, no decryption, no value on the wire, exit 5");
     }
 
     // ---------- what a grant covers (H1 of the review) ----------

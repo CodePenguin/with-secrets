@@ -381,12 +381,30 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
                 return deny(ReasonCodes.Cancelled, grant.SecurityRevision);
             }
 
+            // The decision above was made before a person tapped (which can take minutes): what it rested on is read again now, at the authority, before anything is decrypted. The machine must still
+            // be Trusted at the same security revision and the grant must be the same, active grant; otherwise nothing is decrypted and the key just held is dropped.
+            if (ChangedSince(machine.Fingerprint, grant))
+            {
+                DropKeys("authorization changed during the approval");
+
+                return deny(ReasonCodes.AuthorizationChanged, grant.SecurityRevision);
+            }
+
             return Deliver(message, SecretsDelivery.ViaGrant, grant.GrantId, grant.SecurityRevision, unlock, deny);
         }
         finally
         {
             unlock?.Dispose();
         }
+    }
+
+    private bool ChangedSince(string machineFingerprint, GrantResponse grant)
+    {
+        MachineRecord? now = _store.Find(machineFingerprint);
+        GrantRecord? row = _store.FindGrant(grant.GrantId);
+
+        return now is not { Status: MachineStatus.Trusted } || now.SecurityRevision != grant.SecurityRevision
+            || row is null || !row.IsUsable(_clock.GetUtcNow()) || row.Revision != grant.GrantRevision || row.ScopeKey != grant.ScopeKey || row.Fingerprint != machineFingerprint;
     }
 
     private Unlock? Borrow(string machineFingerprint, GrantResponse grant)

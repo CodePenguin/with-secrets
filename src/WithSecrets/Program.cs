@@ -9,6 +9,20 @@ internal static class Program
     // secrets as Dotenvx ciphertext). The store key is never stored: it is wrapped under keys that only the passkeys (WebAuthn PRF) can produce.
     private const string StoreFolder = ".with-secrets";
 
+    /// <summary>True when the failure (or one inside it) is a socket that could not be bound because the address is already in use.</summary>
+    private static bool PortInUse(Exception failure)
+    {
+        for (Exception? item = failure; item is not null; item = item.InnerException)
+        {
+            if (item is System.Net.Sockets.SocketException { SocketErrorCode: System.Net.Sockets.SocketError.AddressAlreadyInUse or System.Net.Sockets.SocketError.AccessDenied })
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static async Task<int> Main(string[] args)
     {
         try
@@ -354,7 +368,9 @@ internal static class Program
         }
         catch (Exception failure)
         {
-            TerminalPrompt.Final($"with-secrets: the host service cannot listen on port {port} ({failure.GetType().Name}). Is it already running? Use --port N for another port.");
+            TerminalPrompt.Final(PortInUse(failure)
+                ? $"with-secrets: the host service cannot listen on port {port}: the port is in use. Is it already running? Use --port N for another port."
+                : $"with-secrets: the host service could not start ({failure.GetType().Name}). The port is not the problem as far as is known; run again with --debug and read the log.");
 
             return RunCommand.StoreError;
         }

@@ -856,7 +856,7 @@ internal static class ApiTests
         AdminWebAssets real = AdminWebAssets.FromAssembly();
         if (!real.Available)
         {
-            check(true, "embedded: (skipped: this assembly was built without the frontend, so no application is embedded; build with Node.js to check the embedded files)");
+            check(false, "embedded: this assembly was built without the frontend, so no application is embedded; the check cannot pass (build with Node.js 22 or newer)");
 
             return;
         }

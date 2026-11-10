@@ -206,6 +206,20 @@ internal static class AdminTests
             check(code == 7 && !outText.ToString().Contains("unlocked", StringComparison.Ordinal), "admin: an impostor's own status answer is not reported");
         }
 
+        // M2: on the first run nothing is pinned yet. `admin` must not send the person back to itself (exit 7 with "admin prints its link"): it prints the link, marked as not verified, and opens nothing.
+        using (Impostor firstRun = new(body => Answer(real, Challenge(body))))
+        {
+            StringWriter outText = new();
+            StringWriter errText = new();
+            string? opened = null;
+            int code = await AdminAppCommand.RunAsync(firstRun.Port, outText, errText, new ServiceTrust(null), link => opened = link);
+            string printed = outText.ToString();
+            check(code == 0 && printed.Contains($"http://localhost:{firstRun.Port}/admin", StringComparison.Ordinal) && printed.Contains("Not verified", StringComparison.Ordinal) && opened is null && errText.ToString().Length == 0, "admin: with no identity pinned yet (first run) it prints the link, says it is not verified, opens nothing and exits 0 (" + printed.Trim().Replace((char)10, ' ') + ")");
+            StringWriter unreadable = new();
+            int broken = await AdminAppCommand.RunAsync(firstRun.Port, new StringWriter(), unreadable, new ServiceTrust(null, "host.json cannot be read"));
+            check(broken == 7 && unreadable.ToString().Contains("host.json cannot be read", StringComparison.Ordinal), "admin: an unreadable host.json is still a refusal, never 'nothing pinned'");
+        }
+
         string replayed = Answer(real, "an old challenge");
         (string Name, Func<string, string?> Reply)[] cases =
         [

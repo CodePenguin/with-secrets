@@ -23,6 +23,17 @@ public static class AdminAppCommand
 
         string link = $"http://localhost:{port}/admin";
         using HttpClient client = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(3) };
+        if (trust is { PinnedFingerprint: null, Problem: null })
+        {
+            // First run: this machine is not approved yet, so no identity is pinned and the program on the port cannot be checked. The link is public and carries nothing; it is offered
+            // as unverified (and not opened), and the person compares the fingerprint the service printed in its own window before approving anything.
+            await output.WriteLineAsync("Admin web app: " + link);
+            await output.WriteLineAsync("Service: " + await StatusAsync(client, port.Value));
+            await output.WriteLineAsync("Not verified: this machine is not approved yet, so no identity is pinned and the program on the port cannot be checked. Open the link only if the service you started printed this port, and compare its fingerprint with the one shown in the app before you approve.");
+
+            return 0;
+        }
+
         StringWriter refusal = new();
         int? refused = await LaunchClient.AuthenticateService(client, port.Value, trust, refusal, CancellationToken.None);
         if (refused == LaunchClient.ServiceNotAuthenticated)

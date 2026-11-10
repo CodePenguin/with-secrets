@@ -87,6 +87,9 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, ILaunchAuthority, 
     /// <summary>Raised when the authority pushes an invalidation notice (a prompt to look at the pending list; the list is the source of truth).</summary>
     public event Action<PendingInvalidation>? InvalidationNotified;
 
+    /// <summary>Raised when the encrypted session to the authority ends (the authority locked and dropped it, the network broke, an idle timeout). A host cancels the launches that have not started when it happens.</summary>
+    public event Action? LinkEnded;
+
     /// <summary>Ends the current session (the next call connects again with new keys).</summary>
     public void Disconnect()
     {
@@ -325,6 +328,7 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, ILaunchAuthority, 
             }
 
             link.Kill();
+            LinkEnded?.Invoke();
         }
     }
 
