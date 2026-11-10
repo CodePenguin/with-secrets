@@ -14,7 +14,7 @@ Building needs the .NET 10 SDK and **Node.js 22 or newer** on the PATH (the admi
 
 ## 2. First run
 
-**Read this before the first real start.** The first `with-secrets service` on a real profile creates two non-exportable Windows CNG keys under fixed names: `with-secrets machine identity v1` (this machine's identity) and `with-secrets authority signing key v1` (the authority's), in the TPM when there is one. There is no way to export or copy them, and removing them by hand (or a wiped profile) means **Recover** (section 5) and approving the machine again. That sequence on the real profile (start locked, unlock, sign in, approve, run) has been exercised only with test key names and software keys (`--self-check`), never end to end on `%USERPROFILE%\.with-secrets`; the WSL path and a real relay deployment across machines have not been run at all (section 8 and `IMPLEMENTATION_PROGRESS.md` "Exit criteria status"). Treat the first run as a test drive and do it in this order:
+**Read this before the first real start.** The first `with-secrets service` on a real profile creates two non-exportable Windows CNG keys under fixed names: `with-secrets machine identity v1` (this machine's identity) and `with-secrets authority signing key v1` (the authority's), in the TPM when there is one. There is no way to export or copy them, and removing them by hand (or a wiped profile) means **Recover** (section 5) and approving the machine again. That sequence on the real profile (start locked, unlock, sign in, approve, run) has been exercised only with test key names and software keys (`--self-check`), never end to end on `%USERPROFILE%\.with-secrets`; the WSL path and a real two-machine deployment over mutual TLS (each running service also creates, and deletes at exit, short-lived named CNG keys for its temporary TLS certificate) have not been run at all (section 8 and `IMPLEMENTATION_PROGRESS.md` "Exit criteria status"). Treat the first run as a test drive and do it in this order:
 
 1. `with-secrets --config` (creates the passkey and the secret store; no CNG key)
 2. `with-secrets service` (**creates the two CNG keys**; starts locked)
@@ -39,7 +39,7 @@ Every later change in the app is its own request, its own one-use passkey page a
 
 ### More machines
 
-A second machine (for example WSL) is a separate identity with its own enrollment. On the authority's machine run `with-secrets service --machine-port 8790` (loopback by default; beyond loopback it needs `--machine-cert`). On the other machine run `with-secrets admin https://HOST:8790 --authority-fingerprint HEX`, where the fingerprint is the authority's (shown in the app; it is required, there is no trust on first use). That enrolls the machine as Pending and pins the authority; an administrator then approves it in the app **Machines** view after comparing its fingerprint. See section 8 for WSL.
+A second machine (for example WSL) is a separate identity. On the authority's machine run `with-secrets service --machine-port 8790` (loopback by default; `--machine-bind ADDRESS` for one other address; the machine port is separate from the browser and client port and speaks only TLS 1.3 with a certificate on both sides, HTTP/2). The other machine is introduced to the authority by **pairing**, which is the next task (M2) and is not available yet: `with-secrets admin https://HOST:8790` says so and changes nothing. Once a machine is known, an administrator approves it in the app **Machines** view after comparing its fingerprint. See section 8 for WSL.
 
 ## 3. Day to day
 
@@ -105,11 +105,11 @@ A machine that starts reporting another host name is **not** accepted by itself:
 
 **Docker.** A program called `docker` is launched through the host service like any other: the service runs on the host and starts the Docker client there. Values reach the client only as environment variables (`-e API_TOKEN` in the arguments names the variable; the value is never in arguments), the service adds no volume, no env-file and no container identity, and nothing is written to disk by it. [suite Operations "docker:" checks with a stand-in `docker`] A client **inside a container** cannot talk to the service as it stands: the service answers only for loopback host names and addresses (`localhost`, `127.0.0.1`, `[::1]`), so a request that names `host.docker.internal` or a bridge address is refused with 421. Reaching the service from a container would need a deliberate decision to listen beyond loopback (an attack-surface change); it is not made here, and no system or firewall setting is changed by this program.
 
-**WSL.** The protocol, configuration and topology are tested by simulation (two independently enrolled host identities against one authority, the relay, the machine endpoint). A real WSL run is not possible yet: the Linux machine key store does not exist (Windows CNG only), so a WSL host service cannot start. That is a recorded security decision, not an oversight. Checklist for when it is decided:
+**WSL.** The protocol, configuration and topology are tested by simulation (two independently enrolled host identities against one authority over real mutual TLS 1.3 / HTTP/2 on loopback). A real WSL run is not possible yet: the Linux machine key store does not exist (Windows CNG only), so a WSL host service cannot start. That is a recorded security decision, not an oversight. Checklist for when it is decided:
 
 1. Build for `linux-x64` and start the WSL service.
-2. Windows: `with-secrets service --machine-port 8790` (mirrored networking: loopback works; NAT mode: bind the vEthernet(WSL) address with `--machine-bind` and `--machine-cert`, and add the firewall rule yourself).
-3. WSL: `with-secrets admin https://HOST:8790 --authority-fingerprint HEX`.
+2. Windows: `with-secrets service --machine-port 8790` (mirrored networking: loopback works; NAT mode: bind the vEthernet(WSL) address with `--machine-bind` and add the firewall rule yourself; the certificate is the machine's own, there is no certificate file to supply).
+3. WSL: pair the host with the authority (pairing is task M2; `with-secrets admin https://HOST:8790` will be the command).
 4. Windows admin app: approve the pending machine after comparing its fingerprint.
 5. WSL: run a command that needs a secret; open the authority link printed on Windows and tap the passkey.
 6. Confirm the child saw the value and the Windows audit history shows the signed events.

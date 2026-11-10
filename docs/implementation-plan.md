@@ -129,6 +129,17 @@ This plan turns the accepted target design in [architecture.md](architecture.md#
 - Tests cover persistent connection recovery, duplicate durable requests, interrupted secret releases, redirect/proxy rejection, no-cache/no-compression behavior, JSON/content-type enforcement, safe errors, and fixed resource bounds.
 - Durable grants, authority trust transitions, pairing-invitation consumption, audit events, and idempotency state remain valid across connection loss and service restart.
 
+**Progress (task M1, transport foundation; branch `impl/mtls-pairing`):**
+- [x] Direct HTTPS, TLS 1.3 mutual authentication, HTTP/2 only; the relay, the custom handshake, AES-GCM sessions, relay wire layer and the 5b `--authority-fingerprint` pairing are removed.
+- [x] Persistent self-signed identity certificate (profile per architecture 10.2: CA with path length 0, DigitalSignature and KeyCertSign, ten years) and strict validator; machine registration carries it (`machine_certificates`, additive table).
+- [x] Per-instance in-memory TLS key, 24-hour temporary leaf signed by the identity key, rotation one hour before expiry, per-handshake selection, client pool rotation with a bounded drain.
+- [x] Narrow custom-root validation in both directions (identity independent of address); unknown-but-valid certificates reach only the pairing route, which is a 501 stub.
+- [x] Transport policy (no redirects or proxy, no-store, no compression, UTF-8 JSON, safe errors with correlation id, fixed bounds), GOAWAY then close on revocation, per-request authorization, final checkpoint before release.
+- [x] Direct reconnect with bounded exponential backoff and jitter; idempotent retries under the same id; a release with a lost answer is not retried.
+- [x] Existing invalidation and grant-event delivery carried by HTTP/2 long polling (one outstanding poll, no heartbeat); reconnect checks status and revision.
+- [x] Tests: suites `Remote` (transport) and `RemoteLaunch` (CLI-level launches through the new transport); see `IMPLEMENTATION_PROGRESS.md`, "Task M1".
+- [ ] Pairing invitation flow, pairing-only bootstrap and proof, registration on the pairing route, credential supply, Pending refresh and abuse limits: **task M2**. The pairing route exists as a seam that answers 501.
+- [ ] Pairing tests and the "no machine data before the authority's proof is verified" tests: task M2.
 ## Phase 6 — Admin experience, hardening, and platform integration
 
 **Goal:** Complete the operational experience and validate real deployments.
