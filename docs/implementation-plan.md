@@ -6,9 +6,9 @@ This plan turns the accepted target design in [architecture.md](architecture.md#
 
 - The current CLI prototype remains the behavioral reference for existing secret parsing, approval display, secret resolution, and child-process behavior.
 - Section 10.1 describes accepted `.env` and Dotenvx integration work; it is related CLI work but does not block the host-service foundation.
-- Section 10.2 is the accepted target for the host service, authority, machine identity, relay, grants, offline use, and audit.
+- Section 10.2 is the accepted target for the host service, authority, machine identity, direct HTTPS/mTLS communication, grants, offline use, and audit.
 - Task 16 (running the service under a separate OS account / privilege separation) remains explicitly out of scope for this plan.
-- Keep each phase buildable and testable. Do not implement the remote relay before the local service boundary and shared protocol work.
+- Keep each phase buildable and testable. Complete the local service boundary and shared protocol before implementing direct remote-authority communication.
 
 ## Phase 0 — Extract contracts and preserve current behavior
 
@@ -97,21 +97,28 @@ This plan turns the accepted target design in [architecture.md](architecture.md#
 - Tests cover event signing, durable-before-launch ordering, duplicate delivery, retries, acknowledgements, sequence gaps, retention, redaction, and local outbox failure.
 - A command cannot launch with secrets if its audit event was not durably committed.
 
-## Phase 5 — Remote authority protocol and relay
+## Phase 5 — Direct remote authority communication
 
 **Goal:** Make remote-authority mode work without changing the CLI or shared local API.
 
-- Implement the mutually authenticated ECDH P-256 handshake, transcript-bound identity signatures, HKDF-SHA-256 session keys, and AES-256-GCM directional encryption using built-in .NET cryptography.
-- Implement canonical, versioned application messages, session/sequence replay protection, unique request IDs, idempotent operations, and authenticated authority responses.
-- Require HTTPS as an additional layer for externally hosted authorities.
-- Implement the relay as an opaque in-memory router only; it must not inspect message types or payloads, store sessions, or make authorization decisions.
-- Implement reconnect with fresh session keys and durable invalidation delivery/acknowledgement.
+- Implement direct host-to-authority HTTPS communication using TLS 1.3 mutual authentication and HTTP/2. Do not implement an application-level encrypted channel, relay, reverse tunnel, or multi-hop routing.
+- Generate the persistent self-signed machine identity certificate from the existing ECDSA P-256 identity key, and include it in required machine enrollment. Validate its public key, self-signature, CA constraints, key usage, and 10-year validity.
+- Generate a separate in-memory ECDSA P-256 TLS key/certificate per running host-service instance. Sign the 24-hour temporary leaf with the persistent machine identity key; include the machine identity SAN URI; use the same leaf for client and server authentication; rotate one hour before expiry.
+- Implement narrowly scoped custom-root certificate validation against the exact enrolled machine identity certificate or configured authority identity. Validate machine identity independently of endpoint hostname/IP. Do not disable certificate validation globally.
+- Require TLS 1.3 and HTTP/2 with no downgrade. Disable TLS 0-RTT and session resumption initially. Keep healthy HTTP/2 connections persistent; do not impose maximum connection age or idle timeouts.
+- Implement temporary certificate rotation without interrupting healthy connections. New handshakes use the new certificate; client connection pools rotate and old pools drain. Close active connections when machine trust is revoked.
+- Enforce the machine API transport policy: no redirects or ambient proxies; no HTTP caching or conditional requests; no compression; UTF-8 JSON only; no unauthenticated endpoints; structured safe errors; fixed built-in request/concurrency/time limits appropriate for a development tool.
+- Derive the authenticated caller identity only from the validated TLS client certificate. Authorize every request independently and perform the final current-state authorization checkpoint immediately before secret release.
+- Implement direct reconnect to the one configured authority with bounded exponential backoff and jitter. Do not add authority fallback or automatic endpoint switching.
+- Preserve canonical, versioned API contracts, request IDs, idempotent durable operations, and durable invalidation delivery/acknowledgement. Do not persist secret values to make release retries replayable; an interrupted release is not automatically retried.
+- Retain signatures for durable authority-issued records and machine-signed audit events. Do not add signatures or custom encryption to every ordinary HTTP message. Keep machine identity, authority signing, and secret-data encryption keys separate.
 - Reuse the same authority contracts and persistence model as local-authority mode.
 
 **Exit criteria:**
-- Local host service can use a remote authority through the relay with no CLI protocol changes.
-- Tests cover mutual authentication, key substitution, tampering, replay, out-of-order messages, reconnect, relay restart, duplicate requests, and invalidation delivery.
-- Relay inspection reveals routing metadata only, never application message contents.
+- A host connects directly to its one configured authority using TLS 1.3 mTLS and HTTP/2; no relay is required.
+- Tests cover identity certificate enrollment/validation, temporary certificate generation/rotation, SAN identity lookup, custom-root validation, hostname mismatch handling, TLS downgrade rejection, mTLS enforcement on every endpoint, revocation of active connections, per-request authorization, and the secret-release/revocation race.
+- Tests cover persistent connection recovery, duplicate durable requests, interrupted secret releases, redirect/proxy rejection, no-cache/no-compression behavior, JSON/content-type enforcement, safe errors, and fixed resource bounds.
+- Durable grants, authority trust transitions, audit events, and idempotency state remain valid across connection loss and service restart.
 
 ## Phase 6 — Admin experience, hardening, and platform integration
 
@@ -127,7 +134,7 @@ This plan turns the accepted target design in [architecture.md](architecture.md#
 - Validate machine rename/host-name change approval and authority signing-key rotation/recovery.
 - Test Windows and WSL as independently enrolled host-service identities.
 - Test Docker-launched commands through the host service.
-- Add end-to-end tests with real browser/passkey flows and a real remote relay/authority deployment.
+- Add end-to-end tests with real browser/passkey flows and a direct remote-authority deployment.
 - Document installation, enrollment, recovery, backup, offline behavior, and operational troubleshooting.
 
 **Exit criteria:**
@@ -137,6 +144,6 @@ This plan turns the accepted target design in [architecture.md](architecture.md#
 
 ## Implementation notes
 
-- Exact HTTP routes, DTO names, SQLite schema details, UI layout, concrete offline-lease policy values, and the specific platform key-protection adapters are implementation choices unless they change an accepted security property. Keep them simple and testable. Manual unlock is the default; unattended unlock is explicit opt-in. Sensitive administrator operations always require fresh passkey authentication, while routine use of a valid grant does not.
+- Exact HTTP routes, DTO names, SQLite schema details, UI layout, concrete offline-lease policy values, and the specific platform key-protection adapters are implementation choices unless they change an accepted security property. Keep them simple and testable. Machine transport limits and timeout defaults are fixed built-in implementation constants, not user-facing settings or environment-variable overrides. Manual unlock is the default; unattended unlock is explicit opt-in. Sensitive administrator operations always require fresh passkey authentication, while routine use of a valid grant does not.
 - Do not add caller-process identity, separate local IPC authentication, a hash chain, audit export, a message broker, or Task 16 privilege separation as prerequisites for the initial build.
 - Prefer completing Phase 1 as a working vertical slice before broadening into remote networking. The local-authority path then provides a practical test harness for the same contracts used remotely.
