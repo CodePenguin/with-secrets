@@ -485,3 +485,30 @@ Recorded blocker: the Linux machine key store does not exist (CNG only), so a WS
 - Provider instances, mounts and write-only provider credential entry (plan Phase 6) are not built because no provider code exists; recorded as not applicable until providers are built.
 - Not built: Windows service installation (start at logon), the Linux machine key store, grant creation from a remote host, unattended unlock with a TPM-sealed key.
 - The manual keyboard and screen-reader checklist (Phase 6b-2) and a real remote relay/authority deployment test across machines remain the maintainer's.
+
+## Exit criteria status (Phase 6, honest)
+
+| Criterion (docs/implementation-plan.md) | Status |
+| --- | --- |
+| Local-authority deployment passes the end-to-end acceptance suite | Met: `scripts/verify-all.ps1` (suite, real-browser E2E on the real service with software keys and a virtual authenticator) |
+| Remote-authority deployment passes the end-to-end acceptance suite, "a real remote relay/authority deployment" | **Not met.** Covered in process only (suite `RemoteLaunch`: real HTTP, relay and endpoint in one process, a test authenticator); no browser E2E for remote mode, no stage in `verify-all.ps1`, never run across two machines |
+| Windows and WSL tested as independently enrolled identities | **Simulated only** (two host identities against one authority). A real WSL run is blocked: no Linux machine key store (recorded security decision) |
+| Recovery and key-rotation procedures exercised | Met (suite `Operations`) |
+| Security-sensitive failure paths fail closed and are audited | Met as tested; see the fix round below for the gaps found by the final review |
+| The real production start (production-named CNG keys on `%USERPROFILE%\.with-secrets`) | **Never run.** `--self-check` and the tests use software keys and test key names. The first real `with-secrets service` creates the two non-exportable CNG keys; see `docs/operations.md` section 2 |
+
+### Maintainer first-run checklist (a test drive)
+
+1. `with-secrets --config` (passkey with PRF; write the recovery code down offline; creates no CNG key).
+2. `with-secrets service` (**creates `with-secrets machine identity v1` and `with-secrets authority signing key v1` in CNG, non-exportable, one way**; starts locked; prints the fingerprint and the app link).
+3. Open the printed link (not `with-secrets admin`, which cannot verify anything before the approval); Unlock (tap), Sign in (tap), Machines, compare the fingerprint, Approve (tap).
+4. `with-secrets --set NAME`; run a command; `with-secrets admin` now verifies and opens the app.
+5. Not yet run for real, in this order when decided: the WSL checklist above (blocked by the Linux key store), a relay deployment across two machines.
+
+## Final-review fix round (task-final-review.md: M1 to M4, L1 to L11)
+
+- **M1 fixed:** after the keep-the-key tap the authority re-reads the machine (Trusted, same security revision) and the grant (active, same revision, scope, machine) before it decrypts; otherwise nothing is decrypted, the key just held is dropped and the answer is `authorization-changed`. Tests (`RemoteLaunch`, `ChangeDuringKeepTap`): disable, untrust and revoke during the tap.
+- **M2 fixed:** `with-secrets admin` with no identity pinned prints the link marked "Not verified", exits 0 and opens nothing; an unreadable `host.json` is still exit 7. Test in `Admin`. README and operations first-run text corrected (open the link the service printed).
+- **M3 documented, OPEN for the maintainer:** offline grant use (`OfflineUse`) is reachable only with a test double: local mode has no separate authority to be offline from, and remote mode holds no store. README, operations section 6 and the architecture Phase 3 note say so. No gate was weakened. Decision needed: build an offline cache for remote mode, or remove the offline path and its lease text.
+- **M4:** checklist and exit criteria status above and in operations section 2.
+- **L1 fixed:** the remote "requested" audit record fails closed (exit 5, the authority is not asked). **L2 documented** (backup section). **L3** current-implementation text corrected in architecture 10.2 and README. **L4** a port in use is reported as such, any other start failure by its type (the inner failure is kept). **L5** a 503 is its own exit code 9 (tables updated). **L6** `RunCommand.ExecuteAsync(RunArgs, string)` is internal. **L7** the host cancels launches that have not started when its session with the authority ends (a lock drops the session): `RemoteAuthority.LinkEnded` invalidates the gate; test `LockCancelsUncommitted`. **L8** timing bound 15 s. **L9** the embedded-asset check fails when nothing is embedded. **L10** locked line copied from the code. **L11** documented in operations section 5 (restart or lock the service after `--rotate-key`); telling the service would need a design change.
