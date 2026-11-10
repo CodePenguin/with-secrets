@@ -25,6 +25,7 @@ internal static class Program
         ("i5-spa-lock-unlock", ScenariosSpa.LockUnlock),
         ("i6-spa-settings-change", ScenariosSpa.Settings),
         ("i7-spa-refused-without-authorization", ScenariosSpa.RefusedWithoutAuthorization),
+        ("i8-spa-accept-host-name", ScenariosSpa.AcceptHostName),
         ("j1-spa-accessibility", ScenariosSpa.Accessibility),
     ];
 

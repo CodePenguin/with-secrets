@@ -87,24 +87,42 @@ internal sealed class AdminApp : IDisposable
     private readonly IPasskeyAdmin? _passkeys;
     private readonly IUnlockProtection? _protection;
     private readonly AdminWebAssets? _web;
+    private readonly Func<IApprover>? _approver;
 
-    public AdminApp(string root, bool trusted = true, bool unlocked = true, int askSeconds = 4, IPasskeyAdmin? passkeys = null, bool protection = false, AdminWebAssets? web = null)
+    public AdminApp(string root, bool trusted = true, bool unlocked = true, int askSeconds = 4, IPasskeyAdmin? passkeys = null, bool protection = false, AdminWebAssets? web = null, AdminApp? restoreFrom = null, Func<IApprover>? approver = null)
     {
         _web = web;
+        _approver = approver;
         Clock = new AppClock();
-        Machine = new TestMachine(Path.Combine(root, "app-" + Guid.NewGuid().ToString("N")[..8]), trusted, clock: Clock);
-        if (!trusted)
+        string machineFolder = Path.Combine(root, "app-" + Guid.NewGuid().ToString("N")[..8]);
+        if (restoreFrom is not null)
+        {
+            // A second machine: only the backup artifacts (the secret store and authority.db) come over, never host.json or a key; it has keys of its own.
+            Directory.CreateDirectory(machineFolder);
+            File.Copy(restoreFrom.Store.FilePath, Path.Combine(machineFolder, AuthorityStore.FileName));
+            trusted = false;
+        }
+
+        Machine = new TestMachine(machineFolder, trusted, clock: Clock);
+        if (!trusted && restoreFrom is null)
         {
             Machine.Deployment.EnrollAsync().GetAwaiter().GetResult();
         }
 
-        _rig = new HostServiceTests.Rig(root, startLocked: true, machine: Machine);
+        _rig = new HostServiceTests.Rig(root, startLocked: true, machine: Machine, seedState: restoreFrom is null ? null : folder =>
+        {
+            Directory.CreateDirectory(folder);
+            File.Copy(restoreFrom.State.FilePath, Path.Combine(folder, StateDatabase.FileName));
+        });
         _rig.Service.Dispose();
-        Laptop = TestAuthenticator.ES256();
-        Phone = TestAuthenticator.ES256();
-        DateTimeOffset created = new(2026, 11, 1, 10, 0, 0, TimeSpan.Zero);
-        TestState.Add(State, Laptop.Record("localhost", "laptop") with { Created = created });
-        TestState.Add(State, Phone.Record("localhost", "phone") with { Created = created });
+        Laptop = restoreFrom?.Laptop ?? TestAuthenticator.ES256();
+        Phone = restoreFrom?.Phone ?? TestAuthenticator.ES256();
+        if (restoreFrom is null)
+        {
+            DateTimeOffset created = new(2026, 11, 1, 10, 0, 0, TimeSpan.Zero);
+            TestState.Add(State, Laptop.Record("localhost", "laptop") with { Created = created });
+            TestState.Add(State, Phone.Record("localhost", "phone") with { Created = created });
+        }
         Http = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false, UseCookies = false }) { Timeout = TimeSpan.FromSeconds(60) };
         _passkeys = passkeys;
         _protection = protection ? new ReversibleProtection() : null;
@@ -159,6 +177,9 @@ internal sealed class AdminApp : IDisposable
 
     public HostServiceTests.CountingStore Secrets => _rig.Store;
 
+    /// <summary>The rig that holds the work folder and the helpers (a request is posted to <see cref="Service" />, which the rig follows).</summary>
+    public HostServiceTests.Rig Rig => _rig;
+
     public AdminBrowser Browser() => new(Service, Http);
 
     /// <summary>A browser that has signed in with the admin key.</summary>
@@ -187,7 +208,9 @@ internal sealed class AdminApp : IDisposable
             AdminAskerFactory = _askers,
             PasskeyAdminFactory = _passkeys is null ? null : () => _passkeys,
             WebAssets = _web,
+            ApproverFactory = _approver is null ? null : (_, _) => _approver(),
         });
+        _rig.Service = Service;
     }
 
     public void Dispose()

@@ -122,6 +122,51 @@ internal static class ScenariosSpa
         s.NoProblems(c);
     }
 
+    public static async Task AcceptHostName(Host host, S s)
+    {
+        using Rig rig = new();
+        await using Ctx c = await Ctx.NewAsync(host);
+        await Flows.Configure(rig, c);
+        using SpaApp app = new(rig);
+        using SoftwareSigningKey other = new();
+        string fp = KeyIdentity.Fingerprint(other.PublicKey);
+        byte[] challenge = await rig.Machine.Deployment.Authority.BeginEnrollmentAsync();
+        await rig.Machine.Deployment.Authority.EnrollAsync(EnrollmentRequest.Create("laptop-old", challenge, other));
+        AuthorityStore store = rig.Machine.Deployment.Store;
+        store.Approve(fp, "travel laptop", "e2e fixture");
+        store.RecordHostMismatch(fp, "laptop-new");
+        int revision = store.Find(fp)!.SecurityRevision;
+        s.Check(store.Find(fp) is { Status: MachineStatus.Trusted, HostName: "laptop-old", PendingHostName: "laptop-new" }, "fixture: a Trusted machine reports a new host name, which is only recorded as waiting");
+        await Spa.SignIn(c, app, s);
+        (_, long signsAfterSignIn) = await c.AuthOps();
+
+        await Spa.GoTo(c, "Machines", "Machines");
+        ILocator row = c.Page.GetByRole(AriaRole.Listitem).Filter(new() { HasText = "travel laptop" });
+        await row.WaitForAsync();
+        string text = await row.TextContentAsync() ?? "";
+        s.Check(text.Contains("New host name reported", StringComparison.Ordinal) && text.Contains("laptop-old", StringComparison.Ordinal) && text.Contains("laptop-new", StringComparison.Ordinal), "the machines view shows the enrolled and the reported host name and says a new name was reported");
+        await Spa.Axe(c, s, "machines with a reported host name");
+
+        await row.GetByRole(AriaRole.Button, new() { Name = "Accept host name" }).ClickAsync();
+        ILocator dialog = Spa.Dialog(c);
+        await dialog.WaitForAsync();
+        string review = await dialog.TextContentAsync() ?? "";
+        s.Check(review.Contains("machine-host-change", StringComparison.Ordinal) && review.Contains("laptop-new", StringComparison.Ordinal) && review.Contains(fp, StringComparison.Ordinal), "the dialog names the exact operation, the machine and the host name that would be accepted");
+        await dialog.GetByRole(AriaRole.Button, new() { Name = "Ask for passkey authorization" }).ClickAsync();
+        s.Check(store.Find(fp) is { HostName: "laptop-old" } && await c.PasskeyCalls() == 0, "nothing changed and the application asked for no passkey before the tap page");
+        string page = await Spa.Tap(c, s);
+        await dialog.GetByText("Done").First.WaitForAsync(new() { Timeout = 20000 });
+        s.Check(page.Contains("laptop-new", StringComparison.Ordinal) && page.Contains(KeyIdentity.Display(fp), StringComparison.Ordinal), "its own passkey page shows the machine and the new host name the tap binds");
+        s.Check(store.Find(fp) is { HostName: "laptop-new", PendingHostName: null } done && done.SecurityRevision == revision, "the tap and its one mutation bind the new host name and leave the security revision alone");
+        (_, long signs) = await c.AuthOps();
+        s.Check(signs == signsAfterSignIn + 1, "exactly one passkey signature");
+        s.Check(store.History(fp).Any(entry => entry.Kind == "host-name-mismatch") && store.Audit(100).Any(entry => entry.Actor.StartsWith("admin passkey", StringComparison.Ordinal) && entry.Detail.Contains("laptop-new", StringComparison.Ordinal)), "the history records the mismatch and the audit names the admin passkey that accepted the name");
+        await dialog.GetByRole(AriaRole.Button, new() { Name = "Close" }).ClickAsync();
+        await dialog.WaitForAsync(new() { State = WaitForSelectorState.Detached });
+        s.Check(await row.GetByText("New host name reported").CountAsync() == 0, "the warning is gone from the list");
+        s.NoProblems(c);
+    }
+
     private static async Task<string> MakeGrant(Ctx c, Rig rig, SpaApp app, S s)
     {
         await Scenarios3.SeedSecret(rig, c);

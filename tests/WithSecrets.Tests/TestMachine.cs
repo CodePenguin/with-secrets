@@ -10,6 +10,7 @@ internal sealed class TestMachine : IDisposable
 {
     private readonly Dictionary<int, SoftwareSigningKey> _authorityKeys = [];
     private readonly Lock _lock = new();
+    private int _lostUpTo;
 
     public TestMachine(string folder, bool trusted = true, string hostName = "test-host", TimeProvider? clock = null)
     {
@@ -43,12 +44,28 @@ internal sealed class TestMachine : IDisposable
     {
         lock (_lock)
         {
+            if (generation <= _lostUpTo)
+            {
+                // A generation the key store lost: whatever is asked for is a different key each time (as a wiped store would make).
+                return new SoftwareSigningKey();
+            }
+
             if (!_authorityKeys.TryGetValue(generation, out SoftwareSigningKey? key))
             {
                 _authorityKeys[generation] = key = new SoftwareSigningKey();
             }
 
             return key;
+        }
+    }
+
+    /// <summary>The key store loses the authority signing keys (a wiped or replaced machine): the next use of a generation makes a new, different key.</summary>
+    public void LoseAuthorityKeys()
+    {
+        lock (_lock)
+        {
+            _lostUpTo = _authorityKeys.Count == 0 ? 1 : _authorityKeys.Keys.Max();
+            _authorityKeys.Clear();
         }
     }
 

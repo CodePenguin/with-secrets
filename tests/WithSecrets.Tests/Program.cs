@@ -426,6 +426,11 @@ internal static class Program
             PageScriptTests.Run(Check).GetAwaiter().GetResult();
         }
 
+        if (Wants("Operations"))
+        {
+            OperationsTests.Run(Check).GetAwaiter().GetResult();
+        }
+
         if (Wants("AdminKeys"))
         {
             AdminKeysTests.Run(Check).GetAwaiter().GetResult();

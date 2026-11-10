@@ -108,11 +108,12 @@ internal static class HostServiceTests
         private readonly string _dir;
         private int _ids;
 
-        public Rig(string parent, Dictionary<string, string>? values = null, Func<IApprover>? approver = null, TimeSpan? bodyTimeout = null, Action<PreparedChild>? afterPrepare = null, Action? afterCommit = null, bool trusted = true, TestMachine? machine = null, TestAuthenticator? savedApprovalSigner = null, bool needsUnlock = false, Func<IApprover, IStoreKeyProvider>? keyProvider = null, IMonotonicClock? monotonic = null, TestAuthenticator? enrolled = null, TimeSpan? auditInterval = null, bool startLocked = false, IUnlockProtection? protection = null, Func<Action<string>, IAdminAsker>? adminAskers = null)
+        public Rig(string parent, Dictionary<string, string>? values = null, Func<IApprover>? approver = null, TimeSpan? bodyTimeout = null, Action<PreparedChild>? afterPrepare = null, Action? afterCommit = null, bool trusted = true, TestMachine? machine = null, TestAuthenticator? savedApprovalSigner = null, bool needsUnlock = false, Func<IApprover, IStoreKeyProvider>? keyProvider = null, IMonotonicClock? monotonic = null, TestAuthenticator? enrolled = null, TimeSpan? auditInterval = null, bool startLocked = false, IUnlockProtection? protection = null, Func<Action<string>, IAdminAsker>? adminAskers = null, Action<string>? seedState = null)
         {
             _dir = Path.Combine(parent, "svc-" + Guid.NewGuid().ToString("N")[..8]);
             Work = Path.Combine(_dir, "work");
             Directory.CreateDirectory(Work);
+            seedState?.Invoke(Path.Combine(_dir, "state"));
             State = StateDatabase.InFolder(Path.Combine(_dir, "state"));
             Machine = machine ?? new TestMachine(Path.Combine(_dir, "state"), trusted);
             if (savedApprovalSigner is not null)
@@ -164,7 +165,7 @@ internal static class HostServiceTests
 
         public CountingStore Store { get; }
 
-        public HostService Service { get; }
+        public HostService Service { get; internal set; }
 
         public HttpClient Http { get; }
 
