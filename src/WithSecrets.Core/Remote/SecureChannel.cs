@@ -442,6 +442,7 @@ internal sealed class SecureSession : IDisposable
     private readonly byte _sendDirection;
     private ulong _sendSequence;
     private ulong _receiveSequence;
+    private bool _disposed;
 
     public SecureSession(byte[] sessionId, byte sendDirection, byte[] sendKey, byte[] sendIv, byte[] receiveKey, byte[] receiveIv)
     {
@@ -451,6 +452,10 @@ internal sealed class SecureSession : IDisposable
         _receive = new AesGcm(receiveKey, ChannelFormat.TagLength);
         _sendIv = sendIv;
         _receiveIv = receiveIv;
+
+        // AesGcm keeps its own copy of each key: the raw arrays are wiped now.
+        CryptographicOperations.ZeroMemory(sendKey);
+        CryptographicOperations.ZeroMemory(receiveKey);
     }
 
     public byte[] SessionId { get; }
@@ -555,7 +560,19 @@ internal sealed class SecureSession : IDisposable
 
     public void Dispose()
     {
-        _send.Dispose();
-        _receive.Dispose();
+        lock (_lock)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            Broken = true;
+            _send.Dispose();
+            _receive.Dispose();
+            CryptographicOperations.ZeroMemory(_sendIv);
+            CryptographicOperations.ZeroMemory(_receiveIv);
+        }
     }
 }

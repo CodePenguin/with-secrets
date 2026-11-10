@@ -450,3 +450,9 @@ Phase 6a built the back end and the session and authorization model, as server-r
 ## Future options
 
 - **Native AOT and statically linked SQLite (deferred by the maintainer).** The Windows single-file EXE currently self-extracts the native `e_sqlite3` at run time. AOT supports Windows/Linux/macOS x64/arm64 but needs a per-platform build with a native toolchain, source-generated JSON and trimming fixes, and an AOT-compatibility check of Dotenvx.Core and the other dependencies; the existing suite would not catch AOT-only failures. A Windows-only alternative is the winsqlite3 provider (no native file; the SQLite version is whatever the OS provides).
+
+## Phase 5b fix round 1 (review task-p5-review.md: H1, M1, M2, L1 to L8)
+
+- H1: a grant covers exactly the names, program and folder that were approved (signed digest `Grant contents:`, row columns untruncated), enforced at the authority in `UseGrant`; the scope key of a remote launch is recomputed from the signed context. Grants made before this round are ignored and must be approved again.
+- M1: Origin refused, Host validated, authority-registration capability, per-source host slots, idle timeout, enrollment caps (per session, per host name, in all). M2: pairing refuses a differing existing pin and names both keys. L1 to L6 and L8 as in `docs/architecture.md` (fix round paragraph). L7: in-process loopback listener added, untested live; plain ws to private addresses stays refused, pending the maintainer's confirmation (needs an explicit setting).
+- Tests: `RemoteLaunch` suite extended (grant contents, endpoint abuse, pairing pin, locked exit 8, own lock, delivery records, session keys). Mutation evidence is in `task-p5b-report.md`.

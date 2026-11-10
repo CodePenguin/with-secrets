@@ -44,6 +44,18 @@ public sealed class RelayOptions
 
     /// <summary>The authority path accepts only a connection that comes from this machine's loopback address (the authority registers from inside the same process; a process reaching the relay from another address can connect as a host only). Off for a general relay.</summary>
     public bool AuthorityLoopbackOnly { get; init; }
+
+    /// <summary>When not empty, the authority path needs this secret in the <see cref="RelayServer.CapabilityHeader" /> header (the endpoint in the same process holds it; nothing else can register as the authority).</summary>
+    public string AuthorityCapability { get; init; } = "";
+
+    /// <summary>Only a request whose Host header names this relay's own address and port (or a loopback name and its own port) is served (any other name is refused with 421: a rebound DNS name, a proxy).</summary>
+    public bool BindHostOnly { get; init; }
+
+    /// <summary>When the relay listens beyond loopback (with TLS), it also listens on a plain loopback port of its own, which the endpoint in the same process uses; the authority capability still applies.</summary>
+    public bool InProcessLoopback { get; init; }
+
+    /// <summary>How many host connections one source address may hold at once for a registration.</summary>
+    public int MaxHostsPerSource { get; init; } = 16;
 }
 
 /// <summary>
@@ -56,6 +68,9 @@ public sealed class RelayServer : IAsyncDisposable
 {
     public const string AuthorityPath = "/relay/v1/authority";
     public const string HostPath = "/relay/v1/host";
+
+    /// <summary>The header that carries the authority capability (see <see cref="RelayOptions.AuthorityCapability" />).</summary>
+    public const string CapabilityHeader = "X-Relay-Capability";
 
     /// <summary>Relay to authority: a host connected (the payload is empty).</summary>
     public const byte KindOpen = 2;
@@ -74,6 +89,7 @@ public sealed class RelayServer : IAsyncDisposable
     private readonly Dictionary<string, Registration> _registrations = new(StringComparer.Ordinal);
     private readonly List<RelayRecord> _records = [];
     private int _disposed;
+    private readonly HashSet<string> _allowedHosts = new(StringComparer.OrdinalIgnoreCase);
 
     private sealed class Registration(string id)
     {
@@ -82,6 +98,8 @@ public sealed class RelayServer : IAsyncDisposable
         public RelaySocket? Authority { get; set; }
 
         public ConcurrentDictionary<Guid, RelaySocket> Hosts { get; } = new();
+
+        public ConcurrentDictionary<Guid, string> Sources { get; } = new();
     }
 
     private RelayServer(RelayOptions options, WebApplication app, int port)
@@ -92,6 +110,20 @@ public sealed class RelayServer : IAsyncDisposable
     }
 
     public int Port { get; }
+
+    /// <summary>The plain loopback port of the relay in this process (0 when there is none; see <see cref="RelayOptions.InProcessLoopback" />).</summary>
+    public int LoopbackPort { get; private init; }
+
+    private void AllowHosts(params int[] ports)
+    {
+        foreach (int port in ports.Where(item => item > 0))
+        {
+            foreach (string name in new[] { "127.0.0.1", "localhost", "[::1]", _options.Bind.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6 ? "[" + _options.Bind + "]" : _options.Bind.ToString() })
+            {
+                _allowedHosts.Add(name + ":" + port.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            }
+        }
+    }
 
     public string Scheme => _options.Certificate is null ? "http" : "https";
 
@@ -137,6 +169,11 @@ public sealed class RelayServer : IAsyncDisposable
         {
             kestrel.AddServerHeader = false;
             kestrel.Limits.MaxRequestHeadersTotalSize = 16 * 1024;
+            if (options.InProcessLoopback && !IPAddress.IsLoopback(options.Bind))
+            {
+                kestrel.Listen(IPAddress.Loopback, 0);
+            }
+
             kestrel.Listen(options.Bind, options.Port, listen =>
             {
                 if (options.Certificate is { } certificate)
@@ -151,14 +188,37 @@ public sealed class RelayServer : IAsyncDisposable
         RelayServer? server = null;
         app.Run(context => server!.HandleAsync(context));
         await app.StartAsync();
-        string address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.First();
-        server = new RelayServer(options, app, new Uri(address).Port);
+        string[] addresses = [.. app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses];
+        Uri main = new(addresses.FirstOrDefault(item => item.StartsWith(options.Certificate is null ? "http://" : "https://", StringComparison.Ordinal)) ?? addresses[0]);
+        int loopbackPort = 0;
+        if (options.InProcessLoopback && !IPAddress.IsLoopback(options.Bind))
+        {
+            loopbackPort = addresses.Select(item => new Uri(item)).First(item => item.Scheme == "http").Port;
+        }
+
+        server = new RelayServer(options, app, main.Port) { LoopbackPort = loopbackPort };
+        server.AllowHosts(main.Port, loopbackPort);
 
         return server;
     }
 
     private async Task HandleAsync(HttpContext context)
     {
+        // A browser always sends Origin on a WebSocket and no CORS rule applies to it: a page on this machine must not be able to use the relay. Native clients send none.
+        if (context.Request.Headers.ContainsKey("Origin"))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+
+            return;
+        }
+
+        if (_options.BindHostOnly && !_allowedHosts.Contains(context.Request.Host.Value ?? ""))
+        {
+            context.Response.StatusCode = StatusCodes.Status421MisdirectedRequest;
+
+            return;
+        }
+
         string path = context.Request.Path.Value ?? "";
         string id = context.Request.Query["registration"].ToString();
         if (!context.WebSockets.IsWebSocketRequest || (path != AuthorityPath && path != HostPath) || !RemoteTarget.IsRegistrationId(id))
@@ -170,6 +230,14 @@ public sealed class RelayServer : IAsyncDisposable
 
         if (path == AuthorityPath)
         {
+            if (_options.AuthorityCapability.Length > 0
+                && !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(System.Text.Encoding.UTF8.GetBytes(context.Request.Headers[CapabilityHeader].ToString()), System.Text.Encoding.UTF8.GetBytes(_options.AuthorityCapability)))
+            {
+                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+
+                return;
+            }
+
             if (_options.AuthorityLoopbackOnly && (context.Connection.RemoteIpAddress is not { } remote || !IPAddress.IsLoopback(remote)))
             {
                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
@@ -287,7 +355,8 @@ public sealed class RelayServer : IAsyncDisposable
         {
             _registrations.TryGetValue(id, out registration);
             authority = registration?.Authority;
-            if (authority is null || registration!.Hosts.Count >= _options.MaxHostsPerRegistration)
+            string source = context.Connection.RemoteIpAddress?.ToString() ?? "";
+            if (authority is null || registration!.Hosts.Count >= _options.MaxHostsPerRegistration || registration.Sources.Values.Count(item => item == source) >= _options.MaxHostsPerSource)
             {
                 context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
 
@@ -299,6 +368,7 @@ public sealed class RelayServer : IAsyncDisposable
         RelaySocket mine = new(socket, _options.MaxMessageBytes);
         Guid connection = Guid.NewGuid();
         registration!.Hosts[connection] = mine;
+        registration.Sources[connection] = context.Connection.RemoteIpAddress?.ToString() ?? "";
         Note("host-connect", id, connection, 0);
         try
         {
@@ -329,6 +399,7 @@ public sealed class RelayServer : IAsyncDisposable
         finally
         {
             registration.Hosts.TryRemove(connection, out _);
+            registration.Sources.TryRemove(connection, out _);
             mine.Abort();
             RelaySocket? current;
             lock (_lock)

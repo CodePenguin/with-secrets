@@ -557,10 +557,10 @@ public sealed partial class AuthorityStore
         }
 
         /// <summary>Sets the end of an active grant (null: indefinite), raises the grant's revision and records who. Returns the grant as it is now.</summary>
-        public GrantRecord SetExpiry(string id, DateTimeOffset? expires, string approvedBy, StoredEvidence evidence, DateTimeOffset at)
+        public GrantRecord SetExpiry(string id, DateTimeOffset? expires, string approvedBy, StoredEvidence evidence, DateTimeOffset at, (string Program, string WorkingDirectory, string SecretNames)? contents = null)
         {
-            StateDatabase.Execute(_connection, _transaction, "UPDATE grants SET expires = $expires, updated = $now, grant_revision = grant_revision + 1, approved_by = $by, evidence_kind = $ek, evidence_nonce = $en, evidence_text = $et, evidence_proof = $ep, evidence_minutes = $em WHERE id = $id AND status = 'active'",
-                ("$expires", expires is { } end ? Time(end) : null), ("$now", Time(at)), ("$by", approvedBy), ("$id", id),
+            StateDatabase.Execute(_connection, _transaction, "UPDATE grants SET expires = $expires, updated = $now, grant_revision = grant_revision + 1, approved_by = $by, evidence_kind = $ek, evidence_nonce = $en, evidence_text = $et, evidence_proof = $ep, evidence_minutes = $em" + (contents is null ? "" : ", program = $program, working_directory = $dir, secret_names = $names") + " WHERE id = $id AND status = 'active'",
+                ("$expires", expires is { } end ? Time(end) : null), ("$now", Time(at)), ("$by", approvedBy), ("$id", id), ("$program", contents?.Program), ("$dir", contents?.WorkingDirectory), ("$names", contents?.SecretNames),
                 ("$ek", evidence.Kind), ("$en", evidence.Nonce), ("$et", evidence.Text), ("$ep", evidence.Proof), ("$em", evidence.Minutes));
             _store.Fault?.Invoke("after-grant");
 
@@ -685,6 +685,26 @@ public sealed partial class AuthorityStore
 
             return 0;
         });
+    }
+
+    /// <summary>
+    /// A durable note about a delivery of secret values to a machine (<c>delivery-prepared</c> before they are sent, then <c>delivery-sent</c>, <c>delivery-not-sent</c> or <c>approved-not-delivered</c>). The
+    /// <c>delivery-prepared</c> row is also what makes a request id deliverable once across restarts. It holds no value.
+    /// </summary>
+    public void RecordDeliveryEvent(string fingerprint, string requestId, string eventName, string detail)
+    {
+        Write((connection, transaction) =>
+        {
+            Audit(connection, transaction, eventName, fingerprint, requestId, "authority", detail);
+
+            return 0;
+        });
+    }
+
+    /// <summary>True when values were already prepared for this request id of this machine (in this or an earlier run of the authority).</summary>
+    public bool WasDelivered(string fingerprint, string requestId)
+    {
+        return Read(connection => connection is not null && Convert.ToInt64(StateDatabase.Scalar(connection, null, "SELECT COUNT(*) FROM audit_history WHERE event = 'delivery-prepared' AND fingerprint = $fp AND request_id = $id", ("$fp", fingerprint), ("$id", requestId)), CultureInfo.InvariantCulture) > 0);
     }
 
     // ---- plumbing ----

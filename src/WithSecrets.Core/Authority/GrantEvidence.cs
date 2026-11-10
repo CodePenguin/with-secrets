@@ -75,6 +75,35 @@ public static class GrantEvidence
     public const string NewRevisionPrefix = "New revision: ";
     public const string NewEndPrefix = "New end: ";
     public const string NoEnd = "no end";
+    public const string ContentsPrefix = "Grant contents: ";
+
+    /// <summary>
+    /// What a grant covers besides its scope key: the exact secret names, the program and the working folder, as one SHA-256 (upper-case hex). The scope key is made by the
+    /// host from things the authority cannot see, so the authority keeps this too: the passkey signs it (approve and admin pages) and a use is served only when the request
+    /// has exactly these contents, so a grant can never release a name that was not approved.
+    /// </summary>
+    public static string ContentsKey(IEnumerable<string> secretNames, string program, string workingDirectory)
+    {
+        string[] names = [.. secretNames.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)];
+        StringBuilder text = new("with-secrets grant contents v1\n");
+        text.Append(names.Length.ToString(CultureInfo.InvariantCulture)).Append('\n');
+        foreach (string name in names)
+        {
+            text.Append(name.Length.ToString(CultureInfo.InvariantCulture)).Append(':').Append(name).Append('\n');
+        }
+
+        text.Append(program.Length.ToString(CultureInfo.InvariantCulture)).Append(':').Append(program).Append('\n');
+        text.Append(workingDirectory.Length.ToString(CultureInfo.InvariantCulture)).Append(':').Append(workingDirectory).Append('\n');
+
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text.ToString())));
+    }
+
+    /// <summary>The names as a grant row keeps them: the sorted, distinct names joined by ", " (never truncated: they are security-relevant).</summary>
+    public static string NamesText(IEnumerable<string> secretNames) => string.Join(", ", secretNames.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal));
+
+    /// <summary>The contents key of what a grant row records.</summary>
+    public static string ContentsKey(GrantRecord row) => ContentsKey(row.SecretNames.Length == 0 ? [] : row.SecretNames.Split(", "), row.Program, row.WorkingDirectory);
+
 
     /// <summary>How far a page-issue time may be ahead of the authority's clock (the same machine's clock in local mode; a little slack for a remote one).</summary>
     public static readonly TimeSpan Skew = TimeSpan.FromMinutes(1);
@@ -93,9 +122,14 @@ public static class GrantEvidence
     }
 
     /// <summary>The lines an approve page carries (in the text the person signs) so the evidence binds the machine's security revision.</summary>
-    public static IReadOnlyList<string> ApproveLines(int securityRevision, string scopeKey, string? heldNote = null)
+    public static IReadOnlyList<string> ApproveLines(int securityRevision, string scopeKey, string? heldNote = null, string? contents = null)
     {
         List<string> lines = [SecurityRevisionPrefix + securityRevision.ToString(CultureInfo.InvariantCulture), GrantScopePrefix + scopeKey];
+        if (contents is not null)
+        {
+            lines.Add(ContentsPrefix + contents);
+        }
+
         if (heldNote is not null)
         {
             lines.Add(heldNote);
@@ -115,6 +149,7 @@ public static class GrantEvidence
             GrantIdPrefix + grant.Id,
             GrantScopePrefix + grant.ScopeKey,
             MachinePrefix + grant.Fingerprint,
+            ContentsPrefix + ContentsKey(grant),
             SecurityRevisionPrefix + grant.SecurityRevision.ToString(CultureInfo.InvariantCulture),
             NewRevisionPrefix + newRevision.ToString(CultureInfo.InvariantCulture),
             NewEndPrefix + EndText(newEnd));
@@ -148,6 +183,7 @@ public static class GrantEvidence
             || Line(evidence.Text, GrantIdPrefix) != grant.Id
             || Line(evidence.Text, GrantScopePrefix) != grant.ScopeKey
             || Line(evidence.Text, MachinePrefix) != grant.Fingerprint
+            || Line(evidence.Text, ContentsPrefix) != ContentsKey(grant)
             || Line(evidence.Text, SecurityRevisionPrefix) != grant.SecurityRevision.ToString(CultureInfo.InvariantCulture)
             || Line(evidence.Text, NewRevisionPrefix) != (grant.Revision + 1).ToString(CultureInfo.InvariantCulture)
             || Line(evidence.Text, NewEndPrefix) != EndText(newEnd))
@@ -203,7 +239,7 @@ public static class GrantEvidence
                 return "the grant's end does not match the minutes that were signed";
             }
 
-            if (Line(stored.Text, ApprovalSummary.RequestIdPrefix) != row.ScopeKey || Line(stored.Text, SecurityRevisionPrefix) != row.SecurityRevision.ToString(CultureInfo.InvariantCulture))
+            if (Line(stored.Text, ApprovalSummary.RequestIdPrefix) != row.ScopeKey || Line(stored.Text, SecurityRevisionPrefix) != row.SecurityRevision.ToString(CultureInfo.InvariantCulture) || Line(stored.Text, ContentsPrefix) != ContentsKey(row))
             {
                 return "the signed text is not for this grant";
             }
@@ -223,6 +259,7 @@ public static class GrantEvidence
             || Line(stored.Text, GrantIdPrefix) != row.Id
             || Line(stored.Text, GrantScopePrefix) != row.ScopeKey
             || Line(stored.Text, MachinePrefix) != row.Fingerprint
+            || Line(stored.Text, ContentsPrefix) != ContentsKey(row)
             || Line(stored.Text, SecurityRevisionPrefix) != row.SecurityRevision.ToString(CultureInfo.InvariantCulture)
             || Line(stored.Text, NewRevisionPrefix) != row.Revision.ToString(CultureInfo.InvariantCulture)
             || Line(stored.Text, NewEndPrefix) != EndText(row.Expires))

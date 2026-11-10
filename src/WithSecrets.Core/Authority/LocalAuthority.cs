@@ -404,6 +404,13 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
                 return new AuthorityStore.GrantPlan(answer(GrantOps.None, GrantReasons.NoGrant, null, current.SecurityRevision), "grant-ignored", $"grant {grant.Id}: {rowProblem}", false);
             }
 
+            // A grant covers exactly the secret names, program and working folder the person approved (the passkey signed them, and the row was just checked against that text):
+            // another set of names under the same scope key is not covered, whatever the host says the scope is.
+            if (GrantEvidence.ContentsKey(envelope.Request.SecretNames, envelope.Request.Program, envelope.Request.WorkingDirectory) != GrantEvidence.ContentsKey(grant))
+            {
+                return new AuthorityStore.GrantPlan(answer(GrantOps.None, GrantReasons.NoGrant, null, current.SecurityRevision), "grant-ignored", $"grant {grant.Id}: the request's secret names, program or folder are not what the grant covers", false);
+            }
+
             if (grant.IsExpired(now))
             {
                 return new AuthorityStore.GrantPlan(answer(GrantOps.None, GrantReasons.Expired, null, current.SecurityRevision), null, "", false);
@@ -474,7 +481,8 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
             ApprovalCheck check = Verifier?.Verify(evidence, answered.ReuseMinutes) ?? new ApprovalCheck(false, "", false, "no verifier");
             if (!check.Ok || pageIssued is null || now < pageIssued - GrantEvidence.Skew || now > pageIssued.Value.AddMinutes(ApprovalSettings.MaxTimeoutMinutes - 1)
                 || GrantEvidence.Line(evidence.Text, ApprovalSummary.RequestIdPrefix) != envelope.ScopeKey
-                || GrantEvidence.Line(evidence.Text, GrantEvidence.SecurityRevisionPrefix) != current.SecurityRevision.ToString(CultureInfo.InvariantCulture))
+                || GrantEvidence.Line(evidence.Text, GrantEvidence.SecurityRevisionPrefix) != current.SecurityRevision.ToString(CultureInfo.InvariantCulture)
+                || GrantEvidence.Line(evidence.Text, GrantEvidence.ContentsPrefix) != GrantEvidence.ContentsKey(request.SecretNames, request.Program, request.WorkingDirectory))
             {
                 return new AuthorityStore.GrantPlan(refuse(GrantReasons.BadEvidence, current.SecurityRevision), "grant-denied", "the passkey assertion does not back this grant (" + (check.Ok ? "wrong text or time" : check.Detail) + ")");
             }
@@ -482,21 +490,15 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
             DateTimeOffset expires = now.AddMinutes(answered.ReuseMinutes);
             StoredEvidence stored = new(GrantEvidence.ApproveKind, evidence.Nonce, evidence.Text, evidence.Proof, answered.ReuseMinutes);
             GrantRecord? existing = tx.FindByScope(machine.Fingerprint, envelope.ScopeKey);
-            string names = string.Join(", ", request.SecretNames.Order(StringComparer.Ordinal));
+            string names = GrantEvidence.NamesText(request.SecretNames);
             GrantRecord grant = existing is null
-                ? tx.Create(machine.Fingerprint, envelope.ScopeKey, Short(request.Program), Short(request.WorkingDirectory), Short(names), expires, current.SecurityRevision, approvedBy, stored, now)
-                : tx.SetExpiry(existing.Id, expires, approvedBy, stored, now);
+                ? tx.Create(machine.Fingerprint, envelope.ScopeKey, request.Program, request.WorkingDirectory, names, expires, current.SecurityRevision, approvedBy, stored, now)
+                : tx.SetExpiry(existing.Id, expires, approvedBy, stored, now, (request.Program, request.WorkingDirectory, names));
 
             return new AuthorityStore.GrantPlan(answer(GrantOps.Granted, GrantReasons.Ok, grant.Info, current.SecurityRevision), existing is null ? "grant-created" : "grant-updated", $"grant {grant.Id}, {answered.ReuseMinutes} min, by {approvedBy}");
         });
     }
 
-    private static string Short(string text)
-    {
-        string clean = ApprovalSummary.Clean(text);
-
-        return clean.Length > 300 ? clean[..300] : clean;
-    }
 
     /// <summary>
     /// An administrator's extend, renew or revoke of a grant (the admin passkey approved it in the caller). Extend lengthens an active grant (by
@@ -657,6 +659,11 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
         return Task.FromResult(challenge);
     }
 
+    /// <summary>How many machines may wait Pending at once, and with one host name.</summary>
+    public const int MaxPendingMachines = 32;
+
+    public const int MaxPendingPerHostName = 4;
+
     public Task<EnrollmentResult> EnrollAsync(EnrollmentRequest request, CancellationToken cancel = default)
     {
         EnrollmentResult Refuse(string message) => new(false, MachineStatus.Pending, request.Fingerprint, message);
@@ -681,6 +688,17 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
         if (!KeyIdentity.Verify(request.PublicKey, request.SigningBytes(), request.Signature))
         {
             return Task.FromResult(Refuse("the proof of possession does not verify"));
+        }
+
+        // A machine that is not yet known can wait for approval only while there is room: any process that reaches the endpoint may enroll, so the list an administrator reviews is bounded
+        // (in all, and per host name, so one name cannot crowd the list or copy the name of a real host many times).
+        if (store.Find(request.Fingerprint) is null)
+        {
+            IReadOnlyList<MachineRecord> waiting = [.. store.Machines().Where(item => item.Status == MachineStatus.Pending)];
+            if (waiting.Count >= MaxPendingMachines || waiting.Count(item => string.Equals(item.HostName, request.HostName, StringComparison.OrdinalIgnoreCase)) >= MaxPendingPerHostName)
+            {
+                return Task.FromResult(Refuse("too many machines are waiting for approval; an administrator must approve or remove some first"));
+            }
         }
 
         MachineRecord machine = store.Register(request.PublicKey, request.HostName, request.Fingerprint);

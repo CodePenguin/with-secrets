@@ -18,6 +18,18 @@ public static class AuthorityPairing
             return RunCommand.Usage;
         }
 
+        // An authority key already pinned in host.json (for example this machine's own local authority) is never replaced by a new fingerprint: the host would go on trusting the pin
+        // and every handshake with the new address would fail while this command said otherwise. Refuse, and say which two keys are involved.
+        string wanted = KeyIdentity.ParseHex(command.AuthorityFingerprint ?? "", true) ?? "";
+        HostConfigLoad existing = deployment.HostConfig.Load();
+        if (existing.Config?.Authority is { } pinned && !string.Equals(pinned.Fingerprint, wanted, StringComparison.OrdinalIgnoreCase))
+        {
+            await error.WriteLineAsync("with-secrets: this machine already trusts the authority key " + KeyIdentity.Display(pinned.Fingerprint) + " (pinned in host.json), but you gave " + KeyIdentity.Display(wanted)
+                + ". Nothing was changed and the new key is NOT trusted. If this machine should use the other authority, remove the old trust deliberately first (delete host.json's authority pin, or recover the host's trust as an administrator) and run this command again.");
+
+            return RunCommand.Usage;
+        }
+
         try
         {
             deployment.HostConfig.SetRemote(deployment.Fingerprint, config);

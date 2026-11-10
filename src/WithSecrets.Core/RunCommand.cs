@@ -281,13 +281,15 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         {
             await stderr.WriteLineAsync("with-secrets: waiting for the authority to approve this request...");
             await stderr.WriteLineAsync(ApprovalSummary.BuildMessage(request, showValues: false));
+            // The host's own record that it asked is committed before the authority is asked (and before any value can arrive); the outcome follows as its own event.
+            Record(AuditEventTypes.Authorization, "requested", "remote");
             RemoteAuthorization outcome = await context.Authorization!.AuthorizeRemoteAsync(context.Request!, GrantEvidence.Scope(context.Authorization.Fingerprint, fingerprint.Key, arguments), new PageContext(resolved, arguments, links, script, programFile, fingerprint.Key), link => context.OnApprovalLink?.Invoke(link), context.Cancel);
             if (!outcome.Ok)
             {
                 audit.TryWrite("denied", request, outcome.Message, files: fingerprint.Files);
                 Record(AuditEventTypes.Authorization, "denied", context.Cancel.IsCancellationRequested ? "cancelled" : outcome.Code);
 
-                return (context.Cancel.IsCancellationRequested ? await Cancelled() : await Fail(Denied, outcome.Message), null, "");
+                return (context.Cancel.IsCancellationRequested ? await Cancelled() : await Fail(outcome.Code == "authority-locked" ? LaunchClient.AuthorityLocked : Denied, outcome.Message), null, "");
             }
 
             SecretValues values = outcome.Values!;
@@ -702,7 +704,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             lines.Add("The first run under the grant needs one passkey tap, and that tap makes the service keep the secret store key (it opens all your secrets) in memory until the grant ends (until restart for a grant with no end).");
         }
 
-        lines.AddRange(GrantEvidence.ApproveLines(revision, grantScope));
+        lines.AddRange(GrantEvidence.ApproveLines(revision, grantScope, contents: GrantEvidence.ContentsKey(launch.SecretNames, launch.Program, launch.WorkingDirectory)));
         ApprovalRequest shown = request with { RequestId = grantScope, Reuse = times, Unlock = false, Heading = "Create a GRANT for this exact command. No program runs now. Read all of it before you approve.", ExtraLines = lines };
         GrantApproval result = await host.ApproveGrantAsync(launch, grantScope, () =>
         {

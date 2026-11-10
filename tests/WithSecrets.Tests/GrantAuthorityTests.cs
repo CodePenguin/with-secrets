@@ -215,11 +215,16 @@ internal static class GrantAuthorityTests
         }
 
         /// <summary>The text an approve page carries for this scope and security revision, as the program builds it.</summary>
-        public static string ApproveText(string scope, int revision) => string.Join('\n', GrantEvidence.ApproveLines(revision, scope)) + "\n" + ApprovalSummary.RequestIdPrefix + scope;
+        public static string ApproveText(string scope, int revision, LaunchRequest? request = null)
+        {
+            LaunchRequest basis = request ?? IdentityTests.Sample("contents", DateTimeOffset.UtcNow);
+
+            return string.Join((char)10, GrantEvidence.ApproveLines(revision, scope, contents: GrantEvidence.ContentsKey(basis.SecretNames, basis.Program, basis.WorkingDirectory))) + (char)10 + ApprovalSummary.RequestIdPrefix + scope;
+        }
 
         public Task<GrantApproval> Approve(string scope, int minutes, bool approve = true, LaunchRequest? request = null, TestAuthenticator? who = null, string? textScope = null, int? textRevision = null, bool noEvidence = false)
             => Host.ApproveGrantAsync(request ?? Req(), scope, () => approve
-                ? ApprovalDecision.Allow("approved with passkey key-one", minutes, minutes > 0 && !noEvidence ? Sign(who ?? UserKey, ApproveText(textScope ?? scope, textRevision ?? Host.KnownRevision ?? 1), minutes) : null)
+                ? ApprovalDecision.Allow("approved with passkey key-one", minutes, minutes > 0 && !noEvidence ? Sign(who ?? UserKey, ApproveText(textScope ?? scope, textRevision ?? Host.KnownRevision ?? 1, request), minutes) : null)
                 : ApprovalDecision.Deny("test denied"), CancellationToken.None);
 
         public Task<GrantUse> Use(string scope, LaunchRequest? request = null) => Host.TryUseGrantAsync(request ?? Req(), scope, CancellationToken.None);

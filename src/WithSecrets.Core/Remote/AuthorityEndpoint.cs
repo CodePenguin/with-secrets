@@ -13,6 +13,15 @@ public sealed class AuthorityEndpointOptions
 
     public int MaxSessions { get; init; } = 128;
 
+    /// <summary>A session with no request for this long (and none in flight) is closed; a host that is up polls every second, and reconnects when it next needs the authority.</summary>
+    public TimeSpan SessionIdleTimeout { get; init; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>How many enrollment challenges one session may ask for (a machine needs one).</summary>
+    public int MaxEnrollmentsPerSession { get; init; } = 3;
+
+    /// <summary>The secret the relay in the same process wants from the authority registration (nothing else may register as the authority). Empty: none.</summary>
+    public string RelayCapability { get; init; } = "";
+
     /// <summary>The longest pause between attempts to reach the relay.</summary>
     public TimeSpan MaxReconnectPause { get; init; } = TimeSpan.FromSeconds(5);
 }
@@ -70,7 +79,7 @@ public sealed class AuthorityEndpoint(LocalAuthority authority, AuthorityKeyRing
         {
             try
             {
-                using WebSocketChannel channel = await WebSocketChannel.ConnectAsync(relay, RelayServer.AuthorityPath, stop);
+                using WebSocketChannel channel = await WebSocketChannel.ConnectAsync(relay, RelayServer.AuthorityPath, stop, _options.RelayCapability);
                 _registered.TrySetResult();
                 pause = TimeSpan.FromMilliseconds(100);
                 await ServeAsync(channel, stop);
@@ -132,6 +141,12 @@ public sealed class AuthorityEndpoint(LocalAuthority authority, AuthorityKeyRing
 
         /// <summary>The launch ids this session ran: a launch runs once per id, and its answer (which carries values) is never kept.</summary>
         public HashSet<string> LaunchIds { get; } = new(StringComparer.Ordinal);
+
+        public long LastActivity { get; set; } = Environment.TickCount64;
+
+        public int InFlight;
+
+        public int Enrollments;
     }
 
     private async Task ServeAsync(WebSocketChannel channel, CancellationToken stop)
@@ -213,6 +228,7 @@ public sealed class AuthorityEndpoint(LocalAuthority authority, AuthorityKeyRing
             peer.Stage = Stage.Hello;
             peer.Handshake?.Dispose();
             peer.Handshake = null;
+            peer.Session?.Dispose();
             peer.Session = null;
         }
 
@@ -282,6 +298,7 @@ public sealed class AuthorityEndpoint(LocalAuthority authority, AuthorityKeyRing
                     break;
                 default:
                     byte[] plaintext = peer.Session!.Open(frame);
+                    peer.LastActivity = Environment.TickCount64;
                     if (!RemoteWire.TryReadMessage(plaintext, out WireMessage? message) || message is null || !message.IsRequest)
                     {
                         await Drop(channel, peer, peers, null, stop);
@@ -323,10 +340,26 @@ public sealed class AuthorityEndpoint(LocalAuthority authority, AuthorityKeyRing
 
     private async Task HandleAsync(WebSocketChannel channel, Peer peer, ConcurrentDictionary<Guid, Peer> peers, WireMessage message, CancellationToken stop)
     {
+        Interlocked.Increment(ref peer.InFlight);
+        try
+        {
+            await HandleCoreAsync(channel, peer, peers, message, stop);
+        }
+        finally
+        {
+            peer.LastActivity = Environment.TickCount64;
+            Interlocked.Decrement(ref peer.InFlight);
+        }
+    }
+
+    private async Task HandleCoreAsync(WebSocketChannel channel, Peer peer, ConcurrentDictionary<Guid, Peer> peers, WireMessage message, CancellationToken stop)
+    {
         Interlocked.Increment(ref _requests);
         string reply;
         bool close = false;
         SecretsDelivery? delivery = null;
+        string? deliveredId = null;
+        bool sentOk = false;
         try
         {
             if (Locked)
@@ -366,7 +399,17 @@ public sealed class AuthorityEndpoint(LocalAuthority authority, AuthorityKeyRing
                 return;
             }
 
+            // A lock between the decryption and now: the values are not sent (the delivery is zeroed in the finally below, and the host gets "locked").
+            deliveredId = delivery is not null && message.Id.StartsWith("launch:", StringComparison.Ordinal) ? message.Id["launch:".Length..] : null;
+            if (delivery is not null && Locked)
+            {
+                delivery.Zero();
+                reply = RemoteWire.Failure(message.Id, "locked");
+                close = true;
+            }
+
             await SendSealedAsync(channel, peer, session, reply, stop);
+            sentOk = deliveredId is not null && !close;
             if (close)
             {
                 await Drop(channel, peer, peers, null, stop);
@@ -378,7 +421,12 @@ public sealed class AuthorityEndpoint(LocalAuthority authority, AuthorityKeyRing
         }
         finally
         {
-            // Sent or not, the values of a delivery are zeroed here, and the reply (the only other holder) is dropped.
+            // Sent or not, the values of a delivery are zeroed here, and the reply (the only other holder) is dropped; the authority's record says which.
+            if (deliveredId is not null)
+            {
+                launches?.Sent(peer.Machine, deliveredId, sentOk);
+            }
+
             delivery?.Zero();
         }
     }
@@ -475,6 +523,11 @@ public sealed class AuthorityEndpoint(LocalAuthority authority, AuthorityKeyRing
         switch (message.Op)
         {
             case RemoteOps.BeginEnrollment:
+                if (Interlocked.Increment(ref peer.Enrollments) > _options.MaxEnrollmentsPerSession)
+                {
+                    return Fail("too-many-enrollments");
+                }
+
                 return Ok(RemoteWire.WriteChallenge(await authority.BeginEnrollmentAsync(cancel)));
             case RemoteOps.Enroll:
                 if (!RemoteWire.TryRead(body, out EnrollmentRequest? enrollment) || enrollment is null)
@@ -575,6 +628,13 @@ public sealed class AuthorityEndpoint(LocalAuthority authority, AuthorityKeyRing
             while (!linked.IsCancellationRequested)
             {
                 if (Locked)
+                {
+                    await Drop(channel, peer, peers, null, stop);
+
+                    return;
+                }
+
+                if (Volatile.Read(ref peer.InFlight) == 0 && Environment.TickCount64 - peer.LastActivity > (long)_options.SessionIdleTimeout.TotalMilliseconds)
                 {
                     await Drop(channel, peer, peers, null, stop);
 

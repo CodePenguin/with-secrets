@@ -105,7 +105,7 @@ internal sealed class WebSocketChannel(WebSocket socket, int maxMessage = 8 * 10
     }
 
     /// <summary>Connects out to the relay as the host or the authority (<paramref name="path" />). Certificate validation is the system's; the optional pin only narrows it.</summary>
-    public static async Task<WebSocketChannel> ConnectAsync(RemoteAuthorityConfig config, string path, CancellationToken cancel)
+    public static async Task<WebSocketChannel> ConnectAsync(RemoteAuthorityConfig config, string path, CancellationToken cancel, string capability = "")
     {
         if (RemoteTarget.Problem(config) is { } problem)
         {
@@ -117,6 +117,11 @@ internal sealed class WebSocketChannel(WebSocket socket, int maxMessage = 8 * 10
         try
         {
             client.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
+            if (capability.Length > 0)
+            {
+                client.Options.SetRequestHeader(RelayServer.CapabilityHeader, capability);
+            }
+
             if (RemoteTarget.IsLoopback(relay!))
             {
                 client.Options.Proxy = null;

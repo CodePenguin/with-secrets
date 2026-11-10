@@ -202,9 +202,9 @@ public sealed class HostService : IDisposable
 
         // The authority starts LOCKED. The lock gates the authority signing key, the authority's decisions and grants, this host's runs and the memory it holds for a grant.
         // A host whose authority is remote has no authority lock of its own: the lock that matters is the authority's, enforced at its endpoint (a locked authority delivers nothing).
-        Lock = options.Lock ?? (Authorization.IsRemote ? AuthorityLock.Delegated() : new AuthorityLock());
+        Lock = options.Lock ?? new AuthorityLock();
         options.Deployment.Keys.LockState = Lock;
-        Authorization.LockState = Lock;
+        Authorization.LockState = Authorization.IsRemote ? null : Lock;
         Lock.OnLock(reason =>
         {
             Volatile.Write(ref _ready, false);
@@ -237,6 +237,9 @@ public sealed class HostService : IDisposable
 
     /// <summary>The port of the machine-protocol endpoint, or null when this service serves none.</summary>
     public int? MachinePort => _relay?.Port;
+
+    /// <summary>For tests: how many sessions the machine endpoint has open.</summary>
+    internal int MachineSessions => _machineEndpoint?.Sessions ?? 0;
 
     /// <summary>For tests: the authority-side launch handler (null when no machine endpoint is served).</summary>
     internal AuthorityLaunchHandler? Launches => _launches;
@@ -305,7 +308,7 @@ public sealed class HostService : IDisposable
                 // Locked by default; unattended unlock applies only when the administrator chose it. Before any request is accepted: check machine status, host name binding and security
                 // revision with the authority (it also issues the lease), which needs the authority unlocked.
                 service._startupUnlockNote = service.Lock.IsLocked ? UnattendedUnlock.TryUnlock(options.Deployment.Store, options.Deployment.Keys, service.Lock, options.UnlockProtection ?? UnlockProtections.ForThisPlatform()) : null;
-                if (!service.Lock.IsLocked)
+                if (service.Authorization.IsRemote || !service.Lock.IsLocked)
                 {
                     service.StartupReconcile();
                 }
@@ -370,18 +373,25 @@ public sealed class HostService : IDisposable
         }
 
         RelayOptions template = endpoint.Relay ?? new RelayOptions();
+
+        // Only this process's endpoint may register as the authority at its relay: it holds a random capability that no other process is given.
+        string capability = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
         _relay = RelayServer.StartAsync(new RelayOptions
         {
             Bind = endpoint.Bind,
             Port = endpoint.Port,
             Certificate = endpoint.Certificate,
             AuthorityLoopbackOnly = true,
+            AuthorityCapability = capability,
+            BindHostOnly = true,
+            InProcessLoopback = true,
             CaptureRecords = template.CaptureRecords,
             Tap = template.Tap,
         }).GetAwaiter().GetResult();
-        RemoteAuthorityConfig config = new($"http://127.0.0.1:{_relay.Port}", MachineEndpointOptions.RegistrationId, KeyIdentity.Fingerprint(authorityKey));
+        RemoteAuthorityConfig config = new($"http://127.0.0.1:{(_relay.LoopbackPort > 0 ? _relay.LoopbackPort : _relay.Port)}", MachineEndpointOptions.RegistrationId, KeyIdentity.Fingerprint(authorityKey));
+        AuthorityEndpointOptions endpointOptions = endpoint.Endpoint is { } given ? new AuthorityEndpointOptions { PushInterval = given.PushInterval, HandshakeTimeout = given.HandshakeTimeout, MaxSessions = given.MaxSessions, MaxReconnectPause = given.MaxReconnectPause, SessionIdleTimeout = given.SessionIdleTimeout, MaxEnrollmentsPerSession = given.MaxEnrollmentsPerSession, RelayCapability = capability } : new AuthorityEndpointOptions { RelayCapability = capability };
         _launches = new AuthorityLaunchHandler(_options.Deployment.Authority, _options.Deployment.Keys, _options.Deployment.Store, _options.Store, MachineApprover, Lock, _options.Deployment.Clock);
-        _machineEndpoint = new AuthorityEndpoint(_options.Deployment.Authority, _options.Deployment.Keys, _options.Deployment.Store, config, endpoint.Endpoint, _launches);
+        _machineEndpoint = new AuthorityEndpoint(_options.Deployment.Authority, _options.Deployment.Keys, _options.Deployment.Store, config, endpointOptions, _launches);
         _machineEndpoint.Start();
     }
 
@@ -739,7 +749,7 @@ public sealed class HostService : IDisposable
             {
                 try
                 {
-                    if (Lock.IsLocked)
+                    if (!Authorization.IsRemote && Lock.IsLocked)
                     {
                         continue;
                     }
@@ -775,7 +785,7 @@ public sealed class HostService : IDisposable
     {
         HttpRequest request = context.Request;
         HttpResponse response = context.Response;
-        if (Lock.IsLocked)
+        if (!Authorization.IsRemote && Lock.IsLocked)
         {
             await Refuse(response, StatusCodes.Status423Locked, LockedRefusal);
 

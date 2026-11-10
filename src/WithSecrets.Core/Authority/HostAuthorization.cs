@@ -859,6 +859,11 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
         {
             return Deny("authority-locked", AuthorityLock.LockedMessage);
         }
+        catch (RemoteTransportException reported) when (reported.ReportsLocked)
+        {
+            // Said before the session was authenticated: not proof, but nothing can be asked of a locked authority either way.
+            return Deny("authority-locked", "the authority reports that it is locked (unverified). " + AuthorityLock.LockedMessage);
+        }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
             AppLog.Warn("the authority did not answer a launch: {Type}", error.GetType().Name);

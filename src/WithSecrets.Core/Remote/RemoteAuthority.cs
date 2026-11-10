@@ -5,7 +5,11 @@ using System.Text;
 namespace WithSecrets;
 
 /// <summary>The authority could not be reached, or the session broke (connection, handshake, a frame that did not authenticate). The host treats it as "authority unavailable".</summary>
-public sealed class RemoteTransportException(string message) : IOException(message);
+public sealed class RemoteTransportException(string message, bool reportsLocked = false) : IOException(message)
+{
+    /// <summary>The authority said "locked" before the session was authenticated. It proves nothing (anyone on the path can send it), so it only chooses the wording; the run is denied either way.</summary>
+    public bool ReportsLocked { get; } = reportsLocked;
+}
 
 /// <summary>The authority answered over a good session with a refusal code (for example <c>locked</c> or <c>wrong-machine</c>). Retrying the same message would not help.</summary>
 public sealed class RemoteRefusedException(string code) : InvalidOperationException("the remote authority refused the request: " + code)
@@ -133,6 +137,7 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, ILaunchAuthority, 
 
             _ended.Cancel();
             Channel.Dispose();
+            Session.Dispose();
             foreach (TaskCompletionSource<WireMessage> waiting in Pending.Values)
             {
                 waiting.TrySetException(new RemoteTransportException("the session ended"));
@@ -142,6 +147,8 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, ILaunchAuthority, 
         public void Dispose() => Kill();
     }
 
+    private int _warnedPin;
+
     private TrustedAuthority Trusted()
     {
         HostConfigLoad load = _hostConfig.Load();
@@ -150,7 +157,17 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, ILaunchAuthority, 
             throw new RemoteTransportException("host.json cannot be used");
         }
 
-        return load.Config?.Authority is { } pinned ? new TrustedAuthority(pinned.Fingerprint, pinned.PublicKey) : new TrustedAuthority(_config.AuthorityFingerprint, null);
+        if (load.Config?.Authority is { } pinned)
+        {
+            if (!string.Equals(pinned.Fingerprint, _config.AuthorityFingerprint, StringComparison.OrdinalIgnoreCase) && Interlocked.Exchange(ref _warnedPin, 1) == 0)
+            {
+                AppLog.Warn("host.json names authority key {Configured} but this host trusts the pinned key {Pinned}; only a rotation signed by the pinned key can change that", _config.AuthorityFingerprint, pinned.Fingerprint);
+            }
+
+            return new TrustedAuthority(pinned.Fingerprint, pinned.PublicKey);
+        }
+
+        return new TrustedAuthority(_config.AuthorityFingerprint, null);
     }
 
     private async Task<Link> EnsureLinkAsync(CancellationToken cancel)
@@ -213,7 +230,7 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, ILaunchAuthority, 
             byte[] serverHello = await channel.ReceiveAsync(limit.Token) ?? throw new RemoteTransportException("the relay closed the connection");
             if (ChannelFormat.ErrorCode(serverHello) is { } refused)
             {
-                throw new RemoteTransportException("the authority refused the connection (" + refused + ")");
+                throw new RemoteTransportException("the authority refused the connection (" + refused + ")", refused == "locked");
             }
 
             (byte[] auth, SecureSession session, byte[] authorityKey, byte[] expectedReady) = handshake.Complete(serverHello);

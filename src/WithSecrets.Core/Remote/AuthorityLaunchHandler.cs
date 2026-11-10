@@ -8,6 +8,9 @@ public interface IRemoteLaunchHandler
     /// <see cref="AuthorityLockedException" /> when the authority is locked; it never returns a value in any other way.
     /// </summary>
     Task<LaunchAnswer> AuthorizeAsync(string machineFingerprint, LaunchAuthorize message, Action<string> announceLink, CancellationToken cancel);
+
+    /// <summary>Tells the handler whether the answer for this request id (which carried values) was actually sent to the machine, so the authority's record says what happened.</summary>
+    void Sent(string machineFingerprint, string requestId, bool sent);
 }
 
 /// <summary>
@@ -217,6 +220,12 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
             }
         }
 
+        // Across restarts too: values prepared for this id once are never prepared again (the durable row is written before they are sent).
+        if (_store.WasDelivered(machineFingerprint, request.RequestId))
+        {
+            return Deny(ReasonCodes.RequestIdReused, machine.SecurityRevision);
+        }
+
         // Only a machine that may ask learns whether a name exists; the others are refused by the same checks that refuse them in local mode.
         if (machine.Status == MachineStatus.Trusted && string.Equals(machine.HostName, message.Decide.HostName, StringComparison.Ordinal))
         {
@@ -236,6 +245,13 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
         try
         {
             ApprovalRequest page = Page(machine, message, request);
+
+            // The scope key must be the one these contents make (the machine's fingerprint, the fingerprint key and the expanded arguments the machine signed): a use cannot name a scope
+            // the request does not belong to. What the grant covers (names, program, folder) is checked by the authority against the grant itself.
+            if (message.Use.ScopeKey != GrantEvidence.Scope(machineFingerprint, message.Context.FingerprintKey, message.Context.Arguments))
+            {
+                return Deny(ReasonCodes.InvalidRequest, machine.SecurityRevision);
+            }
 
             // A grant that covers exactly this request stands in for the page's decision: the authority answers from its own record (the same check as in local mode).
             GrantResponse grant = await _authority.GrantAsync(message.Use, linked.Token);
@@ -319,6 +335,7 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
 
             if (cancel.IsCancellationRequested)
             {
+                _store.RecordDeliveryEvent(machine.Fingerprint, message.Decide.Request.RequestId, "approved-not-delivered", "the approval was given but the session ended or the launch was cancelled before any value was decrypted");
                 return deny(ReasonCodes.Cancelled, response.SecurityRevision);
             }
 
@@ -441,6 +458,9 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
             List<DeliveredValue> list = [.. values.Names.Select(name => new DeliveredValue(name, [.. values.Bytes(name)]))];
             SecretsDelivery delivery = SecretsDelivery.Create(request.RequestId, request.Digest(), message.Decide.MachineFingerprint, via, grantId, revision, issued, issued + SecretsDelivery.MaxLifetime, list, _keys.Current());
 
+            // Written before the answer can be sent: a restart cannot prepare values for this id again.
+            _store.RecordDeliveryEvent(message.Decide.MachineFingerprint, request.RequestId, "delivery-prepared", via == SecretsDelivery.ViaGrant ? "by grant " + grantId : "by the approval page");
+
             return new LaunchAnswer(delivery, null);
         }
         finally
@@ -449,6 +469,17 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
         }
     }
 
+    public void Sent(string machineFingerprint, string requestId, bool sent)
+    {
+        try
+        {
+            _store.RecordDeliveryEvent(machineFingerprint, requestId, sent ? "delivery-sent" : "delivery-not-sent", sent ? "the answer with the values was sent into the session" : "the values were prepared but not sent (the session ended or the authority locked)");
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            AppLog.Warn("a delivery outcome could not be recorded: {Type}", error.GetType().Name);
+        }
+    }
     public void Dispose()
     {
         _stop.Cancel();
