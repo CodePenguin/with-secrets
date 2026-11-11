@@ -88,8 +88,11 @@ public static class PairingProtocol
     /// <summary>Wrong proofs on one invitation before it is withdrawn.</summary>
     public const int MaxFailedPerInvitation = 5;
 
-    /// <summary>Refused attempts, in all, within <see cref="FailureWindow" />, before the route refuses everything for the rest of the window.</summary>
-    public const int MaxFailedOverall = 30;
+    /// <summary>Refused attempts per peer network address within <see cref="FailureWindow" />, before requests from that address for an unknown or ended invitation are answered "too busy". An invitation that is still pending is never refused for this: guessing one needs its 128-bit identifier, and each invitation has its own limit.</summary>
+    public const int MaxFailedPerPeer = 20;
+
+    /// <summary>How many peer addresses are tracked at once (the oldest is forgotten when the table is full).</summary>
+    public const int MaxTrackedPeers = 256;
 
     public static readonly TimeSpan FailureWindow = TimeSpan.FromMinutes(10);
 

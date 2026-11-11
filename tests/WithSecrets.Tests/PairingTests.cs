@@ -1050,12 +1050,13 @@ internal static partial class PairingTests
         (int sameName, _) = await named.Register(twin, named.Request(nb, twin, "SAME-NAME"));
         check(sameName == 403 && named.Store.Find(twin.Fingerprint) is null && named.Store.Invitation(n1.Id) is { Status: "pending" }, "limit: at most 4 machines may wait under one host name");
 
-        // Failed attempts overall: after 30 refused attempts the route refuses everything (429) until the window has passed.
+        // Failed attempts: per peer address. After 20 refused attempts for unknown or ended invitations from one address, more of those are answered 429; a PENDING invitation is never turned away for it (no lockout of the legitimate holder),
+        // and neither is the identical retry of a registration that was already committed.
         using Rig noisy = new(root);
         (CreatedInvitation good, PairingBundle goodBundle) = noisy.NewInvitation();
         using Identity noise = noisy.NewIdentity();
         int refusals = 0;
-        for (int i = 0; i < PairingProtocol.MaxFailedOverall; i++)
+        for (int i = 0; i < PairingProtocol.MaxFailedPerPeer; i++)
         {
             (int status, _) = await noisy.Bootstrap(noise, PairingProtocol.NewToken(16));
             if (status == 403)
@@ -1064,13 +1065,74 @@ internal static partial class PairingTests
             }
         }
 
-        (int blocked, string blockedBody) = await noisy.Bootstrap(noise, good.Id);
+        (int blocked, string blockedBody) = await noisy.Bootstrap(noise, PairingProtocol.NewToken(16));
+        check(refusals == PairingProtocol.MaxFailedPerPeer && blocked == 429 && JsonDocument.Parse(blockedBody).RootElement.GetProperty("error").GetString() == "too-busy" && PairingProtocol.MaxFailedPerPeer == 20, "limit: after 20 refused attempts from one address within ten minutes, further requests for unknown or ended invitations from it are answered 429");
+        (int legit, _) = await noisy.Bootstrap(noise, good.Id);
+        using Host holder = noisy.NewHost("legit-holder");
+        (PairingResult pairedWhileBlocked, _) = await noisy.Pair(holder, goodBundle);
+        check(legit == 200 && pairedWhileBlocked.Ok && noisy.Store.Find(holder.Fingerprint) is { Status: MachineStatus.Pending }, "limit: while that address is blocked the holder of a pending invitation (the same address) still pairs: no lockout of a legitimate invitation");
+        PairingRegistrationRequest committedRequest = noisy.Request(PairingBundle.Create(noisy.Url, good.Id, ExtractCode(goodBundle)), noise, "unused");
+        (int replayBlocked, _) = await noisy.Bootstrap(noise, PairingProtocol.NewToken(16));
+        check(replayBlocked == 429, "limit: the address is still blocked for unknown invitations");
+        _ = committedRequest;
         noisy.Clock.Advance(PairingProtocol.FailureWindow + TimeSpan.FromSeconds(1));
-        (CreatedInvitation fresh, PairingBundle freshBundle) = noisy.NewInvitation();
-        (int unblocked, _) = await noisy.Bootstrap(noise, fresh.Id);
-        check(refusals == PairingProtocol.MaxFailedOverall && blocked == 429 && JsonDocument.Parse(blockedBody).RootElement.GetProperty("error").GetString() == "too-busy" && unblocked == 200 && PairingProtocol.MaxFailedOverall == 30, "limit: after 30 refused attempts in ten minutes the route answers 429 to everyone; it recovers when the window has passed");
-        _ = goodBundle;
-        _ = freshBundle;
+        (int unblocked, _) = await noisy.Bootstrap(noise, PairingProtocol.NewToken(16));
+        check(unblocked == 403, "limit: it recovers when the window has passed");
+
+        // A different address is not affected by the first one's failures, and the table of addresses is bounded.
+        using Rig table = new(root);
+        for (int i = 0; i < PairingProtocol.MaxTrackedPeers + 50; i++)
+        {
+            table.Service.Bootstrap(new PairingBootstrapRequest(PairingProtocol.NewToken(16), new byte[16]), "198.51.100." + (i % 250) + ":" + i);
+        }
+
+        for (int i = 0; i < PairingProtocol.MaxFailedPerPeer; i++)
+        {
+            table.Service.Bootstrap(new PairingBootstrapRequest(PairingProtocol.NewToken(16), new byte[16]), "203.0.113.9");
+        }
+
+        check(table.Service.TrackedPeers <= PairingProtocol.MaxTrackedPeers && table.Service.Bootstrap(new PairingBootstrapRequest(PairingProtocol.NewToken(16), new byte[16]), "203.0.113.9").Status == 429 && table.Service.Bootstrap(new PairingBootstrapRequest(PairingProtocol.NewToken(16), new byte[16]), "203.0.113.77").Status == 403,
+            "limit: the table of peer addresses has a fixed size, one address's failures block only that address");
+
+        // The retry of a COMMITTED registration is answered whatever the limits say (the machine would otherwise be Pending at the authority with nothing saved at the host).
+        using Rig retry = new(root);
+        (CreatedInvitation ri, PairingBundle rb) = retry.NewInvitation();
+        using Identity retrier = retry.NewIdentity();
+        PairingRegistrationRequest committed = retry.Request(rb, retrier, "retrier");
+        (int firstStatus, string firstBody) = await retry.Register(retrier, committed);
+        for (int i = 0; i < PairingProtocol.MaxFailedPerPeer + 5; i++)
+        {
+            await retry.Bootstrap(retrier, PairingProtocol.NewToken(16));
+        }
+
+        int slotsHeld = 0;
+        using ManualResetEventSlim gate = new(false);
+        using ManualResetEventSlim slotsFull = new(false);
+        retry.Service.WhileRegistering = () =>
+        {
+            if (Interlocked.Increment(ref slotsHeld) == PairingProtocol.MaxConcurrentRegistrations)
+            {
+                slotsFull.Set();
+            }
+
+            gate.Wait();
+        };
+        (CreatedInvitation hi, PairingBundle hb) = retry.NewInvitation();
+        Identity[] busyIds = [.. Enumerable.Range(0, PairingProtocol.MaxConcurrentRegistrations).Select(_ => retry.NewIdentity())];
+        Task[] slotTasks = [.. busyIds.Select(identity => Task.Run(() =>
+        {
+            using X509Certificate2 leaf = identity.Leaf;
+            retry.Service.Register(retry.Request(hb, identity, "busyIds"), identity.Fingerprint, leaf, "10.9.9.9");
+        }))];
+        slotsFull.Wait(TimeSpan.FromSeconds(10));
+        (int blockedBootstrap, _) = await retry.Bootstrap(retrier, PairingProtocol.NewToken(16));
+        (int retryStatus, string retryBody) = await retry.Register(retrier, committed);
+        gate.Set();
+        await Task.WhenAll(slotTasks);
+        retry.Service.WhileRegistering = null;
+        check(firstStatus == 200 && blockedBootstrap == 429 && retryStatus == 200 && retryBody == firstBody, "limit: with the peer blocked and every registration slot busyIds, the identical retry of a committed registration still gets the committed result");
+        _ = ri;
+        _ = hi;
 
         // The audit of a flood is bounded and summarized.
         using Rig flood = new(root);
@@ -1081,7 +1143,7 @@ internal static partial class PairingTests
         }
 
         int rows = flood.Store.Audit().Count(entry => entry.Event == "pairing-refused");
-        check(rows <= PairingService.MaxAuditRowsPerMinute && rows >= 1, "limit: the audit of a flood of refused attempts is bounded (rows per minute); a flood past the overall limit writes nothing more");
+        check(rows <= PairingService.MaxAuditRowsPerMinute && rows >= 1, "limit: the audit of a flood of refused attempts is bounded (rows per minute); a flood past the per-address limit writes nothing more");
     }
 
     // ---------- the audit ----------

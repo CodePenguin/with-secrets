@@ -10,11 +10,12 @@ internal sealed class PairingHandler(PairingService service) : IPairingHandler
     public Task<PairingReply> HandleAsync(PairingContext context, CancellationToken cancel)
     {
         service.SeenPeer?.Invoke(context.Peer.Fingerprint);
+        string peer = context.Http.Connection.RemoteIpAddress?.ToString() ?? "";
 
         PairingReply reply = PairingWire.StepOf(context.Body) switch
         {
-            "bootstrap" => PairingWire.TryReadBootstrap(context.Body, out PairingBootstrapRequest? bootstrap) && bootstrap is not null ? service.Bootstrap(bootstrap) : PairingReply.BadRequest,
-            "register" => PairingWire.TryReadRegistration(context.Body, out PairingRegistrationRequest? registration) && registration is not null ? service.Register(registration, context.Peer.Fingerprint, context.Certificate) : PairingReply.BadRequest,
+            "bootstrap" => PairingWire.TryReadBootstrap(context.Body, out PairingBootstrapRequest? bootstrap) && bootstrap is not null ? service.Bootstrap(bootstrap, peer) : PairingReply.BadRequest,
+            "register" => PairingWire.TryReadRegistration(context.Body, out PairingRegistrationRequest? registration) && registration is not null ? service.Register(registration, context.Peer.Fingerprint, context.Certificate, peer) : PairingReply.BadRequest,
             _ => PairingReply.BadRequest,
         };
 

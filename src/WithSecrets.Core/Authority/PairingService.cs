@@ -42,7 +42,7 @@ public sealed class PairingService(AuthorityStore store, IUnlockProtection prote
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
     private readonly SemaphoreSlim _registrations = new(PairingProtocol.MaxConcurrentRegistrations);
     private readonly Lock _gate = new();
-    private readonly Queue<DateTimeOffset> _failures = new();
+    private readonly Dictionary<string, Queue<DateTimeOffset>> _peerFailures = new(StringComparer.Ordinal);
     private readonly Queue<DateTimeOffset> _auditRows = new();
     private int _suppressed;
 
@@ -108,27 +108,74 @@ public sealed class PairingService(AuthorityStore store, IUnlockProtection prote
 
     // ---- limits and audit ----
 
-    private bool Blocked()
+    /// <summary>True when this peer address has made too many refused attempts lately (see <see cref="PairingProtocol.MaxFailedPerPeer" />). Only consulted for a request that names no pending invitation.</summary>
+    private bool Blocked(string peer)
     {
         lock (_gate)
         {
             DateTimeOffset now = _clock.GetUtcNow();
-            while (_failures.Count > 0 && now - _failures.Peek() > PairingProtocol.FailureWindow)
-            {
-                _failures.Dequeue();
-            }
 
-            return _failures.Count >= PairingProtocol.MaxFailedOverall;
+            return _peerFailures.TryGetValue(peer, out Queue<DateTimeOffset>? times) && Prune(times, now) >= PairingProtocol.MaxFailedPerPeer;
         }
     }
 
-    private void Failed(string detail, string? fingerprint = null)
+    private static int Prune(Queue<DateTimeOffset> times, DateTimeOffset now)
+    {
+        while (times.Count > 0 && now - times.Peek() > PairingProtocol.FailureWindow)
+        {
+            times.Dequeue();
+        }
+
+        return times.Count;
+    }
+
+    /// <summary>Counts one refused attempt against a peer address, in a table of fixed size: stale peers are dropped, and when it is still full the one with the oldest last failure is.</summary>
+    private void CountPeer(string peer)
     {
         lock (_gate)
         {
-            _failures.Enqueue(_clock.GetUtcNow());
-        }
+            DateTimeOffset now = _clock.GetUtcNow();
+            if (!_peerFailures.TryGetValue(peer, out Queue<DateTimeOffset>? times))
+            {
+                if (_peerFailures.Count >= PairingProtocol.MaxTrackedPeers)
+                {
+                    foreach (string stale in _peerFailures.Where(entry => Prune(entry.Value, now) == 0).Select(entry => entry.Key).ToList())
+                    {
+                        _peerFailures.Remove(stale);
+                    }
 
+                    if (_peerFailures.Count >= PairingProtocol.MaxTrackedPeers)
+                    {
+                        _peerFailures.Remove(_peerFailures.MinBy(entry => entry.Value.Last()).Key);
+                    }
+                }
+
+                _peerFailures[peer] = times = new Queue<DateTimeOffset>();
+            }
+
+            Prune(times, now);
+            if (times.Count < PairingProtocol.MaxFailedPerPeer)
+            {
+                times.Enqueue(now);
+            }
+        }
+    }
+
+    /// <summary>For tests: how many peer addresses are tracked.</summary>
+    internal int TrackedPeers
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _peerFailures.Count;
+            }
+        }
+    }
+
+    private void Failed(string peer, string detail, string? fingerprint = null)
+    {
+        CountPeer(peer);
         Audit("pairing-refused", fingerprint, detail);
     }
 
@@ -189,17 +236,18 @@ public sealed class PairingService(AuthorityStore store, IUnlockProtection prote
     // ---- the bootstrap ----
 
     /// <summary>First request: the invitation id and the client's nonce. Answers the authority's identity certificate, a fresh nonce and the proof, or the one refusal.</summary>
-    public PairingReply Bootstrap(PairingBootstrapRequest request)
+    public PairingReply Bootstrap(PairingBootstrapRequest request, string peerAddress = "")
     {
-        if (Blocked())
-        {
-            return PairingReply.Busy;
-        }
-
         store.ExpireInvitations();
         if (store.Invitation(request.InvitationId) is not { } invitation || invitation.StatusAt(_clock.GetUtcNow()) != "pending" || OpenKey(invitation) is not { } key)
         {
-            Failed("bootstrap for an invitation that is unknown, expired, used or withdrawn");
+            // Only a request for an invitation that is not pending can be turned away for its sender's address having made too many such requests.
+            if (Blocked(peerAddress))
+            {
+                return PairingReply.Busy;
+            }
+
+            Failed(peerAddress, "bootstrap for an invitation that is unknown, expired, used or withdrawn");
 
             return PairingReply.Refused;
         }
@@ -224,11 +272,12 @@ public sealed class PairingService(AuthorityStore store, IUnlockProtection prote
     /// Second request, on the connection pinned to this authority: verifies the certificate, the proof of possession and the registration proof, then consumes the invitation and creates (or refreshes) the Pending record in one step.
     /// <paramref name="peerFingerprint" /> is what the TLS client certificate says; <paramref name="leaf" /> is that certificate.
     /// </summary>
-    public PairingReply Register(PairingRegistrationRequest request, string peerFingerprint, X509Certificate2 leaf)
+    public PairingReply Register(PairingRegistrationRequest request, string peerFingerprint, X509Certificate2 leaf, string peerAddress = "")
     {
-        if (Blocked())
+        // The identical retry of a registration that was already committed always gets the committed result: neither the peer limit nor the concurrency limit may stop it (the machine would be Pending at the authority with nothing saved at the host).
+        if (CommittedResult(request, peerFingerprint) is { } committed)
         {
-            return PairingReply.Busy;
+            return committed;
         }
 
         if (!_registrations.Wait(0))
@@ -240,7 +289,7 @@ public sealed class PairingService(AuthorityStore store, IUnlockProtection prote
         {
             WhileRegistering?.Invoke();
 
-            return RegisterCore(request, peerFingerprint, leaf);
+            return RegisterCore(request, peerFingerprint, leaf, peerAddress);
         }
         finally
         {
@@ -248,26 +297,49 @@ public sealed class PairingService(AuthorityStore store, IUnlockProtection prote
         }
     }
 
-    private PairingReply RegisterCore(PairingRegistrationRequest request, string peerFingerprint, X509Certificate2 leaf)
+    /// <summary>A machine that asks again after a lost answer gets the original result (same invitation, fingerprint and proofs); nothing is created again. Null when this is not such a retry.</summary>
+    private PairingReply? CommittedResult(PairingRegistrationRequest request, string peerFingerprint)
+    {
+        if (request.MachineFingerprint != peerFingerprint)
+        {
+            return null;
+        }
+
+        PairingInvitationRecord? invitation = store.Invitation(request.InvitationId);
+        if (invitation is { Status: "consumed" } && invitation.RequestDigest == request.Digest() && invitation.MachineFingerprint == request.MachineFingerprint && invitation.Result is { } committed)
+        {
+            Audit("pairing-retry", request.MachineFingerprint, "invitation " + request.InvitationId[..8] + ": the same registration again after it was committed; the original result was returned");
+
+            return PairingReply.Ok(PairingWire.Write(new PairingRegistrationReply(request.MachineFingerprint, committed)));
+        }
+
+        return null;
+    }
+
+    private PairingReply RegisterCore(PairingRegistrationRequest request, string peerFingerprint, X509Certificate2 leaf, string peerAddress)
     {
         DateTimeOffset now = _clock.GetUtcNow();
         string digest = request.Digest();
-        string shortId = request.InvitationId[..8];
         if (WireText.HostNameProblem(request.HostName) is not null || KeyIdentity.ParseHex(request.MachineFingerprint, true) != request.MachineFingerprint)
         {
-            Failed("registration with an unusable host name or fingerprint", null);
+            Failed(peerAddress, "registration with an unusable host name or fingerprint", null);
 
             return PairingReply.BadRequest;
         }
 
-        // A machine that asks again after a lost answer gets the original result (same invitation, fingerprint and proofs); nothing is created again.
         store.ExpireInvitations();
         PairingInvitationRecord? invitation = store.Invitation(request.InvitationId);
-        if (invitation is { Status: "consumed" } && invitation.RequestDigest == digest && invitation.MachineFingerprint == request.MachineFingerprint && request.MachineFingerprint == peerFingerprint && invitation.Result is { } committed)
+        if (invitation is null || invitation.StatusAt(now) != "pending")
         {
-            Audit("pairing-retry", request.MachineFingerprint, "invitation " + shortId + ": the same registration again after it was committed; the original result was returned");
+            // Not pending: this is the only kind of request a peer address that made too many refused attempts is turned away for.
+            if (Blocked(peerAddress))
+            {
+                return PairingReply.Busy;
+            }
 
-            return PairingReply.Ok(PairingWire.Write(new PairingRegistrationReply(request.MachineFingerprint, committed)));
+            Failed(peerAddress, "registration for an invitation that is unknown, expired, used or withdrawn", request.MachineFingerprint);
+
+            return PairingReply.Refused;
         }
 
         // Structure first: the identity certificate (profile, 10-year validity), that it is the key behind the fingerprint and the TLS certificate, and that this TLS certificate was signed by it.
@@ -276,7 +348,7 @@ public sealed class PairingService(AuthorityStore store, IUnlockProtection prote
         {
             if (MachineCertificates.ValidateIdentity(request.MachineCertificate, now) is { } profile)
             {
-                Failed("registration whose identity certificate is not acceptable: " + profile, request.MachineFingerprint);
+                Failed(peerAddress, "registration whose identity certificate is not acceptable: " + profile, request.MachineFingerprint);
 
                 return PairingReply.Refused;
             }
@@ -286,7 +358,7 @@ public sealed class PairingService(AuthorityStore store, IUnlockProtection prote
         }
         catch (CryptographicException)
         {
-            Failed("registration with an unreadable identity certificate", request.MachineFingerprint);
+            Failed(peerAddress, "registration with an unreadable identity certificate", request.MachineFingerprint);
 
             return PairingReply.Refused;
         }
@@ -294,14 +366,14 @@ public sealed class PairingService(AuthorityStore store, IUnlockProtection prote
         if (!KeyIdentity.IsCanonicalP256(publicKey) || KeyIdentity.Fingerprint(publicKey) != request.MachineFingerprint || request.MachineFingerprint != peerFingerprint
             || MachineCertificates.ValidateLeaf(leaf, request.MachineCertificate, now, request.MachineFingerprint) is not null)
         {
-            Failed("registration whose certificates do not name one machine", request.MachineFingerprint);
+            Failed(peerAddress, "registration whose certificates do not name one machine", request.MachineFingerprint);
 
             return PairingReply.Refused;
         }
 
-        if (invitation is null || invitation.StatusAt(now) != "pending" || OpenKey(invitation) is not { } key)
+        if (OpenKey(invitation) is not { } key)
         {
-            Failed("registration for an invitation that is unknown, expired, used or withdrawn", request.MachineFingerprint);
+            Failed(peerAddress, "registration for an invitation whose key material is gone", request.MachineFingerprint);
 
             return PairingReply.Refused;
         }
@@ -312,10 +384,7 @@ public sealed class PairingService(AuthorityStore store, IUnlockProtection prote
             if (!PairingProtocol.Same(expected, request.Proof))
             {
                 store.RecordInvitationFailure(request.InvitationId, "wrong registration proof", PairingProtocol.MaxFailedPerInvitation);
-                lock (_gate)
-                {
-                    _failures.Enqueue(now);
-                }
+                CountPeer(peerAddress);
 
                 return PairingReply.Refused;
             }
@@ -323,10 +392,7 @@ public sealed class PairingService(AuthorityStore store, IUnlockProtection prote
             if (!KeyIdentity.Verify(publicKey, PairingProtocol.PossessionMessage(request.InvitationId, AuthorityFingerprint, request.MachineFingerprint, request.HostName, request.Nonce), request.Possession))
             {
                 store.RecordInvitationFailure(request.InvitationId, "wrong proof of possession of the identity key", PairingProtocol.MaxFailedPerInvitation);
-                lock (_gate)
-                {
-                    _failures.Enqueue(now);
-                }
+                CountPeer(peerAddress);
 
                 return PairingReply.Refused;
             }
@@ -344,7 +410,7 @@ public sealed class PairingService(AuthorityStore store, IUnlockProtection prote
             case PairingOutcome.Replayed:
                 return PairingReply.Ok(PairingWire.Write(new PairingRegistrationReply(request.MachineFingerprint, result.Status)));
             default:
-                Failed("registration refused at the last step: " + result.Reason, request.MachineFingerprint);
+                Failed(peerAddress, "registration refused at the last step: " + result.Reason, request.MachineFingerprint);
 
                 return PairingReply.Refused;
         }
