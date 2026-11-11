@@ -36,6 +36,8 @@ internal static class ApiTests
             await OpenApiDocument(check, root);
             await ProblemsAndCanaries(check, root);
             await ApiHardeningTests.Run(check, root);
+            await PairingAdminTests.Run(check, root);
+            await PairingAdminTests.Refusals(check, root);
             await VerbsAreGone(check);
         }
         finally

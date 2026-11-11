@@ -88,11 +88,13 @@ internal sealed class AdminApp : IDisposable
     private readonly IUnlockProtection? _protection;
     private readonly AdminWebAssets? _web;
     private readonly Func<IApprover>? _approver;
+    private readonly bool _machineEndpoint;
 
-    public AdminApp(string root, bool trusted = true, bool unlocked = true, int askSeconds = 4, IPasskeyAdmin? passkeys = null, bool protection = false, AdminWebAssets? web = null, AdminApp? restoreFrom = null, Func<IApprover>? approver = null)
+    public AdminApp(string root, bool trusted = true, bool unlocked = true, int askSeconds = 4, IPasskeyAdmin? passkeys = null, bool protection = false, AdminWebAssets? web = null, AdminApp? restoreFrom = null, Func<IApprover>? approver = null, bool machineEndpoint = false)
     {
         _web = web;
         _approver = approver;
+        _machineEndpoint = machineEndpoint;
         Clock = new AppClock();
         string machineFolder = Path.Combine(root, "app-" + Guid.NewGuid().ToString("N")[..8]);
         if (restoreFrom is not null)
@@ -208,6 +210,7 @@ internal sealed class AdminApp : IDisposable
             AdminAskerFactory = _askers,
             PasskeyAdminFactory = _passkeys is null ? null : () => _passkeys,
             WebAssets = _web,
+            MachineEndpoint = _machineEndpoint ? new MachineListenerOptions { Port = 0 } : null,
             ApproverFactory = _approver is null ? null : (_, _) => _approver(),
         });
         _rig.Service = Service;
