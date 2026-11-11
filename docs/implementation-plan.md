@@ -141,6 +141,10 @@ This plan turns the accepted target design in [architecture.md](architecture.md#
 - Validate that every sensitive administrative operation requires fresh operation-bound passkey authentication in both manual and unattended startup modes; validate that normal grant use requires no repeated passkey prompt.
 - Exercise lock/unlock, restart, key zeroization best-effort behavior, key backup/recovery, and fail-closed behavior when authentication or protected key access fails.
 - Validate machine rename/host-name change approval and authority signing-key rotation/recovery.
+- Implement the optional native tray companion on supported desktop platforms as a thin OS integration client: service/authority status, native notifications, and system-browser launching to allowlisted administration routes. Do not embed a browser or duplicate administration UI.
+- Connect the tray through the existing authenticated loopback API, application protocol, and event-delivery mechanism; do not add a separate IPC or notification transport. Enforce a narrow local-client capability set and do not expose the machine identity private key to the tray.
+- Implement informational notifications for approval and pairing events. Notification activation opens the exact SPA route in the system browser; notification dismissal never changes the underlying request. Keep notification text free of secret values and credentials.
+- Test tray authentication and authorization, arbitrary-URL rejection, route allowlisting, notification payload redaction, browser launching, service-manager integration, and correct host-service operation when the tray is absent.
 - Test Windows and WSL as independently enrolled host-service identities.
 - Test Docker-launched commands through the host service.
 - Add end-to-end tests with real browser/passkey flows and a direct remote-authority deployment.
