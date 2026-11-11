@@ -1,5 +1,5 @@
 import { api } from '../../api/client'
-import type { Grant, Machine, MutationResponse, OperationName, ParameterValue, Passkey } from '../../api/types'
+import type { Grant, Invitation, Machine, MutationResponse, OperationName, ParameterValue, Passkey } from '../../api/types'
 
 /**
  * Every administrative change the page can ask for, as data: what the person fills in, the exact operation and parameters the passkey will
@@ -350,5 +350,29 @@ export const removePasskey = (passkey: Passkey): OperationDef => ({
     parameters: { name: passkey.name },
     summary: `Remove the passkey "${passkey.name}".`,
     perform: (authorization) => api.post('/api/v1/passkeys/{name}/remove', { path: { name: passkey.name }, body: { authorization } }),
+  }),
+})
+
+// ---- pairing ----
+
+/** The service names the address and the lifetime in the sentence the passkey signs; this page only asks. */
+export const createPairingInvitation = (): OperationDef =>
+  simple('pairing-create', 'Create a pairing invitation', 'pairing-create', 'Create a one-time invitation for one new machine to pair with this authority (valid 10 minutes). The invitation bundle is shown once.', (authorization) => api.post('/api/v1/pairing/invitations', { body: { authorization } }), {
+    intro: 'The invitation lets one machine ask to be added. The machine is still Pending until you approve it here. The bundle is shown once, after your tap, and can never be shown again.',
+  })
+
+export const revokePairingInvitation = (invitation: Invitation): OperationDef => ({
+  key: 'pairing-revoke',
+  title: 'Revoke this invitation',
+  about: [
+    ['Invitation', invitation.id],
+    ['Status', invitation.status],
+  ],
+  danger: true,
+  prepare: () => ({
+    operation: 'pairing-revoke',
+    parameters: { id: invitation.id },
+    summary: `Revoke pairing invitation ${invitation.id}: it can no longer be used.`,
+    perform: (authorization) => api.post('/api/v1/pairing/invitations/{id}/revoke', { path: { id: invitation.id }, body: { authorization } }),
   }),
 })

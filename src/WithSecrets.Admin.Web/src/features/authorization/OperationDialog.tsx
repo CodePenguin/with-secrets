@@ -7,6 +7,7 @@ import { Dialog } from '../../components/Dialog'
 import { Field, checkClass, controlClass } from '../../components/Field'
 import { Facts } from '../../components/Card'
 import { Notice, ProblemAlert, useAnnounce } from '../../components/Feedback'
+import { BundleOnce } from '../pairing/BundleOnce'
 import { usePollInterval } from './poll'
 import type { FormValues, OperationDef, Prepared } from './operations'
 import styles from './OperationDialog.module.css'
@@ -303,6 +304,7 @@ export function OperationDialog({ def, onClose }: Props) {
         <Notice kind="ok" title="Done">
           {state.prepared.summary}
         </Notice>
+        {state.result.invitation ? <BundleOnce invitation={state.result.invitation} /> : null}
         {state.result.outcome === 'started' ? (
           next ? (
             <p>

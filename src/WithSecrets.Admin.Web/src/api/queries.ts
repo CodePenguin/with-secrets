@@ -6,6 +6,7 @@ export const keys = {
   status: ['status'] as const,
   session: ['session'] as const,
   machines: ['machines'] as const,
+  invitations: ['invitations'] as const,
   grants: ['grants'] as const,
   settings: ['settings'] as const,
   passkeys: ['passkeys'] as const,
@@ -69,6 +70,10 @@ export function useSession() {
 
 export function useMachines(enabled: boolean) {
   return useQuery({ queryKey: keys.machines, queryFn: async () => (await api.get('/api/v1/machines')).items, enabled })
+}
+
+export function useInvitations(enabled: boolean) {
+  return useQuery({ queryKey: keys.invitations, queryFn: async () => (await api.get('/api/v1/pairing/invitations')).items, enabled })
 }
 
 export function useGrants(enabled: boolean) {

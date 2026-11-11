@@ -12,6 +12,7 @@ import styles from './Shell.module.css'
 const links = [
   { to: '/', label: 'Overview', end: true },
   { to: '/machines', label: 'Machines', end: false },
+  { to: '/pairing', label: 'Pairing', end: false },
   { to: '/grants', label: 'Grants', end: false },
   { to: '/audit', label: 'Audit', end: false },
   { to: '/settings', label: 'Settings', end: false },

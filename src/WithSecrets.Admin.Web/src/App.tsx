@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import { AuditPage } from './features/audit/AuditPage'
 import { GrantsPage } from './features/grants/GrantsPage'
 import { MachinesPage } from './features/machines/MachinesPage'
+import { PairingPage } from './features/pairing/PairingPage'
 import { PasskeysPage } from './features/passkeys/PasskeysPage'
 import { SettingsPage } from './features/settings/SettingsPage'
 import { Shell } from './features/shell/Shell'
@@ -14,6 +15,7 @@ export function App() {
       <Route element={<Shell />}>
         <Route index element={<OverviewPage />} />
         <Route path="machines" element={<MachinesPage />} />
+        <Route path="pairing" element={<PairingPage />} />
         <Route path="grants" element={<GrantsPage />} />
         <Route path="audit" element={<AuditPage view="events" />} />
         <Route path="audit/changes" element={<AuditPage view="changes" />} />

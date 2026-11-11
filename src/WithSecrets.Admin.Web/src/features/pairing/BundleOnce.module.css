@@ -1,0 +1,16 @@
+.once {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.bundle {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: var(--font-mono);
+  word-break: break-all;
+  padding: var(--space-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: inherit;
+}

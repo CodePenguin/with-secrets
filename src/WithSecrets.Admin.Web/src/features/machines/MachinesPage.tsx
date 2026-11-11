@@ -44,6 +44,7 @@ export function MachinesPage() {
       <p>Each machine that asks for secrets has its own identity. A machine is only served once you approve it here.</p>
       {machines.isPending ? <Loading what="machines" /> : null}
       {machines.isError ? <ProblemAlert error={machines.error} title="The machines could not be listed" /> : null}
+      {machines.data?.some((machine) => machine.status === 'pending') ? <p>A Pending machine is waiting for you. Before you approve it, check that its fingerprint and host name are the ones shown on the machine itself when it paired.</p> : null}
       {machines.data?.length === 0 ? <Empty>No machine has enrolled yet.</Empty> : null}
       {machines.data && machines.data.length > 0 ? (
         <ul className={list.list} aria-label="Machines">
