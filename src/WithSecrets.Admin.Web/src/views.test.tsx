@@ -227,6 +227,20 @@ describe('what is shown', () => {
     expect(screen.getByRole('button', { name: /^disable/i })).toBeInTheDocument()
   })
 
+  it('warns on a machine whose identity may have been copied, never by itself disabling it', async () => {
+    signedIn({
+      'GET /api/v1/machines': {
+        body: { items: [machine({ status: 'trusted', actions: ['disable', 'rename'], copyWarning: { count: 3, firstAddress: '10.0.0.5', lastAddress: '10.0.0.9', firstSeen: '2026-11-09T10:00:00Z', lastSeen: '2026-11-09T10:04:00Z' } }), machine({ fingerprint: 'ff'.repeat(32), display: 'ffff', hostName: 'clean-host', status: 'trusted', actions: ['disable'] })] },
+      },
+    })
+    renderApp('/machines')
+    await screen.findByRole('heading', { name: 'clean-host' })
+
+    expect(screen.getAllByText(/Disable this machine if you did not start both./)).toHaveLength(1)
+    expect(screen.getByText(/10.0.0.9/)).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: /^disable/i })).toHaveLength(2)
+  })
+
   it('states the status in words as well as colour', async () => {
     signedIn({ 'GET /api/v1/status': { body: status({ locked: true }) } })
     renderApp('/')

@@ -5673,6 +5673,40 @@
           "link"
         ]
       },
+      "CopyWarning": {
+        "type": "object",
+        "properties": {
+          "count": {
+            "type": "integer",
+            "description": "The most supersedes from another address seen within one watch window."
+          },
+          "firstAddress": {
+            "type": "string",
+            "description": "The address of the older connection when the warning was first recorded."
+          },
+          "lastAddress": {
+            "type": "string",
+            "description": "The address of the newest connection that superseded another."
+          },
+          "firstSeen": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lastSeen": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "count",
+          "firstAddress",
+          "lastAddress",
+          "firstSeen",
+          "lastSeen"
+        ],
+        "description": "A warning (never a decision) that this machine\u0027s identity may have been copied: its connection was repeatedly superseded by a connection from a different address."
+      },
       "Machine": {
         "type": "object",
         "properties": {
@@ -5734,6 +5768,16 @@
                 "rename"
               ]
             }
+          },
+          "copyWarning": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CopyWarning"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": false,
@@ -5748,7 +5792,8 @@
           "created",
           "updated",
           "thisMachine",
-          "actions"
+          "actions",
+          "copyWarning"
         ]
       },
       "MachineList": {

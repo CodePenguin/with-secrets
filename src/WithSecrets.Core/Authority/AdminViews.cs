@@ -16,7 +16,10 @@ public sealed record BrowserDto(string AntiForgery);
 
 public sealed record ClaimDto(string AntiForgery, SessionDto Session);
 
-public sealed record MachineDto(string Fingerprint, string Display, string Status, int Revision, string HostName, string? PendingHostName, string? FriendlyName, DateTimeOffset Created, DateTimeOffset Updated, bool ThisMachine, IReadOnlyList<string> Actions);
+/// <summary>The warning that a machine's identity may have been copied (see <see cref="CopiedIdentityWatch" />): public data only. A warning, never a decision.</summary>
+public sealed record CopyWarningDto(int Count, string FirstAddress, string LastAddress, DateTimeOffset FirstSeen, DateTimeOffset LastSeen);
+
+public sealed record MachineDto(string Fingerprint, string Display, string Status, int Revision, string HostName, string? PendingHostName, string? FriendlyName, DateTimeOffset Created, DateTimeOffset Updated, bool ThisMachine, IReadOnlyList<string> Actions, CopyWarningDto? CopyWarning);
 
 public sealed record GrantDto(string Id, string Fingerprint, string? MachineName, string State, string Status, int Revision, DateTimeOffset Created, DateTimeOffset Updated, DateTimeOffset? Expires, string Ends, string SecretNames, string Program, string WorkingDirectory,
     string ApprovedBy, DateTimeOffset? Revoked, IReadOnlyList<string> Actions);
@@ -95,7 +98,10 @@ public sealed partial class AdminService
     }
 
     internal MachineDto MachineView(MachineRecord machine) => new(machine.Fingerprint, KeyIdentity.Display(machine.Fingerprint), machine.Status.ToString().ToLowerInvariant(), machine.SecurityRevision, C(machine.HostName),
-        machine.PendingHostName is null ? null : C(machine.PendingHostName), machine.FriendlyName is null ? null : C(machine.FriendlyName), machine.Created, machine.Updated, machine.Fingerprint == _p.LocalFingerprint, MachineActions(machine));
+        machine.PendingHostName is null ? null : C(machine.PendingHostName), machine.FriendlyName is null ? null : C(machine.FriendlyName), machine.Created, machine.Updated, machine.Fingerprint == _p.LocalFingerprint, MachineActions(machine), CopyWarningOf(machine));
+
+    /// <summary>The copied-identity warning of a machine that is still in use (a Disabled machine is already dealt with), or null.</summary>
+    private CopyWarningDto? CopyWarningOf(MachineRecord machine) => machine.Status != MachineStatus.Disabled && _p.Store.CopyWarningOf(machine.Fingerprint) is { } warning ? new CopyWarningDto(warning.Count, warning.FirstAddress, warning.LastAddress, warning.FirstSeen, warning.LastSeen) : null;
 
     internal IReadOnlyList<MachineDto> MachinesView() => [.. _p.Store.Machines().Select(MachineView)];
 

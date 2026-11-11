@@ -2,7 +2,7 @@ import { useMachines } from '../../api/queries'
 import type { Machine } from '../../api/types'
 import { Badge, Empty, Facts, PageHeader } from '../../components/Card'
 import { Button } from '../../components/Button'
-import { Loading, ProblemAlert } from '../../components/Feedback'
+import { Loading, Notice, ProblemAlert } from '../../components/Feedback'
 import list from '../../components/List.module.css'
 import { Time } from '../../lib/format'
 import { usePageTitle } from '../../lib/usePageTitle'
@@ -59,6 +59,14 @@ export function MachinesPage() {
                   {machine.thisMachine ? <Badge tone="neutral">This machine</Badge> : null}
                   {machine.pendingHostName ? <Badge tone="warn">New host name reported</Badge> : null}
                 </div>
+                {machine.copyWarning ? (
+                  <Notice kind="warning" title="This machine's identity may have been copied">
+                    <p>
+                      Its connection was replaced by a connection from a different address {machine.copyWarning.count} times within 10 minutes (from {machine.copyWarning.firstAddress} and {machine.copyWarning.lastAddress}). Two programs may be using
+                      this machine's key. Disable this machine if you did not start both.
+                    </p>
+                  </Notice>
+                ) : null}
                 <Facts
                   items={[
                     ['Fingerprint', <span key="f" className={list.mono}>{machine.display}</span>],

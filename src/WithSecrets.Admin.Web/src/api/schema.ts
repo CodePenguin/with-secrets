@@ -740,6 +740,19 @@ export interface components {
             /** @description The one-use passkey page to open. The tap there starts the session. */
             link: string;
         };
+        /** @description A warning (never a decision) that this machine's identity may have been copied: its connection was repeatedly superseded by a connection from a different address. */
+        CopyWarning: {
+            /** @description The most supersedes from another address seen within one watch window. */
+            count: number;
+            /** @description The address of the older connection when the warning was first recorded. */
+            firstAddress: string;
+            /** @description The address of the newest connection that superseded another. */
+            lastAddress: string;
+            /** Format: date-time */
+            firstSeen: string;
+            /** Format: date-time */
+            lastSeen: string;
+        };
         Machine: {
             fingerprint: string;
             display: string;
@@ -755,6 +768,7 @@ export interface components {
             updated: string;
             thisMachine: boolean;
             actions: ("approve" | "disable" | "enable" | "untrust" | "trust" | "approve-host-change" | "rename")[];
+            copyWarning: components["schemas"]["CopyWarning"] | null;
         };
         MachineList: {
             items: components["schemas"]["Machine"][];

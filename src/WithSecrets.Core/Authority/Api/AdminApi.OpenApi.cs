@@ -48,6 +48,14 @@ internal sealed partial class AdminApi
             ["Browser"] = S.Obj([("antiForgery", S.Str(description: "Keep this in the page (not in a cookie) and send it as the X-Admin-Token header with every request. It is given once, here, and never again."))]),
             ["Claim"] = S.Obj([("antiForgery", S.Str(description: "The session's own secret, given once, here. Send it as the X-Admin-Token header with every request: the session cookie alone is not enough.")), ("session", S.Ref("Session"))]),
             ["LoginStarted"] = S.Obj([("link", S.Str(description: "The one-use passkey page to open. The tap there starts the session."))]),
+            ["CopyWarning"] = S.Obj(
+            [
+                ("count", S.Int(description: "The most supersedes from another address seen within one watch window.")),
+                ("firstAddress", S.Str(description: "The address of the older connection when the warning was first recorded.")),
+                ("lastAddress", S.Str(description: "The address of the newest connection that superseded another.")),
+                ("firstSeen", S.Time()),
+                ("lastSeen", S.Time()),
+            ], description: "A warning (never a decision) that this machine's identity may have been copied: its connection was repeatedly superseded by a connection from a different address."),
             ["Machine"] = S.Obj(
             [
                 ("fingerprint", S.Str()),
@@ -61,6 +69,7 @@ internal sealed partial class AdminApi
                 ("updated", S.Time()),
                 ("thisMachine", S.Bool()),
                 ("actions", S.Arr(S.Str(values: machineActions))),
+                ("copyWarning", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("CopyWarning"), new JsonObject { ["type"] = "null" }) }),
             ]),
             ["MachineList"] = S.Obj([("items", S.Arr(S.Ref("Machine")))]),
             ["Grant"] = S.Obj(

@@ -71,6 +71,7 @@ export const machine = (extra: Partial<Machine> = {}): Machine => ({
   updated: '2026-11-08T10:00:00Z',
   thisMachine: false,
   actions: ['approve', 'rename'],
+  copyWarning: null,
   ...extra,
 })
 
