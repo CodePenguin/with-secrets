@@ -181,3 +181,11 @@ This plan turns the accepted target design in [architecture.md](architecture.md#
 - [x] Copied-identity warning: 3 supersedes from different addresses within 10 minutes (fixed) record a warning in `authority.db`, one signed `admin` audit event and a Machines screen warning; nothing is disabled.
 - [x] The machine listener starts when the first approval makes the authority signing key (no restart).
 - [x] A run blocked on approval ends as approved, refused or timed out with a distinct outcome (exit 3 for both refusals, per the exit-code table; own sentence and reason code `approval-timeout` for a timeout).
+
+### Task M8: admin web, fewer steps (groups A and B)
+
+- [x] One step per administrative change: the dialog's **Continue to passkey** asks for the authorization and opens the passkey page; the operation and its parameters are shown once. Review, Ask and Open are gone.
+- [x] Pairing is part of Machines (Add a machine, the machine that paired as a card to check and approve, its friendly name pre-filled from the host name, invitations by status); the Pairing navigation entry is gone.
+- [x] The service makes the change when the tap is verified; the web page reads the outcome by authorization id (also after a reload); cancel at the service; the invitation bundle is collected once.
+- [x] The architecture's "Current implementation" text about browser storage is corrected (the session secret and the waiting-authorization record are kept in `sessionStorage`).
+- [x] Tests: Vitest, the `Api` suite (`ApiTapTimeTests`), E2E click counts (3 clicks to approve a machine, create an invitation or make an admin change) and a reload between the tap and the result (`i9`).

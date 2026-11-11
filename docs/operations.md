@@ -28,10 +28,12 @@ Do these in your own terminal, not the agent's.
 1. **Create the secret store and the first passkey:** `with-secrets --config` (README "First-time setup"). The first passkey must support PRF and becomes the first admin key. The page shows a **recovery code once**; write it down offline (see section 5).
 2. **Start the host service:** `with-secrets service`. It enrolls this machine as **Pending**, starts **locked** and prints its fingerprint and the link of the admin web app. It listens on `127.0.0.1` and `[::1]`, port 8765 (`--port N` or `WITH_SECRETS_PORT`).
 3. **Open the admin web app:** open the link the service printed in its own window. (`with-secrets admin` also prints the link, but until this machine is approved nothing is pinned, so it marks the link as not verified, exits 0 and does not open a browser; after the approval it checks the service's identity first, opens the link in a terminal on Windows, and exits 7 if what answers is not this machine's service.) Unlock (one passkey tap), sign in (a second tap, a read-only session) and open **Machines**.
-4. **Approve this machine:** compare the fingerprint with the one the service printed, type a friendly name, press **Approve** and tap an admin passkey. This also pins the authority signing key in `host.json`. Until then a run exits 7 (no identity pinned) or is refused (Pending).
+4. **Approve this machine:** compare the fingerprint with the one the service printed, check the friendly name (it starts as the host name; change it if you like), press **Approve**, **Continue to passkey** and tap an admin passkey. This also pins the authority signing key in `host.json`. Until then a run exits 7 (no identity pinned) or is refused (Pending).
 5. **Store secrets:** `with-secrets --set NAME`. Give the agent the run command and the secret names.
 
 Every later change in the app is its own request, its own one-use passkey page and one tap; a session alone changes nothing. Normal use of a valid grant needs no tap.
+
+**How a change goes (one step).** In the change's dialog press **Continue to passkey**: the app asks the service for the authorization and the service's own passkey page opens in a new tab (if your browser blocks that, use the link the dialog offers). Check that the page names the same operation, and tap there. The service makes the change when the tap is verified; the dialog (or, after a reload or when you come back to the tab, the same dialog again) shows the result: done, refused, expired, or not made with the service's reason. The page never makes the change itself, so a tab that was reloaded, backgrounded or closed between the tap and the result loses nothing; closing the dialog or **Cancel the request** before the tap cancels the request (a tap on its passkey page afterwards changes nothing). Limits: after **Lock**, and after an idle session timeout, the result of a request cannot be read back (the sessions are gone); if you tapped, the change was made and is in **Audit, Authority changes**. A new invitation's bundle is shown once and is held by the service for 5 minutes only if the dialog was closed before collecting it.
 
 ### More passkeys
 
@@ -43,7 +45,7 @@ A second machine (for example WSL) is a separate identity. On the authority's ma
 
 #### Pairing procedure
 
-1. On the authority: admin app, **Pairing**, **Create an invitation**, tap the passkey on the page that opens and **copy the bundle** shown once (`wsp1;https://HOST:8790;ID;CODE`). It is valid 10 minutes and registers one machine. It cannot be shown again: if it is lost, revoke the invitation (or let it expire) and create another.
+1. On the authority: admin app, **Machines**, **Add a machine**, **Continue to passkey**, tap the passkey on the page that opens and **copy the bundle** shown once (`wsp1;https://HOST:8790;ID;CODE`). It is valid 10 minutes and registers one machine. It cannot be shown again: if it is lost, revoke the invitation (or let it expire) and create another.
 2. On the new machine: `with-secrets pair`, paste the bundle at the hidden prompt. The machine prints its fingerprint and host name and says it is Pending.
 3. On the authority: **Machines**, find the Pending machine, compare the fingerprint and host name with what the machine printed, **Approve** with a tap. Host then pins the authority key by itself on its first run.
 4. Check: run a command on the new machine that needs a secret; the authority's approval page opens on the authority.
@@ -149,7 +151,7 @@ A machine that starts reporting another host name is **not** accepted by itself:
 
 1. Build for `linux-x64`; in WSL `with-secrets pair` makes the key file on first use (a Linux host service starts with `with-secrets service`).
 2. Windows: `with-secrets service --machine-port 8790` (mirrored networking: loopback works; NAT mode: bind the vEthernet(WSL) address with `--machine-bind`, which from WSL is the default gateway in `ip route show default`, and add the firewall rule yourself; the certificate is the machine's own, there is no certificate file to supply).
-3. Windows admin app: **Pairing**, create an invitation (tap) and copy the bundle. WSL: `with-secrets pair` and paste it (see section 2, "Pairing procedure").
+3. Windows admin app: **Machines**, **Add a machine** (tap) and copy the bundle. WSL: `with-secrets pair` and paste it (see section 2, "Pairing procedure").
 4. Windows admin app: approve the pending machine after comparing its fingerprint.
 5. WSL: run a command that needs a secret; open the authority link printed on Windows and tap the passkey.
 6. Confirm the child saw the value and the Windows audit history shows the signed events.

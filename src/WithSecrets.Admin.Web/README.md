@@ -12,4 +12,4 @@ The administration web application (React, TypeScript strict, Vite). It is built
 | `npm run build` | `api:check`, typecheck, then the production build into `dist` (embedded by MSBuild) |
 | `npm run dev` | Vite dev server (base `/admin/`); the API is not proxied, use the built exe for real runs |
 
-Rules: no browser storage except the two secrets of the API (`src/api/client.ts`, this tab's `sessionStorage`, never `localStorage`), no inline script or style (strict CSP), same origin only, every mutation goes through the authorization dialog (`src/features/authorization`).
+Rules: no browser storage except the two secrets of the API and the one waiting-authorization record (id, operation, title, summary; `src/api/client.ts`, this tab's `sessionStorage`, never `localStorage`), no inline script or style (strict CSP), same origin only, every mutation goes through the authorization dialog (`src/features/authorization`).
