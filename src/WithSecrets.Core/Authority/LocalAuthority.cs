@@ -143,9 +143,6 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
     /// <summary>How long a response is valid after it was issued.</summary>
     public static readonly TimeSpan ResponseLifetime = TimeSpan.FromSeconds(60);
 
-    /// <summary>The longest a host may go on using what it synchronized while it cannot reach the authority: the authority's policy (a provisional default of 15 minutes), sent to the host in each reconcile answer. A connected host applies a change at its next check-in.</summary>
-    public TimeSpan LeaseDuration { get; set; } = TimeSpan.FromMinutes(15);
-
     /// <summary>Checks the passkey assertions that back grants. Without one no grant is made or used (a grant counts only when a person's assertion backs its present state).</summary>
     public IApprovalVerifier? Verifier { get; set; }
 
@@ -443,7 +440,7 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
         bool cancelled = cancel.IsCancellationRequested;
         string detail = ApprovalSummary.Clean(answered.Detail);
         detail = detail.Length > 200 ? detail[..200] : detail;
-        string keyName = AuditLog.KeyName(answered.Detail);
+        string keyName = AdminAudit.KeyName(answered.Detail);
         string approvedBy = keyName.Length > 0 ? "passkey " + ApprovalSummary.Clean(keyName) : "approval page";
 
         return store.ApplyGrant(request.RequestId, digest, machine.Fingerprint, (tx, current) =>
@@ -609,12 +606,12 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
         string digest = envelope.Digest();
         ISigningKey key = keys.Current();
         DateTimeOffset now = _clock.GetUtcNow();
-        ReconcileResponse Answer(string status, bool bound, int revision, TimeSpan lease) => ReconcileResponse.Create(envelope.RequestId, digest, envelope.MachineFingerprint, status, bound, revision, (int)lease.TotalSeconds, now, now + ResponseLifetime, key);
+        ReconcileResponse Answer(string status, bool bound, int revision) => ReconcileResponse.Create(envelope.RequestId, digest, envelope.MachineFingerprint, status, bound, revision, now, now + ResponseLifetime, key);
 
         MachineRecord? machine = store.Find(envelope.MachineFingerprint);
         if (machine is null || !envelope.Verify(machine.PublicKey) || (envelope.Created - now).Duration() > TimeSpan.FromMinutes(5))
         {
-            return Task.FromResult(Answer("Unknown", false, machine?.SecurityRevision ?? 0, TimeSpan.Zero));
+            return Task.FromResult(Answer("Unknown", false, machine?.SecurityRevision ?? 0));
         }
 
         bool bound = string.Equals(envelope.HostName, machine.HostName, StringComparison.Ordinal);
@@ -623,7 +620,7 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
             store.RecordHostMismatch(machine.Fingerprint, envelope.HostName);
         }
 
-        return Task.FromResult(Answer(machine.Status.ToString(), bound, machine.SecurityRevision, machine.Status == MachineStatus.Trusted && bound ? LeaseDuration : TimeSpan.Zero));
+        return Task.FromResult(Answer(machine.Status.ToString(), bound, machine.SecurityRevision));
     }
 
     public Task<IReadOnlyList<PendingGrantEvent>> PendingGrantEventsAsync(string machineFingerprint, CancellationToken cancel = default)

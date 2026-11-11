@@ -11,7 +11,7 @@ public sealed class StateDatabaseException(string message, Exception? inner = nu
 
 /// <summary>
 /// <c>state.db</c> in the protected store folder: the signed manifest (passkeys and settings, see <see cref="Manifest" />), the
-/// sign counts, saved approvals and the audit log, in SQLite. Every read of keys, settings or approvals verifies the manifest
+/// sign counts and saved approvals, in SQLite. Every read of keys, settings or approvals verifies the manifest
 /// first (see <see cref="CurrentManifest" />); a state that fails verification can be used for nothing. Every
 /// write is one transaction that takes the write lock first (<c>BEGIN IMMEDIATE</c>), so two processes writing at once wait for
 /// each other (up to the busy timeout) and no update is lost. A missing database is empty. A database that exists but cannot be
@@ -23,7 +23,7 @@ public sealed class StateDatabaseException(string message, Exception? inner = nu
 public sealed class StateDatabase
 {
     public const string FileName = "state.db";
-    public const int SchemaVersion = 9;
+    public const int SchemaVersion = 10;
 
     public static readonly TimeSpan DefaultBusyTimeout = TimeSpan.FromSeconds(5);
 
@@ -43,10 +43,6 @@ public sealed class StateDatabase
             key TEXT PRIMARY KEY NOT NULL, credential_id TEXT NOT NULL, authenticator_data TEXT NOT NULL, client_data TEXT NOT NULL,
             signature TEXT NOT NULL, nonce TEXT NOT NULL, text TEXT NOT NULL, minutes INTEGER NOT NULL, approved INTEGER NOT NULL,
             expires INTEGER NOT NULL);
-        CREATE TABLE audit (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT NOT NULL, event TEXT NOT NULL, secrets TEXT NOT NULL,
-            program TEXT NOT NULL, detail TEXT NOT NULL, key_name TEXT NOT NULL, entry TEXT NOT NULL,
-            prev_hash TEXT NOT NULL, hash TEXT NOT NULL);
         CREATE TABLE secrets (name TEXT PRIMARY KEY NOT NULL, ciphertext TEXT NOT NULL);
         """;
 
@@ -54,7 +50,7 @@ public sealed class StateDatabase
     /// The tables a store holds, all of them (sqlite_sequence may or may not be there). Any other table, any view, trigger or
     /// index other than SQLite's own primary-key indexes is an edit made outside the tool.
     /// </summary>
-    private static readonly string[] Tables = ["audit", "grants", "manifest", "schema_version", "secrets", "sign_counts"];
+    private static readonly string[] Tables = ["grants", "manifest", "schema_version", "secrets", "sign_counts"];
 
     /// <summary>Manifests already verified in this process, by the stored row, so the signature is checked once per process.</summary>
     private static readonly ConcurrentDictionary<string, Manifest> Verified = new(StringComparer.Ordinal);
@@ -73,6 +69,21 @@ public sealed class StateDatabase
     }
 
     public string FilePath { get; }
+
+    private AdminAudit? _audit;
+
+    /// <summary>
+    /// Where this store's administrative events go (the signed host audit; there is no audit table in state.db). By default the machine identity key of the platform key store
+    /// and the outbox beside the state, opened on first use; the host service puts its own audit here so that an event wakes its uploader.
+    /// </summary>
+    public AdminAudit Audit
+    {
+        get => _audit ??= AdminAudit.ForState(FilePath);
+        set => _audit = value;
+    }
+
+    /// <summary>Records one administrative event inside the caller's write transaction (just before it commits); throws <see cref="StateDatabaseException" /> when it cannot be committed, which rolls the change back.</summary>
+    internal void AppendAudit(AdminEvent item) => Audit.Append(item);
 
     /// <summary>The file name, for messages.</summary>
     public string FileLabel => Path.GetFileName(FilePath);

@@ -29,8 +29,23 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
     private long _reconcileNotBefore;
     private int _reconciling;
 
-    /// <summary>The offline-authorization lease: in memory only, issued by the authority's reconcile answer, measured on the monotonic clock. None after a restart.</summary>
-    public OfflineLease Lease { get; } = new(monotonic ?? SystemMonotonicClock.Instance);
+    private bool _vouched;
+
+    /// <summary>
+    /// True while the authority's last check-in answer (verified, for this machine, at the applied revision) said the machine is Trusted and its host name is the bound one. In memory only
+    /// (none after a restart) and cleared with every other authorization state. It is not a lease: there is no time during which the host goes on without the authority. Every run still asks
+    /// the authority; when it cannot be reached nothing is run.
+    /// </summary>
+    public bool Vouched
+    {
+        get
+        {
+            lock (_lock)
+            {
+                return _vouched;
+            }
+        }
+    }
 
     public string Fingerprint { get; } = KeyIdentity.Fingerprint(machineKey.PublicKey);
 
@@ -43,7 +58,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
     private bool Locked => LockState?.IsLocked == true;
 
     /// <summary>
-    /// Drops the held key unless this host still vouches for its grant: the grant is synchronized and has not ended, and the lease runs (a revision
+    /// Drops the held key unless this host still vouches for its grant: the grant is synchronized and has not ended, and the authority still vouches for this machine (a revision
     /// change or a disable forgets every grant, which ends here). Called wherever one of those can change, and before a key is lent.
     /// </summary>
     public void SweepKey()
@@ -66,9 +81,9 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
             {
                 Keys.Drop("grant changed");
             }
-            else if (!Lease.IsValid)
+            else if (!_vouched)
             {
-                Keys.Drop("lease ended");
+                Keys.Drop("authority no longer vouches");
             }
             else if (bound.Expires is { } end && _clock.GetUtcNow() >= end)
             {
@@ -110,7 +125,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
         lock (_lock)
         {
             SyncedGrant? grant = _synced.Values.FirstOrDefault(item => item.GrantId == grantId && item.ScopeKey == scopeKey && (item.Expires is null || _clock.GetUtcNow() < item.Expires));
-            if (Lease.IsValid && grant is not null)
+            if (_vouched && grant is not null)
             {
                 Keys.Hold(key, new HeldKeyBinding(grant.GrantId, grant.ScopeKey, grant.Revision, grant.Expires));
             }
@@ -119,7 +134,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
 
     public void DropKey(string reason) => Keys.Drop(reason);
 
-    /// <summary>The grants this host has synchronized with the authority (the scopes it may use while the authority cannot be reached, within the lease).</summary>
+    /// <summary>The grants this host has synchronized with the authority (what the authority last said covers this machine; every use is still checked with the authority).</summary>
     public IReadOnlyList<SyncedGrant> SyncedGrants
     {
         get
@@ -171,7 +186,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
 
     /// <summary>
     /// The authority locked: forget everything that lets this host authorize a run without asking the authority again. The held store key is zeroed and dropped, the
-    /// offline lease and the synchronized grants are cleared, saved approvals end, and every launch that has not committed is cancelled. Nothing is restored by unlocking: the
+    /// synchronized grants are cleared, saved approvals end, and every launch that has not committed is cancelled. Nothing is restored by unlocking: the
     /// host checks in again and the next run that needs a key taps again.
     /// </summary>
     public void Discard(string reason)
@@ -185,13 +200,13 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
         }
     }
 
-    /// <summary>Forgets every saved approval (in this host and in the store behind <c>clearSaved</c>), every synchronized grant and the offline lease. Called with the lock held.</summary>
+    /// <summary>Forgets every saved approval (in this host and in the store behind <c>clearSaved</c>), every synchronized grant and what vouched for the machine. Called with the lock held.</summary>
     private void ForgetSaved()
     {
         _saved.Clear();
         clearSaved?.Invoke();
         _synced.Clear();
-        Lease.Clear();
+        _vouched = false;
         Keys.Drop("authorization changed");
         _reconcileNotBefore = 0;
     }
@@ -299,12 +314,12 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
                 return Deny("no-approval", "the authority approved, but this host has no approval of its own for it. Nothing was run");
             }
 
-            // No valid lease, no use of secrets: a host that cannot show a current lease from its authority fails closed.
-            if (!await EnsureLeaseAsync(cancel))
+            // The authority must vouch for this machine (a verified, Trusted check-in): a host that cannot reach its authority fails closed.
+            if (!await EnsureVouchedAsync(cancel))
             {
                 local.Unlock?.Dispose();
 
-                return Deny("no-lease", NoLeaseMessage);
+                return Deny("not-vouched", NotVouchedMessage);
             }
 
             return new AuthorizationOutcome(local, null, response.ReasonCode, response.SecurityRevision);
@@ -421,18 +436,18 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
         }
     }
 
-    /// <summary>The line a run or approval gets when the host has no valid lease from its authority.</summary>
-    public const string NoLeaseMessage = "this host has no valid offline-authorization lease (the authority has not been reached lately, or the machine is not Trusted), so secrets cannot be used. The service reconnects by itself; ask again in a moment";
+    /// <summary>The line a run or approval gets when the authority has not vouched for this machine (it cannot be reached, or the machine is not Trusted).</summary>
+    public const string NotVouchedMessage = "the authority has not confirmed this machine as trusted (it cannot be reached, or the machine is not Trusted), so secrets cannot be used. The service reconnects by itself; ask again in a moment";
 
     /// <summary>
-    /// Applies an invalidation the authority announced (clears the host's authorization state, synchronized grants and lease; pending launches are
-    /// cancelled at their commit), then acknowledges it; applies the grant revocations the same way; then renews the lease while the authority answers.
+    /// Applies an invalidation the authority announced (clears the host's authorization state and synchronized grants; pending launches are
+    /// cancelled at their commit), then acknowledges it; applies the grant revocations the same way; then checks in again when nothing vouches for the machine.
     /// A host that cannot reach its authority throws from here and renews nothing.
     /// </summary>
     public async Task PumpAsync(CancellationToken cancel = default)
     {
         await ApplyAsync(await authority.PendingInvalidationsAsync(Fingerprint, cancel), await authority.PendingGrantEventsAsync(Fingerprint, cancel), cancel);
-        await RenewLeaseAsync(cancel);
+        await ReconcileIfNeededAsync(cancel);
     }
 
     /// <summary>
@@ -487,11 +502,10 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
         }
     }
 
-    /// <summary>A lease that is half gone, or none, is renewed now; then a held key that outlived its grant or the lease is dropped. Asks the authority only when a renewal is due.</summary>
-    public async Task RenewLeaseAsync(CancellationToken cancel = default)
+    /// <summary>Checks in now when nothing vouches for the machine (and the back-off after a refusal has passed); then a held key that outlived its grant or the authority's vouching is dropped.</summary>
+    public async Task ReconcileIfNeededAsync(CancellationToken cancel = default)
     {
-        // A lease that is half gone, or none, is renewed now (the local authority always answers; a remote one that does not leaves the lease to run out).
-        if (!Lease.IsValid && _monotonic.Milliseconds >= Volatile.Read(ref _reconcileNotBefore) || Lease.IsValid && Lease.Remaining < Lease.Duration / 2)
+        if (!Vouched && _monotonic.Milliseconds >= Volatile.Read(ref _reconcileNotBefore))
         {
             await ReconcileAsync(cancel);
         }
@@ -502,7 +516,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
     /// <summary>What a check-in with the authority came to.</summary>
     public enum Reconciliation
     {
-        /// <summary>The authority answered and its answer verified (a lease was issued when the machine is Trusted).</summary>
+        /// <summary>The authority answered and its answer verified (the machine is vouched for when it is Trusted).</summary>
         Reconciled,
 
         /// <summary>The authority could not be reached.</summary>
@@ -514,7 +528,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
 
     /// <summary>
     /// Checks in with the authority: it must answer for this machine (status, host name binding, security revision) with a signature of the pinned
-    /// key, and, when the machine is Trusted, it issues the lease, which starts on the monotonic clock now and replaces the one there was. A revision
+    /// key, and, when the machine is Trusted and its host name is the bound one, the host is vouched for. A revision
     /// newer than the one applied clears every cache first (so no state outlives an administrative change). Called at startup (before requests
     /// are accepted), on reconnect and on renewal; the same code runs in local mode.
     /// </summary>
@@ -523,7 +537,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
         // One check-in at a time.
         if (Interlocked.Exchange(ref _reconciling, 1) == 1)
         {
-            return Lease.IsValid ? Reconciliation.Reconciled : Reconciliation.Unverified;
+            return Vouched ? Reconciliation.Reconciled : Reconciliation.Unverified;
         }
 
         try
@@ -531,8 +545,8 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
             HostConfigLoad load = config.Load();
             if (load.Problem is not null || load.Config?.Authority is null || load.Config.MachineFingerprint != Fingerprint)
             {
-                Lease.Clear();
-                Keys.Drop("lease not renewed");
+                ClearVouched();
+                Keys.Drop("not vouched");
                 Volatile.Write(ref _reconcileNotBefore, _monotonic.Milliseconds + 5000);
 
                 return Reconciliation.Unverified;
@@ -555,8 +569,8 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
             {
                 if (await Verify(response, envelope.RequestId, envelope.Digest(), cancel) is not null || response.Status == "Unknown")
                 {
-                    Lease.Clear();
-                    Keys.Drop("lease not renewed");
+                    ClearVouched();
+                    Keys.Drop("not vouched");
                     Volatile.Write(ref _reconcileNotBefore, _monotonic.Milliseconds + 5000);
 
                     return Reconciliation.Unverified;
@@ -565,7 +579,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
             catch (Exception error) when (error is not OutOfMemoryException)
             {
                 AppLog.Warn("the authority's check-in answer could not be checked: {Type}", error.GetType().Name);
-                Lease.Clear();
+                ClearVouched();
                 Keys.Drop("check-in failed");
                 Volatile.Write(ref _reconcileNotBefore, _monotonic.Milliseconds + 5000);
 
@@ -576,8 +590,8 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
             {
                 if (_knownRevision is { } known && response.SecurityRevision < known)
                 {
-                    // An answer for an older revision than the one applied is not accepted, and no lease comes of it.
-                    Lease.Clear();
+                    // An answer for an older revision than the one applied is not accepted, and nothing vouches for the machine because of it.
+                    _vouched = false;
                     Keys.Drop("check-in older than the applied revision");
 
                     return Reconciliation.Unverified;
@@ -594,15 +608,15 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
                     ForgetSaved();
                 }
 
-                bool trusted = response.Status == nameof(MachineStatus.Trusted) && response.HostNameBound && response.LeaseSeconds > 0;
+                bool trusted = response.Status == nameof(MachineStatus.Trusted) && response.HostNameBound;
                 if (trusted)
                 {
-                    Lease.Issue(TimeSpan.FromSeconds(response.LeaseSeconds));
+                    _vouched = true;
                 }
                 else
                 {
-                    // A machine that is not Trusted keeps nothing: no lease, no synchronized grant.
-                    Lease.Clear();
+                    // A machine that is not Trusted keeps nothing: nothing vouches for it, no synchronized grant.
+                    _vouched = false;
                     _synced.Clear();
                     Keys.Drop("authority no longer trusts this machine");
                     Volatile.Write(ref _reconcileNotBefore, _monotonic.Milliseconds + 5000);
@@ -617,23 +631,30 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
         }
     }
 
-    /// <summary>True when the lease is valid, after a check-in with the authority if it was not.</summary>
-    private async Task<bool> EnsureLeaseAsync(CancellationToken cancel)
+    private void ClearVouched()
     {
-        if (Lease.IsValid)
+        lock (_lock)
+        {
+            _vouched = false;
+        }
+    }
+
+    /// <summary>True when the authority vouches for this machine, after a check-in with it if it did not.</summary>
+    private async Task<bool> EnsureVouchedAsync(CancellationToken cancel)
+    {
+        if (Vouched)
         {
             return true;
         }
 
         await ReconcileAsync(cancel);
 
-        return Lease.IsValid;
+        return Vouched;
     }
 
     /// <summary>
     /// Is there a grant for exactly this request (the scope key the host made from it)? Online, the authority answers (signed); a grant it names is then
-    /// remembered here as synchronized. When the authority cannot be reached, only a grant remembered here counts, and only while the lease is valid and
-    /// the grant's own end has not come: the lease is never longer because a grant is, and an indefinite grant does not make it indefinite.
+    /// remembered here as synchronized. When the authority cannot be reached nothing is used: a grant remembered here is never used on its own.
     /// Anything that is not a verified, applicable grant is <see cref="GrantUseKind.NoGrant" />, and the request then goes through the ordinary approval.
     /// </summary>
     public async Task<GrantUse> TryUseGrantAsync(LaunchRequest launch, string scopeKey, CancellationToken cancel)
@@ -665,14 +686,8 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
 
             AppLog.Warn("the authority could not be asked about a grant: {Type}", error.GetType().Name);
 
-            // Only a failed transport to a remote authority is "offline". The local authority has no network: its failure (a database or key error) is not
-            // an absence, so nothing is used on the strength of an earlier answer.
-            if (authority is LocalAuthority || !IsTransportFailure(error))
-            {
-                return new GrantUse(GrantUseKind.Denied, "the authority failed to answer about a grant (" + error.GetType().Name + "). Nothing was run");
-            }
-
-            return OfflineUse(scopeKey);
+            // The authority did not answer (a network failure, or a database or key error at a local one): nothing is used on the strength of an earlier answer.
+            return new GrantUse(GrantUseKind.Denied, "the authority could not be asked about a grant (" + error.GetType().Name + "). Nothing was run");
         }
 
         string? problem;
@@ -709,9 +724,9 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
 
         if (response.Outcome == GrantOps.Granted && response.GrantId.Length > 0 && response.ScopeKey == scopeKey)
         {
-            if (!await EnsureLeaseAsync(cancel))
+            if (!await EnsureVouchedAsync(cancel))
             {
-                return new GrantUse(GrantUseKind.Denied, NoLeaseMessage);
+                return new GrantUse(GrantUseKind.Denied, NotVouchedMessage);
             }
 
             lock (_lock)
@@ -731,22 +746,6 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
         }
 
         return NoGrant();
-    }
-
-    private static bool IsTransportFailure(Exception error) => error is System.Net.Http.HttpRequestException or System.Net.Sockets.SocketException or TimeoutException or IOException && error is not AuthorityDatabaseException;
-
-    /// <summary>The authority cannot be reached: a grant this host already synchronized counts only while the lease runs (monotonic clock) and the grant has not ended.</summary>
-    private GrantUse OfflineUse(string scopeKey)
-    {
-        lock (_lock)
-        {
-            if (_synced.TryGetValue(scopeKey, out SyncedGrant? grant) && Lease.IsValid && (grant.Expires is null || _clock.GetUtcNow() < grant.Expires))
-            {
-                return new GrantUse(GrantUseKind.Granted, "", grant.GrantId, Offline: true);
-            }
-        }
-
-        return new GrantUse(GrantUseKind.NoGrant, "");
     }
 
     /// <summary>
@@ -846,7 +845,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
     /// <summary>
     /// Asks the authority to authorize and decrypt <paramref name="launch" />: it shows the page, takes the passkey tap and decrypts at its side, and answers with a signed refusal or a
     /// <see cref="SecretsDelivery" />. Nothing is launched here. A delivery counts only when the pinned authority key (or a rotation it signed) signed it for exactly this request id, digest
-    /// and machine, it has not expired, the names are exactly the requested ones, the security revision is not older than the one applied, this host holds a valid lease, and the id was not delivered before;
+    /// and machine, it has not expired, the names are exactly the requested ones, the security revision is not older than the one applied, the authority vouches for this host, and the id was not delivered before;
     /// otherwise every value is zeroed and the answer is a denial. <paramref name="onLink" /> receives the authority's page link (checked to be a plain http or https address).
     /// </summary>
     public async Task<RemoteAuthorization> AuthorizeRemoteAsync(LaunchRequest launch, string scopeKey, PageContext context, Action<string> onLink, CancellationToken cancel)
@@ -958,10 +957,10 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
                 return Deny(ReasonCodes.AuthorizationChanged, revisionProblem);
             }
 
-            // No valid lease, no use of secrets: the same rule as in local mode.
-            if (!await EnsureLeaseAsync(cancel))
+            // The authority must vouch for this machine: the same rule as in local mode.
+            if (!await EnsureVouchedAsync(cancel))
             {
-                return Deny("no-lease", NoLeaseMessage);
+                return Deny("not-vouched", NotVouchedMessage);
             }
 
             if (cancel.IsCancellationRequested)
@@ -1013,8 +1012,8 @@ public enum GrantUseKind
     Denied,
 }
 
-/// <summary>The answer to a grant check. <see cref="Offline" /> is true when the authority could not be reached and a synchronized grant under a valid lease was used.</summary>
-public sealed record GrantUse(GrantUseKind Kind, string Message, string GrantId = "", bool Offline = false);
+/// <summary>The answer to a grant check.</summary>
+public sealed record GrantUse(GrantUseKind Kind, string Message, string GrantId = "");
 
 /// <summary>The result of an approval that makes a grant: the grant (id and end, null for indefinite) or why not (a message with no value in it).</summary>
 public sealed record GrantApproval(bool Granted, string Message, string Code, string? GrantId, DateTimeOffset? Expires = null);

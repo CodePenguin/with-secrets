@@ -81,7 +81,7 @@ public sealed class SettingsPage(StateDatabase db, EnrollmentTarget primaryTarge
         // A refused or failed change is recorded (never on the first run, which has no state.db yet).
         if (!change.Done)
         {
-            new AuditLog(db).TryWriteDenied("--config", [], change.Detail);
+            db.Audit.TryWriteDenied("--config", [], change.Detail);
         }
 
         return change;
@@ -209,10 +209,16 @@ public sealed class SettingsPage(StateDatabase db, EnrollmentTarget primaryTarge
                                 throw new InvalidOperationException("the carried secrets do not match the new state (" + mismatch + ")");
                             }
 
-                            AuditLog.Append(connection, transaction, AuditLog.SettingsRow("settings-setup", changes, key.Name, $"first passkey \"{key.Name}\" (admin) added for {key.RpId}"));
+                            AdminEvent setup = AdminEvent.Settings("settings-setup", changes, key.Name, $"first passkey \"{key.Name}\" (admin) added for {key.RpId}");
                             if (Carry is { } carry)
                             {
-                                AuditLog.Append(connection, transaction, AuditLog.ChangeRow("recovered", $"recovered {carry.Count} secrets from {carry.OldFileName} (renamed to {carry.RecoveredName}); new keys made", key.Name));
+                                // A recovery builds the new state in a file of its own that only takes the old one's place when the swap succeeds: its events are recorded then, never for a state that was thrown away.
+                                carry.Pending.Add(setup);
+                                carry.Pending.Add(AdminEvent.Change("recovered", $"recovered {carry.Count} secrets from {carry.OldFileName} (renamed to {carry.RecoveredName}); new keys made", key.Name));
+                            }
+                            else
+                            {
+                                db.AppendAudit(setup);
                             }
                         });
 
@@ -434,7 +440,7 @@ public sealed class SettingsPage(StateDatabase db, EnrollmentTarget primaryTarge
                         return "the settings changed while the page was open; nothing was saved";
                     }
 
-                    AuditLog.Append(connection, transaction, AuditLog.SettingsRow("settings-changed", changes, AuditLog.KeyName(result.Detail)));
+                    db.AppendAudit(AdminEvent.Settings("settings-changed", changes, AdminAudit.KeyName(result.Detail)));
 
                     return null;
                 });

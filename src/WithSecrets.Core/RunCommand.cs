@@ -10,7 +10,7 @@ public sealed record RunArgs(IReadOnlyList<string> Secrets, string Reason, strin
 /// signed it, for exactly that time, keeps that signature, and is used only while it verifies and its lifetime is within the
 /// current ceiling. One that does not verify is reported once on stderr and ignored: the person is asked again.
 /// </summary>
-public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog audit, TextWriter stdout, TextWriter stderr, GrantStore? grants = null, ReuseOffer? reuse = null, Func<string, string?>? environment = null, IStoreKeyProvider? keyProvider = null)
+public sealed class RunCommand(ISecretSource store, IApprover approver, TextWriter stdout, TextWriter stderr, GrantStore? grants = null, ReuseOffer? reuse = null, Func<string, string?>? environment = null, IStoreKeyProvider? keyProvider = null)
 {
     private readonly IStoreKeyProvider _keys = keyProvider ?? new TapStoreKeyProvider(approver);
 
@@ -83,7 +83,8 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         return await RunPlan(launch.Program, launch.Arguments, launch.Reason, launch.WorkingDirectory, plan, available, context, approveOnly);
     }
 
-    internal async Task<int> ExecuteAsync(RunArgs args, string workingDirectory)
+    /// <summary>A run without the service (tests): <paramref name="audit" /> is where the signed events go, as the service gives them to a run (none: nothing is recorded).</summary>
+    internal async Task<int> ExecuteAsync(RunArgs args, string workingDirectory, IHostAudit? audit = null)
     {
         IReadOnlyList<string> available;
         try
@@ -95,8 +96,8 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             return await Fail(StoreError, $"cannot read the secret store: {error.Message}");
         }
 
-        // The .env files are read once, here. This plan (pairs, files, ordinary values) goes to the page, the fingerprint, the audit
-        // row and the launch unchanged: a file edited later changes nothing.
+        // The .env files are read once, here. This plan (pairs, files, ordinary values) goes to the page, the fingerprint
+        // and the launch unchanged: a file edited later changes nothing.
         EnvResult composed = EnvDeclarations.Compose(args.EnvFiles, workingDirectory, args.Secrets, environment ?? Environment.GetEnvironmentVariable);
         if (composed.Plan is not { } plan)
         {
@@ -108,7 +109,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             await stderr.WriteLineAsync("with-secrets: " + note);
         }
 
-        return await RunPlan(args.Program, args.Arguments, args.Reason, workingDirectory, plan, available, new LaunchContext());
+        return await RunPlan(args.Program, args.Arguments, args.Reason, workingDirectory, plan, available, new LaunchContext { Audit = audit });
     }
 
     private async Task<int> RunPlan(string program, IReadOnlyList<string> typedArguments, string reason, string workingDirectory, EnvPlan plan, IReadOnlyList<string> available, LaunchContext context, bool approveOnly = false)
@@ -266,7 +267,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         // command line never covers another. The saved-approval key above ignores the other arguments and is not used for grants.
         string? grantScope = context.Authorization is { } scopeHost ? GrantEvidence.Scope(scopeHost.Fingerprint, fingerprint.Key, arguments) : null;
 
-        // The host's signed audit trail (the new events; the state.db rows above stay for the human commands). Every run that gets here names secrets, so every one is
+        // The host's signed audit trail. Every run that gets here names secrets, so every one is
         // secret-bearing: its authorization event is committed durably BEFORE anything is decrypted, and a run whose event cannot be committed does not go on. The later
         // events (launch, execution) cannot be a condition of a launch that already happened, so a failure to record them is only logged. No value of any secret is
         // recorded: the arguments are redacted, and the reasons are codes.
@@ -274,7 +275,44 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
         string auditProgram = resolved;
         IReadOnlyList<string> auditArguments = hostAudit is null ? [] : AuditRedaction.Arguments(arguments);
         string auditRequestId = context.Request?.RequestId ?? "";
-        bool Record(string type, string outcome, string reason, string grantId = "", int? exit = null) => hostAudit is null || hostAudit.TryRecord(new AuditFacts(type, outcome, reason, auditRequestId, workingDirectory, auditProgram, auditArguments, grantId, exit));
+        // The metadata of every event of the run: what the person approved, by name and fingerprint only (secret names, the variable mapping, the .env files and the
+        // fingerprints of the files the approval covers). Never a value. The approving key and the reuse minutes are added to the event that carries them.
+        Dictionary<string, string> auditMetadata = new(StringComparer.Ordinal) { ["secrets"] = string.Join(",", request.SecretNames.OrderBy(name => name, StringComparer.Ordinal)) };
+        if (request.Mappings is { Count: > 0 } mappings && mappings.Any(pair => pair.Variable != pair.Secret))
+        {
+            auditMetadata["variables"] = string.Join(",", mappings.Select(pair => pair.Variable + "=" + pair.Secret));
+        }
+
+        if (request.EnvFiles is { Count: > 0 } envFiles)
+        {
+            auditMetadata["envFiles"] = string.Join(",", envFiles);
+        }
+
+        if (fingerprint.Files.Count > 0)
+        {
+            auditMetadata["files"] = string.Join(";", fingerprint.Files.Select(file => file.Key + "=" + file.Value));
+        }
+
+        bool Record(string type, string outcome, string reason, string grantId = "", int? exit = null, string key = "", int? reuseMinutes = null)
+        {
+            if (hostAudit is null)
+            {
+                return true;
+            }
+
+            Dictionary<string, string> metadata = new(auditMetadata, StringComparer.Ordinal);
+            if (key.Length > 0)
+            {
+                metadata["key"] = key;
+            }
+
+            if (reuseMinutes is { } minutes)
+            {
+                metadata["reuseMinutes"] = minutes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            return hostAudit.TryRecord(new AuditFacts(type, outcome, reason, auditRequestId, workingDirectory, auditProgram, auditArguments, grantId, exit, metadata));
+        }
 
         // Remote authority: the page, the passkey tap and the decryption happen at the authority; what comes back is the verified, signed delivery. Nothing is decrypted here.
         async Task<(int? Exit, SecretValues? Values, string Grant)> RemoteAuthorizeAsync()
@@ -290,7 +328,6 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             RemoteAuthorization outcome = await context.Authorization!.AuthorizeRemoteAsync(context.Request!, GrantEvidence.Scope(context.Authorization.Fingerprint, fingerprint.Key, arguments), new PageContext(resolved, arguments, links, script, programFile, fingerprint.Key), link => context.OnApprovalLink?.Invoke(link), context.Cancel);
             if (!outcome.Ok)
             {
-                audit.TryWrite("denied", request, outcome.Message, files: fingerprint.Files);
                 Record(AuditEventTypes.Authorization, "denied", context.Cancel.IsCancellationRequested ? "cancelled" : outcome.Code);
 
                 return (context.Cancel.IsCancellationRequested ? await Cancelled() : await Fail(outcome.Code == "authority-locked" ? LaunchClient.AuthorityLocked : Denied, outcome.Message), null, "");
@@ -299,13 +336,6 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             SecretValues values = outcome.Values!;
             bool viaGrant = outcome.Via == SecretsDelivery.ViaGrant;
             string grant = viaGrant ? outcome.GrantId : "";
-            if (!audit.TryWrite(viaGrant ? "granted" : "approved", request, viaGrant ? $"grant {grant}, checked with the authority" : "approved at the authority", files: fingerprint.Files))
-            {
-                values.Dispose();
-
-                return (await Fail(AuditError, "cannot write the audit log, so nothing was run."), null, "");
-            }
-
             // The authorization event is committed before the program starts (the values are only in memory until then); a run whose event cannot be committed does not go on.
             if (!Record(AuditEventTypes.Authorization, viaGrant ? "granted" : "approved", viaGrant ? "online" : ReasonCodes.Approved, grant))
             {
@@ -346,7 +376,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             return approved;
         }
 
-        // A grant for exactly this request (the authority answers, or one this host synchronized, under a valid lease) stands in for the
+        // A grant for exactly this request (the authority answers; when it cannot be reached nothing is run) stands in for the
         // approval page's decision. A request that is not covered, or whose grant ended, goes through the page as before.
         GrantUse? grantUse = null;
         if (!remote && context.Authorization is { } grantHost && context.Request is { } grantLaunch)
@@ -354,7 +384,6 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             grantUse = await grantHost.TryUseGrantAsync(grantLaunch, grantScope!, context.Cancel);
             if (grantUse.Kind == GrantUseKind.Denied)
             {
-                audit.TryWrite("denied", request, grantUse.Message, files: fingerprint.Files);
                 Record(AuditEventTypes.Authorization, "denied", context.Cancel.IsCancellationRequested ? "cancelled" : "grant-check-failed");
 
                 return context.Cancel.IsCancellationRequested ? await Cancelled() : await Fail(Denied, grantUse.Message);
@@ -394,14 +423,9 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             }
             else if (grantUse is { Kind: GrantUseKind.Granted } granted)
             {
-                string how = granted.Offline ? "offline, within the lease" : "checked with the authority";
+                const string how = "checked with the authority";
                 await stderr.WriteLineAsync($"with-secrets: a grant covers this request (grant {granted.GrantId}, {how}); no approval page decision is needed.");
-                if (!audit.TryWrite("granted", request, $"grant {granted.GrantId}, {how}", files: fingerprint.Files))
-                {
-                    return await Fail(AuditError, "cannot write the audit log, so nothing was run.");
-                }
-
-                if (!Record(AuditEventTypes.Authorization, "granted", granted.Offline ? "offline-lease" : "online", granted.GrantId))
+                if (!Record(AuditEventTypes.Authorization, "granted", "online", granted.GrantId))
                 {
                     return await Fail(AuditError, AuditEventMessage);
                 }
@@ -410,7 +434,6 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                 KeyRelease release = _keys.Obtain(store, request, context.Cancel, line => stderr.WriteLine(line), granted.GrantId, grantScope);
                 if (!release.Ok)
                 {
-                    audit.TryWrite("denied", request, release.Detail, files: fingerprint.Files);
                     Record(AuditEventTypes.Launch, context.Cancel.IsCancellationRequested ? "cancelled" : "failed", "key-not-released", runGrant);
 
                     return context.Cancel.IsCancellationRequested ? await Cancelled() : await Fail(Denied, release.Detail);
@@ -427,7 +450,6 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                     AuthorizationOutcome reused = await reusedHost.AuthorizeAsync(reusedLaunch, () => ApprovalDecision.Allow("saved approval"), context.Cancel);
                     if (!reused.Decision.Approved)
                     {
-                        audit.TryWrite("denied", request, reused.Decision.Detail, files: fingerprint.Files);
                         Record(AuditEventTypes.Authorization, "denied", context.Cancel.IsCancellationRequested ? "cancelled" : reused.Code);
 
                         return context.Cancel.IsCancellationRequested ? await Cancelled() : await Fail(Denied, reused.AuthorityMessage ?? $"The user did not approve ({reused.Decision.Detail}). Do not retry. Ask the user.");
@@ -437,12 +459,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                 DateTimeOffset now = DateTimeOffset.UtcNow;
                 string detail = $"approval by passkey {grant.KeyName} from {grant.Approved:O}, ends {grant.Expires:O}";
                 await stderr.WriteLineAsync($"with-secrets: reusing the approval for this exact request ({Math.Max(0, (int)(grant.Expires - now).TotalMinutes)} min left).");
-                if (!audit.TryWrite("reused", request, detail, files: fingerprint.Files, keyName: grant.KeyName))
-                {
-                    return await Fail(AuditError, "cannot write the audit log, so nothing was run.");
-                }
-
-                if (!Record(AuditEventTypes.Authorization, "reused", "saved-approval"))
+                if (!Record(AuditEventTypes.Authorization, "reused", "saved-approval", key: grant.KeyName))
                 {
                     return await Fail(AuditError, AuditEventMessage);
                 }
@@ -478,7 +495,6 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                 unlock = decision.Unlock;
                 if (!decision.Approved && context.Cancel.IsCancellationRequested)
                 {
-                    audit.TryWrite("denied", request, "cancelled by the client", files: fingerprint.Files);
                     Record(AuditEventTypes.Authorization, "denied", "cancelled");
 
                     return await Cancelled();
@@ -490,14 +506,9 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                     authorityCode = "reuse-not-offered";
                 }
 
-                if (!audit.TryWrite(decision.Approved ? "approved" : "denied", request, decision.Detail, files: fingerprint.Files, reuseMinutes: decision.Approved ? decision.ReuseMinutes : null))
-                {
-                    return await Fail(AuditError, "cannot write the audit log, so nothing was run.");
-                }
-
                 // The signed authorization event: for an approval it must be committed before anything is decrypted. A denial is recorded too (nothing runs either way).
                 string authorizationCode = authorityCode ?? (decision.Approved ? ReasonCodes.Approved : ReasonCodes.UserDenied);
-                if (!Record(AuditEventTypes.Authorization, decision.Approved ? "approved" : "denied", authorizationCode) && decision.Approved)
+                if (!Record(AuditEventTypes.Authorization, decision.Approved ? "approved" : "denied", authorizationCode, key: AdminAudit.KeyName(decision.Detail), reuseMinutes: decision.Approved ? decision.ReuseMinutes : null) && decision.Approved)
                 {
                     return await Fail(AuditError, AuditEventMessage);
                 }
@@ -538,7 +549,6 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
             // A launch that was cancelled while the page was open (the client left, or the service is stopping) decrypts nothing.
             if (context.StaleReason() is { } stale)
             {
-                audit.TryWrite("finished", request, "cancelled before the program started (" + stale + ")", Denied, fingerprint.Files);
                 Record(AuditEventTypes.Launch, "cancelled", stale.Replace(' ', '-'), runGrant);
 
                 return await Cancelled();
@@ -596,7 +606,6 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
 
                 if (!committed)
                 {
-                    audit.TryWrite("finished", request, "cancelled before the program started", Denied, fingerprint.Files);
                     Record(AuditEventTypes.Launch, "cancelled", "not-committed", runGrant);
 
                     return await Cancelled();
@@ -606,7 +615,6 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
                 {
                     await stderr.WriteLineAsync(startFailure);
                     Outcome = LaunchOutcome.Failed;
-                    audit.TryWrite("finished", request, "the program could not be started", NotFound, fingerprint.Files);
                     Record(AuditEventTypes.Launch, "failed", "start-failed", runGrant);
 
                     return NotFound;
@@ -645,7 +653,6 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
 
                     AppLog.Warn("launch failed after the program started: {Type}", error.GetType().Name);
                     Outcome = LaunchOutcome.Failed;
-                    audit.TryWrite("finished", request, "internal error after the program started", StoreError, fingerprint.Files);
                     Record(AuditEventTypes.Execution, "failed", "internal-error", runGrant);
                     await stderr.WriteLineAsync("with-secrets: internal error after the program started; it may have run. Check its effects before retrying.");
 
@@ -655,7 +662,6 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
 
             Outcome = LaunchOutcome.Exited;
 
-            audit.TryWrite("finished", request, "", exitCode, fingerprint.Files);
             Record(AuditEventTypes.Execution, "exited", "", runGrant, exitCode);
 
             return exitCode;
@@ -733,7 +739,6 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
 
         if (!result.Granted)
         {
-            audit.TryWrite("denied", request, result.Message, files: fingerprint.Files);
             _approveReason = context.Cancel.IsCancellationRequested ? "cancelled" : result.Code;
 
             return context.Cancel.IsCancellationRequested ? await Cancelled() : await Fail(Denied, result.Message);
@@ -741,11 +746,6 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, AuditLog
 
         _approveGrant = result.GrantId ?? "";
         string ends = result.Expires is { } at ? $"until {at.UtcDateTime:yyyy-MM-dd HH:mm} UTC" : "with no end";
-        if (!audit.TryWrite("grant-approved", request, $"grant {result.GrantId} {ends}", files: fingerprint.Files))
-        {
-            return await Fail(AuditError, $"the authority recorded grant {result.GrantId}, but the audit log cannot be written here.");
-        }
-
         Outcome = LaunchOutcome.Approved;
         await stdout.WriteLineAsync($"with-secrets: grant {result.GrantId} approved {ends}. A run of this exact command (every argument, the same secrets, folder, script and .env plan) needs no approval page decision while it lasts. Nothing was run.");
         if (store.NeedsUnlock)

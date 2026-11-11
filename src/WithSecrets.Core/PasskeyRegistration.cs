@@ -601,7 +601,7 @@ internal static class PasskeyRegistration
                 string signer = PasskeyMethod.Signer(current!, signed);
 
                 return Commit(store.Database, signed, () => ApprovalDecision.Allow($"Added the passkey named \"{key.Name}\" for {key.RpId}" + (admin ? ", as an admin." : ".")),
-                    (connection, transaction) => AuditLog.Append(connection, transaction, AuditLog.ChangeRow("key-enrolled",
+                    (connection, transaction) => store.Database.AppendAudit(AdminEvent.Change("key-enrolled",
                         $"passkey \"{key.Name}\" added for {key.RpId}" + (admin ? " as an admin" : " (approves runs only)") + $"; admin passkey {signer} verified", signer)));
             });
 

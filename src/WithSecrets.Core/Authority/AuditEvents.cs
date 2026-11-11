@@ -6,7 +6,7 @@ using System.Text.RegularExpressions;
 
 namespace WithSecrets;
 
-/// <summary>The three kinds of fact a run produces. Each is its own event: a decision is not an outcome, and a started program is not a finished one.</summary>
+/// <summary>The kinds of fact the audit records: three for a run (each is its own event: a decision is not an outcome, and a started program is not a finished one) and the administrative events.</summary>
 public static class AuditEventTypes
 {
     /// <summary>Whether the run may use secrets: the person's approval, a grant, a saved approval, or a denial (with its code).</summary>
@@ -18,7 +18,108 @@ public static class AuditEventTypes
     /// <summary>How the program ended: its exit code, or an internal failure after it started.</summary>
     public const string Execution = "execution";
 
-    public static readonly IReadOnlyList<string> All = [Authorization, Launch, Execution];
+    /// <summary>An administrative event: a change to the secret store, to the passkeys, the saved approvals or the settings, or a change that was refused. The outcome is the event name; the arguments are names only (see <see cref="AdminEvent" />).</summary>
+    public const string Admin = "admin";
+
+    public static readonly IReadOnlyList<string> All = [Authorization, Launch, Execution, Admin];
+}
+
+/// <summary>
+/// The optional metadata of an event: a small JSON object of text values (names and fingerprints: secret names, an approving key name, reuse minutes, variable mapping,
+/// .env file paths and file fingerprints; never a value, a code, a key or PRF output). It is part of the signed canonical text (members sorted by name) and is left out of it when empty,
+/// so an event without metadata has exactly the text it always had. The limits are built in: <see cref="MaxMembers" /> members, names of letters, digits, dot, dash and underscore,
+/// <see cref="MaxValue" /> characters per value, <see cref="MaxBytes" /> bytes of UTF-8 in all, and valid Unicode only.
+/// </summary>
+public static class AuditMetadata
+{
+    public const int MaxMembers = 24;
+    public const int MaxName = 32;
+    public const int MaxValue = 2048;
+    public const int MaxBytes = 8192;
+
+    public static readonly IReadOnlyDictionary<string, string> None = new Dictionary<string, string>(StringComparer.Ordinal);
+
+    private static bool ValidName(string name) => name.Length is > 0 and <= MaxName && char.IsAsciiLetter(name[0]) && name.All(letter => char.IsAsciiLetterOrDigit(letter) || letter is '.' or '-' or '_');
+
+    private static bool ValidText(string text)
+    {
+        try
+        {
+            _ = new UTF8Encoding(false, true).GetBytes(text);
+
+            return true;
+        }
+        catch (EncoderFallbackException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>The canonical JSON object (members sorted by name, no white space).</summary>
+    public static string Canonical(IReadOnlyDictionary<string, string> metadata)
+    {
+        StringBuilder text = new();
+        CanonicalJson.Map(text, metadata);
+
+        return text.ToString();
+    }
+
+    /// <summary>Null when the metadata is within the limits, else what is wrong (naming the limit, never a value).</summary>
+    public static string? Problem(IReadOnlyDictionary<string, string> metadata)
+    {
+        if (metadata.Count > MaxMembers)
+        {
+            return "too many metadata members";
+        }
+
+        foreach ((string name, string value) in metadata)
+        {
+            if (!ValidName(name))
+            {
+                return "a metadata name is not 1 to 32 letters, digits, dots, dashes or underscores starting with a letter";
+            }
+
+            if (value.Length > MaxValue)
+            {
+                return "a metadata value is too long";
+            }
+
+            if (!ValidText(name) || !ValidText(value))
+            {
+                return "metadata is not valid UTF-8 text";
+            }
+        }
+
+        return Encoding.UTF8.GetByteCount(Canonical(metadata)) > MaxBytes ? "the metadata is too large" : null;
+    }
+
+    /// <summary>The metadata cut to the limits, so that no event this host signs can be refused for it: a member with an invalid name is dropped, a long value is cut, invalid Unicode is removed, and members past the size are left out.</summary>
+    public static IReadOnlyDictionary<string, string> Bound(IReadOnlyDictionary<string, string>? metadata)
+    {
+        if (metadata is null || metadata.Count == 0)
+        {
+            return None;
+        }
+
+        SortedDictionary<string, string> result = new(StringComparer.Ordinal);
+        foreach ((string name, string value) in metadata.OrderBy(entry => entry.Key, StringComparer.Ordinal))
+        {
+            if (!ValidName(name) || result.Count >= MaxMembers)
+            {
+                continue;
+            }
+
+            string clean = AuditRedaction.Cut(ApprovalSummary.Clean(value), MaxValue);
+            result[name] = ValidText(clean) ? clean : new string([.. clean.Where(letter => !char.IsSurrogate(letter))]);
+        }
+
+        while (result.Count > 0 && Encoding.UTF8.GetByteCount(Canonical(result)) > MaxBytes)
+        {
+            result.Remove(result.Keys.Last());
+        }
+
+        return result;
+    }
 }
 
 /// <summary>
@@ -26,7 +127,7 @@ public static class AuditEventTypes
 /// free text from a person, a program or the store. <see cref="Arguments" /> must already be redacted (<see cref="AuditRedaction" />). No OS user, no secret
 /// value and no environment value belongs here.
 /// </summary>
-public sealed record AuditFacts(string Type, string Outcome, string Reason, string RequestId, string Folder, string Program, IReadOnlyList<string> Arguments, string GrantId = "", int? ExitCode = null);
+public sealed record AuditFacts(string Type, string Outcome, string Reason, string RequestId, string Folder, string Program, IReadOnlyList<string> Arguments, string GrantId = "", int? ExitCode = null, IReadOnlyDictionary<string, string>? Metadata = null);
 
 /// <summary>
 /// One signed audit event. The host numbers it (a per-machine sequence, monotonic and gapless) and signs it with the machine identity key before it is committed to
@@ -50,7 +151,8 @@ public sealed record AuditEvent(
     IReadOnlyList<string> Arguments,
     string GrantId,
     int? ExitCode,
-    byte[] Signature)
+    byte[] Signature,
+    IReadOnlyDictionary<string, string>? Metadata = null)
 {
     public const string Domain = "with-secrets audit event v1\n";
 
@@ -92,7 +194,15 @@ public sealed record AuditEvent(
         text.Append(",\"grantId\":");
         ToolSettings.QuoteJson(text, GrantId);
         text.Append(",\"exitCode\":").Append(ExitCode is { } code ? code.ToString(CultureInfo.InvariantCulture) : "null");
+        if (Metadata is { Count: > 0 })
+        {
+            text.Append(",\"metadata\":");
+            CanonicalJson.Map(text, Metadata);
+        }
     }
+
+    /// <summary>The metadata of the event (empty when it has none).</summary>
+    public IReadOnlyDictionary<string, string> Meta => Metadata ?? AuditMetadata.None;
 
     /// <summary>The event with its signature (base64) as the last member: as stored in the outbox and at the authority.</summary>
     public string ToJson()
@@ -109,7 +219,7 @@ public sealed record AuditEvent(
 
     public static AuditEvent Create(AuditFacts facts, string eventId, long sequence, DateTimeOffset time, ISigningKey machineKey, string epoch = "default")
     {
-        AuditEvent unsigned = new(1, eventId, sequence, time, KeyIdentity.Fingerprint(machineKey.PublicKey), epoch, facts.Type, facts.Outcome, facts.Reason, facts.RequestId, facts.Folder, facts.Program, [.. facts.Arguments], facts.GrantId, facts.ExitCode, []);
+        AuditEvent unsigned = new(1, eventId, sequence, time, KeyIdentity.Fingerprint(machineKey.PublicKey), epoch, facts.Type, facts.Outcome, facts.Reason, facts.RequestId, facts.Folder, facts.Program, [.. facts.Arguments], facts.GrantId, facts.ExitCode, [], AuditMetadata.Bound(facts.Metadata) is { Count: > 0 } meta ? meta : null);
 
         return unsigned with { Signature = machineKey.Sign(SigningBytes(unsigned.Canonical())) };
     }
@@ -159,7 +269,7 @@ public sealed record AuditEvent(
             return "too many arguments, or one is too long";
         }
 
-        return null;
+        return AuditMetadata.Problem(Meta);
     }
 
     /// <summary>Reads a stored event, strictly (every member, none unknown or repeated, each of its type).</summary>
@@ -173,11 +283,22 @@ public sealed record AuditEvent(
 
         using (doc)
         {
-            ContractReader reader = new(doc!.RootElement, "protocolVersion", "eventId", "sequence", "time", "machineFingerprint", "epoch", "type", "outcome", "reason", "requestId", "folder", "program", "arguments", "grantId", "exitCode", "signature");
+            // The metadata member is optional: an event without it has the text it always had.
+            bool hasMetadata = doc!.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("metadata", out _);
+            string[] names = ["protocolVersion", "eventId", "sequence", "time", "machineFingerprint", "epoch", "type", "outcome", "reason", "requestId", "folder", "program", "arguments", "grantId", "exitCode", "signature", .. hasMetadata ? new[] { "metadata" } : []];
+            ContractReader reader = new(doc.RootElement, names);
             if (reader.Problem is not null || !reader.Int("protocolVersion", out int version) || !reader.Text("eventId", out string? id) || !reader.Long("sequence", out long sequence)
                 || !reader.Time("time", out DateTimeOffset time) || !reader.Text("machineFingerprint", out string? machine) || !reader.Text("epoch", out string? epoch) || !reader.Text("type", out string? type) || !reader.Text("outcome", out string? outcome)
                 || !reader.Text("reason", out string? reason) || !reader.Text("requestId", out string? requestId) || !reader.Text("folder", out string? folder) || !reader.Text("program", out string? program)
                 || !reader.Strings("arguments", out List<string>? arguments) || !reader.Text("grantId", out string? grantId) || !reader.OptionalInt("exitCode", out int? exitCode) || !reader.Text("signature", out string? signature))
+            {
+                error = reader.Problem;
+
+                return false;
+            }
+
+            Dictionary<string, string>? metadata = null;
+            if (hasMetadata && !reader.Map("metadata", out metadata))
             {
                 error = reader.Problem;
 
@@ -193,7 +314,7 @@ public sealed record AuditEvent(
             }
 
             error = null;
-            parsed = new AuditEvent(version, id!, sequence, time, machine!, epoch!, type!, outcome!, reason!, requestId!, folder!, program!, arguments!, grantId!, exitCode, bytes);
+            parsed = new AuditEvent(version, id!, sequence, time, machine!, epoch!, type!, outcome!, reason!, requestId!, folder!, program!, arguments!, grantId!, exitCode, bytes, metadata is { Count: > 0 } ? metadata : null);
 
             return true;
         }
@@ -399,6 +520,7 @@ public static partial class AuditRedaction
             Program = Cut(facts.Program, AuditEvent.MaxText),
             GrantId = Cut(facts.GrantId, 128),
             Arguments = [.. facts.Arguments.Take(AuditEvent.MaxArguments).Select(argument => Cut(argument, AuditEvent.MaxText))],
+            Metadata = AuditMetadata.Bound(facts.Metadata),
         };
     }
 

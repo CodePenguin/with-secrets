@@ -281,15 +281,15 @@ internal static class RemoteWire
 
         using (doc)
         {
-            ContractReader reader = new(doc!.RootElement, "protocolVersion", "requestId", "requestDigest", "machineFingerprint", "status", "hostName", "securityRevision", "leaseSeconds", "issued", "expires", "authorityKeyId", "signature");
+            ContractReader reader = new(doc!.RootElement, "protocolVersion", "requestId", "requestDigest", "machineFingerprint", "status", "hostName", "securityRevision", "issued", "expires", "authorityKeyId", "signature");
             if (reader.Problem is not null || !reader.Int("protocolVersion", out int version) || !reader.Text("requestId", out string? id) || !reader.Text("requestDigest", out string? digest) || !reader.Text("machineFingerprint", out string? machine)
-                || !reader.Text("status", out string? status) || !reader.Text("hostName", out string? bound) || bound is not ("bound" or "mismatch") || !reader.Int("securityRevision", out int revision) || !reader.Int("leaseSeconds", out int lease)
+                || !reader.Text("status", out string? status) || !reader.Text("hostName", out string? bound) || bound is not ("bound" or "mismatch") || !reader.Int("securityRevision", out int revision)
                 || !reader.Time("issued", out DateTimeOffset issued) || !reader.Time("expires", out DateTimeOffset expires) || !reader.Text("authorityKeyId", out string? keyId) || !reader.Text("signature", out string? signatureText) || !Signature(signatureText!, out byte[] signature))
             {
                 return false;
             }
 
-            response = new ReconcileResponse(version, id!, digest!, machine!, status!, bound == "bound", revision, lease, issued, expires, keyId!, signature);
+            response = new ReconcileResponse(version, id!, digest!, machine!, status!, bound == "bound", revision, issued, expires, keyId!, signature);
 
             return true;
         }

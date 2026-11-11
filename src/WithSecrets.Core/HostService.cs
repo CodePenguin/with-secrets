@@ -58,7 +58,7 @@ public sealed class HostServiceOptions
     /// <summary>Local authority: how often the service looks for invalidations of this machine that it has not applied (a launch also looks before it begins). Remote authority: no timer asks; this is only the first pause before a reconnect (it grows to a bound, with jitter) and how often the lease is checked for renewal.</summary>
     public TimeSpan InvalidationPoll { get; init; } = TimeSpan.FromSeconds(1);
 
-    /// <summary>For tests: the clock that measures the offline lease (default: the system's monotonic clock).</summary>
+    /// <summary>For tests: the clock for the check-in back-off (default: the system's monotonic clock).</summary>
     public IMonotonicClock? Monotonic { get; init; }
 
     /// <summary>How often the service sends its audit outbox to the authority when nothing wakes it (a new event always does). After a failure it waits longer, up to <see cref="AuditMaxBackoff" />.</summary>
@@ -199,6 +199,9 @@ public sealed class HostService : IDisposable
         // The host's audit: events are signed with the machine key and committed to the outbox (beside authority.db) before a run decrypts anything; the uploader sends them on its own.
         HostAuditOutbox outbox = HostAuditOutbox.InFolder(Path.GetDirectoryName(options.Deployment.Store.FilePath)!, options.Deployment.MachineKey, options.Deployment.Clock);
         Audit = new HostAudit(outbox, new AuditUploader(outbox, () => options.Deployment.AuditSink, (ack, id, digest, cancel) => Authorization.VerifyAnswerAsync(ack, id, digest, cancel), Authorization.Fingerprint));
+
+        // The human commands' and the admin app's events (type admin) take the same road as a run's: signed with the machine key, committed to this outbox, sent by this uploader.
+        options.State.Audit = new AdminAudit(() => Audit, options.State.FilePath);
     }
 
     private Task _auditLoop = Task.CompletedTask;
@@ -234,7 +237,7 @@ public sealed class HostService : IDisposable
 
     private void AfterUnlock()
     {
-        // The authority is unlocked: check in with it as at a start (the lease, the machine's status and revision) before any run is served.
+        // The authority is unlocked: check in with it as at a start (the machine's status and revision) before any run is served.
         StartupReconcile();
     }
 
@@ -283,7 +286,7 @@ public sealed class HostService : IDisposable
                 WebApplication app = Build(options, port, withIpv6);
                 service = new HostService(options, app, port);
                 // Locked by default; unattended unlock applies only when the administrator chose it. Before any request is accepted: check machine status, host name binding and security
-                // revision with the authority (it also issues the lease), which needs the authority unlocked.
+                // revision with the authority (it also vouches for the machine), which needs the authority unlocked.
                 service._startupUnlockNote = service.Lock.IsLocked ? UnattendedUnlock.TryUnlock(options.Deployment.Store, options.Deployment.Keys, service.Lock, options.UnlockProtection ?? UnlockProtections.ForThisPlatform()) : null;
                 if (service.Authorization.IsRemote || !service.Lock.IsLocked)
                 {
@@ -729,97 +732,58 @@ public sealed class HostService : IDisposable
         TimeSpan floor = _options.InvalidationPoll;
         TimeSpan pause = floor;
         bool reconnected = true;
-        Task lease = Task.Run(LeaseLoop);
-        try
-        {
-            while (!_stop.IsCancellationRequested)
-            {
-                try
-                {
-                    if (reconnected || !Ready)
-                    {
-                        await _options.Deployment.Remote!.EnsureAuthorityKeyPinnedAsync(_stop.Token);
-                        if (await Authorization.ReconcileAsync(_stop.Token) == HostAuthorization.Reconciliation.Unreachable)
-                        {
-                            throw new RemoteTransportException("the authority could not be reached");
-                        }
-
-                        Volatile.Write(ref _ready, true);
-                        reconnected = false;
-                        RenewIdentity(_stop.Token);
-                    }
-
-                    await Authorization.PollAsync(_stop.Token);
-                    pause = floor;
-                }
-                catch (OperationCanceledException) when (_stop.IsCancellationRequested)
-                {
-                    return;
-                }
-                catch (Exception error) when (error is not OutOfMemoryException)
-                {
-                    reconnected = true;
-                    if (error is RemoteRefusedException { Code: "machine-not-trusted" })
-                    {
-                        // The authority turns this machine away: whatever it was told, it is not trusted now. Nothing it holds may be used; the next check-in says what it is now.
-                        Authorization.Discard("the authority no longer trusts this machine");
-                    }
-
-                    AppLog.Warn("the authority link failed: {Type}", error is RemoteRefusedException refused ? "refused " + refused.Code : error.GetType().Name);
-                    try
-                    {
-                        await Task.Delay(TimeSpan.FromTicks((long)(pause.Ticks * (0.5 + Random.Shared.NextDouble() / 2))), _stop.Token);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        return;
-                    }
-
-                    pause = TimeSpan.FromTicks(Math.Min(pause.Ticks * 2, Math.Max(TimeSpan.FromSeconds(10).Ticks, floor.Ticks)));
-                }
-                finally
-                {
-                    Authorization.SweepKey();
-                }
-            }
-        }
-        finally
+        while (!_stop.IsCancellationRequested)
         {
             try
             {
-                await lease.WaitAsync(TimeSpan.FromSeconds(1));
-            }
-            catch (Exception error) when (error is OperationCanceledException or TimeoutException)
-            {
-                // Stopping.
-            }
-        }
-    }
+                if (reconnected || !Ready)
+                {
+                    await _options.Deployment.Remote!.EnsureAuthorityKeyPinnedAsync(_stop.Token);
+                    if (await Authorization.ReconcileAsync(_stop.Token) == HostAuthorization.Reconciliation.Unreachable)
+                    {
+                        throw new RemoteTransportException("the authority could not be reached");
+                    }
 
-    /// <summary>The offline lease is renewed when it is half gone (a local check; the authority is asked only then): the existing lease rule, not an invalidation poll.</summary>
-    private async Task LeaseLoop()
-    {
-        using PeriodicTimer timer = new(_options.InvalidationPoll);
-        try
-        {
-            while (await timer.WaitForNextTickAsync(_stop.Token))
+                    Volatile.Write(ref _ready, true);
+                    reconnected = false;
+                    RenewIdentity(_stop.Token);
+                }
+
+                await Authorization.PollAsync(_stop.Token);
+                pause = floor;
+            }
+            catch (OperationCanceledException) when (_stop.IsCancellationRequested)
             {
+                return;
+            }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            {
+                reconnected = true;
+
+                // Fail closed: with the authority out of reach (or refusing) the host keeps no store key it was lent.
+                Authorization.DropKey("the authority link failed");
+                if (error is RemoteRefusedException { Code: "machine-not-trusted" })
+                {
+                    // The authority turns this machine away: whatever it was told, it is not trusted now. Nothing it holds may be used; the next check-in says what it is now.
+                    Authorization.Discard("the authority no longer trusts this machine");
+                }
+
+                AppLog.Warn("the authority link failed: {Type}", error is RemoteRefusedException refused ? "refused " + refused.Code : error.GetType().Name);
                 try
                 {
-                    if (Ready)
-                    {
-                        await Authorization.RenewLeaseAsync(_stop.Token);
-                    }
+                    await Task.Delay(TimeSpan.FromTicks((long)(pause.Ticks * (0.5 + Random.Shared.NextDouble() / 2))), _stop.Token);
                 }
-                catch (Exception error) when (error is not OperationCanceledException)
+                catch (OperationCanceledException)
                 {
-                    AppLog.Warn("renewing the lease failed: {Type}", error.GetType().Name);
+                    return;
                 }
+
+                pause = TimeSpan.FromTicks(Math.Min(pause.Ticks * 2, Math.Max(TimeSpan.FromSeconds(10).Ticks, floor.Ticks)));
             }
-        }
-        catch (OperationCanceledException)
-        {
-            // The service is stopping.
+            finally
+            {
+                Authorization.SweepKey();
+            }
         }
     }
 
@@ -857,7 +821,7 @@ public sealed class HostService : IDisposable
                 }
                 finally
                 {
-                    // Whatever the authority did or did not answer, a held key outlives neither its grant nor the lease.
+                    // Whatever the authority did or did not answer, a held key outlives neither its grant nor the authority's vouching.
                     Authorization.SweepKey();
                 }
             }
@@ -1094,7 +1058,7 @@ public sealed class HostService : IDisposable
             };
 
             IApprover approver = Authorization.IsRemote ? new RefusingApprover("approval happens at the authority") : _options.ApproverFactory?.Invoke(settings, announce) ?? CommandWiring.RunApprover(_options.State, settings, announce);
-            RunCommand run = new(_options.Store, approver, new AuditLog(_options.State), stdout, stderr, _options.Grants, ReuseSettings.Load(_options.State), keyProvider: _options.KeyProviderFactory?.Invoke(approver) ?? new HeldStoreKeyProvider(approver, Authorization));
+            RunCommand run = new(_options.Store, approver, stdout, stderr, _options.Grants, ReuseSettings.Load(_options.State), keyProvider: _options.KeyProviderFactory?.Invoke(approver) ?? new HeldStoreKeyProvider(approver, Authorization));
             int code = await run.ExecuteAsync(launch, context, approve);
             stdout.Complete();
             stderr.Complete();

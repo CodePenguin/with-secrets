@@ -288,7 +288,7 @@ public interface IAuthority
     /// <summary>Asks about a grant for a request (use) or gets one made by the person's approval (approve). Idempotent by request id; the answer is signed.</summary>
     Task<GrantResponse> GrantAsync(GrantEnvelope envelope, CancellationToken cancel = default);
 
-    /// <summary>A machine's check-in: its status, host name binding, security revision and the offline lease the authority grants it. Signed.</summary>
+    /// <summary>A machine's check-in: its status, host name binding, security revision. Signed.</summary>
     Task<ReconcileResponse> ReconcileAsync(ReconcileEnvelope envelope, CancellationToken cancel = default);
 
     /// <summary>Grant revocations for the machine that it has not acknowledged yet, oldest first.</summary>

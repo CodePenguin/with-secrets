@@ -23,7 +23,7 @@ public static class CommandWiring
 
         Action<string> announce = TerminalPrompt.Line;
         (EnrollmentTarget primary, EnrollmentTarget local) = Targets(state, settings, announce, null);
-        SecretEntry entry = new(primary, local, store, new AuditLog(state), announce);
+        SecretEntry entry = new(primary, local, store, state.Audit, announce);
         SecretChange change = command switch
         {
             CliCommand.Set set => entry.Set(set.Names),
@@ -65,7 +65,7 @@ public static class CommandWiring
         Action<string> announce = TerminalPrompt.Line;
         (EnrollmentTarget primary, EnrollmentTarget local) = Targets(state, settings, announce, CodeReader("If the page says nothing was added, press Ctrl+C."));
         bool useLocal = command is CliCommand.Enroll { Local: true } or CliCommand.Unenroll { Local: true };
-        AuditLog audit = new(state);
+        AdminAudit audit = state.Audit;
         Enrollment enrollment = useLocal ? new(local, primary, announce, audit) : new(primary, local, announce, audit);
 
         switch (command)

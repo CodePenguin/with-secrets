@@ -149,7 +149,7 @@ public sealed class PasskeyMethod(PasskeyStore store, ApprovalSettings settings,
         return approval.Signed.Text != next.Canonical()
             ? ApprovalDecision.Deny("the admin approval did not sign the new state; nothing was removed")
             : PasskeyRegistration.Commit(store.Database, approval.Signed, () => ApprovalDecision.Allow($"Removed the passkey named \"{stored}\"."),
-                (connection, transaction) => AuditLog.Append(connection, transaction, AuditLog.ChangeRow("key-removed",
+                (connection, transaction) => store.Database.AppendAudit(AdminEvent.Change("key-removed",
                     $"passkey \"{stored}\" removed (with its saved approvals){(matches[0].Admin ? ", it was an admin" : "")}; admin passkey {Signer(current, approval.Signed)} verified", Signer(current, approval.Signed))));
     }
 

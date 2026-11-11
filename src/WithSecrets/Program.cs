@@ -5,7 +5,7 @@ namespace WithSecrets;
 
 internal static class Program
 {
-    // Everything lives in the user profile: %USERPROFILE%\.with-secrets\state.db (passkeys, settings, approvals, audit and the
+    // Everything lives in the user profile: %USERPROFILE%\.with-secrets\state.db (passkeys, settings, approvals and the
     // secrets as Dotenvx ciphertext). The store key is never stored: it is wrapped under keys that only the passkeys (WebAuthn PRF) can produce.
     private const string StoreFolder = ".with-secrets";
 
@@ -94,12 +94,6 @@ internal static class Program
         if (state.Gate(Console.Error) is { } failed)
         {
             return failed;
-        }
-
-        // --audit only reads: it may run anywhere and creates nothing.
-        if (command is CliCommand.Audit audit)
-        {
-            return AuditCommand.Run(state, audit, Console.Out, Console.Error);
         }
 
         // --revoke, --enroll, --enrolled, --unenroll and --config (not --config --show) are for a person in their own terminal.

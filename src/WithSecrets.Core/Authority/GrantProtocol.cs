@@ -114,8 +114,7 @@ public sealed record GrantEnvelope(int ProtocolVersion, string Operation, string
 /// <summary>
 /// The authority's signed answer about a grant: what was asked (<see cref="Operation" />), the outcome and a reason code, the grant
 /// (id, scope key, revision of the grant, and when it ends: a time, <see cref="Indefinite" />, or none), the machine's security
-/// revision, and how long the answer is valid. A grant change never carries a lease: the offline lease comes only from a
-/// <see cref="ReconcileResponse" />. Never a secret value.
+/// revision, and how long the answer is valid. Never a secret value.
 /// </summary>
 public sealed record GrantResponse(
     int ProtocolVersion,
@@ -287,7 +286,7 @@ public sealed record GrantAdminCommand(string RequestId, string Operation, strin
     }
 }
 
-/// <summary>A host's check-in with its authority (startup, reconnect, lease renewal), signed by the machine key. Carries no request content.</summary>
+/// <summary>A host's check-in with its authority (startup, reconnect, after a change), signed by the machine key. Carries no request content.</summary>
 public sealed record ReconcileEnvelope(int ProtocolVersion, string RequestId, string MachineFingerprint, string HostName, DateTimeOffset Created, byte[] Signature)
 {
     public const string Domain = "with-secrets reconcile request v1\n";
@@ -326,11 +325,9 @@ public sealed record ReconcileEnvelope(int ProtocolVersion, string RequestId, st
 
 /// <summary>
 /// The authority's signed answer to a <see cref="ReconcileEnvelope" />: the machine's status, whether the host name is the bound one
-/// and the security revision, and the offline lease. <see cref="LeaseSeconds" /> is the authority's policy for how long this host may go on
-/// using what it has synchronized while it cannot reach the authority; 0 (also for a machine that is not Trusted or whose host name
-/// does not match) means no lease. The host measures it with a monotonic clock from the moment it receives this answer.
+/// and the security revision. A host is vouched for only while its last check-in said Trusted and bound; there is no lease that lets it go on without the authority.
 /// </summary>
-public sealed record ReconcileResponse(int ProtocolVersion, string RequestId, string RequestDigest, string MachineFingerprint, string Status, bool HostNameBound, int SecurityRevision, int LeaseSeconds, DateTimeOffset Issued, DateTimeOffset Expires, string AuthorityKeyId, byte[] Signature) : ISignedAnswer
+public sealed record ReconcileResponse(int ProtocolVersion, string RequestId, string RequestDigest, string MachineFingerprint, string Status, bool HostNameBound, int SecurityRevision, DateTimeOffset Issued, DateTimeOffset Expires, string AuthorityKeyId, byte[] Signature) : ISignedAnswer
 {
     public const string Domain = "with-secrets reconcile response v1\n";
 
@@ -347,7 +344,7 @@ public sealed record ReconcileResponse(int ProtocolVersion, string RequestId, st
         ToolSettings.QuoteJson(text, Status);
         text.Append(",\"hostName\":");
         ToolSettings.QuoteJson(text, HostNameBound ? "bound" : "mismatch");
-        text.Append(",\"securityRevision\":").Append(SecurityRevision.ToString(CultureInfo.InvariantCulture)).Append(",\"leaseSeconds\":").Append(LeaseSeconds.ToString(CultureInfo.InvariantCulture)).Append(",\"issued\":");
+        text.Append(",\"securityRevision\":").Append(SecurityRevision.ToString(CultureInfo.InvariantCulture)).Append(",\"issued\":");
         ToolSettings.QuoteJson(text, CanonicalJson.Time(Issued));
         text.Append(",\"expires\":");
         ToolSettings.QuoteJson(text, CanonicalJson.Time(Expires));
@@ -357,9 +354,9 @@ public sealed record ReconcileResponse(int ProtocolVersion, string RequestId, st
         return text.Append('}').ToString();
     }
 
-    public static ReconcileResponse Create(string requestId, string requestDigest, string machineFingerprint, string status, bool hostNameBound, int securityRevision, int leaseSeconds, DateTimeOffset issued, DateTimeOffset expires, ISigningKey key)
+    public static ReconcileResponse Create(string requestId, string requestDigest, string machineFingerprint, string status, bool hostNameBound, int securityRevision, DateTimeOffset issued, DateTimeOffset expires, ISigningKey key)
     {
-        ReconcileResponse unsigned = new(LaunchProtocol.Version, requestId, requestDigest, machineFingerprint, status, hostNameBound, securityRevision, leaseSeconds, issued, expires, KeyIdentity.Fingerprint(key.PublicKey), []);
+        ReconcileResponse unsigned = new(LaunchProtocol.Version, requestId, requestDigest, machineFingerprint, status, hostNameBound, securityRevision, issued, expires, KeyIdentity.Fingerprint(key.PublicKey), []);
 
         return unsigned with { Signature = key.Sign(WireText.Bytes(Domain, unsigned.Canonical())) };
     }
@@ -371,7 +368,7 @@ public sealed record ReconcileResponse(int ProtocolVersion, string RequestId, st
     }
 }
 
-/// <summary>The clock that measures the offline lease: milliseconds that only go forward and do not change when the system date or time is changed.</summary>
+/// <summary>A clock for short back-off waits: milliseconds that only go forward and do not change when the system date or time is changed.</summary>
 public interface IMonotonicClock
 {
     long Milliseconds { get; }
@@ -383,75 +380,4 @@ public sealed class SystemMonotonicClock : IMonotonicClock
     public static SystemMonotonicClock Instance { get; } = new();
 
     public long Milliseconds => (long)(System.Diagnostics.Stopwatch.GetTimestamp() * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
-}
-
-/// <summary>
-/// The finite offline-authorization lease of a host service: a duration that the authority issued, started on a monotonic clock when the
-/// signed answer arrived. It lives in memory only (a restart creates a service with no lease) and nothing but a verified
-/// <see cref="ReconcileResponse" /> can set it, so a grant, an extension or a renewal never lengthens it, and neither does a change of the system time.
-/// </summary>
-public sealed class OfflineLease(IMonotonicClock clock)
-{
-    private readonly Lock _lock = new();
-    private long? _startedAt;
-    private long _durationMs;
-
-    /// <summary>Starts a lease of <paramref name="duration" /> now (replacing any other); a zero duration means no lease.</summary>
-    public void Issue(TimeSpan duration)
-    {
-        lock (_lock)
-        {
-            if (duration <= TimeSpan.Zero)
-            {
-                _startedAt = null;
-
-                return;
-            }
-
-            _startedAt = clock.Milliseconds;
-            _durationMs = (long)duration.TotalMilliseconds;
-        }
-    }
-
-    /// <summary>Destroys the lease (an applied invalidation, a machine that is no longer Trusted).</summary>
-    public void Clear()
-    {
-        lock (_lock)
-        {
-            _startedAt = null;
-        }
-    }
-
-    /// <summary>The time left on the monotonic clock, or zero.</summary>
-    public TimeSpan Remaining
-    {
-        get
-        {
-            lock (_lock)
-            {
-                if (_startedAt is not { } started)
-                {
-                    return TimeSpan.Zero;
-                }
-
-                long left = _durationMs - (clock.Milliseconds - started);
-
-                return left > 0 ? TimeSpan.FromMilliseconds(left) : TimeSpan.Zero;
-            }
-        }
-    }
-
-    public bool IsValid => Remaining > TimeSpan.Zero;
-
-    /// <summary>The duration of the lease that was last issued (zero when none).</summary>
-    public TimeSpan Duration
-    {
-        get
-        {
-            lock (_lock)
-            {
-                return _startedAt is null ? TimeSpan.Zero : TimeSpan.FromMilliseconds(_durationMs);
-            }
-        }
-    }
 }

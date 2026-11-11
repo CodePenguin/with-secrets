@@ -54,7 +54,7 @@ public sealed class KeyRotation(StateDatabase db, SecretStore store, EnrollmentT
 
         if (!change.Done)
         {
-            new AuditLog(db).TryWriteDenied("--rotate-key", [], change.Detail);
+            db.Audit.TryWriteDenied("--rotate-key", [], change.Detail);
         }
 
         return change;
@@ -220,7 +220,7 @@ public sealed class KeyRotation(StateDatabase db, SecretStore store, EnrollmentT
                     string note = $"keys rotated; {removedNames.Count.ToString(CultureInfo.InvariantCulture)} key(s) removed"
                         + (removedNames.Count == 0 ? "" : ": " + string.Join(", ", removedNames.Select(ApprovalSummary.Clean))) + $"; {rows.Count.ToString(CultureInfo.InvariantCulture)} secret(s) encrypted again";
 
-                    return store.TryApply(manifest.Version, signed, rows, [], AuditLog.ChangeRow("key-rotated", note, signer.Name));
+                    return store.TryApply(manifest.Version, signed, rows, [], AdminEvent.Change("key-rotated", note, signer.Name));
                 },
                 recoveryText);
 

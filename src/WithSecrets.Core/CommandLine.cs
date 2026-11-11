@@ -48,8 +48,6 @@ public abstract record CliCommand
     /// <summary>--unenroll NAME [--local]: a person removes something that can approve runs.</summary>
     public sealed record Unenroll(string Name, bool Local = false) : CliCommand;
 
-    /// <summary>--audit [--last N] [--secret NAME] [--verify]: print recent audit entries (names only), and check the chain.</summary>
-    public sealed record Audit(int Last, string? Secret, bool Verify) : CliCommand;
 
     /// <summary>--config: a person changes the settings on a web page (first run: and adds the first passkey). --show prints them.</summary>
     public sealed record Config(bool Show) : CliCommand;
@@ -106,7 +104,7 @@ public static class CliArgs
         same approval page, where the user also picks how long the approval lasts; the authority then records a grant for exactly that
         request (the secrets, the program, the working folder, the script and the .env plan; not the other arguments) and nothing is run.
         A later run of that request needs no approval page decision while the grant lasts, the machine is Trusted and the host service is
-        in contact with its authority or holds the grant under its offline lease. A request the grant does not cover, or one after it ends or is
+        in contact with its authority (a host that cannot reach its authority runs nothing: it fails closed). A request the grant does not cover, or one after it ends or is
         revoked, goes through the page as before. A store whose key is released by a passkey tap still asks for that tap at each run. A
         person lists and changes grants in the admin web app (with-secrets admin prints its link).
 
@@ -152,8 +150,9 @@ public static class CliArgs
         outbox BEFORE a secret is decrypted: if that cannot be done the run does not happen (exit 5). It sends the events to the authority
         by itself and keeps them until the authority has them. A person reads what the authority holds in the admin web app (Audit: filter by machine,
         time, type, outcome, grant, folder or text; the sequence gaps of a machine's numbering). Arguments are recorded
-        with values that look like secrets masked; no secret value, environment value or user name is recorded. (--audit is the older
-        log of the human commands in state.db.)
+        with values that look like secrets masked; no secret value, environment value or user name is recorded.
+        The human commands (--set, --remove, --revoke, --enroll, --unenroll, --config, --recover, --rotate-key) record their own signed events
+        (type admin: the event name and names only) the same way. There is no other audit log.
 
         A person changes the settings with --config: the terminal shows only a link, the page shows every setting, and a
         passkey approves the change. With nothing enrolled, --config is the first-time setup: it also creates the first
@@ -170,7 +169,7 @@ public static class CliArgs
         A person adds a passkey with --enroll (its name, and whether it is also an admin, are chosen on the page), sees
         them with --enrolled, and removes one with --unenroll NAME (any key but the last admin key). Admin keys change the
         state; two admin keys (laptop and phone) mean a lost device does not lock you out.
-        Every page, --enrolled and --audit list the admin keys' fingerprints ("Admins: laptop ab12 cd34 ef56 7890, phone ...").
+        Every page and --enrolled list the admin keys' fingerprints ("Admins: laptop ab12 cd34 ef56 7890, phone ...").
         Note them down; if they ever change without you, state.db was replaced.
         If baseUrl is set, add --local to use a page at http://localhost instead.
 
@@ -185,8 +184,6 @@ public static class CliArgs
 
         --self-check (alone) is the release check: it starts a throwaway service (software keys, a temporary folder, a free loopback port; no user state, no Windows key), asks it for the administration web app and the API, and prints one JSON line with the backend version, the frontend version and the embedded files. Exit code 0 only when the web app is embedded, served from the one origin, and its version is the backend's.
 
-        --audit prints the admin keys' fingerprints, then the newest audit entries (default 20; --last N, 1 to 1000; --secret NAME for one secret): time, event,
-        secret names, program, outcome and key name. Never values. --verify also checks the hash chain (exit 4 if broken).
         """;
 
     /// <summary>Returns the command, or null and an error message when the arguments are wrong.</summary>
@@ -238,7 +235,7 @@ public static class CliArgs
             return command;
         }
 
-        if (command is CliCommand.List or CliCommand.Needs or CliCommand.Enrolled or CliCommand.Audit or CliCommand.Config { Show: true })
+        if (command is CliCommand.List or CliCommand.Needs or CliCommand.Enrolled or CliCommand.Config { Show: true })
         {
             error = "--port goes only with a command that opens a web page: --set, --remove, --revoke, --enroll, --unenroll, --config, --recover, --rotate-key, or a run.";
 
@@ -403,10 +400,6 @@ public static class CliArgs
         Option<bool> local = new("--local") { Description = "With --enroll or --unenroll: use the page at http://localhost:<port> and ignore baseUrl." };
         Option<bool> enrolled = new("--enrolled") { Description = "Print the admin keys' fingerprints, then the passkeys that can approve runs (real terminal)." };
         Option<string?> unenroll = new("--unenroll") { Description = "A person removes a passkey by name (real terminal).", HelpName = "NAME" };
-        Option<bool> audit = new("--audit") { Description = "Print the admin keys' fingerprints, then the newest audit entries: time, event, secret names, program, outcome, key name. Never values." };
-        Option<string?> last = new("--last") { Description = "With --audit: how many entries, 1 to 1000. Default: 20.", HelpName = "N" };
-        Option<string?> secret = new("--secret") { Description = "With --audit: only entries that name this secret.", HelpName = "NAME" };
-        Option<bool> verify = new("--verify") { Description = "With --audit: check the audit hash chain and report the first broken entry (exit 4)." };
         Option<bool> config = new("--config") { Description = "A person changes the settings on a web page with a passkey; with nothing enrolled, sets up the first passkey (real terminal)." };
         Option<bool> recover = new("--recover") { Description = "When every passkey is lost: type the recovery code on a web page, make a new passkey and new keys, and carry the secrets over. The old file is renamed, never deleted (real terminal)." };
         Option<bool> rotateKey = new("--rotate-key") { Description = "An admin makes a new store key and master key, keeps only the key tapped and shows a new recovery code. Removes the other keys (real terminal)." };
@@ -438,10 +431,6 @@ public static class CliArgs
         root.Options.Add(local);
         root.Options.Add(enrolled);
         root.Options.Add(unenroll);
-        root.Options.Add(audit);
-        root.Options.Add(last);
-        root.Options.Add(secret);
-        root.Options.Add(verify);
         root.Options.Add(config);
         root.Options.Add(recover);
         root.Options.Add(rotateKey);
@@ -497,17 +486,6 @@ public static class CliArgs
             return null;
         }
 
-        bool auditRequested = result.GetValue(audit);
-        string? lastText = result.GetValue(last);
-        string? secretName = result.GetValue(secret);
-        bool verifyRequested = result.GetValue(verify);
-        if ((lastText is not null || secretName is not null || verifyRequested) && !auditRequested)
-        {
-            error = "--last, --secret and --verify go only with --audit.";
-
-            return null;
-        }
-
         bool configRequested = result.GetValue(config);
         bool showRequested = result.GetValue(show);
         if (showRequested && !configRequested)
@@ -541,13 +519,13 @@ public static class CliArgs
             servicePortNumber = parsedService;
         }
 
-        int modes = (auditRequested ? 1 : 0) + (result.GetValue(list) ? 1 : 0) + (needsRequested ? 1 : 0) + (setName is not null ? 1 : 0) + (removeName is not null ? 1 : 0) + (result.GetValue(revoke) ? 1 : 0)
+        int modes = (result.GetValue(list) ? 1 : 0) + (needsRequested ? 1 : 0) + (setName is not null ? 1 : 0) + (removeName is not null ? 1 : 0) + (result.GetValue(revoke) ? 1 : 0)
             + (enrollRequested ? 1 : 0) + (result.GetValue(enrolled) ? 1 : 0) + (unenrollName is not null ? 1 : 0) + (configRequested ? 1 : 0) + (result.GetValue(recover) ? 1 : 0) + (result.GetValue(rotateKey) ? 1 : 0) + (runRequested ? 1 : 0);
         if (modes != 1)
         {
             error = modes == 0
-                ? "Nothing to do. Use --list, --needs, --audit, --config, --enroll, --enrolled, --unenroll NAME, --recover, --rotate-key, or --reason TEXT [--secrets NAME[,NAME...]] -- PROGRAM [ARGS...]. Try --help."
-                : "Use one command at a time: --list, --needs, --set, --remove, --revoke, --enroll, --enrolled, --unenroll, --audit, --config, --recover, --rotate-key, or a run with --secrets.";
+                ? "Nothing to do. Use --list, --needs, --config, --enroll, --enrolled, --unenroll NAME, --recover, --rotate-key, or --reason TEXT [--secrets NAME[,NAME...]] -- PROGRAM [ARGS...]. Try --help."
+                : "Use one command at a time: --list, --needs, --set, --remove, --revoke, --enroll, --enrolled, --unenroll, --config, --recover, --rotate-key, or a run with --secrets.";
 
             return null;
         }
@@ -581,11 +559,6 @@ public static class CliArgs
             {
                 return null;
             }
-        }
-
-        if (auditRequested)
-        {
-            return AuditArgs(lastText, secretName, verifyRequested, out error);
         }
 
         error = "";
@@ -677,28 +650,6 @@ public static class CliArgs
             : "";
 
         return error.Length == 0 ? names : null;
-    }
-
-    private static CliCommand.Audit? AuditArgs(string? lastText, string? secretName, bool verify, out string error)
-    {
-        int count = AuditCommand.DefaultLast;
-        if (lastText is not null && (!int.TryParse(lastText, NumberStyles.None, CultureInfo.InvariantCulture, out count) || count < 1 || count > AuditCommand.MaxLast))
-        {
-            error = $"--last takes a number from 1 to {AuditCommand.MaxLast}.";
-
-            return null;
-        }
-
-        if (secretName is not null && !SecretNames.IsValid(secretName))
-        {
-            error = "--secret takes one secret name. " + SecretNameRule;
-
-            return null;
-        }
-
-        error = "";
-
-        return new CliCommand.Audit(count, secretName, verify);
     }
 
     private static int IndexOfSeparator(IReadOnlyList<string> args)

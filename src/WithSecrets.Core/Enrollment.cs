@@ -34,7 +34,7 @@ public static class EnrolledListing
 /// target; the approval happens at the first of the command target and the other target where the targets' methods can
 /// prove (Program gives both targets admin-only methods).
 /// </summary>
-public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget otherTarget, Action<string> announce, AuditLog? audit = null)
+public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget otherTarget, Action<string> announce, AdminAudit? audit = null)
 {
     // Every change is approved by an admin key.
     private readonly EnrollmentTarget command = commandTarget.Admin();

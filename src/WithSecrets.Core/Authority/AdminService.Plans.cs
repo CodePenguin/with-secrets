@@ -78,7 +78,7 @@ public sealed partial class AdminService
 
             case OpLock:
                 return new AdminPlan("lock-authority",
-                    "lock the authority now: secret requests stop, the held keys, the offline lease and the synchronized grants are discarded, and every administrator session ends",
+                    "lock the authority now: secret requests stop, the held keys and the synchronized grants are discarded, and every administrator session ends",
                     [("authority-key", key)],
                     _ =>
                     {
@@ -612,7 +612,7 @@ public sealed class StatePasskeyAdmin(StateDatabase state) : IPasskeyAdmin
         Func<string?> guarded = () => stopReason?.Invoke() is not null ? null : reader() is { } code && stopReason?.Invoke() is null ? code : null;
         (EnrollmentTarget primary, EnrollmentTarget local) = CommandWiring.Targets(state, settings, announce, guarded);
 
-        return new Enrollment(primary, local, announce, new AuditLog(state)) { StopReason = stopReason };
+        return new Enrollment(primary, local, announce, state.Audit) { StopReason = stopReason };
     }
 
     /// <summary>

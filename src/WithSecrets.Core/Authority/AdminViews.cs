@@ -21,7 +21,7 @@ public sealed record MachineDto(string Fingerprint, string Display, string Statu
 public sealed record GrantDto(string Id, string Fingerprint, string? MachineName, string State, string Status, int Revision, DateTimeOffset Created, DateTimeOffset Updated, DateTimeOffset? Expires, string Ends, string SecretNames, string Program, string WorkingDirectory,
     string ApprovedBy, DateTimeOffset? Revoked, IReadOnlyList<string> Actions);
 
-public sealed record AuditEventDto(string EventId, long Sequence, DateTimeOffset Time, DateTimeOffset Received, string Machine, string Type, string Outcome, string Reason, string RequestId, string Folder, string Program, IReadOnlyList<string> Arguments, string GrantId, int? ExitCode);
+public sealed record AuditEventDto(string EventId, long Sequence, DateTimeOffset Time, DateTimeOffset Received, string Machine, string Type, string Outcome, string Reason, string RequestId, string Folder, string Program, IReadOnlyList<string> Arguments, string GrantId, int? ExitCode, IReadOnlyDictionary<string, string> Metadata);
 
 public sealed record AuditChangeDto(long Id, DateTimeOffset Time, string Event, string? Machine, string Actor, string Detail);
 
@@ -182,14 +182,14 @@ public sealed partial class AdminService
         string? type = Text(get("type"));
         if (type is not null && !AuditEventTypes.All.Contains(type))
         {
-            return (null, "type is authorization, launch or execution");
+            return (null, "type is authorization, launch, execution or admin");
         }
 
         return (new AuditQuery(Text(get("machine")), since, until, type, Text(get("outcome")), Text(get("grant")), Text(get("folder")), Text(get("text")), last), null);
     }
 
     internal IReadOnlyList<AuditEventDto> AuditEventsView(AuditQuery query) => [.. _p.Store.AuditHistory(query).Select(record => new AuditEventDto(record.Event.EventId, record.Event.Sequence, record.Event.Time, record.Received, record.Event.MachineFingerprint, record.Event.Type,
-        C(record.Event.Outcome), C(record.Event.Reason), C(record.Event.RequestId), C(record.Event.Folder), C(record.Event.Program), [.. record.Event.Arguments.Select(C)], C(record.Event.GrantId), record.Event.ExitCode))];
+        C(record.Event.Outcome), C(record.Event.Reason), C(record.Event.RequestId), C(record.Event.Folder), C(record.Event.Program), [.. record.Event.Arguments.Select(C)], C(record.Event.GrantId), record.Event.ExitCode, record.Event.Meta.ToDictionary(item => C(item.Key), item => C(item.Value), StringComparer.Ordinal)))];
 
     internal IReadOnlyList<AuditChangeDto> AuditChangesView(AuditQuery query)
     {

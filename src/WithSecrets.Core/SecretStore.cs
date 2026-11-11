@@ -263,9 +263,9 @@ public sealed class SecretStore(StateDatabase db, ISecretCipher? cipher = null) 
     /// One write transaction: the signed manifest replaces version <paramref name="expectedVersion" /> (see
     /// <see cref="StateDatabase.TryReplace" />: signed by an admin, the next version), <paramref name="removes" /> are deleted,
     /// <paramref name="rows" /> written, every row must then match the new manifest's hashes, and <paramref name="audit" /> is
-    /// appended. Null when committed, else why not; then nothing was written.
+    /// recorded in the signed audit (just before the commit; when it cannot be, nothing is written). Null when committed, else why not; then nothing was written.
     /// </summary>
-    internal string? TryApply(long expectedVersion, SignedManifest signed, IReadOnlyDictionary<string, string> rows, IReadOnlyCollection<string> removes, AuditLog.Row audit)
+    internal string? TryApply(long expectedVersion, SignedManifest signed, IReadOnlyDictionary<string, string> rows, IReadOnlyCollection<string> removes, AdminEvent audit)
     {
         try
         {
@@ -293,8 +293,8 @@ public sealed class SecretStore(StateDatabase db, ISecretCipher? cipher = null) 
                     throw new Abort("the secrets do not match the new state (" + mismatch + "); nothing was stored");
                 }
 
-                AuditLog.Append(connection, transaction, audit);
                 BeforeCommit?.Invoke();
+                db.AppendAudit(audit);
 
                 return null;
             });

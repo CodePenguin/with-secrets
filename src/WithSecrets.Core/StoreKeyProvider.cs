@@ -68,7 +68,7 @@ public sealed record HeldKeyBinding(string GrantId, string ScopeKey, int Revisio
 /// see IMPLEMENTATION_PROGRESS.md). The PRF output is held rather than K itself because it is a byte array that can be zeroed; K is opened from it
 /// for each run and zeroed there. The holder keeps one key for one <see cref="HeldKeyBinding" /> and lends it only to a run whose grant id and scope key
 /// are the bound ones. It is dropped and zeroed by <see cref="Drop" />; the host calls that when the grant ends or is revoked or changes, the machine is
-/// disabled or untrusted, the security revision changes, the lease ends, or a run fails. Nothing is written to disk or a log. The held bytes (and each copy
+/// disabled or untrusted, the security revision changes, the authority stops vouching for the machine, the authority link fails, or a run fails. Nothing is written to disk or a log. The held bytes (and each copy
 /// lent to a run) are in pinned arrays, so the garbage collector never moves them and leaves no unzeroed copy behind; the array the page's tap handed over
 /// is the caller's and is zeroed when it is disposed.
 /// </summary>
@@ -170,7 +170,7 @@ public sealed class HeldStoreKeyProvider(IApprover approver, HostAuthorization h
     /// <summary>The sentence the page shows (and the passkey signs) before a key-holding tap.</summary>
     public static string KeepText(string grantId, DateTimeOffset? end)
     {
-        string until = end is { } at ? "until " + CanonicalJson.Time(at) + " (or until the grant is revoked or changed, the lease ends, or the service restarts)" : "until the service restarts (this grant has no end; it also stops if the grant is revoked or changed or the lease ends)";
+        string until = end is { } at ? "until " + CanonicalJson.Time(at) + " (or until the grant is revoked or changed, the authority stops vouching for the machine, or the service restarts)" : "until the service restarts (this grant has no end; it also stops if the grant is revoked or changed or the authority stops vouching for the machine)";
 
         return $"KEY HELD: after this tap the service will keep the secret store key, which opens ALL your secrets, in its memory for grant {grantId}, {until}. Runs under the grant then need no tap and no page.";
     }

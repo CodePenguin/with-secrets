@@ -30,7 +30,7 @@ public sealed record SecretChange(int Code, string Detail)
 /// rows are deleted with it. Any doubt or error changes nothing.
 /// </para>
 /// </summary>
-public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget localTarget, SecretStore store, AuditLog audit, Action<string> announce)
+public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget localTarget, SecretStore store, AdminAudit audit, Action<string> announce)
 {
     // Only admin keys may change the secret store.
     private readonly EnrollmentTarget primary = primaryTarget.Admin();
@@ -137,7 +137,7 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
             }
 
             string detail = asked.Decision.Detail;
-            string? written = store.TryApply(manifest.Version, asked.Signed, new Dictionary<string, string>(), names, AuditLog.SecretsRow("secrets-removed", [.. names], detail, AuditLog.KeyName(detail)));
+            string? written = store.TryApply(manifest.Version, asked.Signed, new Dictionary<string, string>(), names, AdminEvent.Secrets("secrets-removed", [.. names], detail, AdminAudit.KeyName(detail)));
 
             return written is null ? new SecretChange(0, $"Removed {list}.") : new SecretChange(RunCommand.StoreError, written);
         }
@@ -515,7 +515,7 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
             }
 
             SignedManifest signed = new(prepared.Manifest, manifestBind, assertion);
-            string? problemWriting = store.TryApply(manifest.Version, signed, prepared.Rows, [], AuditLog.SecretsRow("secrets-set", names, result.Detail, AuditLog.KeyName(result.Detail)));
+            string? problemWriting = store.TryApply(manifest.Version, signed, prepared.Rows, [], AdminEvent.Secrets("secrets-set", names, result.Detail, AdminAudit.KeyName(result.Detail)));
             if (problemWriting is not null)
             {
                 _decision.TrySetResult(new SecretChange(RunCommand.StoreError, problemWriting));

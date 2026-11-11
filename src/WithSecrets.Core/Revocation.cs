@@ -24,7 +24,7 @@ public static class Revocation
             return grants.TryClear() ? (0, Ended) : (RunCommand.StoreError, $"cannot clear the saved approvals in {db.FileLabel}.");
         }
 
-        AuditLog audit = new(db);
+        AdminAudit audit = db.Audit;
         EnrollmentTarget adminPrimary = primary.Admin();
         EnrollmentTarget adminLocal = local.Admin();
         EnrollmentTarget? target = EnrollmentTarget.FirstThatCanProve(adminPrimary, adminLocal);
@@ -50,8 +50,8 @@ public static class Revocation
             db.Write((connection, transaction) =>
             {
                 int count = StateDatabase.Execute(connection, transaction, "DELETE FROM grants");
-                AuditLog.Append(connection, transaction, AuditLog.ChangeRow("approvals-revoked",
-                    $"{count} saved approval(s) cleared; {asked.Detail}", AuditLog.KeyName(asked.Detail)));
+                db.AppendAudit(AdminEvent.Change("approvals-revoked",
+                    $"{count} saved approval(s) cleared; {asked.Detail}", AdminAudit.KeyName(asked.Detail)));
 
                 return count;
             });

@@ -21,6 +21,9 @@ internal sealed class RecoveryCarry(byte[] oldPrivateKey, IReadOnlyDictionary<st
     /// <summary>The name the old file gets when everything else has worked: <c>state.db.recovered-&lt;UTC yyyyMMddHHmmss&gt;</c>.</summary>
     public string RecoveredName => recoveredName;
 
+    /// <summary>The administrative events of the recovery, recorded after the swap made the new state the store (see <see cref="StoreRecovery" />).</summary>
+    internal List<AdminEvent> Pending { get; } = [];
+
     public int Count => oldRows.Count;
 
     /// <summary>What the first page of the new passkey says about this setup, where it otherwise says "Admins: not set up yet".</summary>
@@ -91,7 +94,7 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
 
         if (!change.Done)
         {
-            new AuditLog(db).TryWriteDenied("--recover", [], change.Detail);
+            db.Audit.TryWriteDenied("--recover", [], change.Detail);
         }
 
         return change;
@@ -177,6 +180,12 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
             if (Swap(db.FilePath, newPath, recoveredPath) is { } problem)
             {
                 return new ConfigChange(RunCommand.StoreError, problem);
+            }
+
+            // The swap is the change: its events are recorded now. If they cannot be committed the store is already the new one, and the person is told.
+            if (carry.Pending.Any(item => !db.Audit.TryRecord(item)))
+            {
+                return new ConfigChange(RunCommand.AuditError, "the store was recovered (the old state is in " + recoveredName + "), but its audit events could not be committed to the audit outbox");
             }
         }
         catch (Exception)

@@ -19,7 +19,7 @@ public sealed class AuthorityLockedException() : InvalidOperationException(Autho
 /// <summary>
 /// Whether the authority may use its protected keys and serve anything secret-related. The service starts LOCKED. While locked, the authority signing key is not
 /// used (<see cref="AuthorityKeyRing" /> refuses), the authority decides and grants nothing, the host serves no run, and the memory the host held for a grant
-/// (store key, lease, synchronized grants) is discarded and zeroed. This is a gate in the authority process, not a second encryption layer: the signing key stays
+/// (store key, the vouching state, synchronized grants) is discarded and zeroed. This is a gate in the authority process, not a second encryption layer: the signing key stays
 /// protected by the operating system (CNG), the lock decides when this process may ask the system to use it. Unlocking is an administrator ceremony
 /// (a fresh, operation-bound passkey tap on the authority's own admin page) or, only when the administrator chose that, the platform-protected unattended mechanism;
 /// neither creates or widens a grant.
@@ -69,7 +69,7 @@ public sealed class AuthorityLock
         }
     }
 
-    /// <summary>Registers what must be discarded when the authority locks (the host's held keys and lease).</summary>
+    /// <summary>Registers what must be discarded when the authority locks (the host's held keys and vouching state).</summary>
     public void OnLock(Action<string> discard)
     {
         lock (_gate)
