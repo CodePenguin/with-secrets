@@ -1116,7 +1116,7 @@ curl_api.github.com_authorization_value=secret://team/development/github/token
 - Organize the UI by feature, including machines, providers, mounts, grants, approvals, policies, authority status/settings, and audit.
 - Keep presentation separate from API communication. Generate the TypeScript API client from the OpenAPI contract.
 - Use URL-based navigation for primary application views and dialogs for contextual operations. Use React state for local UI state and a small server-state/query library (TanStack Query) for fetching, caching, mutations, and invalidation. Do not introduce a global Redux-style state store initially.
-- The SPA is the canonical human interface. Native applications may be added as optional clients later; they are not required components and do not form a security boundary.
+- The SPA is the canonical human administration interface. An optional native tray companion may provide operating-system integration, notifications, service status, and browser launching, but it is not a second administration UI, is not a security boundary, and is not required for the host service to operate.
 
 #### Accessibility
 
@@ -1249,3 +1249,41 @@ These are not unresolved questions about the accepted Section 10.2 architecture.
 3. **`--revoke` command:** the current passkey-PRF store does not create or use saved approvals, but `--revoke` remains implemented and can clear any rows in the grants table. Decide whether to retain this dormant compatibility/admin command or remove it.
 
 The README path spelling is already correct (`%USERPROFILE%\\.with-secrets\\state.db`); the previous note about missing backslashes was stale and has been removed.
+
+### 10.6 Optional desktop tray companion
+
+**Status:** Accepted target design. The tray companion is optional desktop integration for operating systems that support a native notification area. It does not change the host-service, authority, browser, or machine-identity security boundaries.
+
+#### Responsibilities and boundaries
+
+- The tray application is a lightweight notifications and operating-system integration point. It may monitor/report host-service status, report authority connectivity, receive notification events, display native OS notifications, and launch the system browser to a specific administration page.
+- The tray is not an administration application. It has no embedded browser, no duplicated administration UI, and no independent approval, pairing, grant, or authorization workflow. All menus and notification activations navigate to the corresponding page in the existing web administration SPA.
+- The tray never receives secret values, provider credentials, recovery material, administrative credentials, browser session cookies, or passkey material. It does not make authorization decisions.
+- The tray is optional. The host service must operate normally without it, including in Docker, WSL, server, and other headless deployments. The host service must not depend on the tray to receive, process, or retain approvals or pairing requests.
+- The tray may use the operating-system service manager to inspect service state and request supported lifecycle operations. It does not supervise the service by implementing its own restart loop, bypass OS service controls, or require elevated privileges beyond those already granted by the OS service-management model.
+
+#### Communication with the host service
+
+- The tray communicates with the local host service through the same loopback API, application protocol, and authenticated local-client transport used by the other local clients. Do not introduce named pipes, Unix sockets, a second IPC protocol, a message broker, or a separate notification server for the tray.
+- Loopback is a routing boundary, not authentication. The tray must authenticate as an authorized local client, and the host service must authorize each operation. Give the tray only the capabilities needed for service/authority status, notification subscription/acknowledgement as applicable, and retrieval of safe navigation metadata.
+- Do not give the tray the host service's persistent machine-identity private key or any general machine credential. Use the established local-client authentication mechanism; if that mechanism needs an implementation detail for this client, define it within the existing transport and API rather than creating a second communications system.
+- Reuse the existing persistent-connection/long-poll event-delivery approach for notification events where applicable. Do not redesign the durable invalidation/event protocol or create a parallel event transport solely for the tray.
+- Notification payloads contain event type and the minimum non-secret context needed for a useful notification, plus a stable resource reference or route identifier. They do not contain arbitrary URLs supplied by an event producer.
+
+#### Notifications and browser navigation
+
+- Use native operating-system notifications. A pairing request, for example, can produce a persistent notification where the OS supports it; activating the notification opens the exact pairing-review page in the system browser.
+- Notifications are informational only. They do not contain approve/reject controls and cannot perform administrative mutations. Activating one only navigates to the web application; the existing browser session and fresh operation-bound passkey authorization rules remain in force.
+- Dismissing or clearing a notification never dismisses, approves, rejects, expires, or otherwise changes the underlying request. The authoritative pending state remains in the host service/authority and is visible in the web application.
+- The tray launches only known, trusted administration routes on the expected local authority origin. It must not accept or open arbitrary URLs from notification payloads. External links, if exposed by the web application, are handled by the system browser rather than an embedded view.
+- Notification text must avoid secret values, credentials, recovery material, and unnecessary sensitive details. Show only enough non-secret context to identify the event and explain that review is available.
+- Request persistent presentation where supported, but do not assume every OS guarantees indefinite visibility or identical notification behavior. Correctness must not depend on a toast remaining visible; pending work remains discoverable in the web application.
+- Tray menus are shortcuts, not separate workflows. Entries such as Open dashboard, Pending approvals, Pairing requests, and status views open their corresponding SPA routes in the system browser. Any service lifecycle action is delegated to the OS service manager and host service controls.
+
+#### Implementation constraints
+
+- Keep the tray thin and platform-native where practical. Do not embed a browser engine, host a second web UI, or reimplement browser authentication.
+- The system browser remains responsible for browser security features, session handling, WebAuthn/passkeys, and the administration UI.
+- The host service remains authoritative for approval state, event delivery, service state, and authorization. The tray is a presentation/launch client only.
+- Test the tray as an untrusted local client: direct API calls must not gain capabilities beyond its explicit allowlist, notification payloads must not cause arbitrary navigation, and no secret or credential material may cross the tray boundary.
+
