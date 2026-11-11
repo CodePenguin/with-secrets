@@ -29,6 +29,13 @@ internal static class Program
         {
             return await Execute(args);
         }
+        catch (KeyFileException refused)
+        {
+            // A key file or key folder that is not protected as required (or not this user's): one line with the path and the fix, no stack trace.
+            TerminalPrompt.Final("with-secrets: " + refused.Message);
+
+            return RunCommand.StoreError;
+        }
         finally
         {
             AppLog.Close();
@@ -204,7 +211,13 @@ internal static class Program
     /// <summary>The host service in the foreground, until Ctrl+C. Windows service installation and start at logon come later.</summary>
     private static string StorePath() => TestIsolation.Current?.StoreFolder ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), StoreFolder);
 
-    private static async Task<int> RunPairAsync() => await AuthorityPairing.RunAsync(PairingEnvironment.ForThisProcess(OpenPairingMachine), Console.Out, Console.Error);
+    private static async Task<int> RunPairAsync()
+    {
+        // The pairing command loads the machine key too: non-dumpable on Linux first (skipped on Windows).
+        LinuxHardening.HardenProcess();
+
+        return await AuthorityPairing.RunAsync(PairingEnvironment.ForThisProcess(OpenPairingMachine), Console.Out, Console.Error);
+    }
 
     /// <summary>This machine's identity for pairing: the persistent key of the platform key store (Windows CNG, non-exportable; elsewhere an owner-only key file, weaker), made on first use, its identity certificate beside host.json, and the host name.</summary>
     private static PairingMachine OpenPairingMachine()
@@ -241,6 +254,9 @@ internal static class Program
                 return RunCommand.Usage;
             }
         }
+
+        // Linux: no core dump and no memory reading by another process of this user (non-dumpable) before any key is loaded. Skipped on Windows. A failure is one line in the log, never fatal.
+        LinuxHardening.HardenProcess();
 
         LocalDeployment deployment;
         EnrollmentResult enrolled;
@@ -281,7 +297,7 @@ internal static class Program
         HostService service;
         try
         {
-            service = HostService.Start(new HostServiceOptions { State = state, Store = store, Grants = grants, Port = port.Value, Deployment = deployment, MachineEndpoint = machineEndpoint });
+            service = HostService.Start(new HostServiceOptions { State = state, Store = store, Grants = grants, Port = port.Value, Deployment = deployment, MachineEndpoint = machineEndpoint, MachineListenerStarted = port => TerminalPrompt.Line($"with-secrets service: machine listener now on {machineEndpoint!.Bind}:{port} (the authority signing key was made by the first approval; no restart was needed)."), });
         }
         catch (Exception failure)
         {
@@ -314,6 +330,11 @@ internal static class Program
             if (service.MachinePort is { } machinePortNow)
             {
                 TerminalPrompt.Line($"with-secrets service: machine listener on {machineEndpoint!.Bind}:{machinePortNow} (HTTPS: TLS 1.3 mutual authentication and HTTP/2; the machine API only: no administration, no pages). A firewall rule for that port is the administrator's to make.");
+            }
+
+            if (machineEndpoint is not null && service.MachinePort is null)
+            {
+                TerminalPrompt.Line("with-secrets service: the machine listener starts as soon as the first approval makes the authority signing key (no restart needed); until then no machine can connect.");
             }
 
             TerminalPrompt.Line($"with-secrets service: listening on 127.0.0.1 and [::1], port {service.Port} (this machine only). Press Ctrl+C to stop.");

@@ -515,7 +515,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, TextWrit
 
                 if (!decision.Approved)
                 {
-                    return await Fail(Denied, authorityMessage ?? $"The user did not approve ({decision.Detail}). Do not retry. Ask the user.");
+                    return await Fail(Denied, authorityMessage ?? (decision.TimedOut ? HostAuthorization.TimeoutMessage : $"The user did not approve ({decision.Detail}). Do not retry. Ask the user."));
                 }
 
                 // A script can change while the prompt is open. The person approved what they saw, so run only that.

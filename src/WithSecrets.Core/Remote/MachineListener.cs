@@ -173,6 +173,9 @@ public sealed class MachineListenerOptions
     internal TimeProvider Clock { get; init; } = TimeProvider.System;
 
     internal IPairingHandler? Pairing { get; set; }
+
+    /// <summary>The audit the copied-identity event is committed to (signed with this authority machine's key, like every other event). Null: the warning is still recorded, no event is written.</summary>
+    internal IHostAudit? Audit { get; set; }
 }
 
 /// <summary>
@@ -195,6 +198,7 @@ public sealed class MachineListener : IDisposable
     private readonly MachineListenerOptions _options;
     private readonly IRemoteLaunchHandler? _launches;
     private readonly IPairingHandler _pairing;
+    private readonly CopiedIdentityWatch _copyWatch;
     private readonly MachinePeers _peers;
     private readonly WebApplication _app;
     private readonly CancellationTokenSource _stop = new();
@@ -223,8 +227,11 @@ public sealed class MachineListener : IDisposable
         public int Closing;
     }
 
-    private sealed class PollHold(CancellationTokenSource source)
+    private sealed class PollHold(CancellationTokenSource source, string address)
     {
+        /// <summary>The remote address the poll came from.</summary>
+        public string Address { get; } = address;
+
         public CancellationTokenSource Source { get; } = source;
 
         public bool Superseded { get; set; }
@@ -256,6 +263,7 @@ public sealed class MachineListener : IDisposable
         _options = options;
         _launches = launches;
         _pairing = options.Pairing ?? new NotImplementedPairing();
+        _copyWatch = new CopiedIdentityWatch(store, () => options.Audit, options.Clock);
         _peers = new MachinePeers(store, options.Clock);
         _app = Build();
         _store.Changed += OnChanged;
@@ -659,12 +667,14 @@ public sealed class MachineListener : IDisposable
         if (op == RemoteOps.Poll)
         {
             // Exactly one outstanding poll per machine: a new one supersedes (cancels, and so releases) the older, which a dead or abandoned connection may be holding.
-            hold = new PollHold(limit);
+            string? supersededFrom = null;
+            hold = new PollHold(limit, CopiedIdentityWatch.AddressText(context.Connection.RemoteIpAddress));
             lock (state.Gate)
             {
                 if (state.Poll is { } older)
                 {
                     older.Superseded = true;
+                    supersededFrom = older.Address;
                     try
                     {
                         older.Source.Cancel();
@@ -676,6 +686,12 @@ public sealed class MachineListener : IDisposable
                 }
 
                 state.Poll = hold;
+            }
+
+            if (supersededFrom is not null)
+            {
+                // A poll that supersedes one from another address counts towards the copied-identity warning (never a decision).
+                _copyWatch.Superseded(peer.Fingerprint, supersededFrom, hold.Address);
             }
         }
 

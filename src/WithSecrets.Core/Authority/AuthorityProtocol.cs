@@ -16,6 +16,7 @@ public static class ReasonCodes
 {
     public const string Approved = "approved";
     public const string UserDenied = "user-denied";
+    public const string ApprovalTimeout = "approval-timeout";
     public const string Cancelled = "cancelled";
     public const string MachinePending = "machine-pending";
     public const string MachineDisabled = "machine-disabled";

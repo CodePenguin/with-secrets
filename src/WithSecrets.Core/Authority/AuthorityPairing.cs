@@ -67,6 +67,13 @@ public static class AuthorityPairing
         {
             machine = environment.OpenMachine();
         }
+        catch (KeyFileException refused)
+        {
+            // A key file or folder that is not protected as required: its message is one line with the path and the fix.
+            await error.WriteLineAsync("with-secrets: " + refused.Message + "; nothing was sent");
+
+            return RunCommand.StoreError;
+        }
         catch (Exception failure) when (failure is System.Security.Cryptography.CryptographicException or IOException or UnauthorizedAccessException or PlatformNotSupportedException)
         {
             await error.WriteLineAsync("with-secrets: this machine's identity cannot be used (" + failure.GetType().Name + "); nothing was sent");

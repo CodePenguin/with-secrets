@@ -116,6 +116,9 @@ public sealed class HostServiceOptions
     /// beyond the loopback API. It serves nothing but the machine API: never the administration application, the API, the approval pages or a run (those stay on the loopback listener).
     /// </summary>
     public MachineListenerOptions? MachineEndpoint { get; init; }
+
+    /// <summary>Called (with the port) when the machine listener starts after the service did: at the first approval that makes the authority signing key. Null: nothing is told.</summary>
+    public Action<int>? MachineListenerStarted { get; init; }
 }
 
 
@@ -205,7 +208,8 @@ public sealed class HostService : IDisposable
     }
 
     private Task _auditLoop = Task.CompletedTask;
-    private MachineListener? _machineListener;
+    private volatile MachineListener? _machineListener;
+    private readonly Lock _machineLock = new();
     private AuthorityLaunchHandler? _launches;
 
     /// <summary>The port of the machine listener, or null when this service serves none.</summary>
@@ -345,17 +349,60 @@ public sealed class HostService : IDisposable
             throw new InvalidOperationException(problem);
         }
 
-        if (_options.Deployment.Keys.ActivePublicKey() is null)
-        {
-            AppLog.Warn("no machine endpoint: this authority has no signing key yet");
-
-            return;
-        }
-
-        _launches = new AuthorityLaunchHandler(_options.Deployment.Authority, _options.Deployment.Keys, _options.Deployment.Store, _options.Store, MachineApprover, Lock, _options.Deployment.Clock);
-        endpoint.Pairing ??= new PairingHandler(Pairing);
-        _machineListener = MachineListener.Start(_options.Deployment.Authority, _options.Deployment.Keys, _options.Deployment.Store, _options.Deployment.Tls, endpoint, _launches);
+        // The listener waits for the signing key (the first approval makes it): subscribe first and check second, so a key made in between is not missed. No listener exists before the key does.
+        _options.Deployment.Keys.KeyRecorded += OnAuthorityKeyRecorded;
+        TryStartMachineListener(endpoint, late: false);
     }
+
+    private void OnAuthorityKeyRecorded()
+    {
+        // Called inside the key ring's lock: hand off, never start a listener here.
+        if (_machineListener is null && _options.MachineEndpoint is { } endpoint && Volatile.Read(ref _disposed) == 0)
+        {
+            _ = Task.Run(() => TryStartMachineListener(endpoint, late: true));
+        }
+    }
+
+    private void TryStartMachineListener(MachineListenerOptions endpoint, bool late)
+    {
+        lock (_machineLock)
+        {
+            if (_machineListener is not null || Volatile.Read(ref _disposed) != 0)
+            {
+                return;
+            }
+
+            try
+            {
+                if (_options.Deployment.Keys.ActivePublicKey() is null)
+                {
+                    AppLog.Warn("no machine endpoint yet: this authority has no signing key; it starts when the first approval makes one (no restart needed)");
+
+                    return;
+                }
+
+                _launches = new AuthorityLaunchHandler(_options.Deployment.Authority, _options.Deployment.Keys, _options.Deployment.Store, _options.Store, MachineApprover, Lock, _options.Deployment.Clock);
+                endpoint.Pairing ??= new PairingHandler(Pairing);
+                endpoint.Audit ??= Audit;
+                _machineListener = MachineListener.Start(_options.Deployment.Authority, _options.Deployment.Keys, _options.Deployment.Store, _options.Deployment.Tls, endpoint, _launches);
+            }
+            catch (Exception error) when (late && error is not OutOfMemoryException)
+            {
+                // After the service started there is no caller to tell: the log says it (the type only), and the next restart tries again.
+                AppLog.Warn("the machine endpoint could not be started after the first approval ({Type}); restart the service", error.GetType().Name);
+                _launches?.Dispose();
+                _launches = null;
+
+                return;
+            }
+
+            if (late && _machineListener is { } started)
+            {
+                _options.MachineListenerStarted?.Invoke(started.Port);
+            }
+        }
+    }
+
     /// <summary>The approver for a launch another machine asked for: the same page, passkeys and settings as a local launch, shown here.</summary>
     private IApprover MachineApprover(Action<string> announce)
     {
@@ -1112,8 +1159,13 @@ public sealed class HostService : IDisposable
             // The loop was cancelled or failed; nothing more to wait for.
         }
 
-        _machineListener?.Dispose();
-        _launches?.Dispose();
+        lock (_machineLock)
+        {
+            _options.Deployment.Keys.KeyRecorded -= OnAuthorityKeyRecorded;
+            _machineListener?.Dispose();
+            _launches?.Dispose();
+        }
+
         Authorization.Keys.Dispose();
         CancellationTokenSource[] sources;
         lock (_lock)

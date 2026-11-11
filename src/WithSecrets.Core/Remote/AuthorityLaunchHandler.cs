@@ -365,7 +365,7 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
                     {
                         tap.Unlock?.Dispose();
 
-                        return deny(cancel.IsCancellationRequested ? ReasonCodes.Cancelled : ReasonCodes.UserDenied, grant.SecurityRevision);
+                        return deny(cancel.IsCancellationRequested ? ReasonCodes.Cancelled : tap.TimedOut ? ReasonCodes.ApprovalTimeout : ReasonCodes.UserDenied, grant.SecurityRevision);
                     }
 
                     unlock = tap.Unlock;

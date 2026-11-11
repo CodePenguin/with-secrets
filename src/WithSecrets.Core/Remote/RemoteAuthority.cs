@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Security;
+using System.Net.Sockets;
 using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
@@ -77,6 +78,9 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, ILaunchAuthority, 
 
     /// <summary>The first pause before a repeat; it doubles each time (with jitter) up to <see cref="MaxRetryPause" />.</summary>
     public TimeSpan RetryPause { get; init; } = TimeSpan.FromMilliseconds(150);
+
+    /// <summary>TEST ONLY: the local address connections are made from (default: the system chooses). A second client on another loopback address looks, to the authority, like a copy of the machine on another host.</summary>
+    internal IPAddress? TestLocalAddress { get; init; }
 
     public TimeSpan MaxRetryPause { get; init; } = TimeSpan.FromSeconds(5);
 
@@ -294,6 +298,28 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, ILaunchAuthority, 
                 RemoteCertificateValidationCallback = ValidateAuthority,
             },
         };
+        if (TestLocalAddress is { } local)
+        {
+            // TEST ONLY: connect from a chosen local address, so one authority sees two different remote addresses for one identity.
+            handler.ConnectCallback = async (context, cancel) =>
+            {
+                Socket socket = new(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+                try
+                {
+                    socket.Bind(new IPEndPoint(local, 0));
+                    await socket.ConnectAsync(context.DnsEndPoint, cancel);
+
+                    return new NetworkStream(socket, ownsSocket: true);
+                }
+                catch
+                {
+                    socket.Dispose();
+
+                    throw;
+                }
+            };
+        }
+
         Interlocked.Increment(ref _pools);
 
         return new Pool(handler, certificate.Thumbprint);

@@ -102,6 +102,12 @@ public sealed record ApprovalDecision(bool Approved, string Detail, int ReuseMin
     public static ApprovalDecision Allow(string detail = "approved", int reuseMinutes = 0, ApprovalEvidence? evidence = null, Unlock? unlock = null) => new(true, detail, reuseMinutes, evidence, unlock);
 
     public static ApprovalDecision Deny(string detail) => new(false, detail);
+
+    /// <summary>The detail of a decision that came from the approval time limit running out (nobody answered).</summary>
+    public const string TimeLimitDetail = "no answer before the time limit";
+
+    /// <summary>The approval was not answered before the time limit: a different outcome from a person pressing Deny.</summary>
+    public bool TimedOut => !Approved && Detail == TimeLimitDetail;
 }
 
 /// <summary>Asks the person. Must fail closed: any doubt means deny.</summary>

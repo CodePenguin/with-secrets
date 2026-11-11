@@ -212,6 +212,9 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
     }
 
     /// <summary>The one-line text for a reason code that stops a machine (names the command that fixes it).</summary>
+    /// <summary>What a run says when nobody answered the approval in time: distinct from a refusal, and it may be asked again.</summary>
+    internal const string TimeoutMessage = "Nobody answered before the approval time limit, so nothing was run. The user may not have seen the request: ask the user to be ready, then run again.";
+
     public string Message(string code) => code switch
     {
         ReasonCodes.MachinePending => $"this machine is not approved yet. Ask the administrator to approve fingerprint {Fingerprint} in the authority's admin web app (with-secrets admin prints its link)",
@@ -223,6 +226,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
         ReasonCodes.UnknownSecret => "the authority has no secret with one of the requested names. Ask the user to add it at the authority",
         ReasonCodes.RequestIdReused => "the authority already answered this request id. Ask again",
         ReasonCodes.UserDenied or ReasonCodes.Cancelled => "The user did not approve (" + code + "). Do not retry. Ask the user.",
+        ReasonCodes.ApprovalTimeout => TimeoutMessage,
         GrantReasons.NoEvidence or GrantReasons.BadEvidence => "the approval did not carry a passkey assertion that backs the grant, so none was made. Nothing was saved",
         GrantReasons.NoTime => "no grant time was chosen on the approval page (choose one of the times it offers). Nothing was saved",
         _ => "the authority refused the request (" + code + ")",
@@ -326,7 +330,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
         }
 
         local?.Unlock?.Dispose();
-        if (response.ReasonCode is ReasonCodes.UserDenied or ReasonCodes.Cancelled && local is not null)
+        if (response.ReasonCode is ReasonCodes.UserDenied or ReasonCodes.Cancelled or ReasonCodes.ApprovalTimeout && local is not null)
         {
             return new AuthorizationOutcome(local, null, response.ReasonCode, response.SecurityRevision);
         }
@@ -816,7 +820,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
                 return new GrantApproval(true, "", response.ReasonCode, response.GrantId, response.Indefinite ? null : response.GrantExpires);
             }
 
-            if (response.ReasonCode is ReasonCodes.UserDenied or ReasonCodes.Cancelled && local is not null)
+            if (response.ReasonCode is ReasonCodes.UserDenied or ReasonCodes.Cancelled or ReasonCodes.ApprovalTimeout && local is not null)
             {
                 return Deny("The user did not approve (" + ApprovalSummary.Clean(local.Detail) + "). Do not retry. Ask the user.", response.ReasonCode);
             }

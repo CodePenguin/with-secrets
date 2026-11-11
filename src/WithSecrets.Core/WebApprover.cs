@@ -220,7 +220,7 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
                 // A proof that finishes checking after this loses: the time limit came first.
                 lock (_gate)
                 {
-                    _decision.TrySetResult(ApprovalDecision.Deny("no answer before the time limit"));
+                    _decision.TrySetResult(ApprovalDecision.Deny(ApprovalDecision.TimeLimitDetail));
                 }
             }
 

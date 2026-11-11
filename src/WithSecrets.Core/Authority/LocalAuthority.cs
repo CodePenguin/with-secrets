@@ -19,6 +19,9 @@ public sealed class AuthorityKeyRing(AuthorityStore store, Func<int, ISigningKey
     /// <summary>While this is locked no key is used, made or replaced: <see cref="Current" />, <see cref="Rotate" /> and <see cref="Recover" /> throw <see cref="AuthorityLockedException" />. The public record is still readable.</summary>
     public AuthorityLock? LockState { get; set; }
 
+    /// <summary>Raised (on the calling thread, inside the key ring's lock: handlers must hand off at once) when the FIRST authority signing key was made, so something that waits for it can start.</summary>
+    public event Action? KeyRecorded;
+
     /// <summary>The active key's record, making the first key when there is none.</summary>
     public AuthorityKeyRecord CurrentRecord()
     {
@@ -34,6 +37,7 @@ public sealed class AuthorityKeyRing(AuthorityStore store, Func<int, ISigningKey
             ISigningKey first = open(1);
             AuthorityKeyRecord recorded = store.RecordFirstKey(first.PublicKey, "authority");
             _opened[recorded.Fingerprint] = first;
+            KeyRecorded?.Invoke();
 
             return recorded;
         }
@@ -268,7 +272,7 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
             detail = detail.Length > 200 ? detail[..200] : detail;
             if (!answered.Approved)
             {
-                return new DecisionPlan(Answer(AuthorityDecision.Denied, cancelled ? ReasonCodes.Cancelled : ReasonCodes.UserDenied, current.SecurityRevision), null, detail);
+                return new DecisionPlan(Answer(AuthorityDecision.Denied, cancelled ? ReasonCodes.Cancelled : answered.TimedOut ? ReasonCodes.ApprovalTimeout : ReasonCodes.UserDenied, current.SecurityRevision), null, detail);
             }
 
             return new DecisionPlan(Answer(AuthorityDecision.Approved, ReasonCodes.Approved, current.SecurityRevision), null, detail);
@@ -459,7 +463,7 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
 
             if (!answered.Approved)
             {
-                return new AuthorityStore.GrantPlan(refuse(cancelled ? ReasonCodes.Cancelled : ReasonCodes.UserDenied, current.SecurityRevision), "grant-denied", detail);
+                return new AuthorityStore.GrantPlan(refuse(cancelled ? ReasonCodes.Cancelled : answered.TimedOut ? ReasonCodes.ApprovalTimeout : ReasonCodes.UserDenied, current.SecurityRevision), "grant-denied", detail);
             }
 
             if (answered.ReuseMinutes is < 1 or > ReuseSettings.MaxMinutes)
