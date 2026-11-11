@@ -717,10 +717,11 @@ internal static class ApprovalSummaryTests
             FakeApprover direct = new(false);
             if (!OperatingSystem.IsWindows())
             {
+                File.WriteAllText(script, "#!/bin/sh\n" + content);
                 File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
                 RunArgs self = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "self", "--", "./show.sh"], out _)!;
                 await new RunCommand(new MemoryStore(values), direct, new AuditLog(new StateDatabase(audit)), new StringWriter(), new StringWriter()).ExecuteAsync(self, folder);
-                check(direct.Requests.Single().Script is not null, "run: a script run directly is shown too");
+                check(direct.Requests.Single().ProgramFile is not null, "run: a script run directly is shown too (as the program file)");
             }
 
             // Inline code now gets a page that shows it.

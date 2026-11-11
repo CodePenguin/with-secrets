@@ -127,7 +127,7 @@ internal sealed class AdminApp : IDisposable
         }
         Http = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false, UseCookies = false }) { Timeout = TimeSpan.FromSeconds(60) };
         _passkeys = passkeys;
-        _protection = protection ? new ReversibleProtection() : null;
+        _protection = protection || !OperatingSystem.IsWindows() ? new ReversibleProtection() : null;
         _askers = announce =>
         {
             ApprovalSettings settings = new("passkey", null, 0, TimeSpan.FromSeconds(askSeconds));
