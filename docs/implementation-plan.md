@@ -173,3 +173,11 @@ This plan turns the accepted target design in [architecture.md](architecture.md#
 - [x] The hash-chained `AuditLog` (state.db `audit` table, `--audit`) is deleted; every event it recorded is a signed audit event (type `admin` for administrative events; the run events were already signed). No migration, no hash chain.
 - [x] Administrative changes commit their signed event inside the change's own `state.db` transaction, so a change whose event cannot be committed is not made.
 - [x] `OfflineLease`, `ReconcileResponse.LeaseSeconds`, `LocalAuthority.LeaseDuration`, `HostAuthorization.OfflineUse` and the lease loop are removed; hosts fail closed when the authority is unreachable (`HostAuthorization.Vouched`).
+
+### Task M7: Linux key file hardening, the listener without a restart, the blocked-run outcome
+
+- [x] Linux key file checks: no links (file or folder), owner equals the running user, no group or other write on any folder from the key folder up to the store folder (sticky-bit folders accepted), exclusive (`O_EXCL`, `link`) and atomic (temporary file, `fsync`, rename) creation; a refusal is one line with the path and the fix, no stack trace, exit 4.
+- [x] Linux process hardening: non-dumpable (`prctl`), best-effort `mlock` of key and PRF material (a refusal is one warning line), libc only, skipped on Windows; the key folder is to be excluded from backups (documented).
+- [x] Copied-identity warning: 3 supersedes from different addresses within 10 minutes (fixed) record a warning in `authority.db`, one signed `admin` audit event and a Machines screen warning; nothing is disabled.
+- [x] The machine listener starts when the first approval makes the authority signing key (no restart).
+- [x] A run blocked on approval ends as approved, refused or timed out with a distinct outcome (exit 3 for both refusals, per the exit-code table; own sentence and reason code `approval-timeout` for a timeout).
