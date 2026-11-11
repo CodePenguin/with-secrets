@@ -43,6 +43,14 @@ internal static class Program
             return await SelfCheck.RunAsync(Console.Out);
         }
 
+        // TEST ONLY isolation (WITH_SECRETS_TEST_STORE with WITH_SECRETS_TEST_KEY_PREFIX): refused when incomplete, malformed or aimed at the default store.
+        if (TestIsolation.Problem is { } isolationProblem)
+        {
+            TerminalPrompt.Final("with-secrets: " + isolationProblem);
+
+            return RunCommand.Usage;
+        }
+
         CliCommand? command = CliArgs.Parse(args, out string error);
         if (command is null)
         {
@@ -194,7 +202,7 @@ internal static class Program
     }
 
     /// <summary>The host service in the foreground, until Ctrl+C. Windows service installation and start at logon come later.</summary>
-    private static string StorePath() => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), StoreFolder);
+    private static string StorePath() => TestIsolation.Current?.StoreFolder ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), StoreFolder);
 
     private static async Task<int> RunPairAsync() => await AuthorityPairing.RunAsync(PairingEnvironment.ForThisProcess(OpenPairingMachine), Console.Out, Console.Error);
 

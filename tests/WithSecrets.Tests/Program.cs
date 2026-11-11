@@ -361,6 +361,11 @@ internal static class Program
             IdentityTests.Run(Check).GetAwaiter().GetResult();
         }
 
+        if (Wants("TestIsolation"))
+        {
+            TestIsolationTests.Run(Check).GetAwaiter().GetResult();
+        }
+
         if (Wants("KeyStore"))
         {
             KeyStoreTests.Run(Check).GetAwaiter().GetResult();

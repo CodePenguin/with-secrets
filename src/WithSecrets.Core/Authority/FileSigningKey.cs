@@ -232,13 +232,13 @@ public static class MachineKeyStore
 
     /// <summary>The key named <paramref name="name" />, made when it does not exist.</summary>
     public static ISigningKey OpenOrCreate(string storeFolder, string name, out bool created)
-        => OperatingSystem.IsWindows() ? CngSigningKey.OpenOrCreate(name, out created) : FileSigningKey.OpenOrCreate(FileSigningKey.FileOf(KeyFolder(storeFolder), name), out created);
+        => OperatingSystem.IsWindows() ? CngSigningKey.OpenOrCreate(TestIsolation.KeyNameFor(storeFolder, name), out created) : FileSigningKey.OpenOrCreate(FileSigningKey.FileOf(KeyFolder(storeFolder), name), out created);
 
     /// <summary>A new key under the name; whatever held the name is replaced.</summary>
     public static ISigningKey CreateFresh(string storeFolder, string name)
-        => OperatingSystem.IsWindows() ? CngSigningKey.CreateFresh(name) : FileSigningKey.CreateFresh(FileSigningKey.FileOf(KeyFolder(storeFolder), name));
+        => OperatingSystem.IsWindows() ? CngSigningKey.CreateFresh(TestIsolation.KeyNameFor(storeFolder, name)) : FileSigningKey.CreateFresh(FileSigningKey.FileOf(KeyFolder(storeFolder), name));
 
     /// <summary>The existing key, or null. Creates nothing.</summary>
     public static ISigningKey? TryOpen(string storeFolder, string name)
-        => OperatingSystem.IsWindows() ? CngSigningKey.TryOpen(name) : FileSigningKey.TryOpen(FileSigningKey.FileOf(KeyFolder(storeFolder), name));
+        => OperatingSystem.IsWindows() ? CngSigningKey.TryOpen(TestIsolation.KeyNameFor(storeFolder, name)) : FileSigningKey.TryOpen(FileSigningKey.FileOf(KeyFolder(storeFolder), name));
 }

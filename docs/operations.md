@@ -190,3 +190,9 @@ A machine that starts reporting another host name is **not** accepted by itself:
 ## 10. Limits to remember
 
 Same-OS-user processes can reach the loopback API and the service's memory; a restored or rolled-back `authority.db` can bring back an older state (review machines and grants); the Linux key store, grant creation from a remote host, and a Windows service that starts at logon are not built. The full list is in README "Known limits" and `IMPLEMENTATION_PROGRESS.md`.
+
+### Test-only isolation (never for real use)
+
+For an end-to-end test of a real Windows authority that must not touch your own keys or store: set both `WITH_SECRETS_TEST_STORE` (an absolute folder, not `~/.with-secrets` and not inside it) and `WITH_SECRETS_TEST_KEY_PREFIX` (3 to 12 lower-case letters or digits) before `with-secrets service`/`pair`. The store, its logs and every CNG key name (machine identity, authority signing keys, the temporary TLS key) then move to the folder and carry the prefix; the keys are still real, non-exportable CNG keys. The program refuses to start with one variable only, a malformed prefix, or the default store.
+
+Cleanup deletes only the prefixed keys. In PowerShell, list with `certutil -user -csp "Microsoft Software Key Storage Provider" -key | Select-String '<prefix> '`, then for each exact name `certutil -user -csp "Microsoft Software Key Storage Provider" -delkey "<prefix> with-secrets machine identity v1"` (likewise `<prefix> with-secrets authority signing key v1`, ` g2`...). Never delete a name that does not start with your prefix. Remove the test store folder afterwards.

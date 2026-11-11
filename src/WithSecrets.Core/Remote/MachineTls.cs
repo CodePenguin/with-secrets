@@ -37,7 +37,7 @@ internal sealed class TlsKey : IDisposable
     [SupportedOSPlatform("windows")]
     private static (ECDsa, CngKey) CreateWindows()
     {
-        CngKey key = CngKey.Create(CngAlgorithm.ECDsaP256, "with-secrets tls " + Guid.NewGuid().ToString("N"), new CngKeyCreationParameters
+        CngKey key = CngKey.Create(CngAlgorithm.ECDsaP256, TestIsolation.KeyName("with-secrets tls " + Guid.NewGuid().ToString("N")), new CngKeyCreationParameters
         {
             Provider = CngProvider.MicrosoftSoftwareKeyStorageProvider,
             ExportPolicy = CngExportPolicies.None,

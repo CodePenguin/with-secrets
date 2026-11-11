@@ -561,3 +561,9 @@ Update (task M3): the Linux machine key store now exists (an owner-only key file
 - **Known limits**: the event is committed to the outbox before `state.db` commits (not one atomic transaction across two files): a record of a change that did not happen is possible if `state.db` then fails to commit; the reverse is not. A command run with no service leaves its events in `audit-outbox.db` until a service uploads them. `--audit` has no replacement in the terminal (the admin app reads the audit).
 - **Tests**: see the M4 report in `.superpowers/sdd/2026-11-01-web-approval-passkey/task-m4-report.md`.
 
+
+## Task M3b prerequisite: test-only isolation for the Windows authority (branch `impl/mtls-pairing`)
+
+- **Decision (maintainer)**: a real Windows authority end-to-end test needs prefixed CNG key names, not software keys. `WITH_SECRETS_TEST_STORE` (absolute folder replacing `~/.with-secrets`, logs included) and `WITH_SECRETS_TEST_KEY_PREFIX` (3 to 12 lower-case letters or digits, put in front of every CNG key name: machine identity, authority signing keys, the temporary TLS key) must be set together. Refused at start when only one is set, the prefix is malformed, or the store is (or is inside) the default folder; `MachineKeyStore` refuses a prefix with the default folder again. The keys stay real non-exportable CNG keys; nothing about them is logged.
+- **Built**: `Authority/TestIsolation.cs`, `MachineKeyStore` and `TlsKey` use it, `AppLog` and `Program.StorePath` follow the test store. Suite `TestIsolation` (133 checks, includes real CNG keys under a prefix and an unchanged production-name state).
+- **Cleanup**: see docs/operations.md section 8 ("Test-only isolation").
