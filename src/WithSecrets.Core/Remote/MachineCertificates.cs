@@ -29,7 +29,11 @@ public static class MachineCertificates
     /// <summary>A temporary certificate is replaced this long before it expires.</summary>
     public static readonly TimeSpan RotateBefore = TimeSpan.FromHours(1);
 
-    private static readonly TimeSpan Skew = TimeSpan.FromMinutes(5);
+    /// <summary>
+    /// Clock skew tolerated between two machines, fixed: a certificate is accepted from this long before its notBefore until this long after its notAfter, and new certificates are backdated by the same amount, so two machines whose
+    /// clocks differ by less than this still accept each other's fresh certificates.
+    /// </summary>
+    public static readonly TimeSpan Skew = TimeSpan.FromMinutes(5);
 
     public const string ServerAuthOid = "1.3.6.1.5.5.7.3.1";
     public const string ClientAuthOid = "1.3.6.1.5.5.7.3.2";
@@ -205,12 +209,12 @@ public static class MachineCertificates
 
             DateTimeOffset notBefore = certificate.NotBefore.ToUniversalTime();
             DateTimeOffset notAfter = certificate.NotAfter.ToUniversalTime();
-            if (now < notBefore)
+            if (now < notBefore - Skew)
             {
                 return "the identity certificate is not valid yet";
             }
 
-            if (now > notAfter)
+            if (now > notAfter + Skew)
             {
                 return "the identity certificate has expired";
             }
@@ -243,7 +247,7 @@ public static class MachineCertificates
             request.CertificateExtensions.Add(X509AuthorityKeyIdentifierExtension.CreateFromSubjectKeyIdentifier(issuerKeyId));
         }
 
-        DateTimeOffset notBefore = Whole(now - TimeSpan.FromMinutes(1));
+        DateTimeOffset notBefore = Whole(now - Skew);
         using X509Certificate2 leaf = request.Create(identity.SubjectName, new KeySignatureGenerator(identityKey), notBefore, notBefore + TemporaryValidity, Serial());
 
         return leaf.RawData;
@@ -303,12 +307,12 @@ public static class MachineCertificates
 
         DateTimeOffset notBefore = leaf.NotBefore.ToUniversalTime();
         DateTimeOffset notAfter = leaf.NotAfter.ToUniversalTime();
-        if (now < notBefore)
+        if (now < notBefore - Skew)
         {
             return "the certificate is not valid yet";
         }
 
-        if (now > notAfter)
+        if (now > notAfter + Skew)
         {
             return "the certificate has expired";
         }

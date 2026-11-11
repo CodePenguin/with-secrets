@@ -151,8 +151,22 @@ public sealed class MachineListenerOptions
     /// <summary>After a machine's trust is withdrawn: GOAWAY first, the connections are closed after this.</summary>
     internal TimeSpan CloseGrace { get; init; } = TimeSpan.FromSeconds(5);
 
-    /// <summary>Launch ids remembered per machine (one delivery per id).</summary>
+    /// <summary>
+    /// Launch ids remembered per machine while they can still be reused (one delivery per id): an id is forgotten once its request has expired (the request is then refused as expired by the handler), so the table is bounded by
+    /// time and this count is only a ceiling on a burst of live requests.
+    /// </summary>
     internal int MaxLaunchesPerMachine { get; init; } = 4096;
+
+    /// <summary>HTTP/2 keep-alive: the server pings an idle connection this often and closes it when the ping is not answered within <see cref="Http2PingTimeout" /> (ordinary failure detection of a dead peer; not an idle timeout).</summary>
+    internal TimeSpan Http2PingDelay { get; init; } = TimeSpan.FromSeconds(30);
+
+    internal TimeSpan Http2PingTimeout { get; init; } = TimeSpan.FromSeconds(20);
+
+    /// <summary>Open TLS connections in all (a fixed ceiling; a self-made certificate may connect, so the number is bounded).</summary>
+    internal long MaxConnections { get; init; } = 256;
+
+    /// <summary>For tests: called immediately before the final release checkpoint of a delivery.</summary>
+    internal Action? BeforeRelease { get; set; }
 
     internal int MaxRemembered { get; init; } = 512;
 
@@ -187,6 +201,7 @@ public sealed class MachineListener : IDisposable
     private readonly ConcurrentDictionary<string, MachineState> _machines = new(StringComparer.Ordinal);
     private readonly MachineState _pairingState = new();
     private readonly ConcurrentDictionary<string, Connection> _connections = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, PeerIdentity> _established = new(StringComparer.Ordinal);
     private readonly Lock _signalLock = new();
     private TaskCompletionSource _changed = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _global;
@@ -208,6 +223,13 @@ public sealed class MachineListener : IDisposable
         public int Closing;
     }
 
+    private sealed class PollHold(CancellationTokenSource source)
+    {
+        public CancellationTokenSource Source { get; } = source;
+
+        public bool Superseded { get; set; }
+    }
+
     private sealed class MachineState
     {
         public Lock Gate { get; } = new();
@@ -216,8 +238,11 @@ public sealed class MachineListener : IDisposable
 
         public Queue<string> Order { get; } = new();
 
-        /// <summary>The launch ids this machine ran: a launch runs once per id, and its answer (which carries values) is never kept.</summary>
-        public HashSet<string> LaunchIds { get; } = new(StringComparer.Ordinal);
+        /// <summary>The launch ids this machine ran, each until its request's expiry (plus a minute): a launch runs once per id, and its answer (which carries values) is never kept.</summary>
+        public Dictionary<string, DateTimeOffset> LaunchIds { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>The poll this machine has outstanding (at most one: a new one supersedes it).</summary>
+        public PollHold? Poll { get; set; }
 
         public int InFlight;
     }
@@ -301,6 +326,9 @@ public sealed class MachineListener : IDisposable
             kestrel.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(15);
             kestrel.Limits.Http2.MaxStreamsPerConnection = Math.Max(_options.MaxConcurrentPerMachine * 2, 16);
             kestrel.Limits.KeepAliveTimeout = Timeout.InfiniteTimeSpan;
+            kestrel.Limits.Http2.KeepAlivePingDelay = _options.Http2PingDelay;
+            kestrel.Limits.Http2.KeepAlivePingTimeout = _options.Http2PingTimeout;
+            kestrel.Limits.MaxConcurrentConnections = _options.MaxConnections;
             kestrel.Listen(_options.Bind, _options.Port, listen =>
             {
                 listen.Protocols = HttpProtocols.Http2;
@@ -379,6 +407,7 @@ public sealed class MachineListener : IDisposable
         "unknown-operation" => 404,
         "method-not-allowed" => 405,
         "request-id-reused" => 409,
+        "superseded" => 409,
         "unsupported-media-type" => 415,
         "too-large" => 413,
         "too-busy" => 429,
@@ -424,7 +453,7 @@ public sealed class MachineListener : IDisposable
 
         // The certificate decides who the caller is. Anything else about it (the route, the body, a header) is looked at only afterwards.
         X509Certificate2? certificate = context.Connection.ClientCertificate;
-        PeerIdentity peer = certificate is null ? new PeerIdentity(PeerKind.Rejected, "", "no client certificate") : _peers.Classify(certificate);
+        PeerIdentity peer = certificate is null ? new PeerIdentity(PeerKind.Rejected, "", "no client certificate") : ClassifyConnection(context, certificate);
         if (request.Protocol != "HTTP/2" || peer.Kind == PeerKind.Rejected)
         {
             await FailAsync(context, 403, correlation, "certificate-rejected");
@@ -527,6 +556,28 @@ public sealed class MachineListener : IDisposable
         }
     }
 
+    /// <summary>
+    /// Who a connection's certificate says its caller is. A connection that was accepted as an enrolled machine at its handshake is not interrupted when the certificate it used then later passes its end (10.2: a healthy connection is
+    /// not cut for that): the classification is remembered for the life of the connection, and the per-request checks that matter (the machine is Trusted now, the lock, the binding of each operation) still run on every request. A
+    /// certificate that was not enrolled is looked at again every time (the machine may have been approved since).
+    /// </summary>
+    private PeerIdentity ClassifyConnection(HttpContext context, X509Certificate2 certificate)
+    {
+        string id = context.Connection.Id;
+        if (_established.TryGetValue(id, out PeerIdentity? known))
+        {
+            return known;
+        }
+
+        PeerIdentity peer = _peers.Classify(certificate);
+        if (peer.Kind == PeerKind.Enrolled && _established.TryAdd(id, peer))
+        {
+            context.Features.Get<IConnectionLifetimeFeature>()?.ConnectionClosed.Register(() => _established.TryRemove(id, out _));
+        }
+
+        return peer;
+    }
+
     private static bool IsJson(string? contentType)
     {
         if (contentType is null || !System.Net.Http.Headers.MediaTypeHeaderValue.TryParse(contentType, out System.Net.Http.Headers.MediaTypeHeaderValue? parsed))
@@ -604,6 +655,51 @@ public sealed class MachineListener : IDisposable
             limit.CancelAfter(allowed);
         }
 
+        PollHold? hold = null;
+        if (op == RemoteOps.Poll)
+        {
+            // Exactly one outstanding poll per machine: a new one supersedes (cancels, and so releases) the older, which a dead or abandoned connection may be holding.
+            hold = new PollHold(limit);
+            lock (state.Gate)
+            {
+                if (state.Poll is { } older)
+                {
+                    older.Superseded = true;
+                    try
+                    {
+                        older.Source.Cancel();
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        // Already finished.
+                    }
+                }
+
+                state.Poll = hold;
+            }
+        }
+
+        try
+        {
+            await ServeOperationCoreAsync(context, peer, state, op, correlation, limit, hold);
+        }
+        finally
+        {
+            if (hold is not null)
+            {
+                lock (state.Gate)
+                {
+                    if (ReferenceEquals(state.Poll, hold))
+                    {
+                        state.Poll = null;
+                    }
+                }
+            }
+        }
+    }
+
+    private async Task ServeOperationCoreAsync(HttpContext context, PeerIdentity peer, MachineState state, string op, string correlation, CancellationTokenSource limit, PollHold? hold)
+    {
         byte[]? raw = await ReadBodyAsync(context, _options.MaxBodyBytes, limit.Token);
         if (raw is null)
         {
@@ -646,7 +742,7 @@ public sealed class MachineListener : IDisposable
         {
             if (!context.Response.HasStarted)
             {
-                await FailAsync(context, 504, message.Id, "timeout");
+                await FailAsync(context, hold?.Superseded == true ? 409 : 504, message.Id, hold?.Superseded == true ? "superseded" : "timeout");
             }
 
             return;
@@ -684,7 +780,23 @@ public sealed class MachineListener : IDisposable
             }
             else
             {
-                task = Task.Run(() => DispatchAsync(peer, message, _stop.Token), _stop.Token);
+                task = Task.Run(async () =>
+                {
+                    string result = await DispatchAsync(peer, message, _stop.Token);
+                    if (IsTransientFailure(result))
+                    {
+                        // A transient failure (the authority locked mid-operation, a database error) is not remembered: the same id may be tried again, and a retried acknowledgement must not replay the failure.
+                        lock (state.Gate)
+                        {
+                            if (state.Known.TryGetValue(message.Id, out (string Digest, Task<string> Result) current) && current.Digest == digest)
+                            {
+                                state.Known.Remove(message.Id);
+                            }
+                        }
+                    }
+
+                    return result;
+                }, _stop.Token);
                 state.Known[message.Id] = (digest, task);
                 state.Order.Enqueue(message.Id);
                 while (state.Order.Count > _options.MaxRemembered)
@@ -696,6 +808,8 @@ public sealed class MachineListener : IDisposable
         }
         return await task.WaitAsync(cancel);
     }
+
+    private static bool IsTransientFailure(string reply) => RemoteWire.TryReadMessage(Encoding.UTF8.GetBytes(reply), out WireMessage? parsed) && parsed is { Ok: false } && parsed.Error is "locked" or "internal-error";
 
     private async Task<string> DispatchAsync(PeerIdentity peer, WireMessage message, CancellationToken cancel)
     {
@@ -905,7 +1019,14 @@ public sealed class MachineListener : IDisposable
         bool reused;
         lock (state.Gate)
         {
-            reused = state.LaunchIds.Count >= _options.MaxLaunchesPerMachine || !state.LaunchIds.Add(message.Id);
+            // Ids are kept only while their request can still be used (until its expiry and a minute): older ones are forgotten, so the table does not grow without end and a live id is never reusable.
+            DateTimeOffset now = _options.Clock.GetUtcNow();
+            foreach (string old in state.LaunchIds.Where(item => item.Value < now).Select(item => item.Key).ToList())
+            {
+                state.LaunchIds.Remove(old);
+            }
+
+            reused = state.LaunchIds.Count >= _options.MaxLaunchesPerMachine || !state.LaunchIds.TryAdd(message.Id, launch.Decide.Request.Expires.AddMinutes(1));
         }
 
         if (reused)
@@ -992,14 +1113,16 @@ public sealed class MachineListener : IDisposable
             bool delivering = answer.Delivery is not null;
             if (answer.Delivery is { } delivery)
             {
-                // The final authorization checkpoint, immediately before the values leave: a lock, a withdrawn trust or a newer security revision means they do not.
+                // The final authorization checkpoint, immediately before the values leave: a lock, a withdrawn trust, a newer security revision or (for a delivery by grant) a grant that is no longer usable means they do not.
+                _options.BeforeRelease?.Invoke();
                 MachineRecord? now = _store.Find(peer.Fingerprint);
+                bool grantGone = delivery.Via == SecretsDelivery.ViaGrant && (_store.FindGrant(delivery.GrantId) is not { } liveGrant || !liveGrant.IsUsable(_options.Clock.GetUtcNow()));
                 if (Locked)
                 {
                     reply = RemoteWire.Failure(message.Id, "locked");
                     delivering = false;
                 }
-                else if (now is not { Status: MachineStatus.Trusted } || now.SecurityRevision != delivery.SecurityRevision)
+                else if (now is not { Status: MachineStatus.Trusted } || now.SecurityRevision != delivery.SecurityRevision || grantGone)
                 {
                     reply = RemoteWire.Failure(message.Id, "authorization-changed");
                     delivering = false;
@@ -1041,7 +1164,12 @@ public sealed class MachineListener : IDisposable
         string id = context.Connection.Id;
         if (!_connections.ContainsKey(id))
         {
-            _connections.TryAdd(id, new Connection(id, fingerprint, context.Features.Get<IConnectionLifetimeNotificationFeature>(), context.Features.Get<IConnectionLifetimeFeature>()));
+            IConnectionLifetimeFeature? lifetime = context.Features.Get<IConnectionLifetimeFeature>();
+            if (_connections.TryAdd(id, new Connection(id, fingerprint, context.Features.Get<IConnectionLifetimeNotificationFeature>(), lifetime)))
+            {
+                // Whatever ends the connection (a normal close, a reconnect, a dead peer, a revocation) removes its entry.
+                lifetime?.ConnectionClosed.Register(() => _connections.TryRemove(id, out _));
+            }
         }
     }
 

@@ -22,7 +22,7 @@ namespace WithSecrets.Tests;
 /// certificate profiles (identity and temporary), rotation, the custom-root validation in both directions, the downgrade and fallback refusals, mutual TLS on every route, the transport policy (no caching, no compression, JSON only,
 /// bounded, safe errors), revocation that closes live connections, idempotent retries, the long poll and the client's refusal of redirects, proxies and unreadable answers. Real Kestrel, real TLS, real clients.
 /// </summary>
-internal static class RemoteAuthorityTests
+internal static partial class RemoteAuthorityTests
 {
     private static readonly TimeSpan Fast = TimeSpan.FromMilliseconds(100);
 
@@ -385,6 +385,7 @@ internal static class RemoteAuthorityTests
             await Idempotence(check, root);
             await Recovery(check, root);
             await LongPoll(check, root);
+            await FixRound1(check, root);
             await HostileAuthority(check, root);
         }
         finally
@@ -951,11 +952,13 @@ internal static class RemoteAuthorityTests
         int presented = 0;
         using IDisposable offer = net.Authority.Deployment.Authority.Offer(request.RequestId, request.Digest(), () => { Interlocked.Increment(ref presented); Thread.Sleep(600); return ApprovalDecision.Allow(); });
         MachineRequestEnvelope envelope = MachineRequestEnvelope.Create(request, "recover-host", host.Machine.MachineKey);
+        int requestsBefore = net.Listener.Requests;
+        int connectionsBefore = host.Remote.Connections;
         Task<AuthorityResponse> pending = host.Remote.DecideAsync(envelope);
         await Task.Delay(250);
         host.Remote.Disconnect();
         AuthorityResponse decided = await pending.WaitAsync(TimeSpan.FromSeconds(30));
-        check(decided.Decision == AuthorityDecision.Approved && presented == 1, "recovery: a decision interrupted by a lost connection is retried with the same id and the approval is not asked twice");
+        check(decided.Decision == AuthorityDecision.Approved && presented == 1 && host.Remote.Connections == connectionsBefore + 1 && net.Listener.Requests - requestsBefore == 2, "recovery: a decision interrupted by a lost connection is repeated on a new connection under the same id (two requests, one new connection) and the approval is not asked twice (asked " + presented + ", requests " + (net.Listener.Requests - requestsBefore) + ")");
 
         // A release whose answer is lost is NOT retried: the values may already have left the authority.
         SlowRelease handler = new();
