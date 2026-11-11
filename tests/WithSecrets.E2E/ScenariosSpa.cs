@@ -269,6 +269,13 @@ internal static class ScenariosSpa
         await c.Page.WaitForFunctionAsync("() => location.search.includes('type=launch')");
         await c.Page.GetByRole(AriaRole.Status).Filter(new() { HasText = "found" }).First.WaitForAsync();
         string narrowed = await results.TextContentAsync() ?? "";
+        for (int attempt = 0; attempt < 20 && (narrowed.Contains("authorization:", StringComparison.Ordinal) || !narrowed.Contains("launch:", StringComparison.Ordinal)); attempt++)
+        {
+            // The status line that says "found" is also there from the search before: wait for the list itself to be the narrowed one.
+            await Task.Delay(500);
+            narrowed = await results.TextContentAsync() ?? "";
+        }
+
         s.Check(narrowed.Contains("launch:", StringComparison.Ordinal) && !narrowed.Contains("authorization:", StringComparison.Ordinal), "the kind filter narrows the events to the launch");
 
         // A reload keeps the search (it is in the address).
