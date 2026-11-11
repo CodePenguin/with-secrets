@@ -204,16 +204,11 @@ internal static class Program
 
     private static async Task<int> RunPairAsync() => await AuthorityPairing.RunAsync(PairingEnvironment.ForThisProcess(OpenPairingMachine), Console.Out, Console.Error);
 
-    /// <summary>This machine's identity for pairing: the persistent key Windows keeps (made on first use, non-exportable), its identity certificate beside host.json, and the host name.</summary>
+    /// <summary>This machine's identity for pairing: the persistent key of the platform key store (Windows CNG, non-exportable; elsewhere an owner-only key file, weaker), made on first use, its identity certificate beside host.json, and the host name.</summary>
     private static PairingMachine OpenPairingMachine()
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            throw new PlatformNotSupportedException();
-        }
-
         string folder = StorePath();
-        CngSigningKey key = CngSigningKey.OpenOrCreate(KeyNames.Machine, out _);
+        ISigningKey key = MachineKeyStore.OpenOrCreate(folder, KeyNames.Machine, out _);
 
         return new PairingMachine(key, MachineIdentityFile.LoadOrCreate(folder, key, TimeProvider.System), Environment.MachineName, HostConfigFile.InFolder(folder), (name, detail) =>
         {

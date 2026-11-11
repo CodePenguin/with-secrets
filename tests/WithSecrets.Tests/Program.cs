@@ -361,6 +361,11 @@ internal static class Program
             IdentityTests.Run(Check).GetAwaiter().GetResult();
         }
 
+        if (Wants("KeyStore"))
+        {
+            KeyStoreTests.Run(Check).GetAwaiter().GetResult();
+        }
+
         if (Wants("Authority"))
         {
             AuthorityTests.Run(Check).GetAwaiter().GetResult();

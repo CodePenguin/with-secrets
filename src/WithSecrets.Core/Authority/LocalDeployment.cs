@@ -1,5 +1,3 @@
-using System.Runtime.Versioning;
-
 namespace WithSecrets;
 
 /// <summary>
@@ -87,27 +85,29 @@ public sealed class LocalDeployment(AuthorityStore store, AuthorityKeyRing keys,
     }
 
     /// <summary>
-    /// The deployment of this user's machine: the machine identity and the authority signing key are CNG keys under their fixed names
-    /// (made non-exportable on first use), the rest is in the store folder.
+    /// The deployment of this user's machine: the machine identity and the authority signing key are persistent keys under their fixed names (<see cref="MachineKeyStore" />: non-exportable CNG keys on Windows, owner-only
+    /// key files under <c>keys</c> in the store folder elsewhere), made on first use; the rest is in the store folder.
     /// </summary>
-    [SupportedOSPlatform("windows")]
     public static LocalDeployment OpenProduction(string folder)
     {
-        CngSigningKey machine = CngSigningKey.OpenOrCreate(KeyNames.Machine, out _);
-        LocalDeployment deployment = Create(folder, machine, generation => CngSigningKey.OpenOrCreate(AuthorityKeyNameOf(generation), out _), Environment.MachineName, create: generation => CngSigningKey.CreateFresh(AuthorityKeyNameOf(generation)));
+        ISigningKey machine = MachineKeyStore.OpenOrCreate(folder, KeyNames.Machine, out _);
+        LocalDeployment deployment = Create(folder, machine, generation => MachineKeyStore.OpenOrCreate(folder, AuthorityKeyNameOf(generation), out _), Environment.MachineName, create: generation => MachineKeyStore.CreateFresh(folder, AuthorityKeyNameOf(generation)));
 
         return deployment;
     }
 
-    /// <summary>The authority key ring of this user's machine over a store (the keys are CNG keys, see <see cref="OpenProduction" />).</summary>
-    [SupportedOSPlatform("windows")]
-    public static AuthorityKeyRing ProductionKeyRing(AuthorityStore store) => new(store, generation => CngSigningKey.OpenOrCreate(AuthorityKeyNameOf(generation), out _), null, generation => CngSigningKey.CreateFresh(AuthorityKeyNameOf(generation)));
+    /// <summary>The authority key ring of this user's machine over a store (the keys are in the platform key store, see <see cref="OpenProduction" />).</summary>
+    public static AuthorityKeyRing ProductionKeyRing(AuthorityStore store)
+    {
+        string folder = Path.GetDirectoryName(store.FilePath)!;
+
+        return new(store, generation => MachineKeyStore.OpenOrCreate(folder, AuthorityKeyNameOf(generation), out _), null, generation => MachineKeyStore.CreateFresh(folder, AuthorityKeyNameOf(generation)));
+    }
 
     /// <summary>The fingerprint of this user's machine identity if the key exists already (nothing is created), else null.</summary>
-    [SupportedOSPlatform("windows")]
-    public static string? ExistingMachineFingerprint()
+    public static string? ExistingMachineFingerprint(string folder)
     {
-        using CngSigningKey? key = CngSigningKey.TryOpen(KeyNames.Machine);
+        using ISigningKey? key = MachineKeyStore.TryOpen(folder, KeyNames.Machine);
 
         return key is null ? null : KeyIdentity.Fingerprint(key.PublicKey);
     }
