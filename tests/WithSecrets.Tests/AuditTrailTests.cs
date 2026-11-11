@@ -190,7 +190,7 @@ internal static class AuditTrailTests
             && (e with { Arguments = [.. Enumerable.Repeat("a", 300)] }).Problem() is not null && (e with { EventId = "bad id" }).Problem() is not null && (e with { ProtocolVersion = 9 }).Problem() is not null, "event shape: a number below 1, an unknown type, an empty outcome, a long field, too many arguments or a bad id are refused");
 
         string[] fields = [.. typeof(AuditEvent).GetProperties().Where(p => p.DeclaringType == typeof(AuditEvent) && p.Name != "EqualityContract").Select(p => p.Name).Order(StringComparer.Ordinal)];
-        string[] allowed = ["Arguments", "ExitCode", "EventId", "Epoch", "Folder", "GrantId", "MachineFingerprint", "Outcome", "Program", "ProtocolVersion", "Reason", "RequestId", "Sequence", "Signature", "Time", "Type"];
+        string[] allowed = ["Arguments", "ExitCode", "EventId", "Epoch", "Folder", "GrantId", "MachineFingerprint", "Outcome", "Program", "ProtocolVersion", "Reason", "RequestId", "Sequence", "Signature", "Time", "Type", "Metadata", "Meta"];
         check(fields.SequenceEqual(allowed.Order(StringComparer.Ordinal)), "event content: exactly the agreed fields; none names an OS user, a secret value or an environment value (a new field must be decided here) (" + string.Join(",", fields) + ")");
     }
 

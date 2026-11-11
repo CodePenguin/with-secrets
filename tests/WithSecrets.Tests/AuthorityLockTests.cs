@@ -171,7 +171,7 @@ internal static class AuthorityLockTests
             reconcileRefused = true;
         }
 
-        check(reconcileRefused && !service.Ready && service.Authorization.SyncedGrants.Count == 0 && !service.Authorization.Lease.IsValid, "lock: a locked authority answers no check-in and the host holds no lease or grant");
+        check(reconcileRefused && !service.Ready && service.Authorization.SyncedGrants.Count == 0 && !service.Authorization.Vouched, "lock: a locked authority answers no check-in and nothing vouches for the host, it holds no grant");
 
         // The test seam unlocks (never a production path): the same service logic works afterwards.
         service.Lock.Unlock(UnlockMethod.Seam);
@@ -266,14 +266,14 @@ internal static class AuthorityLockTests
         // Unlock creates no grant and widens none.
         check(store.Grants().Count == 0 && live.Authorization.SyncedGrants.Count == 0 && !live.Authorization.Keys.IsHeld, "unlock: it creates no grant and holds no key");
 
-        // Hold something to discard: a store key for a grant, the lease and a synchronized grant.
+        // Hold something to discard: a store key for a grant, the vouching state and a synchronized grant.
         live.Authorization.Keys.Hold(new Unlock("test-credential", [.. Enumerable.Range(1, 32).Select(item => (byte)item)]), new HeldKeyBinding("g1", "s1", 1, null));
         byte[]? held = live.Authorization.Keys.HeldBytes;
-        check(live.Authorization.Lease.IsValid && held is not null && held.Any(b => b != 0), "lock: before locking the host holds a lease and a key");
+        check(live.Authorization.Vouched && held is not null && held.Any(b => b != 0), "lock: before locking the host is vouched for and holds a key");
 
         Tapped lockTap = await TapOn(live, http, AdminService.OpLock, laptop);
         check(lockTap.ApproveStatus == 200 && await HostServiceTests.WaitFor(() => live.Lock.IsLocked), "lock: the admin key's fresh tap locks at once");
-        check(!live.Authorization.Keys.IsHeld && held!.All(b => b == 0) && !live.Authorization.Lease.IsValid && live.Authorization.SyncedGrants.Count == 0 && !live.Ready, "lock: the held key is zeroed and dropped, the lease and grants are discarded, the host is not ready");
+        check(!live.Authorization.Keys.IsHeld && held!.All(b => b == 0) && !live.Authorization.Vouched && live.Authorization.SyncedGrants.Count == 0 && !live.Ready, "lock: the held key is zeroed and dropped, the vouching state and grants are discarded, the host is not ready");
         (int replayStatus, _) = TestState.Post(http, unlock.PageUrl + "/proof", unlock.ProofBody);
         await Task.Delay(300);
         check(live.Lock.IsLocked && replayStatus != 200, "replay: sending the unlock proof again to its page unlocks nothing");

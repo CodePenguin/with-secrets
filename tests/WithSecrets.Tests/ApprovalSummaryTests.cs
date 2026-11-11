@@ -187,14 +187,14 @@ internal static class ApprovalSummaryTests
                 FakeApprover never = new(true);
                 StringWriter errors = new();
                 RunArgs missing = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", .. Prefix("nope" + extension)], out _)!;
-                int code = await new RunCommand(new MemoryStore(values), never, new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(missing, folder);
+                int code = await new RunCommand(new MemoryStore(values), never, new StringWriter(), errors).ExecuteAsync(missing, folder);
                 check(code == RunCommand.Usage && never.Requests.Count == 0 && errors.ToString().Contains("does not exist", StringComparison.Ordinal), "round4 run: a script that does not exist is refused before any prompt");
 
                 // A binary script is refused.
                 await File.WriteAllBytesAsync(Path.Combine(folder, "bin" + extension), [0, 1, 2, 3]);
                 errors = new StringWriter();
                 RunArgs binary = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", .. Prefix("bin" + extension)], out _)!;
-                code = await new RunCommand(new MemoryStore(values), never, new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(binary, folder);
+                code = await new RunCommand(new MemoryStore(values), never, new StringWriter(), errors).ExecuteAsync(binary, folder);
                 check(code == RunCommand.Usage && never.Requests.Count == 0 && errors.ToString().Contains("Binary scripts", StringComparison.Ordinal), "round4 run: a binary script given to an interpreter is refused");
 
                 // A working folder with spaces and brackets works, and the script is shown, hashed and held.
@@ -206,7 +206,7 @@ internal static class ApprovalSummaryTests
                 StringWriter output = new();
                 errors = new StringWriter();
                 RunArgs spacedRun = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", .. Prefix(scriptName)], out _)!;
-                code = await new RunCommand(new MemoryStore(values), approver, new AuditLog(new StateDatabase(audit)), output, errors).ExecuteAsync(spacedRun, spacedFolder);
+                code = await new RunCommand(new MemoryStore(values), approver, output, errors).ExecuteAsync(spacedRun, spacedFolder);
                 ApprovalRequest? seen = approver.Requests.SingleOrDefault();
                 bool shown = seen?.Script is { Text: not null } view && view.Path.StartsWith(spacedFolder, StringComparison.Ordinal) && ApprovalSummary.BuildMessage(seen).Contains(Marker + "echo SPACE_MARK_OK", StringComparison.Ordinal);
                 check(code == 0 && shown && output.ToString().Contains("SPACE_MARK_OK", StringComparison.Ordinal), "round4 run: a folder with spaces and brackets runs and the script is shown (" + code + " " + errors.ToString().Trim().Replace('\n', ' ') + ")");
@@ -239,7 +239,7 @@ internal static class ApprovalSummaryTests
                     await File.WriteAllTextAsync(Path.Combine(ampFolder, scriptName), "@echo off\r\necho AMP_MARK\r\n");
                     FakeApprover none = new(true);
                     errors = new StringWriter();
-                    code = await new RunCommand(new MemoryStore(values), none, new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(spacedRun, ampFolder);
+                    code = await new RunCommand(new MemoryStore(values), none, new StringWriter(), errors).ExecuteAsync(spacedRun, ampFolder);
                     check(code == RunCommand.Usage && none.Requests.Count == 0 && errors.ToString().Contains("folder name", StringComparison.Ordinal), "round4 run: cmd in a folder with & is refused with a clear message");
                 }
             }
@@ -252,10 +252,10 @@ internal static class ApprovalSummaryTests
                 FakeApprover deny = new(false);
                 StringWriter errors = new();
                 RunArgs noBom = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", "powershell", "-NoProfile", "-File", "u.ps1"], out _)!;
-                int code = await new RunCommand(new MemoryStore(values), deny, new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(noBom, folder);
+                int code = await new RunCommand(new MemoryStore(values), deny, new StringWriter(), errors).ExecuteAsync(noBom, folder);
                 check(code == RunCommand.Usage && deny.Requests.Count == 0 && errors.ToString().Contains("byte order mark", StringComparison.Ordinal), "round4 run: powershell.exe refuses a non-ASCII script without a BOM");
                 RunArgs withBom = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", "powershell", "-NoProfile", "-File", "b.ps1"], out _)!;
-                await new RunCommand(new MemoryStore(values), deny, new AuditLog(new StateDatabase(audit)), new StringWriter(), new StringWriter()).ExecuteAsync(withBom, folder);
+                await new RunCommand(new MemoryStore(values), deny, new StringWriter(), new StringWriter()).ExecuteAsync(withBom, folder);
                 check(deny.Requests.Count == 1, "round4 run: powershell.exe accepts the same script with a BOM");
             }
         }
@@ -311,7 +311,7 @@ internal static class ApprovalSummaryTests
                 StringWriter output = new();
                 StringWriter errors = new();
                 RunArgs run = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", "cmd", "/d", "/c", "t.cmd", "x1"], out _)!;
-                int code = await new RunCommand(new MemoryStore(values), approver, new AuditLog(new StateDatabase(audit)), output, errors).ExecuteAsync(run, folder);
+                int code = await new RunCommand(new MemoryStore(values), approver, output, errors).ExecuteAsync(run, folder);
                 string text = output.ToString();
                 check(code == 0 && text.Contains("SHOWN_T x1", StringComparison.Ordinal) && !text.Contains("HIDDEN_A_MARKER", StringComparison.Ordinal) && approver.Requests.Single().Script is { Text: not null } shown && shown.Path.StartsWith(folder, StringComparison.Ordinal),
                     "round5 run: cmd /d /c t.cmd in a folder named '" + name + "' runs the shown file (" + code + " " + errors.ToString().Trim().Replace('\n', ' ') + ")");
@@ -335,7 +335,7 @@ internal static class ApprovalSummaryTests
                 FakeApprover none = new(true);
                 StringWriter errors = new();
                 RunArgs run = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", .. words], out _)!;
-                int code = await new RunCommand(new MemoryStore(values), none, new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(run, root);
+                int code = await new RunCommand(new MemoryStore(values), none, new StringWriter(), errors).ExecuteAsync(run, root);
                 check(code == RunCommand.Usage && none.Requests.Count == 0 && errors.ToString().Contains("batch files must be ASCII", StringComparison.Ordinal), "round5 run: a non-ASCII batch file is refused (" + string.Join(' ', words) + ")");
             }
 
@@ -351,11 +351,11 @@ internal static class ApprovalSummaryTests
                 RunArgs psRun = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", "powershell", "-NoProfile", "-File", "t.ps1"], out _)!;
                 FakeApprover approver = new(true);
                 StringWriter output = new();
-                int code = await new RunCommand(new MemoryStore(values), approver, new AuditLog(new StateDatabase(audit)), output, new StringWriter()).ExecuteAsync(psRun, plain);
+                int code = await new RunCommand(new MemoryStore(values), approver, output, new StringWriter()).ExecuteAsync(psRun, plain);
                 check(code == 0 && output.ToString().Contains("PS_MARK_OK", StringComparison.Ordinal), "round5 run: powershell -File in a plain folder with a space runs");
                 FakeApprover none = new(true);
                 StringWriter errors = new();
-                code = await new RunCommand(new MemoryStore(values), none, new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(psRun, wild);
+                code = await new RunCommand(new MemoryStore(values), none, new StringWriter(), errors).ExecuteAsync(psRun, wild);
                 check(code == RunCommand.Usage && none.Requests.Count == 0 && errors.ToString().Contains("wildcards", StringComparison.Ordinal), "round5 run: powershell -File in a folder with [ ] is refused before any prompt");
             }
         }
@@ -403,14 +403,14 @@ internal static class ApprovalSummaryTests
             await File.WriteAllTextAsync(data, "just data\n");
             FakeApprover deny = new(false);
             RunArgs benign = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", "./" + Path.GetFileName(evil), "hello"], out _)!;
-            int code = await new RunCommand(new MemoryStore(values), deny, new AuditLog(new StateDatabase(audit)), new StringWriter(), new StringWriter()).ExecuteAsync(benign, folder);
+            int code = await new RunCommand(new MemoryStore(values), deny, new StringWriter(), new StringWriter()).ExecuteAsync(benign, folder);
             ApprovalRequest seen = deny.Requests.Single();
             string message = ApprovalSummary.BuildMessage(seen);
             check(code == RunCommand.Denied && seen.ProgramFile is { Text: not null } && seen.Script is null && Lines(message).Contains(Marker + "echo EVIL_MARK"), "program file: a script run directly is shown even with a benign argument");
 
             deny = new FakeApprover(false);
             RunArgs both = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", "./" + Path.GetFileName(evil), "./data.txt"], out _)!;
-            await new RunCommand(new MemoryStore(values), deny, new AuditLog(new StateDatabase(audit)), new StringWriter(), new StringWriter()).ExecuteAsync(both, folder);
+            await new RunCommand(new MemoryStore(values), deny, new StringWriter(), new StringWriter()).ExecuteAsync(both, folder);
             message = ApprovalSummary.BuildMessage(deny.Requests.Single());
             check(Lines(message).Count(line => line.StartsWith("Script file: ", StringComparison.Ordinal)) == 2 && Lines(message).Contains(Marker + "echo EVIL_MARK") && Lines(message).Contains(Marker + "just data"), "program file: the program and its script argument are both shown, each with its hash");
             check(Lines(message).Count(line => line.StartsWith("Script SHA-256: ", StringComparison.Ordinal)) == 2, "program file: two hashes");
@@ -425,13 +425,13 @@ internal static class ApprovalSummaryTests
             if (interpreter is not null)
             {
                 RunArgs bigRun = CliArgs.ParseRun(windows ? ["--secrets", "DB_URL", "--reason", "x", "--", "cmd", "/d", "/c", bigName] : ["--secrets", "DB_URL", "--reason", "x", "--", "sh", bigName], out _)!;
-                code = await new RunCommand(new MemoryStore(values), never, new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(bigRun, folder);
+                code = await new RunCommand(new MemoryStore(values), never, new StringWriter(), errors).ExecuteAsync(bigRun, folder);
                 check(code == RunCommand.Usage && never.Requests.Count == 0 && errors.ToString().Contains("larger than 1 MB", StringComparison.Ordinal), "big: a script over 1 MB given to an interpreter is refused before any prompt (" + code + ")");
             }
 
             RunArgs bigDirect = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", "./" + bigName], out _)!;
             errors = new StringWriter();
-            code = await new RunCommand(new MemoryStore(values), never, new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(bigDirect, folder);
+            code = await new RunCommand(new MemoryStore(values), never, new StringWriter(), errors).ExecuteAsync(bigDirect, folder);
             check(code == RunCommand.Usage && never.Requests.Count == 0 && errors.ToString().Contains("larger than 1 MB", StringComparison.Ordinal), "big: a script over 1 MB run directly is refused before any prompt (" + code + ")");
 
             // bare interpreter through a run: refused without a prompt
@@ -439,7 +439,7 @@ internal static class ApprovalSummaryTests
             {
                 RunArgs bare = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", interpreter], out _)!;
                 errors = new StringWriter();
-                code = await new RunCommand(new MemoryStore(values), never, new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(bare, folder);
+                code = await new RunCommand(new MemoryStore(values), never, new StringWriter(), errors).ExecuteAsync(bare, folder);
                 check(code == RunCommand.Usage && never.Requests.Count == 0 && errors.ToString().Contains("nothing to run", StringComparison.Ordinal), "bare: an interpreter with nothing to run is refused before any prompt");
             }
 
@@ -457,7 +457,7 @@ internal static class ApprovalSummaryTests
             try
             {
                 errors = new StringWriter();
-                code = await new RunCommand(new MemoryStore(values), approver, new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(racerRun, folder);
+                code = await new RunCommand(new MemoryStore(values), approver, new StringWriter(), errors).ExecuteAsync(racerRun, folder);
             }
             finally
             {
@@ -469,7 +469,7 @@ internal static class ApprovalSummaryTests
             // a file edited while the prompt is open is not run (the fingerprint check after the approval)
             await File.WriteAllTextAsync(racer, windows ? "@echo off\r\necho first\r\n" : "#!/bin/sh\necho first\n");
             errors = new StringWriter();
-            code = await new RunCommand(new MemoryStore(values), new EditingApprover(racer), new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(racerRun, folder);
+            code = await new RunCommand(new MemoryStore(values), new EditingApprover(racer), new StringWriter(), errors).ExecuteAsync(racerRun, folder);
             check(code == RunCommand.Denied && errors.ToString().Contains("while the prompt was open", StringComparison.Ordinal), "race: a file edited while the prompt is open is refused by the fingerprint check (" + code + "; " + errors + ")");
 
             // held files: nobody can write or delete a shown file while it is held (Windows); a changed file is caught on every system
@@ -707,7 +707,7 @@ internal static class ApprovalSummaryTests
             File.WriteAllText(script, content);
             FakeApprover deny = new(false);
             RunArgs run = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "show", "--", "sh", "./show.sh"], out _)!;
-            int code = await new RunCommand(new MemoryStore(values), deny, new AuditLog(new StateDatabase(audit)), new StringWriter(), new StringWriter()).ExecuteAsync(run, folder);
+            int code = await new RunCommand(new MemoryStore(values), deny, new StringWriter(), new StringWriter()).ExecuteAsync(run, folder);
             ApprovalRequest seen = deny.Requests.Single();
             string message = ApprovalSummary.BuildMessage(seen);
             check(code == RunCommand.Denied && seen.Script is { } view && view.Sha256 == Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(script))), "run: the request carries the script that will run, with its hash");
@@ -720,14 +720,14 @@ internal static class ApprovalSummaryTests
                 File.WriteAllText(script, "#!/bin/sh\n" + content);
                 File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
                 RunArgs self = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "self", "--", "./show.sh"], out _)!;
-                await new RunCommand(new MemoryStore(values), direct, new AuditLog(new StateDatabase(audit)), new StringWriter(), new StringWriter()).ExecuteAsync(self, folder);
+                await new RunCommand(new MemoryStore(values), direct, new StringWriter(), new StringWriter()).ExecuteAsync(self, folder);
                 check(direct.Requests.Single().ProgramFile is not null, "run: a script run directly is shown too (as the program file)");
             }
 
             // Inline code now gets a page that shows it.
             FakeApprover inline = new(false);
             RunArgs code1 = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "inline", "--", "sh", "-c", "echo $DB_URL"], out _)!;
-            code = await new RunCommand(new MemoryStore(values), inline, new AuditLog(new StateDatabase(audit)), new StringWriter(), new StringWriter()).ExecuteAsync(code1, folder);
+            code = await new RunCommand(new MemoryStore(values), inline, new StringWriter(), new StringWriter()).ExecuteAsync(code1, folder);
             check(code == RunCommand.Denied && inline.Requests.Count == 1 && ApprovalSummary.BuildMessage(inline.Requests[0]).Contains(Marker + "echo $DB_URL", StringComparison.Ordinal), "run: sh -c reaches the approval page with its code shown");
             foreach ((string program, string[] arguments) in new (string, string[])[] { ("cmd.exe", ["/d", "/c", "echo"]), ("pwsh", ["-NoProfile", "-Command", "x"]), ("bash", ["-c", "x"]) })
             {
@@ -739,7 +739,7 @@ internal static class ApprovalSummaryTests
             File.WriteAllText(Path.Combine(folder, "real.sh"), "echo REAL_MARKER\n");
             FakeApprover optionApprover = new(false);
             RunArgs optionRun = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", "sh", "real.sh", "data"], out _)!;
-            await new RunCommand(new MemoryStore(values), optionApprover, new AuditLog(new StateDatabase(audit)), new StringWriter(), new StringWriter()).ExecuteAsync(optionRun, folder);
+            await new RunCommand(new MemoryStore(values), optionApprover, new StringWriter(), new StringWriter()).ExecuteAsync(optionRun, folder);
             ApprovalRequest optionSeen = optionApprover.Requests.Single();
             Fingerprint optionPrint = RequestFingerprint.Compute(optionSeen);
             check(optionSeen.Script is { } realView && realView.Path.EndsWith("real.sh", StringComparison.Ordinal) && !realView.Guessed && Lines(ApprovalSummary.BuildMessage(optionSeen)).Contains(Marker + "echo REAL_MARKER")
@@ -756,14 +756,14 @@ internal static class ApprovalSummaryTests
             if (OperatingSystem.IsWindows())
             {
                 using FileStream hold = new(locked, FileMode.Open, FileAccess.Read, FileShare.None);
-                code = await new RunCommand(new MemoryStore(values), unseen, new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(lockedRun, folder);
+                code = await new RunCommand(new MemoryStore(values), unseen, new StringWriter(), errors).ExecuteAsync(lockedRun, folder);
                 blocked = true;
             }
             else
             {
                 File.SetUnixFileMode(locked, UnixFileMode.None);
                 blocked = !CanRead(locked);
-                code = blocked ? await new RunCommand(new MemoryStore(values), unseen, new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(lockedRun, folder) : 0;
+                code = blocked ? await new RunCommand(new MemoryStore(values), unseen, new StringWriter(), errors).ExecuteAsync(lockedRun, folder) : 0;
             }
 
             if (blocked)

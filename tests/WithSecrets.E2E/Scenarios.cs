@@ -122,16 +122,11 @@ internal static class Scenarios2
 
         s.Check(rig.Store.ListNames().Count == 0, "state no longer lists the secret");
         s.Check(!(await RawState(rig)).Contains(Secret), "state.db still holds no plaintext");
-        AuditChecks.Expect(s, rig, "settings-setup", "secrets-set", "approved", "finished", "secrets-removed");
+        AuditChecks.Expect(s, rig, "settings-setup", "secrets-set", "authorization-approved", "launch-started", "execution-exited", "secrets-removed");
         s.NoProblems(c);
     }
 
-    private static IEnumerable<string> AuditEvents(Rig rig)
-    {
-        new AuditLog(rig.State).TryRead(50, null, out IReadOnlyList<AuditRecord> rows, out _);
-
-        return rows.Select(r => r.Event);
-    }
+    private static IEnumerable<string> AuditEvents(Rig rig) => AuditChecks.Events(rig);
 }
 
 internal static class Scenarios3
@@ -213,20 +208,14 @@ internal static class Scenarios3
             s.Check(run.Err.Text.Contains("time limit"), "the terminal says it was the time limit");
         }
 
-        IReadOnlyList<AuditRecord> rows = Audit(rig);
-        s.Check(rows.Count(r => r.Detail.Contains("denied on the page")) >= 1, "audit records the Deny");
-        s.Check(rows.Count(r => r.Detail.Contains("time limit")) >= 1, "audit records the time limit");
+        IReadOnlyList<AuditEvent> events = AuditChecks.All(rig);
+        s.Check(events.Count(e => e.Type == AuditEventTypes.Authorization && e.Outcome == "denied" && e.Reason == ReasonCodes.UserDenied) >= 1, "audit records the Deny");
+        s.Check(events.Count(e => e.Type == AuditEventTypes.Authorization && e.Outcome == "denied") >= 2, "audit records the time limit as a second denial (both carry the reason user-denied)");
 
-        AuditChecks.Expect(s, rig, "settings-setup", "secrets-set", "approved", "finished", "approved", "finished", "denied", "denied");
+        AuditChecks.Expect(s, rig, "settings-setup", "secrets-set", "authorization-approved", "launch-started", "execution-exited", "authorization-approved", "launch-started", "execution-exited", "authorization-denied", "authorization-denied");
         s.NoProblems(c);
     }
 
-    private static IReadOnlyList<AuditRecord> Audit(Rig rig)
-    {
-        new AuditLog(rig.State).TryRead(50, null, out IReadOnlyList<AuditRecord> rows, out _);
-
-        return rows;
-    }
 }
 internal static class Scenarios4
 {
@@ -313,7 +302,8 @@ internal static class Scenarios5
         s.Check(Directory.GetFiles(rig.Folder, "state.db.recovered-*").Length == 1, "the old file was renamed (state.db.recovered-<time>), not deleted");
         s.Check(rig.State.TryManifest(out Manifest? manifest, out _) && manifest!.Keys.Count == 1 && manifest.Recovery is not null, "new state: one key and a recovery slot");
         s.Check(rig.Store.ListNames().SequenceEqual(["E2E_SECRET"]), "the secret was carried over");
-        AuditChecks.Expect(s, rig, "settings-setup", "recovered");
+        // The folder holds the events of the first setup and its secret too; the recovery adds the setup of the new state and "recovered" (recorded when the swap succeeded).
+        AuditChecks.Expect(s, rig, "settings-setup", "secrets-set", "settings-setup", "recovered");
     }
 }
 
@@ -372,7 +362,7 @@ internal static class Scenarios6
         await c.Click("#approve");
         s.Check(await run.Result.WaitAsync(TimeSpan.FromSeconds(30)) == 0 && run.Out.Text.Contains("got=" + StreamRedactor.Mask), "the second key approved a run and the secret was released");
         s.Check((await c.AuthOps(second)).Signs > signsSecond && (await c.AuthOps(adminAuth)).Signs == signsFirst, "the signature came from the second device");
-        AuditChecks.Expect(s, rig, "settings-setup", "secrets-set", "key-enrolled", "approved", "finished");
+        AuditChecks.Expect(s, rig, "settings-setup", "secrets-set", "key-enrolled", "authorization-approved", "launch-started", "execution-exited");
         s.NoProblems(c);
     }
 }
@@ -397,7 +387,7 @@ internal static class Scenarios7
             ApprovalSettings remote = new("passkey", "http://ws.localhost:" + port, port, TimeSpan.FromSeconds(60));
             (EnrollmentTarget primary, EnrollmentTarget other) = CommandWiring.Targets(rig.State, remote, TerminalPrompt.Line, CommandWiring.CodeReader("If the page says nothing was added, press Ctrl+C."));
 
-            return new Enrollment(primary, other, TerminalPrompt.Line, new AuditLog(rig.State)).Enroll();
+            return new Enrollment(primary, other, TerminalPrompt.Line, rig.State.Audit).Enroll();
         });
         string link = await cmd.LinkAsync();
         s.Check(new Uri(link).Host == "localhost" && cmd.LinkCount == 1, "the one link is at the admin key's host (localhost)");
@@ -408,7 +398,7 @@ internal static class Scenarios7
         ApprovalDecision result = await cmd.Result.WaitAsync(TimeSpan.FromSeconds(30));
         s.Check(!result.Approved && result.Detail.Contains("https address or localhost"), "the program refuses the non-https cross host and says why (" + result.Detail + ")");
         s.Check(rig.State.TryManifest(out Manifest? manifest, out _) && manifest!.Keys.Count == 1, "nothing was enrolled");
-        s.Check(new AuditLog(rig.State).TryRead(10, null, out IReadOnlyList<AuditRecord> rows, out _) && rows.Any(r => r.Detail.Contains("https address or localhost")), "audit records the refusal");
+        s.Check(AuditChecks.All(rig).Any(e => e.Type == AuditEventTypes.Admin && e.Outcome == AdminEvent.ChangeDenied && e.Reason.Contains("https address or localhost")), "audit records the refusal");
         s.NoProblems(c);
     }
 }

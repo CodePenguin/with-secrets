@@ -496,7 +496,7 @@ internal static class Program
         StringWriter stdout = new();
         StringWriter stderr = new();
         RunArgs approved = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "test", "--", "./script.sh"], out _)!;
-        int code = await new RunCommand(new MemoryStore(values), yes, new AuditLog(new StateDatabase(auditPath)), stdout, stderr).ExecuteAsync(approved, temp);
+        int code = await new RunCommand(new MemoryStore(values), yes, stdout, stderr).ExecuteAsync(approved, temp, TestAudit.Sink(new StateDatabase(auditPath)));
         Check(code == 7, "e2e: exit code of the program passes through");
         Check(stdout.ToString().Contains("plain=[REDACTED]", StringComparison.Ordinal), "e2e: exact value redacted");
         Check(!stdout.ToString().Contains(Secret, StringComparison.Ordinal) && !stdout.ToString().Contains(Convert.ToBase64String(Encoding.UTF8.GetBytes(Secret)), StringComparison.Ordinal), "e2e: base64 form redacted");
@@ -504,8 +504,8 @@ internal static class Program
         Check(stderr.ToString().Contains("key=none", StringComparison.Ordinal), "e2e: dotenvx private key is not passed");
         Check(yes.Requests.Count == 1 && yes.Requests[0].SecretNames.SequenceEqual(["DB_URL"]), "e2e: the approver saw the requested names");
         string audit = StateDatabaseTests.AuditText(auditPath);
-        Check(audit.Contains("DB_URL", StringComparison.Ordinal) && !audit.Contains(Secret, StringComparison.Ordinal) && audit.Contains("\"exitCode\":7", StringComparison.Ordinal), "e2e: audit log has names and exit code, no values");
-        Check(JsonDocument.Parse(audit.Split('\n')[0]).RootElement.GetProperty("event").GetString() == "approved", "e2e: audit log is JSON lines");
+        Check(audit.Contains("./script.sh", StringComparison.Ordinal) && !audit.Contains(Secret, StringComparison.Ordinal) && audit.Contains("\"exitCode\":7", StringComparison.Ordinal), "e2e: the signed audit events have the program and exit code, no values");
+        Check(JsonDocument.Parse(audit.Split('\n')[0]).RootElement.GetProperty("type").GetString() == "authorization" && audit.Split((char)10).Length == 3, "e2e: three signed events (authorization, launch, execution)");
 
         // several secrets in one run: exactly the named ones, and a third is left out
         Dictionary<string, string> three = new() { ["DB_URL"] = Secret, ["API_KEY"] = "Api-Key-Value-1", ["LEFT_OUT"] = "Left-Out-Value-1" };
@@ -515,21 +515,21 @@ internal static class Program
         FakeApprover pair = new(true);
         StringWriter multiOut = new();
         RunArgs two = CliArgs.ParseRun(["--secrets", "DB_URL", "--secrets", "API_KEY", "--reason", "two", "--", "./multi.sh"], out _)!;
-        code = await new RunCommand(new MemoryStore(three), pair, new AuditLog(new StateDatabase(auditPath)), multiOut, new StringWriter()).ExecuteAsync(two, temp);
+        code = await new RunCommand(new MemoryStore(three), pair, multiOut, new StringWriter()).ExecuteAsync(two, temp);
         Check(code == 0 && multiOut.ToString().Trim() == "a=[REDACTED] b=[REDACTED] c=unset", "e2e: two named secrets are injected, the third is not");
         Check(pair.Requests.Count == 1 && pair.Requests[0].SecretNames.SequenceEqual(["DB_URL", "API_KEY"]), "e2e: one prompt lists both names");
 
         // a wildcard is not a name
         FakeApprover star = new(true);
         RunArgs wildcard = CliArgs.ParseRun(["--secrets", "*", "--reason", "x", "--", "./multi.sh"], out _)!;
-        code = await new RunCommand(new MemoryStore(three), star, new AuditLog(new StateDatabase(auditPath)), new StringWriter(), new StringWriter()).ExecuteAsync(wildcard, temp);
+        code = await new RunCommand(new MemoryStore(three), star, new StringWriter(), new StringWriter()).ExecuteAsync(wildcard, temp);
         Check(code == RunCommand.Usage && star.Requests.Count == 0, "e2e: wildcard name is refused without a prompt");
 
         // denied: the program does not run
         File.Delete(marker);
         FakeApprover no = new(false);
         stderr = new StringWriter();
-        code = await new RunCommand(new MemoryStore(values), no, new AuditLog(new StateDatabase(auditPath)), new StringWriter(), stderr).ExecuteAsync(approved, temp);
+        code = await new RunCommand(new MemoryStore(values), no, new StringWriter(), stderr).ExecuteAsync(approved, temp);
         Check(code == RunCommand.Denied && !File.Exists(marker), "e2e: denied request runs nothing");
         Check(stderr.ToString().Contains("Do not retry", StringComparison.Ordinal), "e2e: denial tells the agent to ask the user");
 
@@ -537,10 +537,10 @@ internal static class Program
         FakeApprover untouched = new(true);
         RunArgs inline = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", "sh", "-c", "echo $DB_URL"], out _)!;
         FakeApprover inlineApprover = new(true);
-        code = await new RunCommand(new MemoryStore(values), inlineApprover, new AuditLog(new StateDatabase(auditPath)), new StringWriter(), new StringWriter()).ExecuteAsync(inline, temp);
+        code = await new RunCommand(new MemoryStore(values), inlineApprover, new StringWriter(), new StringWriter()).ExecuteAsync(inline, temp);
         Check(code == 0 && inlineApprover.Requests.Count == 1 && ApprovalSummary.BuildMessage(inlineApprover.Requests[0]).Contains("  | echo $DB_URL", StringComparison.Ordinal), "e2e: inline shell now gets a prompt that shows the code");
         RunArgs unknown = CliArgs.ParseRun(["--secrets", "NOPE_NAME", "--reason", "x", "--", "./script.sh"], out _)!;
-        code = await new RunCommand(new MemoryStore(values), untouched, new AuditLog(new StateDatabase(auditPath)), new StringWriter(), new StringWriter()).ExecuteAsync(unknown, temp);
+        code = await new RunCommand(new MemoryStore(values), untouched, new StringWriter(), new StringWriter()).ExecuteAsync(unknown, temp);
         Check(code == RunCommand.Usage && untouched.Requests.Count == 0, "e2e: unknown secret is refused without a prompt");
 
         // --- full paths in the prompt and in the run
@@ -551,7 +551,7 @@ internal static class Program
         FakeApprover pathApprover = new(true);
         StringWriter pathOut = new();
         RunArgs relativeScript = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "paths", "--", "sh", "./where.sh", "extra"], out _)!;
-        code = await new RunCommand(new MemoryStore(values), pathApprover, new AuditLog(new StateDatabase(auditPath)), pathOut, new StringWriter()).ExecuteAsync(relativeScript, whereDir);
+        code = await new RunCommand(new MemoryStore(values), pathApprover, pathOut, new StringWriter()).ExecuteAsync(relativeScript, whereDir);
         ApprovalRequest seen = pathApprover.Requests[0];
         Check(code == 0 && Path.IsPathRooted(seen.ResolvedProgram), "paths e2e: the program is a full path");
         Check(seen.Arguments[0] == whereScript && seen.Arguments[1] == "extra", "paths e2e: the approver sees the script in full and other arguments as typed");
@@ -559,7 +559,6 @@ internal static class Program
         string seenText = ApprovalSummary.BuildMessage(seen);
         Check(seenText.Contains(whereScript, StringComparison.Ordinal) && !seenText.Contains(" ./where.sh", StringComparison.Ordinal), "paths e2e: the prompt shows the full path, not the relative one");
         Check(pathOut.ToString().Contains("I am " + whereScript, StringComparison.Ordinal), "paths e2e: the program really ran the full path that was shown");
-        Check(StateDatabaseTests.AuditText(auditPath).Contains("typedArguments", StringComparison.Ordinal), "paths e2e: audit log keeps what was typed");
 
         // a symbolic link is shown with where it leads
         string realScript = Path.Combine(whereDir, "real.sh");
@@ -568,7 +567,7 @@ internal static class Program
         File.CreateSymbolicLink(linkScript, realScript);
         FakeApprover linkApprover = new(true);
         RunArgs viaLink = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "link", "--", "sh", "link.sh"], out _)!;
-        await new RunCommand(new MemoryStore(values), linkApprover, new AuditLog(new StateDatabase(auditPath)), new StringWriter(), new StringWriter()).ExecuteAsync(viaLink, whereDir);
+        await new RunCommand(new MemoryStore(values), linkApprover, new StringWriter(), new StringWriter()).ExecuteAsync(viaLink, whereDir);
         Check(linkApprover.Requests[0].Links!.Any(note => note == $"{linkScript} -> {realScript}"), "paths e2e: a symbolic link shows its target");
         Check(ApprovalSummary.BuildMessage(linkApprover.Requests[0]).Contains("Link: ", StringComparison.Ordinal), "paths e2e: the prompt has the link line");
 
@@ -589,7 +588,7 @@ internal static class Program
         ReuseOffer offer = new(480, 10);
         RunArgs reuseArgs = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "loop", "--", "./reuse.sh"], out _)!;
         Task<int> Reuse(IApprover approver, ReuseOffer window, TextWriter? err = null, string? grantPath = null)
-            => new RunCommand(new MemoryStore(values), approver, new AuditLog(new StateDatabase(reuseAudit)), new StringWriter(), err ?? new StringWriter(), new GrantStore(new StateDatabase(grantPath ?? reuseGrants)), window).ExecuteAsync(reuseArgs, temp);
+            => new RunCommand(new MemoryStore(values), approver, new StringWriter(), err ?? new StringWriter(), new GrantStore(new StateDatabase(grantPath ?? reuseGrants)), window).ExecuteAsync(reuseArgs, temp, TestAudit.Sink(new StateDatabase(reuseAudit)));
 
         Fresh();
         Check(await Reuse(reuseApprover, offer) == 0 && reuseApprover.Requests.Count == 1, "reuse: first run asks");
@@ -598,18 +597,18 @@ internal static class Program
         Check(reuseErr.ToString().Contains("reusing the approval", StringComparison.Ordinal), "reuse: the agent is told the approval was reused");
         Check(reuseApprover.Requests[0].Reuse == offer, "reuse: the prompt carried the reuse offer");
 
-        string[] auditLines = (await File.ReadAllTextAsync(reuseAudit)).Split('\n', StringSplitOptions.RemoveEmptyEntries);
-        Check(auditLines.Any(line => line.Contains("\"event\":\"reused\"", StringComparison.Ordinal)) && auditLines.Any(line => line.Contains(reuseScript.Replace("\\", "\\\\", StringComparison.Ordinal), StringComparison.Ordinal)), "reuse: audit records the reuse and the script hash");
+        string[] auditLines = StateDatabaseTests.AuditLines(reuseAudit);
+        Check(auditLines.Any(line => line.Contains("\"outcome\":\"reused\"", StringComparison.Ordinal)) && auditLines.Any(line => line.Contains(reuseScript.Replace("\\", "\\\\", StringComparison.Ordinal), StringComparison.Ordinal)), "reuse: the signed authorization event records the reuse and the script path");
 
         RunArgs withFlags = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "loop", "--", "./reuse.sh", "--filter", "slow"], out _)!;
-        await new RunCommand(new MemoryStore(values), reuseApprover, new AuditLog(new StateDatabase(reuseAudit)), new StringWriter(), new StringWriter(), new GrantStore(new StateDatabase(reuseGrants)), offer).ExecuteAsync(withFlags, temp);
+        await new RunCommand(new MemoryStore(values), reuseApprover, new StringWriter(), new StringWriter(), new GrantStore(new StateDatabase(reuseGrants)), offer).ExecuteAsync(withFlags, temp);
         Check(reuseApprover.Requests.Count == 1, "reuse: the same script with other arguments does not ask again");
 
         await File.WriteAllTextAsync(reuseScript, "#!/bin/sh\necho \"v=$DB_URL\"; echo changed\n");
         Check(await Reuse(reuseApprover, offer) == 0 && reuseApprover.Requests.Count == 2, "reuse: a changed script asks again");
 
         RunArgs otherNames = CliArgs.ParseRun(["--secrets", "DB_URL,OTHER", "--reason", "loop", "--", "./reuse.sh"], out _)!;
-        await new RunCommand(new MemoryStore(values), reuseApprover, new AuditLog(new StateDatabase(reuseAudit)), new StringWriter(), new StringWriter(), new GrantStore(new StateDatabase(reuseGrants)), offer).ExecuteAsync(otherNames, temp);
+        await new RunCommand(new MemoryStore(values), reuseApprover, new StringWriter(), new StringWriter(), new GrantStore(new StateDatabase(reuseGrants)), offer).ExecuteAsync(otherNames, temp);
         Check(reuseApprover.Requests.Count == 3, "reuse: different secret names ask again");
 
         FakeApprover off = new(true);
@@ -634,7 +633,7 @@ internal static class Program
         FakeApprover viaSh = new(true, 10, reuseKey);
         RunArgs shArgs = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", "sh", "./reuse.sh", "one"], out _)!;
         RunArgs shArgsFlag = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", "sh", "./reuse.sh", "two"], out _)!;
-        Task<int> Sh(RunArgs arguments) => new RunCommand(new MemoryStore(values), viaSh, new AuditLog(new StateDatabase(reuseAudit)), new StringWriter(), new StringWriter(), new GrantStore(new StateDatabase(reuseGrants)), offer).ExecuteAsync(arguments, temp);
+        Task<int> Sh(RunArgs arguments) => new RunCommand(new MemoryStore(values), viaSh, new StringWriter(), new StringWriter(), new GrantStore(new StateDatabase(reuseGrants)), offer).ExecuteAsync(arguments, temp);
         await Sh(shArgs);
         await Sh(shArgsFlag);
         Check(viaSh.Requests.Count == 1, "reuse: interpreter with the same script and other arguments does not ask again");
@@ -658,14 +657,14 @@ internal static class Program
         File.SetUnixFileMode(racing, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         RunArgs racingArgs = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "race", "--", "./racing.sh"], out _)!;
         EditingApprover editing = new(racing);
-        code = await new RunCommand(new MemoryStore(values), editing, new AuditLog(new StateDatabase(reuseAudit)), new StringWriter(), new StringWriter(), new GrantStore(new StateDatabase(reuseGrants)), offer).ExecuteAsync(racingArgs, temp);
+        code = await new RunCommand(new MemoryStore(values), editing, new StringWriter(), new StringWriter(), new GrantStore(new StateDatabase(reuseGrants)), offer).ExecuteAsync(racingArgs, temp);
         Check(code == RunCommand.Denied && new GrantStore(new StateDatabase(reuseGrants)).Entries().Count == 0, "reuse: a script edited during the prompt is not run and not remembered");
 
         // audit failure fails closed
         string blocked = Path.Combine(temp, "blocked");
         await File.WriteAllTextAsync(blocked, "a file, not a directory");
         File.Delete(marker);
-        code = await new RunCommand(new MemoryStore(values), yes, new AuditLog(new StateDatabase(Path.Combine(blocked, "audit.db"))), new StringWriter(), new StringWriter()).ExecuteAsync(approved, temp);
-        Check(code == RunCommand.AuditError && !File.Exists(marker), "e2e: unwritable audit log means nothing runs");
+        code = await new RunCommand(new MemoryStore(values), yes, new StringWriter(), new StringWriter()).ExecuteAsync(approved, temp, new RecordingAudit(refuse: true));
+        Check(code == RunCommand.AuditError && !File.Exists(marker), "e2e: an audit event that cannot be committed means nothing runs");
     }
 }

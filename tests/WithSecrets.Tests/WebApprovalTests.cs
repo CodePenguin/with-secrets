@@ -1443,9 +1443,9 @@ internal static partial class WebApprovalTests
                     errors.WriteLine(line);
                     link.TrySetResult(line);
                 });
-                RunCommand run = new(new MemoryStore(new Dictionary<string, string> { ["MY_SECRET"] = Secret }), approver, new AuditLog(new StateDatabase(auditPath)), TextWriter.Synchronized(stdout), errors);
+                RunCommand run = new(new MemoryStore(new Dictionary<string, string> { ["MY_SECRET"] = Secret }), approver, TextWriter.Synchronized(stdout), errors);
                 RunArgs args = CliArgs.ParseRun(["--secrets", "MY_SECRET", "--reason", "chain test", "--", "./" + name], out _)!;
-                Task<int> running = Task.Run(() => run.ExecuteAsync(args, folder));
+                Task<int> running = Task.Run(() => run.ExecuteAsync(args, folder, TestAudit.Sink(new StateDatabase(auditPath))));
                 if (answer is not null)
                 {
                     Task first = await Task.WhenAny(link.Task, running, Task.Delay(TimeSpan.FromSeconds(20)));
@@ -1475,11 +1475,11 @@ internal static partial class WebApprovalTests
             check(code == 0, "run chain: approved with a passkey, exit code 0 (" + code + "; " + stderr + ")");
             check(stdout.Contains("[REDACTED]", StringComparison.Ordinal) && !stdout.Contains(Secret, StringComparison.Ordinal) && !stderr.Contains(Secret, StringComparison.Ordinal), "run chain: the child printed the secret and the output is redacted");
             check(File.Exists(marker) && announced == 1 && stderr.Contains(AnnouncePrefix, StringComparison.Ordinal), "run chain: the child ran and one link was announced on stderr");
-            check(audit.Contains("\"event\":\"approved\"", StringComparison.Ordinal) && audit.Contains("passkey chain-key verified", StringComparison.Ordinal) && audit.Contains("MY_SECRET", StringComparison.Ordinal) && !audit.Contains(Secret, StringComparison.Ordinal), "run chain: audit has approved, the key name and the secret name, no value");
+            check(audit.Contains("\"outcome\":\"approved\"", StringComparison.Ordinal) && !audit.Contains(Secret, StringComparison.Ordinal), "run chain: the signed audit has the approval and no value");
 
             // (2) Deny on the page: exit 3, the child never ran
             (code, stdout, stderr, announced, audit) = await Drive(enrolled, "audit-deny.log", (_, _, _) => ("deny", ""));
-            check(code == RunCommand.Denied && !File.Exists(marker) && !stdout.Contains(Secret, StringComparison.Ordinal) && audit.Contains("\"event\":\"denied\"", StringComparison.Ordinal), "run chain: Deny on the page exits 3 and the child never ran (" + code + ")");
+            check(code == RunCommand.Denied && !File.Exists(marker) && !stdout.Contains(Secret, StringComparison.Ordinal) && audit.Contains("\"outcome\":\"denied\"", StringComparison.Ordinal), "run chain: Deny on the page exits 3 and the child never ran (" + code + ")");
 
             // (3) nothing enrolled: exit 3, a message that names --enroll, no link, the child never ran
             (code, stdout, stderr, announced, audit) = await Drive(new PasskeyStore(Path.Combine(folder, "empty.json")), "audit-none.log", null);
@@ -2431,7 +2431,7 @@ internal static partial class WebApprovalTests
             return EnrollmentTarget.For(method, new WebApprover(method, forPage, announce, TimeSpan.Zero));
         }
 
-        return new SecretEntry(Target(primary), Target(local), store, new AuditLog(store.Database), announce);
+        return new SecretEntry(Target(primary), Target(local), store, store.Database.Audit, announce);
     }
 
     /// <summary>Runs the call on its own task. Each announced line goes to <paramref name="answer" />, which plays the person.</summary>
@@ -2625,7 +2625,7 @@ internal static partial class WebApprovalTests
     /// <summary>The audit rows of an event in the store's state.db.</summary>
     private static int AuditCount(SecretStore store, string eventName)
     {
-        return new AuditLog(store.Database).TryRead(1000, null, out IReadOnlyList<AuditRecord> rows, out _) ? rows.Count(row => row.Event == eventName) : -1;
+        return TestAudit.TryRead(store.Database, 1000, null, out IReadOnlyList<AuditRow> rows, out _) ? rows.Count(row => row.Event == eventName) : -1;
     }
 
     /// <summary>The values in the store, read back (and verified) the way a run reads them.</summary>
@@ -2747,7 +2747,7 @@ internal static partial class WebApprovalTests
                 check(start is not null && start.Keys.SequenceEqual(["mode", "payload", "bind", "nonce", "serverKey"]) && start["mode"] == "webauthn", "secrets: start JSON is mode, payload, bind, nonce, serverKey");
                 byte[] serverKey = start is null ? [] : Base64Url.DecodeFromChars(start["serverKey"]);
                 check(serverKey.Length == 65 && serverKey[0] == 0x04, "secrets: serverKey is a 65-byte uncompressed point");
-                check(new AuditLog(store.Database).TryRead(100, null, out IReadOnlyList<AuditRecord> rows, out _) && rows.Count(row => row.Event == "secrets-set") == 1
+                check(TestAudit.TryRead(store.Database, 100, null, out IReadOnlyList<AuditRow> rows, out _) && rows.Count(row => row.Event == "secrets-set") == 1
                     && rows.Single(row => row.Event == "secrets-set") is { } line && line.Secrets.SequenceEqual(good) && line.Detail == "admin passkey laptop verified" && line.KeyName == "laptop", "secrets: one audit row with the names, the detail and the key");
                 check(run.AgainGone, "secrets: after the outcome the page, /seal and a second /save get 404");
                 check(run.Link is not null && RefusesBoth(run.Link.Port), "secrets: the server and both ports are released");
@@ -2960,7 +2960,7 @@ internal static partial class WebApprovalTests
                 Manifest after = TestState.Current(store.Database)!;
                 check(run.Result is { Code: 0, Detail: "Removed A_NEW, B_OLD." } && Stored(store).Keys.SequenceEqual(["C_KEEP"]), "secrets: an approved Remove deletes the names (" + run.Result?.Detail + ")");
                 check(after.Version == before.Version + 1 && after.Secrets.Keys.SequenceEqual(["C_KEEP"]) && after.Secrets["C_KEEP"] == before.Secrets["C_KEEP"] && after.Store == before.Store, "secrets: --remove re-signs: v+1 with only the kept hash");
-                check(new AuditLog(store.Database).TryRead(100, null, out IReadOnlyList<AuditRecord> rows, out _) && rows.SingleOrDefault(row => row.Event == "secrets-removed") is { } line
+                check(TestAudit.TryRead(store.Database, 100, null, out IReadOnlyList<AuditRow> rows, out _) && rows.SingleOrDefault(row => row.Event == "secrets-removed") is { } line
                     && line.Secrets.SequenceEqual(good) && line.Detail.Contains("admin passkey laptop verified", StringComparison.Ordinal), "secrets: the removal is audited with names only");
 
                 run = await RemoveRun(client, passkeys, local, store, ["C_KEEP", "NOPE"], laptop, true);

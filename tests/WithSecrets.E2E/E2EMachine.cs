@@ -8,11 +8,13 @@ namespace WithSecrets.E2E;
 internal sealed class E2EMachine : IDisposable
 {
     private readonly Dictionary<int, SoftwareSigningKey> _authorityKeys = [];
-    private readonly SoftwareSigningKey _machineKey = new();
+    private readonly SoftwareSigningKey _machineKey;
     private readonly Lock _lock = new();
 
     public E2EMachine(string folder)
     {
+        // The same key signs the events the commands write (see E2EAudit) and the ones the service writes: one machine, one key.
+        _machineKey = E2EAudit.KeyFor(folder);
         Deployment = LocalDeployment.Create(folder, _machineKey, AuthorityKey, "e2e-host");
         Deployment.EnrollAsync().GetAwaiter().GetResult();
         TransitionResult result = AdminActions.ApproveMachine(Deployment.Store, Deployment.Keys, Deployment.HostConfig, Deployment.Fingerprint, Deployment.Fingerprint, "e2e machine", "e2e admin");
@@ -39,5 +41,7 @@ internal sealed class E2EMachine : IDisposable
         }
     }
 
-    public void Dispose() => _machineKey.Dispose();
+    public void Dispose()
+    {
+    }
 }

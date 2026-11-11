@@ -170,7 +170,8 @@ internal sealed class Ctx : IAsyncDisposable
 {
     private const string InitScript = """
         window.__credCalls = 0;
-        ['get', 'create'].forEach(function (m) {
+        // The browser's error page (a refused connection) is an insecure document with no navigator.credentials: nothing to count there.
+        if (navigator.credentials) ['get', 'create'].forEach(function (m) {
             var o = navigator.credentials[m].bind(navigator.credentials);
             navigator.credentials[m] = function () { window.__credCalls++; return o.apply(null, arguments); };
         });

@@ -402,9 +402,9 @@ internal static class RecoveryTests
 
     internal static string Audit(StateDatabase db) => StateDatabaseTests.AuditText(db.FilePath);
 
-    internal static IReadOnlyList<AuditRecord> AuditRows(StateDatabase db)
+    internal static IReadOnlyList<AuditRow> AuditRows(StateDatabase db)
     {
-        return new AuditLog(db).TryRead(50, null, out IReadOnlyList<AuditRecord> rows, out _) ? rows : [];
+        return TestAudit.TryRead(db, 50, null, out IReadOnlyList<AuditRow> rows, out _) ? rows : [];
     }
 
     // ---------------------------------------------------------------------------------------------------------------
@@ -545,7 +545,8 @@ internal static class RecoveryTests
         return TestState.Post(client, link.Url + "/code", SealedCode(StartOf(page), code));
     }
 
-    internal static string[] Files(string folder) => [.. Directory.EnumerateFiles(folder).Select(Path.GetFileName).OfType<string>().Order(StringComparer.Ordinal)];
+    /// <summary>The files of the folder, not counting the signed audit outbox (an administrative change writes its event there).</summary>
+    internal static string[] Files(string folder) => [.. Directory.EnumerateFiles(folder).Select(Path.GetFileName).OfType<string>().Where(name => !name.StartsWith("audit-outbox.db", StringComparison.Ordinal)).Order(StringComparer.Ordinal)];
 
     private static async Task Recover(Action<bool, string> check, string root)
     {
@@ -591,8 +592,8 @@ internal static class RecoveryTests
             check(File.Exists(renamed), "recover: the old file was renamed to state.db.recovered-<UTC yyyyMMddHHmmss>, not deleted (" + string.Join(", ", Files(w.Folder)) + ")");
             check(File.Exists(renamed) && Snapshot(new StateDatabase(renamed)) == oldBytes, "recover: the renamed file is the old state, unchanged");
             check(Files(w.Folder).All(name => !name.Contains(".recovering-", StringComparison.Ordinal)), "recover: no temporary file is left");
-            IReadOnlyList<AuditRecord> rows = AuditRows(w.Db);
-            AuditRecord? recovered = rows.FirstOrDefault(row => row.Event == "recovered");
+            IReadOnlyList<AuditRow> rows = AuditRows(w.Db);
+            AuditRow? recovered = rows.FirstOrDefault(row => row.Event == "recovered");
             check(recovered is not null && recovered.Detail.Contains("3 secrets", StringComparison.Ordinal) && recovered.Detail.Contains("state.db.recovered-20261103120000", StringComparison.Ordinal), "recover: a `recovered` audit row names the secret count and the old file (" + recovered?.Detail + ")");
             check(after is not null && Fails(() => KeyVault.OpenRecovery(after, RecoveryCodeBytes(w.Code))), "recover: the old recovery code no longer opens the new store");
             check(after is not null && RecoveryCode.TryParse(newCode, out byte[] fresher) && KeyVault.UnwrapVault(after.Vault, KeyVault.OpenRecovery(after, fresher), after.Store).Length == 64, "recover: the new recovery code (final page) opens the new store");
@@ -633,8 +634,8 @@ internal static class RecoveryTests
             check(Snapshot(w.Db) == before, "recover: after a wrong code the manifest and the rows are as they were");
             check(Files(w.Folder).SequenceEqual(filesBefore), "recover: after a wrong code there is no new file (" + string.Join(", ", Files(w.Folder)) + ")");
             check(flow.Next() is null, "recover: after a wrong code there is no second page");
-            IReadOnlyList<AuditRecord> rows = AuditRows(w.Db);
-            check(rows.Count(row => row.Event == AuditLog.ChangeDenied && row.Detail.StartsWith("--recover: ", StringComparison.Ordinal)) == 1 && rows.All(row => row.Event != "recovered"), "recover: a wrong code writes one change-denied row for --recover and no `recovered` row");
+            IReadOnlyList<AuditRow> rows = AuditRows(w.Db);
+            check(rows.Count(row => row.Event == AdminEvent.ChangeDenied && row.Detail.StartsWith("--recover: ", StringComparison.Ordinal)) == 1 && rows.All(row => row.Event != "recovered"), "recover: a wrong code writes one change-denied row for --recover and no `recovered` row");
             check(!Holds([Audit(w.Db), result.Detail, flow.AllLines()], CodeForms(wrong)), "recover: the wrong code typed is in no audit entry or message");
             check(ReadAll(w.Db, laptop)?.Count == 3, "recover: the old state still works with its own key");
         }
@@ -796,8 +797,8 @@ internal static class RecoveryTests
             check(after is not null && Fails(() => KeyVault.OpenRecovery(after, RecoveryCodeBytes(w.Code))), "rotate: the old recovery code fails");
             check(newCode is not null && CodePattern.IsMatch(newCode) && after is not null && RecoveryCode.TryParse(newCode, out byte[] fresher) && DotenvxCipher.Instance.Derive(Encoding.UTF8.GetString(KeyVault.UnwrapVault(after.Vault, KeyVault.OpenRecovery(after, fresher), after.Store))) == after.Store,
                 "rotate: the new recovery code (final reply) opens the new store (" + (newCode ?? "none") + ")");
-            IReadOnlyList<AuditRecord> rows = AuditRows(w.Db);
-            AuditRecord? rotated = rows.FirstOrDefault(row => row.Event == "key-rotated");
+            IReadOnlyList<AuditRow> rows = AuditRows(w.Db);
+            AuditRow? rotated = rows.FirstOrDefault(row => row.Event == "key-rotated");
             check(rotated is not null && rotated.Detail.Contains("phone", StringComparison.Ordinal) && rotated.Detail.Contains("1 key(s) removed", StringComparison.Ordinal) && rotated.KeyName == "laptop", "rotate: a key-rotated audit row names the removed keys and the count (" + rotated?.Detail + ")");
 
             string[] said = [.. flow.Lines, result.Detail, pageOne, pageTwo, body1, Audit(w.Db)];
@@ -900,7 +901,7 @@ internal static class RecoveryTests
                 check(ReadAll(w.Db, laptop)?.Count == 3 && ReadAll(w.Db, phone)?.Count == 3, $"rotate refused: {name}: every key still reads every value");
             }
 
-            check(AuditRows(w.Db).All(row => row.Event != "key-rotated") && AuditRows(w.Db).Count(row => row.Event == AuditLog.ChangeDenied && row.Detail.StartsWith("--rotate-key: ", StringComparison.Ordinal)) == 1, $"rotate refused: {name}: no key-rotated row; one change-denied row");
+            check(AuditRows(w.Db).All(row => row.Event != "key-rotated") && AuditRows(w.Db).Count(row => row.Event == AdminEvent.ChangeDenied && row.Detail.StartsWith("--rotate-key: ", StringComparison.Ordinal)) == 1, $"rotate refused: {name}: no key-rotated row; one change-denied row");
             check(!Holds([result.Detail, flow.AllLines(), body2], [oldPhoneKey]) && !Holds([result.Detail, body2], [.. Values.Values]), $"rotate refused: {name}: no key or value in the output");
             if (which == 4)
             {

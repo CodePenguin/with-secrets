@@ -103,7 +103,7 @@ internal static class GrantTests
         TestState.Add(db, admin.Record("localhost", "laptop"));
         GrantStore grants = new(db, () => clock);
 
-        check(StateDatabase.SchemaVersion == 9, "grant store: the schema version is 9");
+        check(StateDatabase.SchemaVersion == 10, "grant store: the schema version is 10");
         check(grants.Add("K", 10, Evidence(admin, Text("K", issued), 10)), "grant store: a grant with the assertion over its request and time is saved");
         GrantLookup found = grants.Find("K", 480);
         check(found.Grant is { Minutes: 10, KeyName: "laptop" } grant && grant.Approved == clock && grant.Expires == clock.AddMinutes(10) && found.Rejected is null, "grant store: it is honoured, names the key from the manifest, and lasts exactly 10 minutes");
@@ -207,9 +207,9 @@ internal static class GrantTests
             errors.WriteLine(line);
             link.TrySetResult(line);
         }, TimeSpan.Zero);
-        RunCommand run = new(new MemoryStore(new Dictionary<string, string> { ["MY_SECRET"] = Secret }), approver, new AuditLog(db), TextWriter.Synchronized(stdout), errors, new GrantStore(db, clock), offer);
+        RunCommand run = new(new MemoryStore(new Dictionary<string, string> { ["MY_SECRET"] = Secret }), approver, TextWriter.Synchronized(stdout), errors, new GrantStore(db, clock), offer);
         RunArgs args = CliArgs.ParseRun(["--secrets", "MY_SECRET", "--reason", "grant test", "--", "./" + program], out _)!;
-        Task<int> running = Task.Run(() => run.ExecuteAsync(args, folder));
+        Task<int> running = Task.Run(() => run.ExecuteAsync(args, folder, TestAudit.Sink(db)));
         string page = "";
         if (minutes is { } chosen)
         {
@@ -295,8 +295,9 @@ internal static class GrantTests
 
             (code, stdout, stderr, announced, _) = await Drive(client, db, folder, program, key, offer, null, () => DateTimeOffset.UtcNow.AddMinutes(9));
             check(code == 0 && announced == 0 && stderr.Contains("reusing the approval", StringComparison.Ordinal) && !stderr.Contains(Rejected, StringComparison.Ordinal) && stdout.Contains("[REDACTED]", StringComparison.Ordinal), "grant chain: a good grant is reused without a page (" + code + "; " + stderr + ")");
-            check(new AuditLog(db).TryRead(20, null, out IReadOnlyList<AuditRecord> rows, out _) && rows.Any(item => item.Event == "reused" && item.KeyName == "chain-key")
-                && rows.Any(item => item.Event == "approved" && item.KeyName == "chain-key" && item.Detail.Contains("approved for 10 min", StringComparison.Ordinal)), "grant chain: the audit names the approving key when the grant is made and when it is used");
+            IReadOnlyList<AuditEvent> chain = TestAudit.Events(db, all: true);
+            check(chain.Any(item => item.Outcome == "reused" && item.Meta.GetValueOrDefault("key") == "chain-key")
+                && chain.Any(item => item.Outcome == "approved" && item.Meta.GetValueOrDefault("key") == "chain-key" && item.Meta.GetValueOrDefault("reuseMinutes") == "10"), "grant chain: the audit names the approving key when the grant is made and when it is used");
             check(!StateDatabaseTests.AuditText(db.FilePath).Contains(Secret, StringComparison.Ordinal), "grant chain: the audit has no secret value");
         }
 
@@ -371,7 +372,7 @@ internal static class GrantTests
         {
             StateDatabase db = NewDb();
             FakeApprover sly = new(true, 10);
-            int code = await new RunCommand(new MemoryStore(new Dictionary<string, string> { ["MY_SECRET"] = Secret }), sly, new AuditLog(db), new StringWriter(), new StringWriter(), new GrantStore(db), offer)
+            int code = await new RunCommand(new MemoryStore(new Dictionary<string, string> { ["MY_SECRET"] = Secret }), sly, new StringWriter(), new StringWriter(), new GrantStore(db), offer)
                 .ExecuteAsync(CliArgs.ParseRun(["--secrets", "MY_SECRET", "--reason", "x", "--", "./" + program], out _)!, folder);
             check(code == 0 && new GrantStore(db).Entries().Count == 0, "grant: an approval without a signed approval runs once and saves nothing");
             check(sly.Requests.Single().RequestId is { Length: > 0 } id && ApprovalSummary.BuildMessage(sly.Requests[0]).Split('\n').Contains(ApprovalSummary.RequestIdPrefix + id), "grant: the request carries its request id, and the prompt text shows it");
@@ -454,8 +455,8 @@ internal static class GrantTests
             ("enroll approval", announce => new Enrollment(Targets(announce).Item1, Targets(announce).Item2, announce).Enroll(), 0),
             ("enroll page", announce => new Enrollment(Targets(announce).Item1, Targets(announce).Item2, announce).Enroll(), 1),
             ("unenroll", announce => new Enrollment(Targets(announce).Item1, Targets(announce).Item2, announce).Unenroll("phone"), 0),
-            ("set", announce => new SecretEntry(Targets(announce).Item1, Targets(announce).Item2, secrets, new AuditLog(db), announce).Set(["NEW_NAME"]), 0),
-            ("remove", announce => new SecretEntry(Targets(announce).Item1, Targets(announce).Item2, secrets, new AuditLog(db), announce).Remove(["OLD_NAME"]), 0),
+            ("set", announce => new SecretEntry(Targets(announce).Item1, Targets(announce).Item2, secrets, db.Audit, announce).Set(["NEW_NAME"]), 0),
+            ("remove", announce => new SecretEntry(Targets(announce).Item1, Targets(announce).Item2, secrets, db.Audit, announce).Remove(["OLD_NAME"]), 0),
             ("config", announce => new SettingsPage(db, Targets(announce).Item1, Targets(announce).Item2, announce, () => null).Run(), 0),
             ("revoke", announce => Revocation.Run(db, Targets(announce).Item1, Targets(announce).Item2, new GrantStore(db)), 0),
         ];
@@ -498,7 +499,7 @@ internal static class GrantTests
         ApprovalSettings settings = new("passkey", null, 0, TimeSpan.FromSeconds(10));
         PasskeyMethod method = new(new PasskeyStore(db), settings, () => codes.TryTake(out string? code, TimeSpan.FromSeconds(15)) ? code : null);
         EnrollmentTarget target = EnrollmentTarget.For(method, new WebApprover(method, settings, text => queue.Add(text), TimeSpan.Zero));
-        Task<ApprovalDecision> task = Task.Run(() => new Enrollment(target, target, text => queue.Add(text), new AuditLog(db)).Enroll());
+        Task<ApprovalDecision> task = Task.Run(() => new Enrollment(target, target, text => queue.Add(text), db.Audit).Enroll());
         DateTime stop = DateTime.UtcNow.AddSeconds(25);
         while (!task.IsCompleted && DateTime.UtcNow < stop)
         {
@@ -553,7 +554,7 @@ internal static class GrantTests
         return finished == task ? task.Result : null;
     }
 
-    private static IReadOnlyList<AuditRecord> Rows(StateDatabase db) => new AuditLog(db).TryRead(100, null, out IReadOnlyList<AuditRecord> rows, out _) ? rows : [];
+    private static IReadOnlyList<AuditRow> Rows(StateDatabase db) => TestAudit.TryRead(db, 100, null, out IReadOnlyList<AuditRow> rows, out _) ? rows : [];
 
     private static async Task AuditEvents(Action<bool, string> check, HttpClient client, string root)
     {
@@ -577,45 +578,44 @@ internal static class GrantTests
 
         // --enroll: a denial, then a success.
         ApprovalDecision? enrolled = await Enroll(client, db, admin, tablet, "tablet", true);
-        check(enrolled is { Approved: false } && Rows(db).Count(row => row.Event == AuditLog.ChangeDenied && row.Detail.StartsWith("--enroll: ", StringComparison.Ordinal)) == 1, "audit events: a denied --enroll is a change-denied row (" + enrolled?.Detail + ")");
+        check(enrolled is { Approved: false } && Rows(db).Count(row => row.Event == AdminEvent.ChangeDenied && row.Detail.StartsWith("--enroll: ", StringComparison.Ordinal)) == 1, "audit events: a denied --enroll is a change-denied row (" + enrolled?.Detail + ")");
         enrolled = await Enroll(client, db, admin, tablet, "tablet", false);
-        AuditRecord? added = Rows(db).SingleOrDefault(row => row.Event == "key-enrolled");
+        AuditRow? added = Rows(db).SingleOrDefault(row => row.Event == "key-enrolled");
         check(enrolled is { Approved: true } && added is { KeyName: "laptop" } && added.Detail.Contains("\"tablet\"", StringComparison.Ordinal) && added.Detail.Contains("admin passkey laptop verified", StringComparison.Ordinal)
             && added.Detail.Contains("(approves runs only)", StringComparison.Ordinal), "audit events: --enroll writes key-enrolled with the new key, that it is not an admin, and the approving admin (" + enrolled?.Detail + "; " + added?.Detail + ")");
 
         // --unenroll: a denial, then a success.
-        Func<Action<string>, object?> unenroll = announce => new Enrollment(Targets(announce).Item1, Targets(announce).Item2, announce, new AuditLog(db)).Unenroll("phone");
+        Func<Action<string>, object?> unenroll = announce => new Enrollment(Targets(announce).Item1, Targets(announce).Item2, announce, db.Audit).Unenroll("phone");
         await Served(client, unenroll, admin, 0);
-        check(Rows(db).Count(row => row.Event == AuditLog.ChangeDenied && row.Detail.StartsWith("--unenroll: ", StringComparison.Ordinal)) == 1, "audit events: a denied --unenroll is a change-denied row");
+        check(Rows(db).Count(row => row.Event == AdminEvent.ChangeDenied && row.Detail.StartsWith("--unenroll: ", StringComparison.Ordinal)) == 1, "audit events: a denied --unenroll is a change-denied row");
         await Served(client, unenroll, admin, 1);
-        AuditRecord? removed = Rows(db).SingleOrDefault(row => row.Event == "key-removed");
+        AuditRow? removed = Rows(db).SingleOrDefault(row => row.Event == "key-removed");
         check(removed is { KeyName: "laptop" } && removed.Detail.Contains("\"phone\"", StringComparison.Ordinal) && removed.Detail.Contains("admin passkey laptop verified", StringComparison.Ordinal), "audit events: --unenroll writes key-removed with the removed key and the approving admin (" + removed?.Detail + ")");
 
         // --revoke: a denial, then a success that says how many were cleared.
         check(new GrantStore(db).Add("K", 10, "laptop"), "audit events: a grant to revoke");
         Func<Action<string>, object?> revoke = announce => Revocation.Run(db, Targets(announce).Item1, Targets(announce).Item2, new GrantStore(db));
         await Served(client, revoke, admin, 0);
-        check(Rows(db).Count(row => row.Event == AuditLog.ChangeDenied && row.Detail.StartsWith("--revoke: ", StringComparison.Ordinal)) == 1 && new GrantStore(db).Entries().Count == 1, "audit events: a denied --revoke is a change-denied row and clears nothing");
+        check(Rows(db).Count(row => row.Event == AdminEvent.ChangeDenied && row.Detail.StartsWith("--revoke: ", StringComparison.Ordinal)) == 1 && new GrantStore(db).Entries().Count == 1, "audit events: a denied --revoke is a change-denied row and clears nothing");
         await Served(client, revoke, admin, 1);
-        AuditRecord? revoked = Rows(db).SingleOrDefault(row => row.Event == "approvals-revoked");
+        AuditRow? revoked = Rows(db).SingleOrDefault(row => row.Event == "approvals-revoked");
         check(revoked is { KeyName: "laptop" } && revoked.Detail.StartsWith("1 saved approval(s) cleared; admin passkey laptop verified", StringComparison.Ordinal) && new GrantStore(db).Entries().Count == 0, "audit events: --revoke writes approvals-revoked with the count and the approving admin (" + revoked?.Detail + ")");
 
         // --set and --remove denied: change-denied rows with the names only.
-        await Served(client, announce => new SecretEntry(Targets(announce).Item1, Targets(announce).Item2, secrets, new AuditLog(db), announce).Set(["NEW_NAME"]), admin, 0);
-        await Served(client, announce => new SecretEntry(Targets(announce).Item1, Targets(announce).Item2, secrets, new AuditLog(db), announce).Remove(["OLD_NAME"]), admin, 0);
-        check(Rows(db).Any(row => row.Event == AuditLog.ChangeDenied && row.Detail.StartsWith("--set: ", StringComparison.Ordinal) && row.Secrets.SequenceEqual(["NEW_NAME"])), "audit events: a denied --set is a change-denied row with the name");
-        check(Rows(db).Any(row => row.Event == AuditLog.ChangeDenied && row.Detail.StartsWith("--remove: ", StringComparison.Ordinal) && row.Secrets.SequenceEqual(["OLD_NAME"])) && secrets.ListNames().Contains("OLD_NAME"), "audit events: a denied --remove is a change-denied row with the name, and nothing is removed");
+        await Served(client, announce => new SecretEntry(Targets(announce).Item1, Targets(announce).Item2, secrets, db.Audit, announce).Set(["NEW_NAME"]), admin, 0);
+        await Served(client, announce => new SecretEntry(Targets(announce).Item1, Targets(announce).Item2, secrets, db.Audit, announce).Remove(["OLD_NAME"]), admin, 0);
+        check(Rows(db).Any(row => row.Event == AdminEvent.ChangeDenied && row.Detail.StartsWith("--set: ", StringComparison.Ordinal) && row.Secrets.SequenceEqual(["NEW_NAME"])), "audit events: a denied --set is a change-denied row with the name");
+        check(Rows(db).Any(row => row.Event == AdminEvent.ChangeDenied && row.Detail.StartsWith("--remove: ", StringComparison.Ordinal) && row.Secrets.SequenceEqual(["OLD_NAME"])) && secrets.ListNames().Contains("OLD_NAME"), "audit events: a denied --remove is a change-denied row with the name, and nothing is removed");
 
-        // --audit shows them, and no value.
-        StringWriter output = new();
-        AuditCommand.Run(db, new CliCommand.Audit(100, null, false), output, new StringWriter());
-        string shown = output.ToString();
-        check(new[] { "key-enrolled", "key-removed", "approvals-revoked", AuditLog.ChangeDenied }.All(name => shown.Contains("\t" + name + "\t", StringComparison.Ordinal)) && !shown.Contains(Secret, StringComparison.Ordinal), "audit events: --audit shows every new event and no value");
-        check(new AuditLog(db).Verify() is { Ok: true }, "audit events: the hash chain holds");
+        // They are signed events, and no value.
+        string shown = StateDatabaseTests.AuditText(db.FilePath);
+        check(new[] { "key-enrolled", "key-removed", "approvals-revoked", AdminEvent.ChangeDenied }.All(name => Rows(db).Any(row => row.Event == name)) && !shown.Contains(Secret, StringComparison.Ordinal), "audit events: the key, approval and denial events are all recorded, and no value");
+        check(TestAudit.Events(db).All(item => item.Verify(TestAudit.KeyOf(db).PublicKey)), "audit events: every event is signed by the machine key");
+        check(TestAudit.MetadataClean(db, [Secret], out _) && TestAudit.Events(db).Any(item => item.Outcome == "key-removed" && item.Meta.ContainsKey("key") && item.Meta.ContainsKey("detail")), "audit canary: the metadata of the admin events holds the key name and detail and no value");
 
         // A refusal with no state.db creates nothing.
         StateDatabase none = StateDatabase.InFolder(Path.Combine(root, "events-none"));
-        check(!new AuditLog(none).TryWriteDenied("--set", [], "x") && !File.Exists(none.FilePath), "audit events: a refusal with no state.db creates none");
+        check(!none.Audit.TryWriteDenied("--set", [], "x") && !File.Exists(none.FilePath), "audit events: a refusal with no state.db creates none");
     }
 
     private static void Listings(Action<bool, string> check, string root)
@@ -636,10 +636,6 @@ internal static class GrantTests
         TestState.Add(db, phone.Record("localhost", "phone") with { Created = when.AddMinutes(1) }, admin: true);
         TestState.Add(db, desk.Record("localhost", "desk") with { Created = when.AddMinutes(2) });
         string line = "Admins: laptop " + Expected(admin) + ", phone " + Expected(phone);
-        new AuditLog(db).TryWrite("approved", new ApprovalRequest("tool", "/bin/tool", [], "/work", "r", ["NAME_A"]), "passkey laptop verified");
-
-        StringWriter audit = new();
-        check(AuditCommand.Run(db, new CliCommand.Audit(20, null, false), audit, new StringWriter()) == 0 && audit.ToString().Split('\n')[0].TrimEnd('\r') == line, "fingerprint --audit: the header line lists every admin key (" + audit + ")");
         StringWriter enrolled = new();
         StringWriter errors = new();
         EnrolledListing.Write(db, new PasskeyMethod(new PasskeyStore(db), new ApprovalSettings("passkey", null, 0, TimeSpan.FromSeconds(5))).Enrolled(), enrolled, errors);
@@ -647,9 +643,5 @@ internal static class GrantTests
         check(lines.Length == 4 && lines[0] == line && lines[1].StartsWith("laptop\tlocalhost\t", StringComparison.Ordinal) && lines[1].EndsWith("\tadmin", StringComparison.Ordinal)
             && lines[2].StartsWith("phone\tlocalhost\t", StringComparison.Ordinal) && lines[2].EndsWith("\tadmin", StringComparison.Ordinal)
             && lines[3].StartsWith("desk\tlocalhost\t", StringComparison.Ordinal) && !lines[3].EndsWith("\tadmin", StringComparison.Ordinal), "fingerprint --enrolled: the header line lists every admin, then one line per key, admins marked (" + enrolled + ")");
-
-        StateDatabase empty = StateDatabase.InFolder(Path.Combine(root, "listings-empty"));
-        StringWriter none = new();
-        check(AuditCommand.Run(empty, new CliCommand.Audit(20, null, false), none, new StringWriter()) == 0 && none.ToString().StartsWith("Admins: not set up yet", StringComparison.Ordinal) && !File.Exists(empty.FilePath), "fingerprint --audit: an empty store says not set up yet and creates nothing");
     }
 }

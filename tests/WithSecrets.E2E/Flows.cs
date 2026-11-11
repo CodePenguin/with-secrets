@@ -89,17 +89,33 @@ internal static class PageSteps
 
 internal static class AuditChecks
 {
-    /// <summary>The audit event names, oldest first.</summary>
-    public static IReadOnlyList<string> Events(Rig rig)
+    /// <summary>
+    /// The audit events, oldest first: what the authority already has plus what is still in the outbox (the service uploads and removes). An administrative event is
+    /// named by its event name, a run's by "type-outcome" (authorization-approved, launch-started, execution-exited).
+    /// </summary>
+    public static IReadOnlyList<AuditEvent> All(Rig rig)
     {
-        new AuditLog(rig.State).TryRead(200, null, out IReadOnlyList<AuditRecord> rows, out _);
+        Dictionary<string, AuditEvent> events = [];
+        foreach (AuditHistoryRecord item in rig.Machine.Deployment.Store.AuditHistory(new AuditQuery(Limit: AuditQuery.MaxLimit)))
+        {
+            events[item.Event.EventId] = item.Event;
+        }
 
-        return [.. rows.Select(r => r.Event)];
+        foreach (AuditEvent item in HostAuditOutbox.InFolder(rig.Folder, E2EAudit.KeyFor(rig.Folder)).Pending(100000))
+        {
+            events[item.EventId] = item;
+        }
+
+        return [.. events.Values.OrderBy(item => item.Sequence)];
     }
+
+    public static string Name(AuditEvent item) => item.Type == AuditEventTypes.Admin ? item.Outcome : item.Type + "-" + item.Outcome;
+
+    public static IReadOnlyList<string> Events(Rig rig) => [.. All(rig).Select(Name)];
 
     public static void Expect(S s, Rig rig, params string[] expected)
     {
         IReadOnlyList<string> events = Events(rig);
-        s.Check(events.SequenceEqual(expected) && new AuditLog(rig.State).Verify().Ok, "audit rows: " + string.Join(", ", expected) + (events.SequenceEqual(expected) ? "" : " (got " + string.Join(", ", events) + ")"));
+        s.Check(events.SequenceEqual(expected) && All(rig).All(item => item.Verify(E2EAudit.KeyFor(rig.Folder).PublicKey)), "audit events (signed): " + string.Join(", ", expected) + (events.SequenceEqual(expected) ? "" : " (got " + string.Join(", ", events) + ")"));
     }
 }

@@ -68,8 +68,8 @@ internal static partial class WebApprovalTests
                 link.TrySetResult(line);
             }, TimeSpan.Zero);
             RunArgs args = CliArgs.ParseRun(["--reason", "env http test", "--", "./" + program], out _)!;
-            RunCommand command = new(store, approver, new AuditLog(db), TextWriter.Synchronized(stdout), errors, environment: _ => null);
-            Task<int> running = Task.Run(() => command.ExecuteAsync(args, scripts));
+            RunCommand command = new(store, approver, TextWriter.Synchronized(stdout), errors, environment: _ => null);
+            Task<int> running = Task.Run(() => command.ExecuteAsync(args, scripts, TestAudit.Sink(db)));
             List<string> seen = [];
             Task first = await Task.WhenAny(link.Task, running, Task.Delay(TimeSpan.FromSeconds(20)));
             if (first == link.Task)
@@ -98,7 +98,7 @@ internal static partial class WebApprovalTests
         check(page.Contains($"TOKEN <- secret {Stripe}", StringComparison.Ordinal) && page.Contains(dotenv, StringComparison.Ordinal) && page.Contains("LOG_LEVEL", StringComparison.Ordinal), "env http: the page shows the pair, the .env path and the ordinary name");
         string everything = string.Join("\n", [.. result.Seen, result.Out, result.Err, audit]);
         check(!everything.Contains(StripeValue, StringComparison.Ordinal) && page.Contains("\n  | LOG_LEVEL=" + Ordinary, StringComparison.Ordinal) && !result.Err.Contains(Ordinary, StringComparison.Ordinal) && !audit.Contains(Ordinary, StringComparison.Ordinal), "env http: no secret value is on the page, stderr or audit; the ordinary value is on the page and not on the terminal");
-        check(audit.Contains($"\"variable\":\"TOKEN\",\"secret\":\"{Stripe}\"", StringComparison.Ordinal), "env http: the audit row names the pair");
+        check(audit.Contains("\"outcome\":\"approved\"", StringComparison.Ordinal) && !audit.Contains(StripeValue, StringComparison.Ordinal), "env http: the signed authorization event is there and has no value");
 
         // denied: no row is decrypted, nothing runs
         (db, passkeys, store, cipher) = NewState();

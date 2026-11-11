@@ -146,7 +146,6 @@ internal static class LoggingTests
             ("--enroll --local", ["--enroll", "--local"]),
             ("--enrolled", ["--enrolled"]),
             ("--unenroll", ["--unenroll", "phone"]),
-            ("--audit", ["--audit", "--last", "5"]),
             ("--config", ["--config"]),
             ("--config --show", ["--config", "--show"]),
             ("--recover", ["--recover"]),
@@ -402,8 +401,8 @@ internal static class LoggingTests
         using Setup third = new(Path.Combine(root, "faults3"), debug: false);
         string blocked = Path.Combine(root, "audit-blocked");
         File.WriteAllText(blocked, "a file, not a directory");
-        AuditLog audit = new(new StateDatabase(Path.Combine(blocked, "audit.db")));
-        bool written = audit.TryWrite("approved", new ApprovalRequest("tool", "/bin/tool", [], "/work", "r", ["OLD_NAME"]), "d");
+        StateDatabase blockedState = new(Path.Combine(blocked, "audit.db"));
+        bool written = blockedState.Audit.TryRecord(AdminEvent.Change("key-enrolled", "d", ""));
         check(!written && third.Events.Lines(LogEventLevel.Warning).Any(line => line.Contains("audit", StringComparison.OrdinalIgnoreCase)), "audit log: a failed write is a warning");
         string damaged = Path.Combine(root, "damaged");
         Directory.CreateDirectory(damaged);
@@ -448,7 +447,7 @@ internal static class LoggingTests
                 "--enroll" => announce =>
                 {
                     (EnrollmentTarget target, _) = RecoveryTests.Targets(w!.Db, announce, readCode);
-                    ApprovalDecision decision = new Enrollment(target, target, announce, new AuditLog(w.Db)).Enroll();
+                    ApprovalDecision decision = new Enrollment(target, target, announce, w.Db.Audit).Enroll();
 
                     return new ConfigChange(decision.Approved ? 0 : 1, decision.Detail);
                 },
@@ -686,7 +685,7 @@ internal static class LoggingTests
                 RecoveryTests.Flow flow = new((announce, read) =>
                 {
                     (EnrollmentTarget target, _) = RecoveryTests.Targets(w.Db, announce, read);
-                    ApprovalDecision decision = new Enrollment(target, target, announce, new AuditLog(w.Db)).Enroll();
+                    ApprovalDecision decision = new Enrollment(target, target, announce, w.Db.Audit).Enroll();
 
                     return new ConfigChange(decision.Approved ? 0 : 1, decision.Detail);
                 });
@@ -724,7 +723,7 @@ internal static class LoggingTests
             {
                 string audit = Path.Combine(root, "leak-run-audit.db");
                 RunArgs args = CliArgs.ParseRun(["--secrets", "CANARY_RUN", "--reason", "leak scan", "--", "dotnet", "--version"], out _)!;
-                int code = await new RunCommand(new MemoryStore(new Dictionary<string, string> { ["CANARY_RUN"] = CanaryRunValue }), new FakeApprover(true), new AuditLog(new StateDatabase(audit)), new StringWriter(), new StringWriter()).ExecuteAsync(args, root);
+                int code = await new RunCommand(new MemoryStore(new Dictionary<string, string> { ["CANARY_RUN"] = CanaryRunValue }), new FakeApprover(true), new StringWriter(), new StringWriter()).ExecuteAsync(args, root);
                 check(code == 0, "leak scan: the run with a secret ran (" + code + ")");
                 flowsRun++;
             }

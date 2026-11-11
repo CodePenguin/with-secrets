@@ -554,7 +554,7 @@ internal static partial class RemoteAuthorityTests
         RemoteAuthority remote = host.Remote;
 
         ReconcileResponse answer = await remote.ReconcileAsync(ReconcileEnvelope.Create("rc-1", machine.HostName, DateTimeOffset.UtcNow, machine.MachineKey));
-        check(answer.Verify(AuthorityKey(net)) && answer.Status == "Trusted" && answer.HostNameBound && answer.LeaseSeconds > 0 && answer.RequestId == "rc-1", "remote: a check-in over mutual TLS returns the authority's signed answer (verifies under the authority key)");
+        check(answer.Verify(AuthorityKey(net)) && answer.Status == "Trusted" && answer.HostNameBound && answer.RequestId == "rc-1", "remote: a check-in over mutual TLS returns the authority's signed answer (verifies under the authority key)");
 
         LaunchRequest request = Request("req-decide-1");
         int presented = 0;

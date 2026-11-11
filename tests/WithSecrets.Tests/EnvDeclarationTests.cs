@@ -107,7 +107,6 @@ internal static class EnvDeclarationTests
         check(CliArgs.Parse(["--set", "team/payments/STRIPE_KEY"], out _) is CliCommand.Set { Names: ["team/payments/STRIPE_KEY"] }, "name: --set takes a folder name");
         check(CliArgs.Parse(["--set", "team//KEY"], out string error) is null && error.Contains("folder", StringComparison.Ordinal), "name: --set refuses //");
         check(CliArgs.Parse(["--remove", "../KEY"], out _) is null, "name: --remove refuses ..");
-        check(CliArgs.Parse(["--audit", "--secret", "team/KEY"], out _) is CliCommand.Audit { Secret: "team/KEY" }, "name: --audit --secret takes a folder name");
     }
 
     // --- the parser
@@ -309,7 +308,7 @@ internal static class EnvDeclarationTests
         check(CliArgs.Parse(["--needs"], out _) is CliCommand.Needs { EnvFiles.Count: 0 }, "cli: --needs");
         check(CliArgs.Parse(["--needs", "-f", "a.env", "--env-file", "b.env"], out _) is CliCommand.Needs { EnvFiles: ["a.env", "b.env"] }, "cli: --needs -f -f (repeatable)");
         check(CliArgs.Parse(["--needs", "--secrets", "A"], out _) is null && CliArgs.Parse(["--needs", "--reason", "x"], out _) is null && CliArgs.Parse(["--needs", "--", "p"], out _) is null, "cli: --needs is not a run");
-        check(CliArgs.Parse(["--needs", "--list"], out _) is null && CliArgs.Parse(["--needs", "--set", "A"], out _) is null && CliArgs.Parse(["--needs", "--audit"], out _) is null, "cli: --needs excludes the other modes");
+        check(CliArgs.Parse(["--needs", "--list"], out _) is null && CliArgs.Parse(["--needs", "--set", "A"], out _) is null, "cli: --needs excludes the other modes");
         check(CliArgs.Parse(["--needs", "--port", "5000"], out _) is null, "cli: --needs opens no page, so no --port");
         check(!CliArgs.NeedsTerminal(new CliCommand.Needs([])), "cli: --needs runs without a terminal");
         check(CliArgs.Parse(["-f", "a.env", "--list"], out string error) is null && error.Contains("--needs", StringComparison.Ordinal) && CliArgs.Parse(["-f", "a.env"], out _) is null && CliArgs.Parse(["--set", "A", "-f", "x"], out _) is null, "cli: -f goes only with a run or --needs");
@@ -349,13 +348,13 @@ internal static class EnvDeclarationTests
 
     private static async Task<RunResult> Execute(string parent, string folder, string script, string envDump, ISecretSource source, IApprover approver, string[] secrets, string[]? envFiles = null, Dictionary<string, string>? os = null)
     {
-        string audit = Path.Combine(Fresh(parent), "audit.db");
+        StateDatabase auditState = new(Path.Combine(Fresh(parent), "audit.db"));
         StringWriter stdout = new();
         StringWriter stderr = new();
         RunArgs args = new(secrets, "env test", script, [], envFiles);
-        int code = await new RunCommand(source, approver, new AuditLog(new StateDatabase(audit)), stdout, stderr, environment: name => os is not null && os.TryGetValue(name, out string? value) ? value : null).ExecuteAsync(args, folder);
+        int code = await new RunCommand(source, approver, stdout, stderr, environment: name => os is not null && os.TryGetValue(name, out string? value) ? value : null).ExecuteAsync(args, folder, TestAudit.Sink(auditState));
 
-        return new RunResult(code, stdout.ToString(), stderr.ToString(), File.Exists(audit) ? StateDatabaseTests.AuditText(audit) : "", File.Exists(envDump) ? File.ReadAllText(envDump) : "");
+        return new RunResult(code, stdout.ToString(), stderr.ToString(), StateDatabaseTests.AuditText(auditState.FilePath), File.Exists(envDump) ? File.ReadAllText(envDump) : "");
     }
 
     private static async Task Runs(Action<bool, string> check, string parent)
@@ -381,7 +380,7 @@ internal static class EnvDeclarationTests
         check(text.Split('\n').Where(line => line.StartsWith("Pair: ", StringComparison.Ordinal)).SequenceEqual([$"Pair: TOKEN <- secret {Stripe} (renamed)", "Pair: UNUSED <- secret OTHER_KEY (renamed)"]), "run: one pair per line, renamed pairs marked");
         check(RequestFingerprint.Compute(seen with { EnvValues = new Dictionary<string, string> { ["LOG_LEVEL"] = "other" } }).Key != RequestFingerprint.Compute(seen).Key, "run: an ordinary value is part of the fingerprint");
         check(!run.Out.Contains(Token, StringComparison.Ordinal) && !run.Err.Contains(Token, StringComparison.Ordinal) && !run.Audit.Contains(Token, StringComparison.Ordinal) && !run.Audit.Contains(Ordinary, StringComparison.Ordinal) && !text.Contains("other-Value-77", StringComparison.Ordinal), "run: values are in no stderr, audit or page text");
-        check(run.Audit.Contains($"\"variable\":\"TOKEN\",\"secret\":\"{Stripe}\"", StringComparison.Ordinal) && run.Audit.Contains(".env", StringComparison.Ordinal) && run.Audit.Contains("LOG_LEVEL", StringComparison.Ordinal), "run: the audit row has the variable mapping, the file and the ordinary names");
+        check(run.Audit.Contains("\"type\":\"authorization\"", StringComparison.Ordinal) && run.Audit.Contains("\"outcome\":\"approved\"", StringComparison.Ordinal), "run: the signed audit events are there (and hold no value)");
 
         // a pair is part of the fingerprint
         string baseKey = RequestFingerprint.Compute(seen).Key;

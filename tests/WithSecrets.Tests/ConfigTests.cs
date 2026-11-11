@@ -170,7 +170,7 @@ internal static class ConfigTests
         string path = SchemaOne(Path.Combine(root, "old-schema"));
         byte[] before = File.ReadAllBytes(path);
         StateDatabase db = new(path);
-        check(StateDatabase.SchemaVersion == 9, "db schema: the schema version is 9");
+        check(StateDatabase.SchemaVersion == 10, "db schema: the schema version is 10");
         check(!db.TryCheck(out string? error) && error is not null && error.Contains("delete state.db to start over", StringComparison.Ordinal), "db schema: an older database is an error that says to delete state.db (" + error + ")");
         check(!new PasskeyStore(db).TryAll(out _) && new PasskeyStore(db).All().Count == 0, "db schema: its passkeys are not used");
         check(ToolSettings.Load(db, out error) == ToolSettings.Defaults && error is not null && ReuseSettings.Load(db) == ReuseOffer.Off, "db schema: settings from it are an error");
@@ -239,7 +239,7 @@ internal static class ConfigTests
         check(CliArgs.NeedsTerminal(new CliCommand.Config(false)), "cli: --config needs a real terminal");
         check(!CliArgs.NeedsTerminal(new CliCommand.Config(true)), "cli: --config --show works anywhere");
         check(CliArgs.NeedsTerminal(new CliCommand.Enroll()) && CliArgs.NeedsTerminal(new CliCommand.Enrolled()) && CliArgs.NeedsTerminal(new CliCommand.Unenroll("x")) && CliArgs.NeedsTerminal(new CliCommand.Revoke()), "cli: --enroll, --enrolled, --unenroll and --revoke need a real terminal");
-        check(!CliArgs.NeedsTerminal(new CliCommand.List()) && !CliArgs.NeedsTerminal(new CliCommand.Set(["A_B"])) && !CliArgs.NeedsTerminal(new CliCommand.Audit(20, null, false)), "cli: --list, --set and --audit do not");
+        check(!CliArgs.NeedsTerminal(new CliCommand.List()) && !CliArgs.NeedsTerminal(new CliCommand.Set(["A_B"])), "cli: --list and --set do not");
     }
 
     private static void Show(Action<bool, string> check, string root)
@@ -458,12 +458,12 @@ internal static class ConfigTests
             check(run.AgainGone, "config: after the save, the page and a second POST are 404");
             string token = run.Link?.AbsolutePath.Split('/')[^1] ?? "";
             check(run.Lines.Count == 1 && run.Link is not null && run.Lines[0] == ConfigPrefix + "http://localhost:" + run.Link.Port + "/c/" + token && token.Length == 22, "config: the terminal gets only the link /c/<token> (" + string.Join(" | ", run.Lines) + ")");
-            check(new AuditLog(db).TryRead(5, null, out IReadOnlyList<AuditRecord> rows, out _) && rows.Count == 1 && rows[0].Event == "settings-changed"
+            check(TestAudit.TryRead(db, 5, null, out IReadOnlyList<AuditRow> rows, out _) && rows.Count == 1 && rows[0].Event == "settings-changed"
                 && rows[0].Secrets.SequenceEqual(["reuseMinutes", "reuseMaxMinutes", "baseUrl", "port", "timeoutMinutes"]) && rows[0].KeyName == "laptop"
                 && rows[0].Detail == "reuseMinutes 10 -> 30; reuseMaxMinutes 480 -> 600; baseUrl none -> https://ws.example.com; port 0 -> 8765; timeoutMinutes 5 -> 10", "config: the audit row has the names, old -> new and the key (" + (rows.Count > 0 ? rows[0].Detail + " / " + rows[0].KeyName : "none") + ")");
             string entry = StateDatabaseTests.AuditText(db.FilePath);
-            check(!entry.Contains("signature", StringComparison.Ordinal) && !entry.Contains("clientDataJSON", StringComparison.Ordinal) && !entry.Contains("authenticatorData", StringComparison.Ordinal) && entry.Contains("\"changes\"", StringComparison.Ordinal), "config: the audit entry holds the changes and no proof material");
-            check(new AuditLog(db).Verify() is { Ok: true }, "config: the audit chain holds");
+            check(TestAudit.Events(db, all: true).All(item => !item.Reason.Contains("signature", StringComparison.Ordinal) && item.Meta.Values.All(value => !value.Contains("signature", StringComparison.Ordinal))) && !entry.Contains("clientDataJSON", StringComparison.Ordinal) && !entry.Contains("authenticatorData", StringComparison.Ordinal) && entry.Contains("settings-changed", StringComparison.Ordinal) && entry.Contains("reuseMinutes 10 -> 30", StringComparison.Ordinal), "config: the audit event holds the changes and no proof material");
+            check(TestAudit.Events(db).All(item => item.Verify(TestAudit.KeyOf(db).PublicKey)), "config: the audit event is signed by the machine key");
 
             // The page: every setting, its current value and its limits; one-use token path; CSP with hashes; no inline handlers.
             check(run.Page.Contains("data-setting=\"reuseMinutes\"", StringComparison.Ordinal) && run.Page.Contains("data-setting=\"reuseMaxMinutes\"", StringComparison.Ordinal) && run.Page.Contains("data-setting=\"method\"", StringComparison.Ordinal)
@@ -523,7 +523,7 @@ internal static class ConfigTests
             string payload = Start(run.Page) is { ValueKind: JsonValueKind.Object } start ? start.GetProperty("payload").GetString() ?? "" : "";
             check(!payload.Contains("allowCredentials", StringComparison.Ordinal) && !payload.Contains(TestAuthenticator.Encode(stranger.CredentialId), StringComparison.Ordinal), "config: with two admins, the payload names no credential");
             check(run.Result is { Code: 0 } && ToolSettings.Load(db, out _).Port == 8765 && db.TryCheck(out _), "config: the second admin key saves the settings (" + run.Result?.Detail + ")");
-            check(new AuditLog(db).TryRead(5, null, out IReadOnlyList<AuditRecord> rows, out _) && rows.Count == 1 && rows[0].KeyName == "phone", "config: the audit row names the second admin");
+            check(TestAudit.TryRead(db, 5, null, out IReadOnlyList<AuditRow> rows, out _) && rows.Count == 1 && rows[0].KeyName == "phone", "config: the audit row names the second admin");
             run = await Drive(db, local, null, Save(client, stranger, Canonical(10, "passkey", null, 0, 5), Canonical(10, "passkey", null, 0, 5)));
             check(run.Result is { Code: RunCommand.Denied } && run.Status == 403 && ToolSettings.Load(db, out _).Port == 8765, "config: a key that is not an admin still cannot save (" + run.Result?.Detail + ")");
         }
@@ -626,9 +626,9 @@ internal static class ConfigTests
     }
 
     /// <summary>The audit log has exactly one row, the change-denied row of --config, and no settings row.</summary>
-    private static bool OnlyDenied(StateDatabase db) => new AuditLog(db).TryRead(10, null, out IReadOnlyList<AuditRecord> rows, out _) && rows.Count == 1 && rows[0].Event == AuditLog.ChangeDenied && rows[0].Detail.StartsWith("--config: ", StringComparison.Ordinal);
+    private static bool OnlyDenied(StateDatabase db) => TestAudit.TryRead(db, 10, null, out IReadOnlyList<AuditRow> rows, out _) && rows.Count == 1 && rows[0].Event == AdminEvent.ChangeDenied && rows[0].Detail.StartsWith("--config: ", StringComparison.Ordinal);
 
-    private static bool Empty(StateDatabase db) => !File.Exists(db.FilePath) || (Version(db) == 0 && new PasskeyStore(db).All().Count == 0 && new AuditLog(db).Lines().Count == 0);
+    private static bool Empty(StateDatabase db) => !File.Exists(db.FilePath) || (Version(db) == 0 && new PasskeyStore(db).All().Count == 0 && TestAudit.Events(db).Count == 0);
 
     private static int FreePort()
     {
@@ -661,7 +661,7 @@ internal static class ConfigTests
             check(CliArgs.Parse(["--config", "--port", bad], out string message) is null && message.Contains("--port", StringComparison.Ordinal) && message.Contains("65535", StringComparison.Ordinal), "port: '" + bad + "' is refused (" + message + ")");
         }
 
-        check(CliArgs.Parse(["--list", "--port", "9000"], out _) is null && CliArgs.Parse(["--audit", "--port", "9000"], out _) is null && CliArgs.Parse(["--enrolled", "--port", "9000"], out _) is null
+        check(CliArgs.Parse(["--list", "--port", "9000"], out _) is null && CliArgs.Parse(["--enrolled", "--port", "9000"], out _) is null
             && CliArgs.Parse(["--config", "--show", "--port", "9000"], out _) is null, "port: commands that open no page refuse --port");
         check(CliArgs.Parse(["--help"], out _) is CliCommand.Help { Text: var help } && help.Contains("--port", StringComparison.Ordinal) && help.Contains("ssh -L", StringComparison.Ordinal), "port: --help describes --port");
 
@@ -825,7 +825,7 @@ internal static class ConfigTests
 
             string script = run.Page[(run.Page.LastIndexOf("<script>", StringComparison.Ordinal) + 8)..];
             check(script.Contains("post(\"sign\"", StringComparison.Ordinal) && script.Contains("navigator.credentials.get", StringComparison.Ordinal) && script.Contains("navigator.credentials.create", StringComparison.Ordinal), "config first run: the page script has the second prompt (get, then post sign)");
-            check(new AuditLog(db).TryRead(5, null, out IReadOnlyList<AuditRecord> rows, out _) && rows.Count == 1 && rows[0].Event == "settings-setup" && rows[0].KeyName == "passkey"
+            check(TestAudit.TryRead(db, 5, null, out IReadOnlyList<AuditRow> rows, out _) && rows.Count == 1 && rows[0].Event == "settings-setup" && rows[0].KeyName == "passkey"
                 && rows[0].Secrets.SequenceEqual(["reuseMinutes", "port", "timeoutMinutes"]), "config first run: one audit row with the names and the new key (" + (rows.Count > 0 ? rows[0].Event + " " + rows[0].Detail : "none") + ")");
             JsonElement start = Start(run.Page);
             check(start.ValueKind == JsonValueKind.Object && start.GetProperty("flow").GetString() == "register" && start.GetProperty("options").GetProperty("rp").GetProperty("id").GetString() == "localhost", "config first run: the page creates a passkey for localhost");

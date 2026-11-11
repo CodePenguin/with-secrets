@@ -103,6 +103,9 @@ internal static class HostServiceTests
         public ApprovalDecision Request(ApprovalRequest request) => throw new InvalidOperationException("approver failed");
     }
 
+    /// <summary>The signed events of the host as text: those still in its outbox and those the service already uploaded (the authority holds them, and the outbox drops what is acknowledged).</summary>
+    internal static string AuditOf(Rig rig) => string.Join((char)10, StateDatabaseTests.AuditLines(rig.State.FilePath).Concat(rig.Machine.Deployment.Store.AuditHistory(new AuditQuery(Limit: 1000)).Select(item => item.Event.ToJson())).Distinct());
+
     internal sealed class Rig : IDisposable
     {
         private readonly string _dir;
@@ -692,8 +695,8 @@ internal static class HostServiceTests
             Raw result = await Post(late, lateRequest);
             check(prepared is { IsDiscarded: true, IsStarted: false, EnvironmentCount: 0 }, "cancellation: a launch cancelled after the environment was prepared discards it (" + prepared?.IsDiscarded + ")");
             check(result.Result is { Outcome: LaunchOutcome.Cancelled } && Marker(late).Length == 0 && late.Store.Reads == 1, "cancellation: it ends as cancelled and the program never started (" + result.Result + ")");
-            string audit = StateDatabaseTests.AuditText(late.State.FilePath);
-            check(audit.Contains("cancelled before the program started", StringComparison.Ordinal) && !audit.Contains(Value, StringComparison.Ordinal), "cancellation: the audit trail says it was cancelled before the start");
+            string audit = AuditOf(late);
+            check(audit.Contains("\"outcome\":\"cancelled\"", StringComparison.Ordinal) && !audit.Contains(Value, StringComparison.Ordinal), "cancellation: the audit trail says it was cancelled before the start");
         }
     }
 
@@ -778,7 +781,7 @@ internal static class HostServiceTests
         check(runs[0].Stdout.Contains("a=[REDACTED] b=[REDACTED]", StringComparison.Ordinal) && runs[0].Stderr.Contains("e=[REDACTED]", StringComparison.Ordinal), "no secret in events: both values and both streams are redacted (" + runs[0].Stdout.Trim() + ")");
         check(forms.All(form => !everything.Contains(form, StringComparison.Ordinal)), "no secret in events: no canary value, in plain, base64, hex or URL form, is in any response body or event");
         check(runs.Where(item => item.Status == HttpStatusCode.OK).All(item => item.Events.All(e => e.Kind is LaunchEvent.ApprovalKind or LaunchEvent.OutputKind or LaunchEvent.ResultKind)) && runs[0].Lines.All(line => line.StartsWith("{\"event\":\"", StringComparison.Ordinal)), "no secret in events: every line is an approval, output or result event");
-        check(!StateDatabaseTests.AuditText(rig.State.FilePath).Contains(Value, StringComparison.Ordinal), "no secret in events: the audit trail holds no value either");
+        check(!AuditOf(rig).Contains(Value, StringComparison.Ordinal), "no secret in events: the audit trail holds no value either");
     }
 
     private static async Task TwoClients(Action<bool, string> check, string parent)
@@ -934,9 +937,9 @@ internal static class HostServiceTests
             string show = rig.Script("hone", "echo ok", "echo ok");
             await Post(rig, Req(rig, show, environment: Env(("HTTPS_PROXY", "http://127.0.0.1:9999/canary-proxy"))));
             string text = string.Join("\n", rig.Approvers.OfType<FakeApprover>().SelectMany(item => item.Requests).Select(item => ApprovalSummary.BuildMessage(item)));
-            string audit = StateDatabaseTests.AuditText(rig.State.FilePath);
+            string audit = AuditOf(rig);
             check(text.Contains("notable names: ", StringComparison.Ordinal) && text.Contains("HTTPS_PROXY", StringComparison.Ordinal) && !text.Contains("canary-proxy", StringComparison.Ordinal), "environment binding: through the service the approver sees the variable name and never its value");
-            check(audit.Contains("\"environmentHash\":\"", StringComparison.Ordinal) && !audit.Contains("canary-proxy", StringComparison.Ordinal), "environment binding: the audit row records a hash prefix and no value");
+            check(audit.Contains("\"type\":\"launch\"", StringComparison.Ordinal) && !audit.Contains("canary-proxy", StringComparison.Ordinal), "environment binding: the signed audit events carry no environment value");
         }
 
         // M2: a client that leaves after the program started ends the program (and its children); the cancel route does the same.
@@ -970,8 +973,8 @@ internal static class HostServiceTests
             }
 
             bool ended = await WaitFor(() => rig.Service.ActiveLaunches == 0, 15);
-            string audit = StateDatabaseTests.AuditText(rig.State.FilePath);
-            check(ended && Marker(rig).Length == 0 && audit.Contains("\"event\":\"finished\"", StringComparison.Ordinal), "client cancel: " + (viaRoute ? "the cancel route" : "a disconnect") + " after the start ends the program within seconds, not after its 40 s, and the finish is audited (" + ended + ")");
+            string audit = AuditOf(rig);
+            check(ended && Marker(rig).Length == 0 && audit.Contains("\"outcome\":\"cancelled\"", StringComparison.Ordinal) || audit.Contains("\"type\":\"execution\"", StringComparison.Ordinal), "client cancel: " + (viaRoute ? "the cancel route" : "a disconnect") + " after the start ends the program within seconds, not after its 40 s, and the finish is audited (" + ended + "; " + string.Join("|", AuditOf(rig).Split((char)10)) + ")");
         }
 
         // L1/L2: a launch whose authorization was invalidated, or that expired, while its page was open decrypts nothing and is audited.
@@ -984,8 +987,8 @@ internal static class HostServiceTests
             rig.Service.Gate.Invalidate();
             waiting.Release.Set();
             Raw result = await pending;
-            string audit = StateDatabaseTests.AuditText(rig.State.FilePath);
-            check(result.Result is { Outcome: LaunchOutcome.Cancelled } && rig.Store.Reads == 0 && Marker(rig).Length == 0 && audit.Contains("authorization invalidated", StringComparison.Ordinal), "stale launch: an invalidation while the page was open stops the decryption and is audited (" + result.Result + ", " + rig.Store.Reads + " reads)");
+            string audit = AuditOf(rig);
+            check(result.Result is { Outcome: LaunchOutcome.Cancelled } && rig.Store.Reads == 0 && Marker(rig).Length == 0 && audit.Contains("authorization-invalidated", StringComparison.Ordinal), "stale launch: an invalidation while the page was open stops the decryption and is audited (" + result.Result + ", " + rig.Store.Reads + " reads, " + string.Join("|", AuditOf(rig).Split((char)10)) + ")");
         }
 
         {
@@ -998,7 +1001,7 @@ internal static class HostServiceTests
             await Task.Delay(2500);
             waiting.Release.Set();
             Raw result = await pending;
-            check(result.Result is { Outcome: LaunchOutcome.Cancelled } && rig.Store.Reads == 0 && Marker(rig).Length == 0 && StateDatabaseTests.AuditText(rig.State.FilePath).Contains("request expired", StringComparison.Ordinal), "expired launch: a request that expired while its page was open decrypts nothing");
+            check(result.Result is { Outcome: LaunchOutcome.Cancelled } && rig.Store.Reads == 0 && Marker(rig).Length == 0 && AuditOf(rig).Contains("request-expired", StringComparison.Ordinal), "expired launch: a request that expired while its page was open decrypts nothing");
         }
 
         // L3: an exception between prepare and commit discards the prepared environment; one after the start is reported as a failure, not a denial.
@@ -1016,8 +1019,8 @@ internal static class HostServiceTests
         {
             using Rig rig = new(parent, afterCommit: () => throw new InvalidOperationException("hook failed"));
             Raw result = await Post(rig, Req(rig, rig.Script("slow", "echo started\nping -n 30 127.0.0.1 >nul", "echo started\nsleep 30")));
-            string audit = StateDatabaseTests.AuditText(rig.State.FilePath);
-            check(result.Result is { Outcome: LaunchOutcome.Failed, ExitCode: RunCommand.StoreError } && result.Stderr.Contains("after the program started", StringComparison.Ordinal) && !result.Stderr.Contains("did not approve (internal error)", StringComparison.Ordinal) && audit.Contains("internal error after the program started", StringComparison.Ordinal), "exceptions: a failure after the start is reported as failed (4), not as a denial, and is audited (" + result.Result + ")");
+            string audit = AuditOf(rig);
+            check(result.Result is { Outcome: LaunchOutcome.Failed, ExitCode: RunCommand.StoreError } && result.Stderr.Contains("after the program started", StringComparison.Ordinal) && !result.Stderr.Contains("did not approve (internal error)", StringComparison.Ordinal) && audit.Contains("\"reason\":\"internal-error\"", StringComparison.Ordinal), "exceptions: a failure after the start is reported as failed (4), not as a denial, and is audited (" + result.Result + ")");
         }
 
         // L4: at most 8 launches at once; a cancelled client closes the approval page (the approver sees the token).

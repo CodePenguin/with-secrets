@@ -7,10 +7,10 @@ using Microsoft.Data.Sqlite;
 namespace WithSecrets.Tests;
 
 /// <summary>
-/// Phase 3, grants as authority operations, the offline lease and reconciliation: a grant is made by a human approval, used without a page
+/// Phase 3, grants as authority operations and reconciliation: a grant is made by a human approval, used without a page
 /// decision for exactly its scope while it is unexpired and unrevoked, extended, renewed and revoked by the authority (signed, idempotent, atomic),
-/// and the host may use a synchronized grant while the authority cannot be reached only within a finite lease that a monotonic clock measures,
-/// that nothing but a verified check-in can set, that a restart destroys, and that no grant (indefinite or not) lengthens.
+/// and a host whose authority cannot be reached uses nothing (it fails closed): what vouches for the host is only a verified, Trusted check-in, which
+/// nothing but the authority can give, which a restart destroys, and which no grant (indefinite or not) changes.
 /// </summary>
 internal static class GrantAuthorityTests
 {
@@ -144,11 +144,9 @@ internal static class GrantAuthorityTests
     private sealed class Fixture : IDisposable
     {
         private int _ids;
-        private readonly TimeSpan _lease;
 
-        public Fixture(string parent, TimeSpan? lease = null)
+        public Fixture(string parent)
         {
-            _lease = lease ?? TimeSpan.FromMinutes(10);
             Clock = new TestClock();
             Machine = new TestMachine(Path.Combine(parent, "gx-" + Guid.NewGuid().ToString("N")[..8]), true, clock: Clock);
             Mono = new FakeMonotonic();
@@ -188,7 +186,6 @@ internal static class GrantAuthorityTests
 
         private void Wire()
         {
-            Machine.Deployment.Authority.LeaseDuration = _lease;
             Machine.Deployment.Authority.Verifier = new ManifestApprovalVerifier(Db);
             Link = new FlakyAuthority(Machine.Deployment.Authority);
             Gate = new LaunchGate();
@@ -263,7 +260,7 @@ internal static class GrantAuthorityTests
         {
             Parsing(check);
             await Lifecycle(check, parent);
-            await Leases(check, parent);
+            await FailClosed(check, parent);
             await Reconnection(check, parent);
             await Tampering(check, parent);
             await Evidence(check, parent);
@@ -307,7 +304,7 @@ internal static class GrantAuthorityTests
     private static async Task Lifecycle(Action<bool, string> check, string parent)
     {
         using Fixture fx = new(parent);
-        check(await fx.Start() == HostAuthorization.Reconciliation.Reconciled && fx.Host.Lease.IsValid && fx.Host.Lease.Remaining == TimeSpan.FromMinutes(10), "startup: the host checks in with the authority and gets the lease the authority set (10 minutes)");
+        check(await fx.Start() == HostAuthorization.Reconciliation.Reconciled && fx.Host.Vouched, "startup: the host checks in with the authority and is vouched for");
         DateTimeOffset t0 = fx.Clock.GetUtcNow();
         int machineRevision = fx.Store.Find(fx.Fingerprint)!.SecurityRevision;
 
@@ -326,7 +323,7 @@ internal static class GrantAuthorityTests
 
         // Use: exact scope only.
         GrantUse use = await fx.Use(S1);
-        check(use is { Kind: GrantUseKind.Granted, Offline: false } && use.GrantId == grant.Id, "use: a request in the scope of the grant is covered (online, answered by the authority)");
+        check(use is { Kind: GrantUseKind.Granted } && use.GrantId == grant.Id, "use: a request in the scope of the grant is covered (online, answered by the authority)");
         check((await fx.Use(S2)).Kind == GrantUseKind.NoGrant && (await fx.Use(Scope("three"))).Kind == GrantUseKind.NoGrant, "scope mismatch: another scope is not covered");
         check(fx.Store.Audit().Count(entry => entry.Event == "grant-use") == 1, "use: the authority audit records the use of the grant (and not the questions that found none)");
 
@@ -346,12 +343,11 @@ internal static class GrantAuthorityTests
         check((await fx.Use(S1)).Kind == GrantUseKind.Granted, "renew: the renewed grant covers the scope again");
         check(fx.Admin(GrantOps.Renew, grant.Id, 5) is { Outcome: GrantOps.Denied, ReasonCode: GrantReasons.NotExpired }, "renew: a grant that has not ended is not renewed (extend it)");
 
-        // Extension: counted from the present end; no revision of the machine, no lease.
-        TimeSpan leaseBefore = fx.Host.Lease.Remaining;
+        // Extension: counted from the present end; no revision of the machine.
         DateTimeOffset endBefore = afterRenew.Expires!.Value;
         GrantResponse extended = fx.Admin(GrantOps.Extend, grant.Id, 30);
         check(extended is { Outcome: GrantOps.Extended } && fx.Store.FindGrant(grant.Id) is { Revision: 4 } now4 && now4.Expires == endBefore.AddMinutes(30), "extend: an active grant ends 30 minutes later than it did (revision 4)");
-        check(fx.Store.Find(fx.Fingerprint)!.SecurityRevision == machineRevision && fx.Host.Lease.Remaining == leaseBefore && fx.Host.Lease.Duration == TimeSpan.FromMinutes(10), "extend: neither the machine's revision nor the offline lease changed");
+        check(fx.Store.Find(fx.Fingerprint)!.SecurityRevision == machineRevision && fx.Host.Vouched, "extend: the machine's revision did not change and the host is still vouched for");
         check(fx.Admin(GrantOps.Extend, grant.Id, null, false) is { Outcome: GrantOps.Denied, ReasonCode: GrantReasons.NoTime } && fx.Admin(GrantOps.Extend, grant.Id, 5000) is { ReasonCode: GrantReasons.NoTime } && fx.Admin(GrantOps.Extend, "g-nothere", 5) is { ReasonCode: GrantReasons.NotFound }, "extend: a time from 1 to 1440 minutes is required and the grant must exist");
         check(fx.Authority.AdminGrant(new GrantAdminCommand("adm-stale", GrantOps.Extend, grant.Id, 5, false, 1, "test admin")) is { ReasonCode: GrantReasons.RevisionChanged }, "extend: a grant that changed since the page showed it is refused");
 
@@ -375,82 +371,48 @@ internal static class GrantAuthorityTests
         check(afterDisable.Kind != GrantUseKind.Granted && fx.Store.FindGrant(fresh.GrantId!)!.Status == "invalidated", "disable (" + afterDisable.Kind + "): the grants end with the security revision and a disabled machine is covered by nothing");
     }
 
-    // ---- the offline lease ----
+    // ---- fail closed: the authority is the only thing that vouches for a host ----
 
-    private static async Task Leases(Action<bool, string> check, string parent)
+    private static async Task FailClosed(Action<bool, string> check, string parent)
     {
-        // Within the lease an offline host uses a synchronized grant; after it, nothing.
+        // An authority that cannot be reached means no use of a grant, even one this host synchronized and that has not ended.
         using (Fixture fx = new(parent))
         {
             await fx.Start();
             GrantApproval made = await fx.Approve(S1, 600);
+            check((await fx.Use(S1)).Kind == GrantUseKind.Granted && fx.Host.SyncedGrants.Count == 1, "fail closed: online the grant covers its scope");
             fx.Link.Offline = true;
-            fx.Mono.Advance(TimeSpan.FromMinutes(9));
-            GrantUse within = await fx.Use(S1);
-            check(within is { Kind: GrantUseKind.Granted, Offline: true } && within.GrantId == made.GrantId, "lease: while the authority cannot be reached, a synchronized grant counts within the lease (9 of 10 minutes)");
-            check((await fx.Use(S2)).Kind == GrantUseKind.NoGrant, "lease: offline, a scope with no synchronized grant is not covered");
-            fx.Mono.Advance(TimeSpan.FromMinutes(2));
-            check((await fx.Use(S1)).Kind == GrantUseKind.NoGrant && !fx.Host.Lease.IsValid && fx.Host.Lease.Remaining == TimeSpan.Zero, "lease expiry: after the lease the same grant (still unexpired) covers nothing; fails closed");
-            GrantApproval offlineApproval = await fx.Approve(Scope("new"), 10);
-            check(!offlineApproval.Granted && offlineApproval.Message.Contains("authority", StringComparison.Ordinal) && fx.Store.Grants().Count == 1, "offline: no new approval is made while disconnected (" + offlineApproval.Message + ")");
-            fx.Link.Offline = false;
-            check((await fx.Use(S1)).Kind == GrantUseKind.Granted && fx.Host.Lease.IsValid && fx.Host.Lease.Remaining == TimeSpan.FromMinutes(10), "lease: reconnected, the authority answers again and a new lease starts (the same code path as local mode)");
-        }
-
-        // The wall clock does not move the lease.
-        using (Fixture fx = new(parent))
-        {
-            await fx.Start();
-            GrantApproval made = await fx.Approve(S1, 600);
-            fx.Admin(GrantOps.Extend, made.GrantId!, null, true);
-            await fx.Use(S1);
-            fx.Link.Offline = true;
-            fx.Clock.Advance(TimeSpan.FromDays(30));
+            GrantUse offline = await fx.Use(S1);
+            check(offline.Kind == GrantUseKind.Denied && offline.GrantId.Length == 0 && offline.Message.Contains("Nothing was run", StringComparison.Ordinal), "fail closed: while the authority cannot be reached a synchronized grant is NOT used (" + offline.Message + ")");
             fx.Mono.Advance(TimeSpan.FromMinutes(1));
-            check((await fx.Use(S1)) is { Kind: GrantUseKind.Granted, Offline: true }, "wall clock: a date 30 days ahead does not end the lease (the monotonic clock says 1 minute) for an indefinite grant");
-            fx.Clock.Advance(TimeSpan.FromDays(-40));
-            fx.Mono.Advance(TimeSpan.FromMinutes(10));
-            check((await fx.Use(S1)).Kind == GrantUseKind.NoGrant, "wall clock: a date set back does not bring the expired lease back");
+            check((await fx.Use(S1)).Kind == GrantUseKind.Denied && (await fx.Use(S2)).Kind == GrantUseKind.Denied, "fail closed: and no time makes it so, for any scope");
+            GrantApproval offlineApproval = await fx.Approve(Scope("new"), 10);
+            check(!offlineApproval.Granted && offlineApproval.Message.Contains("authority", StringComparison.Ordinal) && fx.Store.Grants().Count == 1, "fail closed: no new approval is made while disconnected (" + offlineApproval.Message + ")");
+            fx.Link.Offline = false;
+            check((await fx.Use(S1)) is { Kind: GrantUseKind.Granted } back && back.GrantId == made.GrantId, "fail closed: reconnected, the authority answers again and the grant covers its scope");
         }
 
+        // The wall clock does not matter: with the authority out of reach a date change does not bring a grant back.
         using (Fixture fx = new(parent))
         {
             await fx.Start();
-            await fx.Approve(S1, 30);
+            GrantApproval made = await fx.Approve(S1, 30);
             fx.Link.Offline = true;
             fx.Clock.Advance(TimeSpan.FromMinutes(40));
-            check((await fx.Use(S1)).Kind == GrantUseKind.NoGrant, "grant expiry offline: a grant past its own end is not used even inside the lease");
+            check((await fx.Use(S1)).Kind == GrantUseKind.Denied, "fail closed: a grant past its own end is not used");
             fx.Clock.Advance(TimeSpan.FromDays(-5));
-            fx.Mono.Advance(TimeSpan.FromMinutes(1));
-            check((await fx.Use(S1)).Kind == GrantUseKind.Granted, "grant expiry offline: a date set back can make a grant look current, but only inside the lease (bounded by it)");
-            fx.Mono.Advance(TimeSpan.FromMinutes(10));
-            check((await fx.Use(S1)).Kind == GrantUseKind.NoGrant, "grant expiry offline: and the lease ends that, whatever the date says");
+            check((await fx.Use(S1)).Kind == GrantUseKind.Denied, "fail closed: a date set back does not make a grant look current while the authority is out of reach");
+            fx.Admin(GrantOps.Extend, made.GrantId!, null, true);
+            check((await fx.Use(S1)).Kind == GrantUseKind.Denied, "fail closed: an indefinite grant is no more usable offline");
         }
 
-        // An indefinite grant never makes the lease longer.
-        using (Fixture fx = new(parent, TimeSpan.FromMinutes(10)))
-        {
-            await fx.Start();
-            GrantApproval made = await fx.Approve(S1, 10);
-            TimeSpan before = fx.Host.Lease.Remaining;
-            GrantResponse forever = fx.Admin(GrantOps.Extend, made.GrantId!, null, true);
-            check(forever is { Outcome: GrantOps.Extended, Indefinite: true, GrantExpires: null } && fx.Store.FindGrant(made.GrantId!)!.Expires is null, "indefinite: a grant can be extended to have no end (signed answer says so)");
-            GrantUse online = await fx.Use(S1);
-            check(online.Kind == GrantUseKind.Granted && fx.Host.SyncedGrants[0].Expires is null && fx.Host.Lease.Remaining == before && fx.Host.Lease.Duration == TimeSpan.FromMinutes(10), "indefinite: using it online leaves the lease exactly as it was (10 minutes, not longer)");
-            fx.Link.Offline = true;
-            fx.Mono.Advance(TimeSpan.FromMinutes(9));
-            check((await fx.Use(S1)).Offline, "indefinite: offline it works within the lease");
-            fx.Mono.Advance(TimeSpan.FromMinutes(2));
-            check((await fx.Use(S1)).Kind == GrantUseKind.NoGrant, "indefinite: and not one minute beyond it; an indefinite grant does not make an indefinite lease");
-        }
-
-        // No valid lease, no use of secrets.
+        // Not vouched for, no use of secrets.
         using (Fixture fx = new(parent))
         {
             fx.Link.BreakReconcile = true;
             await fx.Approve(S1, 60);
-            GrantUse noLease = await fx.Use(S1);
-            check(noLease.Kind == GrantUseKind.Denied && noLease.Message.Contains("lease", StringComparison.Ordinal) && !fx.Host.Lease.IsValid, "no lease: the authority answers the grant question but cannot give a lease: the host refuses the use (" + noLease.Message + ")");
+            GrantUse notVouched = await fx.Use(S1);
+            check(notVouched.Kind == GrantUseKind.Denied && notVouched.Message.Contains("trusted", StringComparison.Ordinal) && !fx.Host.Vouched, "not vouched: the authority answers the grant question but cannot vouch for the host: the host refuses the use (" + notVouched.Message + ")");
             int asked = 0;
             AuthorizationOutcome approved = await fx.Host.AuthorizeAsync(fx.Req(), () =>
             {
@@ -458,31 +420,31 @@ internal static class GrantAuthorityTests
 
                 return ApprovalDecision.Allow();
             }, CancellationToken.None);
-            check(!approved.Decision.Approved && approved.Code == "no-lease" && asked == 1 && approved.AuthorityMessage!.Contains("lease", StringComparison.Ordinal), "no lease: even an approval by the person does not release anything without a lease (" + approved.AuthorityMessage + ")");
+            check(!approved.Decision.Approved && approved.Code == "not-vouched" && asked == 1 && approved.AuthorityMessage!.Contains("trusted", StringComparison.Ordinal), "not vouched: even an approval by the person releases nothing (" + approved.AuthorityMessage + ")");
             fx.Link.BreakReconcile = false;
             AuthorizationOutcome ok = await fx.Host.AuthorizeAsync(fx.Req(), () => ApprovalDecision.Allow(), CancellationToken.None);
-            check(ok.Decision.Approved && fx.Host.Lease.IsValid, "no lease: once the authority gives one, the approval stands");
+            check(ok.Decision.Approved && fx.Host.Vouched, "not vouched: once the authority vouches, the approval stands");
         }
 
-        // A restart destroys the lease and what was synchronized.
+        // A restart destroys what vouched for the host and what was synchronized.
         using (Fixture fx = new(parent))
         {
             await fx.Start();
             await fx.Approve(S1, 600);
-            check(fx.Host.Lease.IsValid && fx.Host.SyncedGrants.Count == 1, "restart: before it, a lease and a synchronized grant");
+            check(fx.Host.Vouched && fx.Host.SyncedGrants.Count == 1, "restart: before it, the host is vouched for and holds a synchronized grant");
             fx.Restart();
-            check(!fx.Host.Lease.IsValid && fx.Host.SyncedGrants.Count == 0 && fx.Host.KnownRevision is null, "restart: the new service has no lease, no synchronized grant and has applied no revision");
+            check(!fx.Host.Vouched && fx.Host.SyncedGrants.Count == 0 && fx.Host.KnownRevision is null, "restart: the new service is not vouched for, holds no synchronized grant and has applied no revision");
             fx.Link.Offline = true;
-            check((await fx.Use(S1)).Kind == GrantUseKind.NoGrant, "restart: offline after a restart nothing is covered (fresh reconciliation is needed first)");
+            check((await fx.Use(S1)).Kind == GrantUseKind.Denied, "restart: offline after a restart nothing is covered");
             fx.Link.Offline = false;
-            check(await fx.Start() == HostAuthorization.Reconciliation.Reconciled && fx.Host.Lease.IsValid && (await fx.Use(S1)).Kind == GrantUseKind.Granted, "restart: after reconciling, the grant (kept by the authority) is usable again");
+            check(await fx.Start() == HostAuthorization.Reconciliation.Reconciled && fx.Host.Vouched && (await fx.Use(S1)).Kind == GrantUseKind.Granted, "restart: after reconciling, the grant (kept by the authority) is usable again");
         }
 
-        // The authority is the only source of the lease: a changed answer is not accepted.
+        // Only a verified answer vouches: a changed one is not accepted, and neither is an old one replayed.
         using (Fixture fx = new(parent))
         {
-            fx.Link.TamperReconcile = r => r with { LeaseSeconds = 100_000 };
-            check(await fx.Start() == HostAuthorization.Reconciliation.Unverified && !fx.Host.Lease.IsValid, "lease: a check-in answer whose lease was changed on the way does not verify and gives no lease");
+            fx.Link.TamperReconcile = r => r with { Status = "Trusted", SecurityRevision = r.SecurityRevision + 7 };
+            check(await fx.Start() == HostAuthorization.Reconciliation.Unverified && !fx.Host.Vouched, "not vouched: a check-in answer that was changed on the way does not verify and vouches for nothing");
             fx.Link.TamperReconcile = null;
             await fx.Start();
             ReconcileResponse? captured = null;
@@ -493,22 +455,33 @@ internal static class GrantAuthorityTests
                 return r;
             };
             await fx.Host.ReconcileAsync();
-            fx.Mono.Advance(TimeSpan.FromMinutes(11));
-            check(!fx.Host.Lease.IsValid, "lease: it runs out on the monotonic clock while nobody renews it");
             fx.Link.TamperReconcile = _ => captured!;
-            check(await fx.Host.ReconcileAsync() == HostAuthorization.Reconciliation.Unverified && !fx.Host.Lease.IsValid, "lease: an old check-in answer replayed later gives no lease (another request id)");
+            check(await fx.Host.ReconcileAsync() == HostAuthorization.Reconciliation.Unverified && !fx.Host.Vouched, "not vouched: an old check-in answer replayed later vouches for nothing (another request id)");
         }
 
-        // A machine that is not Trusted gets no lease.
+        // A machine that is not Trusted is not vouched for.
         using (Fixture fx = new(parent))
         {
             await fx.Start();
             fx.Store.Disable(fx.Fingerprint, "test");
             await fx.Host.PumpAsync();
-            check(!fx.Host.Lease.IsValid && fx.Host.KnownRevision == 2, "disable: the connected host applies it at once: the lease is destroyed and the revision applied");
+            check(!fx.Host.Vouched && fx.Host.KnownRevision == 2, "disable: the connected host applies it at once: nothing vouches for it and the revision is applied");
             fx.Store.Enable(fx.Fingerprint, "test");
             await fx.Host.ReconcileAsync();
-            check(fx.Host.Lease.IsValid && fx.Host.SyncedGrants.Count == 0, "enable: it starts clean: a new lease, no grants");
+            check(fx.Host.Vouched && fx.Host.SyncedGrants.Count == 0, "enable: it starts clean: vouched for again, no grants");
+        }
+
+        // The held key is dropped when the authority stops vouching for the host.
+        using (Fixture fx = new(parent))
+        {
+            await fx.Start();
+            GrantApproval made = await fx.Approve(S1, 600);
+            fx.Host.HoldKey(made.GrantId!, S1, new Unlock("test-credential", [.. Enumerable.Range(1, 32).Select(item => (byte)item)]));
+            byte[]? held = fx.Host.Keys.HeldBytes;
+            check(fx.Host.Keys.IsHeld && held is not null && held.Any(b => b != 0), "held key: held after a tap, while the host is vouched for");
+            fx.Store.Disable(fx.Fingerprint, "test");
+            await fx.Host.PumpAsync();
+            check(!fx.Host.Keys.IsHeld && held!.All(b => b == 0), "held key: zeroed and dropped when the authority no longer trusts the host");
         }
     }
 
@@ -525,12 +498,12 @@ internal static class GrantAuthorityTests
             // The authority acts while the host cannot hear it.
             fx.Store.Disable(fx.Fingerprint, "test");
             fx.Store.Enable(fx.Fingerprint, "test");
-            check((await fx.Use(S1)) is { Kind: GrantUseKind.Granted, Offline: true }, "offline: a host cannot benefit from, or be stopped by, a change it has not received: within its lease it still uses what it had");
+            check((await fx.Use(S1)).Kind == GrantUseKind.Denied, "offline: a host that cannot hear its authority uses nothing, whatever it had");
 
             fx.Link.Offline = false;
             int gate = fx.Gate.Revision;
             await fx.Host.PumpAsync();
-            check(fx.Host.KnownRevision == 2 && fx.Gate.Revision > gate && fx.Host.SyncedGrants.Count == 0 && fx.Host.Lease.IsValid, "reconnect: the host applies the missed revision (cleans up, invalidates the gate) and then holds a new lease");
+            check(fx.Host.KnownRevision == 2 && fx.Gate.Revision > gate && fx.Host.SyncedGrants.Count == 0, "reconnect: the host applies the missed revision (cleans up, invalidates the gate)");
             check((await fx.Use(S1)).Kind == GrantUseKind.NoGrant && fx.Store.FindGrant(made.GrantId!)!.Status == "invalidated", "reconnect: the old grant was invalidated by the revision and is not restored");
         }
 
@@ -541,7 +514,7 @@ internal static class GrantAuthorityTests
             fx.Link.Offline = true;
             fx.Admin(GrantOps.Extend, made.GrantId!, 120);
             fx.Clock.Advance(TimeSpan.FromMinutes(11));
-            check((await fx.Use(S1)).Kind == GrantUseKind.NoGrant, "extension offline: the host cannot use an extension it has not received: its synchronized grant ends where it ended");
+            check((await fx.Use(S1)).Kind == GrantUseKind.Denied, "extension offline: nothing is used while the authority cannot be reached");
             fx.Link.Offline = false;
             check((await fx.Use(S1)).Kind == GrantUseKind.Granted && fx.Host.SyncedGrants[0].Revision == 2, "extension: once reconnected the host gets the extension (the authority answers; revision 2)");
         }
@@ -558,20 +531,20 @@ internal static class GrantAuthorityTests
             check(!committed, "revoke: a launch that began before the revocation does not commit (the gate was invalidated)");
         }
 
-        // Startup: the host that cannot reach its authority holds no lease; one that can, does.
+        // Startup: the host that cannot reach its authority is not vouched for; one that can, is.
         using (Fixture fx = new(parent))
         {
             fx.Link.Offline = true;
-            check(await fx.Start() == HostAuthorization.Reconciliation.Unreachable && !fx.Host.Lease.IsValid && fx.Host.KnownRevision is null, "startup: an unreachable authority leaves the host with no lease and no applied revision");
-            check((await fx.Use(S1)).Kind == GrantUseKind.NoGrant, "startup: nothing is covered before the first reconciliation");
+            check(await fx.Start() == HostAuthorization.Reconciliation.Unreachable && !fx.Host.Vouched && fx.Host.KnownRevision is null, "startup: an unreachable authority leaves the host not vouched for, with no applied revision");
+            check((await fx.Use(S1)).Kind == GrantUseKind.Denied, "startup: nothing is covered before the first reconciliation");
             fx.Link.Offline = false;
-            check(await fx.Start() == HostAuthorization.Reconciliation.Reconciled && fx.Host.KnownRevision == 1 && fx.Host.Lease.IsValid, "startup: once the authority answers the host knows the machine status and revision and holds a lease");
+            check(await fx.Start() == HostAuthorization.Reconciliation.Reconciled && fx.Host.KnownRevision == 1 && fx.Host.Vouched, "startup: once the authority answers the host knows the machine status and revision and is vouched for");
         }
 
         using (Fixture fx = new(parent))
         {
             fx.Store.Disable(fx.Fingerprint, "test");
-            check(await fx.Start() == HostAuthorization.Reconciliation.Reconciled && !fx.Host.Lease.IsValid && fx.Host.KnownRevision == 2, "startup: a Disabled machine learns its revision and gets no lease");
+            check(await fx.Start() == HostAuthorization.Reconciliation.Reconciled && !fx.Host.Vouched && fx.Host.KnownRevision == 2, "startup: a Disabled machine learns its revision and is not vouched for");
         }
     }
 
@@ -938,18 +911,18 @@ internal static class GrantAuthorityTests
             };
             GrantUse flaky = await fx.Use(S1);
             fx.Store.Fault = null;
-            check(failing.Kind == GrantUseKind.Denied && failing.Message.Contains("failed to answer", StringComparison.Ordinal), "local errors: a database error of the local authority is a refusal, never 'offline' (no use of an earlier answer) (" + failing.Kind + ")");
+            check(failing.Kind == GrantUseKind.Denied && failing.Message.Contains("could not be asked", StringComparison.Ordinal), "local errors: a database error of the local authority is a refusal, never 'offline' (no use of an earlier answer) (" + failing.Kind + ")");
             check(flaky.Kind == GrantUseKind.Denied, "local errors: nor is a non-transport error of any authority (" + flaky.Kind + ")");
         }
 
-        // L3: a check-in that cannot be checked takes the lease and the key.
+        // L3: a check-in that cannot be checked takes the vouching and the key.
         using (Fixture fx = new(parent))
         {
             await fx.Start();
             byte[] held = await Holding(fx, S1);
             fx.Link.TamperReconcile = r => r with { Signature = null! };
             await fx.Host.ReconcileAsync();
-            check(!fx.Host.Lease.IsValid && !fx.Host.Keys.IsHeld && held.All(b => b == 0), "check-in: an answer that cannot be checked destroys the lease and the held key");
+            check(!fx.Host.Vouched && !fx.Host.Keys.IsHeld && held.All(b => b == 0), "check-in: an answer that cannot be checked ends the vouching and destroys the held key");
         }
 
         // L6: stored answers are pruned.
@@ -1188,18 +1161,6 @@ internal static class GrantAuthorityTests
             check(!fx.Host.Keys.IsHeld && held.All(b => b == 0), "drop: a check-in that finds the machine untrusted drops and zeroes the key");
         }
 
-        // The lease ends (the authority cannot be reached for longer than the lease).
-        using (Fixture fx = new(parent))
-        {
-            await fx.Start();
-            byte[] held = await Holding(fx, S1);
-            fx.Link.Offline = true;
-            fx.Mono.Advance(TimeSpan.FromMinutes(9));
-            check(fx.Host.BorrowKey(fx.Host.Keys.GrantId!, S1) is { } within && within.Output.Length == 32, "lease: within the lease the held key is still lent while the authority cannot be reached");
-            fx.Mono.Advance(TimeSpan.FromMinutes(2));
-            check(fx.Host.BorrowKey(fx.Host.Keys.GrantId ?? "", S1) is null && !fx.Host.Keys.IsHeld && held.All(b => b == 0) && fx.Host.Keys.LastDropReason == "lease ended", "drop: when the lease ends the key is dropped and zeroed");
-        }
-
         // A restart holds nothing (the key lives only in the service's memory).
         using (Fixture fx = new(parent))
         {
@@ -1297,13 +1258,13 @@ internal static class GrantAuthorityTests
                 "service approve: the approval page makes a grant and launches nothing (no decryption, no program) (" + approved.Stdout.Trim() + approved.Stderr.Trim() + ")");
             check(approver.Requests[0].Reuse is { IsOn: true } && !approver.Requests[0].Unlock, "service approve: the page offers the times and asks for no unlock");
             check(rig.Machine.Deployment.Store.Grants() is [{ Status: "active" } granted] && granted.Program == program && granted.SecretNames == "TOKEN" && granted.Fingerprint == rig.Machine.Fingerprint, "service approve: the authority holds one grant with what it covers (program, secret names, folder)");
-            check(rig.Machine.Deployment.Store.Audit().Any(entry => entry.Event == "grant-created") && new AuditLog(rig.State).TryRead(20, null, out IReadOnlyList<AuditRecord> rows, out _) && rows.Any(row => row.Event == "grant-approved"), "service approve: audited by the authority and in the local audit log");
+            check(rig.Machine.Deployment.Store.Audit().Any(entry => entry.Event == "grant-created") && (StateDatabaseTests.AuditText(rig.State.FilePath).Contains("\"outcome\":\"grant-approved\"", StringComparison.Ordinal) || rig.Machine.Deployment.Store.AuditHistory(new AuditQuery(Limit: 1000)).Any(item => item.Event.Outcome == "grant-approved")), "service approve: audited by the authority and in the signed host audit");
 
             approver.Minutes = 0;
             HostServiceTests.Raw run = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program));
             check(run.Result is { Outcome: LaunchOutcome.Exited, ExitCode: 0 } && approver.Requests.Count == 1 && rig.Store.Reads == 1 && File.Exists(Marker(rig)) && run.Stderr.Contains("a grant covers this request", StringComparison.Ordinal) && !run.Stdout.Contains("Canary", StringComparison.Ordinal),
                 "service run: a request in the scope of the grant runs with no approval page decision (the approver was asked once, for approve) (" + run.Stderr.Trim() + string.Join(" | ", rig.Machine.Deployment.Store.Audit().Where(e => e.Event.StartsWith("grant", StringComparison.Ordinal)).Select(e => e.Event + ":" + e.Detail)) + ")");
-            check(new AuditLog(rig.State).TryRead(20, null, out rows, out _) && rows.Any(row => row.Event == "granted") && rig.Machine.Deployment.Store.Audit().Any(entry => entry.Event == "grant-use"), "service run: the use of the grant is audited by the host and by the authority");
+            check((StateDatabaseTests.AuditText(rig.State.FilePath).Contains("\"outcome\":\"granted\"", StringComparison.Ordinal) || rig.Machine.Deployment.Store.AuditHistory(new AuditQuery(Limit: 1000)).Any(item => item.Event.Outcome == "granted")) && rig.Machine.Deployment.Store.Audit().Any(entry => entry.Event == "grant-use"), "service run: the use of the grant is audited by the host and by the authority (" + string.Join("|", HostServiceTests.AuditOf(rig).Split((char)10).Select(line => line.Length)) + "; " + string.Join("|", rig.Machine.Deployment.Store.Audit().Select(entry => entry.Event)) + ")");
 
             // A grant covers exactly one command line: another argument (a different target, or inline code after -c / -e) is another command.
             File.Delete(Marker(rig));
@@ -1456,14 +1417,13 @@ internal static class GrantAuthorityTests
             link.Offline = false;
             check(await HostServiceTests.WaitFor(() => rig.Service.Ready, 30), "startup: it keeps trying and becomes ready when the authority answers");
             HostServiceTests.Raw ready = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, Show(rig)));
-            check(ready.Result is { Outcome: LaunchOutcome.Exited, ExitCode: 0 } && rig.Service.Authorization.Lease.IsValid, "startup: once reconciled the run goes through and the host holds a lease");
+            check(ready.Result is { Outcome: LaunchOutcome.Exited, ExitCode: 0 } && rig.Service.Authorization.Vouched, "startup: once reconciled the run goes through and the host is vouched for");
         }
 
-        // Lease expiry in the running service: an authority that cannot be reached for longer than the lease means no secret use.
+        // Fail closed in the running service: an authority that cannot be reached means no secret use, even under a grant this host synchronized.
         {
-            string folder = Path.Combine(parent, "lease-" + Guid.NewGuid().ToString("N")[..6]);
+            string folder = Path.Combine(parent, "closed-" + Guid.NewGuid().ToString("N")[..6]);
             using TestMachine machine = new(folder);
-            machine.Deployment.Authority.LeaseDuration = TimeSpan.FromMinutes(10);
             FlakyAuthority link = new(machine.Deployment.Authority);
             machine.Deployment.Link = link;
             FakeMonotonic mono = new();
@@ -1472,15 +1432,13 @@ internal static class GrantAuthorityTests
             string program = Show(rig);
             await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program), path: "/v1/approve");
             tap.Minutes = 0;
+            HostServiceTests.Raw online = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program));
+            check(online.Result is { Outcome: LaunchOutcome.Exited, ExitCode: 0 } && tap.Requests.Count == 1, "service fail closed: online, the grant lets the run through with no page decision (" + online.Stderr.Trim() + ")");
             link.Offline = true;
-            mono.Advance(TimeSpan.FromMinutes(9));
-            HostServiceTests.Raw within = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program));
-            check(within.Result is { Outcome: LaunchOutcome.Exited, ExitCode: 0 } && within.Stderr.Contains("offline, within the lease", StringComparison.Ordinal) && tap.Requests.Count == 1, "service lease: offline, within the lease, a synchronized grant still lets the run through with no page decision (" + within.Stderr.Trim() + ")");
-            mono.Advance(TimeSpan.FromMinutes(2));
             int reads = rig.Store.Reads;
             File.Delete(Marker(rig));
-            HostServiceTests.Raw expired = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program));
-            check(expired.Result is { Outcome: LaunchOutcome.Denied } && rig.Store.Reads == reads && !File.Exists(Marker(rig)), "service lease: after the lease, offline, the run is refused and nothing is decrypted (" + expired.Stderr.Trim() + ")");
+            HostServiceTests.Raw offline = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program));
+            check(offline.Result is { Outcome: LaunchOutcome.Denied } && rig.Store.Reads == reads && !File.Exists(Marker(rig)) && !offline.Stderr.Contains("offline", StringComparison.Ordinal), "service fail closed: with the authority out of reach the run is refused at once and nothing is decrypted (" + offline.Stderr.Trim() + ")");
         }
     }
 }

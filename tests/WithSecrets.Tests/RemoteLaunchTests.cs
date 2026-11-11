@@ -443,7 +443,7 @@ internal static class RemoteLaunchTests
         bool uploaded = await HostServiceTests.WaitFor(() => auth.Machine.Deployment.Store.AuditHistory(new AuditQuery(Limit: 50)).Count >= 2);
         string audit = string.Join("\n", auth.Machine.Deployment.Store.AuditHistory(new AuditQuery(Limit: 50)).Select(item => item.Event.ToJson()));
         check(uploaded && audit.Contains(host.Fingerprint, StringComparison.Ordinal) && audit.Contains("requested", StringComparison.Ordinal), "audit: the host's signed events (the request is recorded before the authority is asked) (authorization, launch, execution) reached the authority over the mutually authenticated connection");
-        check(host.Authorization.Lease.IsValid, "lease: the host holds the authority's lease from the remote check-in");
+        check(host.Authorization.Vouched, "check-in: the authority vouches for the host after the remote check-in");
 
         check(!Leaks(string.Join("\n", raw.Lines), Real) && !Leaks(raw.Stdout + raw.Stderr, Real), "canary: the client's events and output carry no value");
         AppLog.Close();

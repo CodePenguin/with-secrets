@@ -94,7 +94,7 @@ internal static class ReuseTests
         }
 
         check(!grants.TryGet("K", 480, out _, out _), "reuse grants: a row whose minutes do not match its times is not honoured");
-        check(StateDatabase.SchemaVersion == 9, "reuse grants: the schema version is 9");
+        check(StateDatabase.SchemaVersion == 10, "reuse grants: the schema version is 10");
     }
 
     private static ApprovalRequest Request(ReuseOffer? offer) => new("tool", "/bin/tool", ["--x"], "/work", "testing", ["API_KEY"], offer);
@@ -235,6 +235,9 @@ internal static class ReuseTests
     /// RunCommand with the real WebApprover and PasskeyMethod, saved approvals in state.db and a real child process.
     /// <paramref name="minutes" /> is the time chosen on the page, or null to answer nothing (no page is expected).
     /// </summary>
+    /// <summary>The signed "approved" authorization events of the store folder.</summary>
+    private static IEnumerable<AuditEvent> Approvals(StateDatabase db) => TestAudit.Events(db, all: true).Where(item => item.Type == AuditEventTypes.Authorization && item.Outcome == "approved");
+
     private static async Task<(int Code, string Out, string Err, int Announced)> Drive(HttpClient client, StateDatabase db, string folder, string program, TestAuthenticator key, GrantStore grants, ReuseOffer? offer, int? minutes, int? sendAs = null)
     {
         TaskCompletionSource<string> link = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -249,9 +252,9 @@ internal static class ReuseTests
             errors.WriteLine(line);
             link.TrySetResult(line);
         }, TimeSpan.Zero);
-        RunCommand run = new(new MemoryStore(new Dictionary<string, string> { ["MY_SECRET"] = Secret }), approver, new AuditLog(db), TextWriter.Synchronized(stdout), errors, grants, offer);
+        RunCommand run = new(new MemoryStore(new Dictionary<string, string> { ["MY_SECRET"] = Secret }), approver, TextWriter.Synchronized(stdout), errors, grants, offer);
         RunArgs args = CliArgs.ParseRun(["--secrets", "MY_SECRET", "--reason", "reuse test", "--", "./" + program], out _)!;
-        Task<int> running = Task.Run(() => run.ExecuteAsync(args, folder));
+        Task<int> running = Task.Run(() => run.ExecuteAsync(args, folder, TestAudit.Sink(db)));
         if (minutes is { } chosen)
         {
             Task first = await Task.WhenAny(link.Task, running, Task.Delay(TimeSpan.FromSeconds(20)));
@@ -314,8 +317,8 @@ internal static class ReuseTests
             check(code == RunCommand.Denied && announced == 1, "reuse chain: an expired grant is ignored and the run asks again (" + code + ")");
 
             string audit = StateDatabaseTests.AuditText(db.FilePath);
-            check(audit.Contains("\"reuseMinutes\":10", StringComparison.Ordinal) && !audit.Contains(Secret, StringComparison.Ordinal), "reuse chain: the audit entry records 10 minutes and no secret value");
-            check(new AuditLog(db).TryRead(10, null, out IReadOnlyList<AuditRecord> rows, out _) && rows.Any(row => row.Event == "approved" && row.Detail.Contains("approved for 10 min", StringComparison.Ordinal) && row.KeyName == "chain-key"), "reuse chain: --audit shows the chosen time and the key name");
+            check(audit.Contains("\"reuseMinutes\":\"10\"", StringComparison.Ordinal) && !audit.Contains(Secret, StringComparison.Ordinal), "reuse chain: the audit entry records 10 minutes and no secret value");
+            check(Approvals(db).Any(item => item.Meta.GetValueOrDefault("key") == "chain-key" && item.Meta.GetValueOrDefault("reuseMinutes") == "10" && item.Meta.GetValueOrDefault("secrets") == "MY_SECRET"), "reuse chain: the signed approval event has the chosen time, the key name and the secret name");
         }
 
         // A second key, not the admin, approves runs; the audit and the grant name it, without the admin marker.
@@ -326,9 +329,9 @@ internal static class ReuseTests
             (int code, string stdout, string stderr, int announced) = await Drive(client, db, folder, program, phone, new GrantStore(db), offer, 10);
             check(code == 0 && announced == 1 && stdout.Contains("[REDACTED]", StringComparison.Ordinal), "reuse chain: a run approved by the second key runs (" + code + "; " + stderr + ")");
             check(new GrantStore(db).Entries().Single().KeyName == "phone", "reuse chain: the grant names the second key");
-            check(new AuditLog(db).TryRead(10, null, out IReadOnlyList<AuditRecord> rows, out _) && rows.Any(row => row.Event == "approved" && row.KeyName == "phone" && row.Detail.StartsWith("passkey phone verified", StringComparison.Ordinal)), "reuse chain: the audit names the key and it is not the admin");
+            check(Approvals(db).Any(item => item.Meta.GetValueOrDefault("key") == "phone"), "reuse chain: the audit names the second key");
             (code, _, _, _) = await Drive(client, db, folder, program, key, new GrantStore(db, () => DateTimeOffset.UtcNow.AddMinutes(11)), offer, 0);
-            check(code == 0 && new AuditLog(db).TryRead(10, null, out rows, out _) && rows.Any(row => row.Event == "approved" && row.KeyName == "chain-key" && row.Detail.StartsWith("admin passkey chain-key verified", StringComparison.Ordinal)), "reuse chain: a run approved by the admin key records the admin marker");
+            check(code == 0 && Approvals(db).Any(item => item.Meta.GetValueOrDefault("key") == "chain-key"), "reuse chain: a run approved by the admin key names that key");
         }
 
         // Approve once: no grant; the next run asks again.
@@ -336,7 +339,7 @@ internal static class ReuseTests
             StateDatabase db = NewDb();
             (int code, _, _, int announced) = await Drive(client, db, folder, program, key, new GrantStore(db), offer, 0);
             check(code == 0 && announced == 1 && new GrantStore(db).Entries().Count == 0, "reuse chain: approve once runs and saves no grant (" + code + ")");
-            check(new AuditLog(db).TryRead(10, null, out IReadOnlyList<AuditRecord> rows, out _) && rows.Any(row => row.Event == "approved" && row.Detail.Contains("approved once", StringComparison.Ordinal)) && StateDatabaseTests.AuditText(db.FilePath).Contains("\"reuseMinutes\":0", StringComparison.Ordinal), "reuse chain: the audit says approved once (0 minutes)");
+            check(Approvals(db).Any(item => item.Meta.GetValueOrDefault("reuseMinutes") == "0"), "reuse chain: the audit says approved once (0 minutes)");
             (code, _, _, announced) = await Drive(client, db, folder, program, key, new GrantStore(db), offer, 0);
             check(code == 0 && announced == 1, "reuse chain: after once, the next run asks again");
         }
@@ -376,7 +379,7 @@ internal static class ReuseTests
         {
             StateDatabase db = NewDb();
             FakeApprover sly = new(true, 7);
-            int code = await new RunCommand(new MemoryStore(new Dictionary<string, string> { ["MY_SECRET"] = Secret }), sly, new AuditLog(db), new StringWriter(), new StringWriter(), new GrantStore(db), offer)
+            int code = await new RunCommand(new MemoryStore(new Dictionary<string, string> { ["MY_SECRET"] = Secret }), sly, new StringWriter(), new StringWriter(), new GrantStore(db), offer)
                 .ExecuteAsync(CliArgs.ParseRun(["--secrets", "MY_SECRET", "--reason", "x", "--", "./" + program], out _)!, folder);
             check(code == RunCommand.Denied && new GrantStore(db).Entries().Count == 0 && sly.Requests.Single().Reuse == offer, "reuse chain: an approval for a time that was not offered is denied; the request carried the offer");
         }

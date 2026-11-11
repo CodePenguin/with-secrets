@@ -178,7 +178,7 @@ internal static class OneFlowTests
         {
             (EnrollmentTarget target, _) = Target(w.Db, settings, announce, read);
 
-            return new Enrollment(target, target, announce, new AuditLog(w.Db)).Enroll();
+            return new Enrollment(target, target, announce, w.Db.Audit).Enroll();
         });
 
         (string Url, string Origin)? one = rig.First();
@@ -234,7 +234,7 @@ internal static class OneFlowTests
                 (EnrollmentTarget primary, _) = Target(w.Db, remote, announce, read);
                 (EnrollmentTarget other, _) = Target(w.Db, localOnly, announce, read);
 
-                return new Enrollment(primary, other, announce, new AuditLog(w.Db)).Enroll();
+                return new Enrollment(primary, other, announce, w.Db.Audit).Enroll();
             });
 
             // The command target is the baseUrl host; the admin key works only at localhost, so the approval and the signature are there.
@@ -413,7 +413,7 @@ internal static class OneFlowTests
                 };
                 (EnrollmentTarget target, _) = Target(w.Db, settings, both, () => TerminalPrompt.ReadCode(asked++ > 0));
 
-                return new Enrollment(target, target, both, new AuditLog(w.Db)).Enroll();
+                return new Enrollment(target, target, both, w.Db.Audit).Enroll();
             });
             (string Url, string Origin)? one = rig.First();
             (_, string body1) = one is null ? (0, "") : TestState.Approve(client, one.Value.Url, one.Value.Origin, "localhost", laptop);
@@ -513,7 +513,7 @@ internal static class OneFlowTests
                 (EnrollmentTarget primary, _) = Target(w.Db, remote, announce, read);
                 (EnrollmentTarget other, _) = Target(w.Db, localOnly, announce, read);
 
-                return new Enrollment(primary, other, announce, new AuditLog(w.Db)).Enroll();
+                return new Enrollment(primary, other, announce, w.Db.Audit).Enroll();
             });
             (string Url, string Origin)? one = rig.First();
             (_, string body1) = one is null ? (0, "") : TestState.Approve(client, one.Value.Url, one.Value.Origin, "localhost", laptop);

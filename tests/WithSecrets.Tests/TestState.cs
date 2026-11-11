@@ -17,7 +17,7 @@ internal static class TestState
     private static int _signs = 1_000_000;
 
     /// <summary>An enrollment where the approval and the change happen at the same place.</summary>
-    public static Enrollment Enrollment(IProofMethod method, WebApprover approver, Action<string> announce, AuditLog? audit = null)
+    public static Enrollment Enrollment(IProofMethod method, WebApprover approver, Action<string> announce, AdminAudit? audit = null)
     {
         return new Enrollment(EnrollmentTarget.For(method, approver), EnrollmentTarget.For(method, approver), announce, audit);
     }

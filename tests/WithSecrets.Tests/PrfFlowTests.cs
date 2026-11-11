@@ -120,7 +120,7 @@ internal static partial class WebApprovalTests
                     errors.WriteLine(line);
                     link.TrySetResult(line);
                 }, TimeSpan.Zero);
-                RunCommand command = new(store, approver, new AuditLog(db), TextWriter.Synchronized(stdout), errors);
+                RunCommand command = new(store, approver, TextWriter.Synchronized(stdout), errors);
                 Task<int> running = Task.Run(() => command.ExecuteAsync(args, scripts));
                 List<string> seen = [];
                 Task first = await Task.WhenAny(link.Task, running, Task.Delay(TimeSpan.FromSeconds(20)));
@@ -323,14 +323,14 @@ internal static partial class WebApprovalTests
                 ManifestTests.Execute(db.FilePath, "UPDATE manifest SET text = replace(text, '" + original + "', '" + Flip(original) + "')");
                 FakeApprover asked = new(true, unlock: () => TestVault.Unlock(db, laptop));
                 StringWriter errors = new();
-                int code = await new RunCommand(new SecretStore(new StateDatabase(db.FilePath), cipher), asked, new AuditLog(db), new StringWriter(), errors).ExecuteAsync(args, scripts);
+                int code = await new RunCommand(new SecretStore(new StateDatabase(db.FilePath), cipher), asked, new StringWriter(), errors).ExecuteAsync(args, scripts);
                 check(!new StateDatabase(db.FilePath).TryCheck(out _) && code == RunCommand.StoreError && asked.Requests.Count == 0 && cipher.Decrypts == 0, "prf tamper: " + label + " fails verification: exit 4, nobody is asked, nothing is decrypted (" + code + " " + errors + ")");
             }
             // (7) A store that needs the passkey's key offers no saved approval: the run asks every time.
             {
                 (StateDatabase db, _, SecretStore store, _) = NewState();
                 FakeApprover asked = new(false);
-                await new RunCommand(store, asked, new AuditLog(db), new StringWriter(), new StringWriter(), new GrantStore(db), new ReuseOffer(480, 10)).ExecuteAsync(args, scripts);
+                await new RunCommand(store, asked, new StringWriter(), new StringWriter(), new GrantStore(db), new ReuseOffer(480, 10)).ExecuteAsync(args, scripts);
                 check(asked.Requests.Count == 1 && asked.Requests[0].Reuse is null && asked.Requests[0].Unlock, "prf run: the request asks for the key release and offers no reuse");
             }
         }

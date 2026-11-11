@@ -127,8 +127,8 @@ internal static class ManifestTests
         check(keys.Count == 2 && keys.Single(key => key.Admin).Name == "laptop" && !keys.Single(key => key.Name == "phone").Admin, "manifest store: keys come from the manifest, the first is the admin");
         check(ToolSettings.Load(again, out error).Port == 8765 && error is null, "manifest store: settings come from the manifest");
         check(TestState.Current(again)!.Version == 2, "manifest store: the version is 2 after two changes");
-        check(Tables(db.FilePath).SequenceEqual(["audit", "grants", "manifest", "schema_version", "secrets", "sign_counts"]), "manifest store: no passkeys or settings table; secrets have their own (" + string.Join(",", Tables(db.FilePath)) + ")");
-        check(StateDatabase.SchemaVersion == 9, "manifest store: the schema version is 9 (slots, the vault and the recovery slot are in the manifest)");
+        check(Tables(db.FilePath).SequenceEqual(["grants", "manifest", "schema_version", "secrets", "sign_counts"]), "manifest store: no passkeys or settings table; secrets have their own (" + string.Join(",", Tables(db.FilePath)) + ")");
+        check(StateDatabase.SchemaVersion == 10, "manifest store: the schema version is 10 (no audit table; slots, the vault and the recovery slot are in the manifest)");
         check(new GrantStore(again).Add("K", 10, "laptop") && new GrantStore(again).TryGet("K", out _, out _), "manifest store: grants work with a valid manifest");
         check(StateDatabase.InFolder(Path.Combine(root, "stored-empty")) is { } empty && !new GrantStore(empty).Add("K", 10) && !File.Exists(empty.FilePath), "manifest store: no grant is saved without a manifest");
     }
@@ -241,7 +241,7 @@ internal static class ManifestTests
             ("an assertion the admin signed without user presence", db => ReplaceRow(db.FilePath, SignWith(laptop, Scalar(db.FilePath, "SELECT text FROM manifest"), userPresent: false))),
             ("an assertion the admin signed with clientData type webauthn.create", db => ReplaceRow(db.FilePath, SignWith(laptop, Scalar(db.FilePath, "SELECT text FROM manifest"), type: "webauthn.create"))),
             ("a view named grants in place of the table", db => Execute(db.FilePath, "DROP TABLE grants; CREATE VIEW grants AS SELECT 'K' AS key, 0 AS approved, 0 AS expires, 0 AS minutes, '' AS key_name")),
-            ("a trigger added", db => Execute(db.FilePath, "CREATE TRIGGER sneaky AFTER INSERT ON audit BEGIN SELECT 1; END")),
+            ("a trigger added", db => Execute(db.FilePath, "CREATE TRIGGER sneaky AFTER INSERT ON grants BEGIN SELECT 1; END")),
             ("an index added", db => Execute(db.FilePath, "CREATE INDEX extra ON grants (expires)")),
             ("a table missing", db => Execute(db.FilePath, "DROP TABLE sign_counts")),
         ];
@@ -265,9 +265,8 @@ internal static class ManifestTests
         // An empty state: no manifest and no rows. That is the first run, not a failure.
         {
             StateDatabase db = StateDatabase.InFolder(Path.Combine(root, "empty-" + Guid.NewGuid().ToString("N")));
-            new AuditLog(db).TryWrite("denied", new ApprovalRequest("p", "/p", [], "/", "r", ["A"]), "test");
             bool ok = db.TryCheck(out string? error);
-            check(File.Exists(db.FilePath) && ok && error is null && db.Gate(new StringWriter()) is null, "manifest: a database with only audit rows is an empty state (" + error + ")");
+            check(!File.Exists(db.FilePath) && ok && error is null && db.Gate(new StringWriter()) is null, "manifest: a missing database is an empty state (" + error + ")");
         }
     }
 
@@ -326,7 +325,7 @@ internal static class ManifestTests
         {
             StringWriter stdout = new();
             FakeApprover never = new(false);
-            int code = await new RunCommand(new MemoryStore(new Dictionary<string, string> { ["MY_SECRET"] = "s3cret-value" }), never, new AuditLog(db), stdout, new StringWriter(), new GrantStore(db), new ReuseOffer(480, 10))
+            int code = await new RunCommand(new MemoryStore(new Dictionary<string, string> { ["MY_SECRET"] = "s3cret-value" }), never, stdout, new StringWriter(), new GrantStore(db), new ReuseOffer(480, 10))
                 .ExecuteAsync(args, folder);
 
             return (code, stdout.ToString());
