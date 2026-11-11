@@ -1,4 +1,6 @@
+using System.Security.AccessControl;
 using System.Security.Cryptography;
+using System.Security.Principal;
 
 namespace WithSecrets.Tests;
 
@@ -87,5 +89,45 @@ internal static partial class PairingTests
         check(exit == RunCommand.Denied && error.ToString().Contains("already trusts", StringComparison.Ordinal) && cli.Machine.Deployment.HostConfig.Load().Config?.Remote?.AuthorityIdentityFingerprint == a.AuthorityFingerprint && !Holds(error.ToString() + output, [ExtractCode(b2)]) && b.Store.Invitation(i2.Id) is { Status: "pending" },
             "re-pair command: an unattended run (invitation from a file or variable, no terminal) is refused, exit 3, nothing changed");
         _ = i1;
+    }
+    /// <summary>Fix round 1, L5: a pairing secret file that other accounts can read is refused, before it is read.</summary>
+    private static async Task SecretFiles(Action<bool, string> check, string root)
+    {
+        string folder = Path.Combine(root, "secret-files-" + Guid.NewGuid().ToString("N")[..6]);
+        Directory.CreateDirectory(folder);
+        string path = Path.Combine(folder, "invitation.secret");
+        File.WriteAllText(path, "wsp1;not-a-real-invitation");
+        if (OperatingSystem.IsWindows())
+        {
+            FileInfo info = new(path);
+            FileSecurity security = info.GetAccessControl();
+            security.SetAccessRuleProtection(true, false);
+            security.AddAccessRule(new FileSystemAccessRule(WindowsIdentity.GetCurrent().User!, FileSystemRights.FullControl, AccessControlType.Allow));
+            info.SetAccessControl(security);
+        }
+        else
+        {
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+
+        check(PairingInput.OthersCanRead(path) is null, "secret file: a file only its owner can read is accepted");
+        if (OperatingSystem.IsWindows())
+        {
+            FileInfo info = new(path);
+            FileSecurity security = info.GetAccessControl();
+            security.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.WorldSid, null), FileSystemRights.Read, AccessControlType.Allow));
+            info.SetAccessControl(security);
+        }
+        else
+        {
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.OtherRead);
+        }
+
+        string? problem = PairingInput.OthersCanRead(path);
+        check(problem is not null, "secret file: a file that other accounts can read is detected (" + problem + ")");
+        int reads = 0;
+        PairingInput.Found refused = PairingInput.Obtain(new FakeConsole(null, false), name => name == PairingInput.FileVariable ? path : null, _ => { reads++; return "never"; }, _ => false, PairingInput.OthersCanRead);
+        check(refused.Bundle is null && refused.Source == PairingSource.File && refused.Problem!.Contains("not protected", StringComparison.Ordinal) && refused.Problem.Contains("left in place", StringComparison.Ordinal) && reads == 0, "secret file: the pairing input refuses such a file without reading it, says the file is left in place, and does not fall back to another source");
+        await Task.CompletedTask;
     }
 }

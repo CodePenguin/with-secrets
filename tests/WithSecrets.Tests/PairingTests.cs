@@ -372,6 +372,7 @@ internal static partial class PairingTests
             await Inputs(check, root);
             await Children(check, root);
             await Repairing(check, root);
+            await SecretFiles(check, root);
         }
         finally
         {

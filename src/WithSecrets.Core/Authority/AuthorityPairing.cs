@@ -17,6 +17,9 @@ public sealed class PairingEnvironment
 
     public required Func<string, bool> FileExists { get; init; }
 
+    /// <summary>Why a secret file must not be used (others can read it), or null. Tests that use no real files leave it as is.</summary>
+    public Func<string, string?> FileProblem { get; init; } = _ => null;
+
     /// <summary>Opens this machine's identity (only after the invitation was read).</summary>
     public required Func<PairingMachine> OpenMachine { get; init; }
 
@@ -33,6 +36,7 @@ public sealed class PairingEnvironment
         ClearVariable = name => Environment.SetEnvironmentVariable(name, null),
         ReadFile = path => File.ReadAllText(path),
         FileExists = File.Exists,
+        FileProblem = PairingInput.OthersCanRead,
         OpenMachine = openMachine,
     };
 }
@@ -46,7 +50,7 @@ public static class AuthorityPairing
 {
     public static async Task<int> RunAsync(PairingEnvironment environment, TextWriter output, TextWriter error, CancellationToken cancel = default)
     {
-        PairingInput.Found found = PairingInput.Obtain(environment.Console, environment.Variable, environment.ReadFile, environment.FileExists);
+        PairingInput.Found found = PairingInput.Obtain(environment.Console, environment.Variable, environment.ReadFile, environment.FileExists, environment.FileProblem);
 
         // Whatever the source, this process stops carrying the pairing variables: nothing it starts can inherit them.
         environment.ClearVariable(PairingInput.ValueVariable);
@@ -107,6 +111,11 @@ public static class AuthorityPairing
             await output.WriteLineAsync("  Fingerprint: " + KeyIdentity.Display(result.MachineFingerprint));
             await output.WriteLineAsync("  Host name:   " + ApprovalSummary.Clean(result.HostName));
             await output.WriteLineAsync("Until it is approved this machine cannot get secrets. Then start the service here: with-secrets service");
+
+            if (found.Source == PairingSource.File)
+            {
+                await output.WriteLineAsync("The invitation file was left where it is (it is spent now); removing it is up to you or your Docker secret lifecycle.");
+            }
 
             return 0;
         }

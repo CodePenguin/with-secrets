@@ -104,16 +104,17 @@ public static class PairingInput
     /// Gets the bundle. Nothing about the input is ever put in the problem text. A file that is named but cannot be read, or an input that is not a bundle, is an error: there is no fallback to a weaker source behind
     /// the person's back.
     /// </summary>
-    public static Found Obtain(IPairingConsole console, Func<string, string?> environment, Func<string, string?> readFile, Func<string, bool> fileExists)
+    public static Found Obtain(IPairingConsole console, Func<string, string?> environment, Func<string, string?> readFile, Func<string, bool> fileExists, Func<string, string?>? fileProblem = null)
     {
         if (environment(FileVariable) is { Length: > 0 } path)
         {
-            return FromFile(path, readFile);
+            return FromFile(path, readFile, fileProblem);
         }
 
         if (fileExists(DockerSecretPath))
         {
-            return FromFile(DockerSecretPath, readFile);
+            // The Docker secret mount is the operator's (it is readable inside its container by design), so it is not checked for who can read it.
+            return FromFile(DockerSecretPath, readFile, null);
         }
 
         if (environment(ValueVariable) is { Length: > 0 } value)
@@ -131,8 +132,49 @@ public static class PairingInput
         return PairingBundle.TryParse(typed) is { } entered ? new Found(entered, PairingSource.Prompt, null) : new Found(null, PairingSource.Prompt, "that is not a pairing invitation (create a new one in the authority's admin web app)");
     }
 
-    private static Found FromFile(string path, Func<string, string?> readFile)
+    /// <summary>
+    /// Who can read this file besides its owner, as far as the platform lets us check: null when nobody else can (or it cannot be told), otherwise a short reason. On Unix a file with any group or other permission bit is refused. On Windows
+    /// a file whose ACL allows reading to anyone but this user, SYSTEM and Administrators (Everyone, Users, Authenticated Users, other accounts) is refused. The file is never read for this and the reason never contains its content.
+    /// </summary>
+    public static string? OthersCanRead(string path)
     {
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                System.Security.AccessControl.FileSecurity security = new FileInfo(path).GetAccessControl(System.Security.AccessControl.AccessControlSections.Access);
+                System.Security.Principal.SecurityIdentifier? me = System.Security.Principal.WindowsIdentity.GetCurrent().User;
+                foreach (System.Security.AccessControl.FileSystemAccessRule rule in security.GetAccessRules(true, true, typeof(System.Security.Principal.SecurityIdentifier)))
+                {
+                    System.Security.Principal.SecurityIdentifier sid = (System.Security.Principal.SecurityIdentifier)rule.IdentityReference;
+                    bool reads = (rule.FileSystemRights & (System.Security.AccessControl.FileSystemRights.ReadData | System.Security.AccessControl.FileSystemRights.FullControl)) != 0;
+                    bool trusted = sid == me || sid.IsWellKnown(System.Security.Principal.WellKnownSidType.LocalSystemSid) || sid.IsWellKnown(System.Security.Principal.WellKnownSidType.BuiltinAdministratorsSid) || sid.Value == "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+                    if (rule.AccessControlType == System.Security.AccessControl.AccessControlType.Allow && reads && !trusted)
+                    {
+                        return "other accounts can read it";
+                    }
+                }
+
+                return null;
+            }
+
+            UnixFileMode others = UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
+
+            return (File.GetUnixFileMode(path) & others) != 0 ? "other users can read it (its mode allows group or other access)" : null;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private static Found FromFile(string path, Func<string, string?> readFile, Func<string, string?>? fileProblem)
+    {
+        if (fileProblem?.Invoke(path) is { } problem)
+        {
+            return new Found(null, PairingSource.File, "the pairing invitation file is not protected: " + problem + ". Restrict it to this account (the file is left in place; deleting it afterwards is up to you), then run pair again");
+        }
+
         string? text;
         try
         {
