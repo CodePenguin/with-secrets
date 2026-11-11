@@ -73,15 +73,15 @@ This plan turns the accepted target design in [architecture.md](architecture.md#
 - Implement `with-secrets run COMMAND` as normal validation plus use of an applicable, unexpired grant without interactive approval.
 - Implement grant extension, renewal, and revocation as authority-controlled operations, each requiring fresh operation-bound administrator passkey authentication.
 - Ensure ordinary use of an applicable, unexpired grant does not prompt for another approval or passkey authentication. Enforce grant scope and expiration independently from the finite offline-authorization lease.
-- Implement authority-issued lease duration/expiration, monotonic-clock enforcement, and destruction of the in-memory lease on service restart.
+- Implement authority-issued lease duration/expiration, monotonic-clock enforcement, and destruction of the in-memory lease on service restart. **[Superseded by task M4: the offline lease and offline grant use were removed; a host whose authority cannot be reached fails closed. Not built.]**
 - Implement startup reconciliation and security-revision checks before accepting requests.
-- Permit offline use only for already synchronized grants and locally available encrypted material; no new authority-dependent retrieval, approval, extension, or renewal while disconnected.
+- Permit offline use only for already synchronized grants and locally available encrypted material; no new authority-dependent retrieval, approval, extension, or renewal while disconnected. **[Superseded by task M4: the offline lease and offline grant use were removed; a host whose authority cannot be reached fails closed. Not built.]**
 - Ensure connected hosts apply authority changes immediately and offline hosts cannot benefit from changes they have not received.
 
 **Exit criteria:**
 - Tests cover grant creation, scope mismatch, expiry, extension, renewal, revocation, offline lease expiry, wall-clock changes, service restart, and reconnect reconciliation.
-- An indefinite grant never extends an offline lease.
-- A host with no valid lease fails closed for secret use.
+- An indefinite grant never extends an offline lease. **[Superseded by task M4: the offline lease and offline grant use were removed; a host whose authority cannot be reached fails closed. Not built.]**
+- A host with no valid lease fails closed for secret use. **[Superseded by task M4: the offline lease and offline grant use were removed; a host whose authority cannot be reached fails closed. Not built.]**
 
 ## Phase 4 — Durable audit trail
 
@@ -167,3 +167,9 @@ This plan turns the accepted target design in [architecture.md](architecture.md#
 - Exact HTTP routes, DTO names, SQLite schema details, UI layout, concrete offline-lease policy values, and the specific platform key-protection adapters are implementation choices unless they change an accepted security property. Keep them simple and testable. Machine transport limits and timeout defaults are fixed built-in implementation constants, not user-facing settings or environment-variable overrides. Manual unlock is the default; unattended unlock is explicit opt-in. Sensitive administrator operations always require fresh passkey authentication, while routine use of a valid grant does not.
 - Do not add caller-process identity, separate local IPC authentication, a hash chain, audit export, a message broker, or Task 16 privilege separation as prerequisites for the initial build.
 - Prefer completing Phase 1 as a working vertical slice before broadening into remote networking. The local-authority path then provides a practical test harness for the same contracts used remotely.
+
+### Task M4: retire the old AuditLog, remove the offline lease
+
+- [x] The hash-chained `AuditLog` (state.db `audit` table, `--audit`) is deleted; every event it recorded is a signed audit event (type `admin` for administrative events; the run events were already signed). No migration, no hash chain.
+- [x] Administrative changes commit their signed event inside the change's own `state.db` transaction, so a change whose event cannot be committed is not made.
+- [x] `OfflineLease`, `ReconcileResponse.LeaseSeconds`, `LocalAuthority.LeaseDuration`, `HostAuthorization.OfflineUse` and the lease loop are removed; hosts fail closed when the authority is unreachable (`HostAuthorization.Vouched`).

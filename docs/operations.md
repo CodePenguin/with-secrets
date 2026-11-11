@@ -1,6 +1,6 @@
 # Operations guide
 
-Installation, first run, enrollment, backup and recovery, offline behaviour, Docker and WSL, and troubleshooting for the Windows host service and its authority. The design is in [architecture.md](architecture.md) (10.2 and 10.5); every command and screen is in the [README](../README.md). Everything here that says "tested" is exercised by the suites named in brackets (`dotnet run --project tests\WithSecrets.Tests` with `WS_ONLY=<suite>`), not only described.
+Installation, first run, enrollment, backup and recovery, behaviour when the authority is unreachable, Docker and WSL, and troubleshooting for the Windows host service and its authority. The design is in [architecture.md](architecture.md) (10.2 and 10.5); every command and screen is in the [README](../README.md). Everything here that says "tested" is exercised by the suites named in brackets (`dotnet run --project tests\WithSecrets.Tests` with `WS_ONLY=<suite>`), not only described.
 
 Terminal output is public: nothing in this guide asks you to copy a code, key or value into a terminal that an agent can read.
 
@@ -83,7 +83,7 @@ A Docker secret appears as `/run/secrets/with-secrets-pairing`, which `with-secr
 - **Unlock mode:** manual (a tap) is the default. Unattended unlock is an explicit opt-in in **Settings**; it only decides how the key hierarchy becomes available at start, never replaces a tap for a sensitive change.
 - **Machines:** Approve, Disable/Enable, Untrust/Trust again, Rename, Accept host name (section 7).
 - **Grants:** created with `with-secrets approve ...` on the page; Extend, Renew, Revoke in the app.
-- **Audit:** the **Audit** view searches the signed events (machine, project, time, outcome).
+- **Audit:** the **Audit** view searches the signed events (machine, project, time, type, outcome). This is the only audit log: run events (authorization, launch, execution) and administrative events (type `admin`: store changes, key rotation, enrollment, recovery, revocation, settings, passkey changes, refused changes; names only). Each event may carry signed **metadata** (names and fingerprints only: secret names, variable mapping, `.env` files, file fingerprints, approving key, reuse minutes), shown read-only in the event list. There is no hash chain; integrity comes from the machine signature, the unique id, the per-machine sequence and the authority's acknowledgement. The `--audit` command is gone.
 
 ## 4. Backup and restore
 
@@ -91,7 +91,7 @@ A Docker secret appears as `/run/secrets/with-secrets-pairing`, which `with-secr
 
 | File | What it holds |
 | --- | --- |
-| `state.db` | The secret store: secrets as ciphertext (names are readable, as `--list` shows), the signed manifest (passkeys with their key slots, settings), the store's vault and recovery slot, the human-command audit log |
+| `state.db` | The secret store: secrets as ciphertext (names are readable, as `--list` shows), the signed manifest (passkeys with their key slots, settings), the store's vault and recovery slot. No audit table: the audit is the signed event outbox, `audit-outbox.db`, below |
 | `authority.db` | Machine records and history, grants (secret names, program, folder, and the approving passkey assertion **with the page text the passkey signed, which contains the full arguments of the command and the ordinary `.env` values the page showed, unredacted**), the audit events hosts uploaded, the authority's public keys and the signed key transitions, settings (the unattended-unlock policy and its sealed blob) |
 
 Not backed up, on purpose: **the keys.** The machine identity key and the authority signing keys are Windows CNG keys created non-exportable; no file holds them, so no backup can. `host.json` is this machine's pin (public data, per machine). `audit-outbox.db` is this host's not yet uploaded events (signed by this machine's key). Logs are diagnostics. The recovery code and the passkeys are not in any file in usable form.
@@ -124,14 +124,14 @@ Not backed up, on purpose: **the keys.** The machine identity key and the author
 
 No path skips a fresh tap: unlock, lock, rotate, recover, approve, disable and every other sensitive operation need an admin passkey with user verification for that operation, with or without unattended unlock.
 
-## 6. Offline behaviour
+## 6. When the authority is unreachable (fail closed)
 
-**Stated exactly: offline grant use is not reachable in either shipped mode.** The lease is enforced and its rules are tested, but they run only against a test double that can fail separately from the host:
+**Stated exactly: a host whose authority cannot be reached fails closed. There is no offline lease and no offline use of a grant, in either mode.**
 
 - **Local mode:** the authority is in the same process as the host, so a failure is a denial, never "offline". Nothing runs while the authority is locked or unreachable inside the process.
-- **Remote mode (WSL path):** the host has no store; every value comes from the authority. When the authority is stopped or the connection is gone, runs are refused (fail closed). Do not expect a grace period.
+- **Remote mode (WSL path):** the host has no store; every value comes from the authority. When the authority is stopped or the connection is gone, runs are refused at once, whatever grant the host synchronized earlier, and the key the host was holding for a grant is dropped and zeroed. Do not expect a grace period.
 
-The rules, as implemented: a grant is checked with the authority on every run; a host that already synchronized a grant could use it offline only inside a **lease** the authority issues (15 minutes by default), held in memory, measured with a monotonic clock (changing the system date does not lengthen it, an indefinite grant does not lengthen it), destroyed by a restart; with no valid lease nothing is decrypted (`this host has no valid offline-authorization lease ...`); offline a host makes no new approval, extension or renewal; a revocation or a disable is applied at once while connected. After a restart the service checks in before it accepts requests (503 until then, exit 9 for a run). Audit events wait in `audit-outbox.db` and are uploaded when the authority answers; a run that needs a secret does not start if its audit event cannot be committed locally (exit 5; in remote mode that includes the host's "requested" record, committed before the authority is asked). An offline cache for remote mode does not exist; it is an open design item for the maintainer. [suites GrantAuthority, AuditTrail, RemoteLaunch]
+The rules: a grant is checked with the authority on every run. The authority vouches for a host only through a verified check-in that says the machine is Trusted and its host name is the bound one; that is held in memory, a restart destroys it, a changed or replayed answer vouches for nothing, and the system date does not matter; without it nothing is decrypted (`the authority has not confirmed this machine as trusted ...`). A host makes no new approval, extension or renewal while the authority cannot be reached; a revocation or a disable is applied at once while connected. After a restart the service checks in before it accepts requests (503 until then, exit 9 for a run). Audit events (the run events and the administrative events) wait in `audit-outbox.db` and are uploaded when the authority answers; a run that needs a secret does not start if its audit event cannot be committed locally (exit 5; in remote mode that includes the host's "requested" record, committed before the authority is asked), and an administrative change is not made if its audit event cannot be committed. [suites GrantAuthority, AuditTrail, RemoteLaunch, StateDatabase]
 
 ## 7. Host name changes
 
@@ -166,7 +166,7 @@ A machine that starts reporting another host name is **not** accepted by itself:
 | 2 | Usage: bad arguments or secret name, policy refusal, script missing or changed, unknown secret | Read the line printed; `--needs` shows what the project asks for |
 | 3 | Denied: Deny on the page, wrong proof, time limit, nothing enrolled, refused change | Ask again; for "nothing enrolled" run `--config` |
 | 4 | Store error: `state.db` damaged, locked over 5 seconds, other schema, failed signature, cannot decrypt; also the service could not start | Read the line: it says whether the port is in use or names another reason (then run with `--debug`) |
-| 5 | Audit error: the audit row or the signed audit event could not be committed, so nothing ran | Check disk space and the `audit-outbox.db` file; see "Outbox" |
+| 5 | Audit error: the signed audit event could not be committed, so nothing ran | Check disk space and the `audit-outbox.db` file; see "Outbox" |
 | 6 | Host service not running | `with-secrets service`, or give `--service-port N` |
 | 7 | Service not authenticated: what answers on the port is not this machine's service, or no identity is pinned yet | Check the port; for a new machine approve its fingerprint in the app |
 | 8 | Authority locked | Unlock in the app (`with-secrets admin` prints the link) |
@@ -179,7 +179,7 @@ A machine that starts reporting another host name is **not** accepted by itself:
 - **Locked.** A run prints `the authority is locked ... Unlock it in the administration web app: http://localhost:8765/admin (one passkey tap; no sign-in is needed to unlock)` (the line the service sends) and exits 8. Unlock with a tap. The service starts locked after every restart by design.
 - **Pending machine.** The run is refused with the machine's fingerprint and the instruction to approve it in the admin app. Compare the fingerprint with the one the service printed.
 - **Port conflict.** `the host service cannot listen on port N: the port is in use. Is it already running?` (exit 4). Any other start failure is reported as `the host service could not start (<type>)` with a hint to use `--debug`. For the port: another service or program holds it; use `--port N` for the service and the same `--service-port N` (or `WITH_SECRETS_PORT`) for runs. An approval page port in use fails with `port N is already in use; choose another with --port N`.
-- **Expired lease.** `this host has no valid offline-authorization lease`: the authority has not been reached lately or the machine is not Trusted. Ask again in a moment; check the authority is running, unlocked and the machine Trusted.
+- **Not vouched for.** `the authority has not confirmed this machine as trusted`: the authority cannot be reached or the machine is not Trusted. Ask again in a moment; check the authority is running, unlocked and the machine Trusted.
 - **Outbox or authority schema mismatch.** `audit-outbox.db is not of schema version N; delete audit-outbox.db to start over` and `authority.db is not of schema version N; delete authority.db to start over (machines then enroll again)`. The outbox holds only events not yet uploaded: deleting it loses those. For `authority.db` restore a backup first; delete only if you accept losing machines, grants and audit.
 - **The authority signing key in the key store is not the one authority.db names.** Restore on a new machine or a wiped key store: **Recover** in the app (section 4).
 - **A host refuses the authority's answers ("not pinned").** The authority key was recovered (no transition): pin it by approving the machine again in the app, or enroll the host again.
