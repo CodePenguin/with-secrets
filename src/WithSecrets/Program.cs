@@ -227,13 +227,6 @@ internal static class Program
             return RunCommand.Usage;
         }
 
-        if (!OperatingSystem.IsWindows())
-        {
-            TerminalPrompt.Final("with-secrets: the machine identity needs Windows CNG for now; the host service cannot start on this system.");
-
-            return RunCommand.StoreError;
-        }
-
         // The machine listener (an authority serving another machine's host service, such as WSL's): nothing but the machine API over TLS 1.3 mutual authentication and HTTP/2, never the admin app, the API or a page.
         MachineListenerOptions? machineEndpoint = null;
         if (command is CliCommand.Service { MachinePort: { } machinePort } machineCommand)
@@ -251,7 +244,7 @@ internal static class Program
         EnrollmentResult enrolled;
         try
         {
-            // The machine identity key is made on the first start (non-exportable, kept by Windows) and never leaves it.
+            // The machine identity key is made on the first start (Windows: a non-exportable CNG key that never leaves it; elsewhere an owner-only key file, which anything running as this user can copy).
             deployment = LocalDeployment.OpenProduction(folder);
 
             // host.json may select a remote authority (public data only: its endpoint address and its identity certificate).
