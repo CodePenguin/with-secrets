@@ -24,7 +24,7 @@ describe('the primary views have no automated accessibility violations', () => {
       'GET /api/v1/audit/events': {
         body: {
           items: [
-            { eventId: 'e1', sequence: 1, time: '2026-11-09T10:00:00Z', received: '2026-11-09T10:00:01Z', machine: 'ab12', type: 'launch', outcome: 'started', reason: '', requestId: 'r1', folder: 'C:\\work', program: 'deploy.cmd', arguments: ['--flag'], grantId: '', exitCode: null },
+            { eventId: 'e1', sequence: 1, time: '2026-11-09T10:00:00Z', received: '2026-11-09T10:00:01Z', machine: 'ab12', type: 'launch', outcome: 'started', reason: '', requestId: 'r1', folder: 'C:\\work', program: 'deploy.cmd', arguments: ['--flag'], grantId: '', exitCode: null, metadata: { secrets: 'DB_URL', key: '<b>laptop</b>' } },
           ],
         },
       },
@@ -35,6 +35,22 @@ describe('the primary views have no automated accessibility violations', () => {
     expect(await screen.findByRole('heading', { level: 1, name: heading })).toBeInTheDocument()
     await waitFor(() => expect(screen.queryByText(/^Loading/)).toBeNull())
     expect(await violations(container)).toEqual([])
+  })
+
+  it('shows the metadata of an audit event as read-only text, never as markup', async () => {
+    signedIn({
+      'GET /api/v1/audit/events': {
+        body: {
+          items: [
+            { eventId: 'e1', sequence: 1, time: '2026-11-09T10:00:00Z', received: '2026-11-09T10:00:01Z', machine: 'ab12', type: 'admin', outcome: 'secrets-set', reason: '', requestId: '', folder: '', program: '', arguments: [], grantId: '', exitCode: null, metadata: { key: '<img src=x onerror=alert(1)>', names: 'DB_URL' } },
+          ],
+        },
+      },
+    })
+    const { container } = renderApp('/audit')
+    expect(await screen.findByText('<img src=x onerror=alert(1)>')).toBeInTheDocument()
+    expect(screen.getByText('Metadata: names')).toBeInTheDocument()
+    expect(container.querySelector('img')).toBeNull()
   })
 
   it('the sign-in view', async () => {

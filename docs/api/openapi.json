@@ -957,7 +957,8 @@
               "enum": [
                 "authorization",
                 "launch",
-                "execution"
+                "execution",
+                "admin"
               ]
             }
           },
@@ -1131,7 +1132,8 @@
               "enum": [
                 "authorization",
                 "launch",
-                "execution"
+                "execution",
+                "admin"
               ]
             }
           },
@@ -5898,7 +5900,8 @@
             "enum": [
               "authorization",
               "launch",
-              "execution"
+              "execution",
+              "admin"
             ]
           },
           "outcome": {
@@ -5930,6 +5933,15 @@
               "integer",
               "null"
             ]
+          },
+          "metadata": {
+            "type": "object",
+            "maxProperties": 24,
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 2048
+            },
+            "description": "Names and fingerprints the host signed with the event (secret names, key name, reuse minutes, variable mapping, .env files, file fingerprints). Read-only data, never values."
           }
         },
         "additionalProperties": false,
@@ -5947,7 +5959,8 @@
           "program",
           "arguments",
           "grantId",
-          "exitCode"
+          "exitCode",
+          "metadata"
         ]
       },
       "AuditEventList": {

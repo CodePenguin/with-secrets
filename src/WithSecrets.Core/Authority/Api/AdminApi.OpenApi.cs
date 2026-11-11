@@ -99,6 +99,7 @@ internal sealed partial class AdminApi
                 ("arguments", S.Arr(S.Str())),
                 ("grantId", S.Str()),
                 ("exitCode", S.Int(nullable: true)),
+                ("metadata", S.TextMap(AuditMetadata.MaxMembers, AuditMetadata.MaxValue, "Names and fingerprints the host signed with the event (secret names, key name, reuse minutes, variable mapping, .env files, file fingerprints). Read-only data, never values.")),
             ]),
             ["AuditEventList"] = S.Obj([("items", S.Arr(S.Ref("AuditEvent")))]),
             ["AuditChange"] = S.Obj([("id", S.Int()), ("time", S.Time()), ("event", S.Str()), ("machine", S.Str(nullable: true)), ("actor", S.Str()), ("detail", S.Str())]),

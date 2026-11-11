@@ -76,7 +76,7 @@ export function AuditPage({ view }: { view: View }) {
       <h2>{title}</h2>
       <p>
         {view === 'events'
-          ? 'What hosts reported: authorization, launch and execution outcomes. Arguments are shown redacted; no secret value is ever kept here.'
+          ? 'What hosts reported: authorization, launch and execution outcomes, and administrative changes. Arguments are shown redacted; the metadata lists names and fingerprints only. No secret value is ever kept here.'
           : view === 'changes'
             ? 'What changed at the authority: administrator operations and machine and grant changes.'
             : 'Open holes in a machine\'s audit numbering (events that were expected and have not arrived).'}
@@ -92,6 +92,7 @@ export function AuditPage({ view }: { view: View }) {
                     <option value="authorization">authorization</option>
                     <option value="launch">launch</option>
                     <option value="execution">execution</option>
+                    <option value="admin">admin</option>
                   </select>
                 ) : (
                   <input {...control} name={name} type="text" className={controlClass} defaultValue={params.get(name) ?? ''} autoComplete="off" spellCheck={false} inputMode={name === 'last' ? 'numeric' : undefined} />
@@ -147,6 +148,10 @@ function Events({ filters }: { filters: AuditFilters }) {
                 ['Grant', event.grantId || 'none'],
                 ['Exit code', event.exitCode === null ? 'none' : String(event.exitCode)],
                 ['Sequence', String(event.sequence)],
+                // The metadata is data the host signed (names and fingerprints): shown as plain text, never as markup.
+                ...Object.entries(event.metadata)
+                  .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+                  .map(([name, value]): [string, string] => ['Metadata: ' + name, value]),
               ]}
             />
           </li>

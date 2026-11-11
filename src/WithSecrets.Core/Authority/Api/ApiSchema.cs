@@ -116,6 +116,23 @@ internal static class S
         return result;
     }
 
+    /// <summary>An object whose members are all text (the metadata of an audit event: names and fingerprints, read-only data).</summary>
+    public static JsonObject TextMap(int maxMembers, int maxLength, string? description = null)
+    {
+        JsonObject schema = new()
+        {
+            ["type"] = "object",
+            ["maxProperties"] = maxMembers,
+            ["additionalProperties"] = new JsonObject { ["type"] = "string", ["maxLength"] = maxLength },
+        };
+        if (description is not null)
+        {
+            schema["description"] = description;
+        }
+
+        return schema;
+    }
+
     /// <summary>A free-form object whose members are all short text, numbers or true/false (the parameters of an operation).</summary>
     public static JsonObject Params(int maxMembers, int maxLength) => new()
     {

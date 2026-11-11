@@ -794,7 +794,7 @@ export interface components {
             received: string;
             machine: string;
             /** @enum {string} */
-            type: "authorization" | "launch" | "execution";
+            type: "authorization" | "launch" | "execution" | "admin";
             outcome: string;
             reason: string;
             requestId: string;
@@ -803,6 +803,10 @@ export interface components {
             arguments: string[];
             grantId: string;
             exitCode: number | null;
+            /** @description Names and fingerprints the host signed with the event (secret names, key name, reuse minutes, variable mapping, .env files, file fingerprints). Read-only data, never values. */
+            metadata: {
+                [key: string]: string;
+            };
         };
         AuditEventList: {
             items: components["schemas"]["AuditEvent"][];
@@ -1652,7 +1656,7 @@ export interface operations {
                 /** @description Only events at or before this time. */
                 until?: string;
                 /** @description authorization, launch or execution. */
-                type?: "authorization" | "launch" | "execution";
+                type?: "authorization" | "launch" | "execution" | "admin";
                 /** @description The outcome, for example approved, denied, started or exited. */
                 outcome?: string;
                 /** @description Events that used this grant. */
@@ -1736,7 +1740,7 @@ export interface operations {
                 /** @description Only events at or before this time. */
                 until?: string;
                 /** @description authorization, launch or execution. */
-                type?: "authorization" | "launch" | "execution";
+                type?: "authorization" | "launch" | "execution" | "admin";
                 /** @description The outcome, for example approved, denied, started or exited. */
                 outcome?: string;
                 /** @description Events that used this grant. */
