@@ -471,6 +471,16 @@ internal static class Program
             OneFlowTests.Run(Check).GetAwaiter().GetResult();
         }
 
+        if (Wants("Hardening"))
+        {
+            HardeningTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("BlockedRun"))
+        {
+            BlockedRunTests.Run(Check).GetAwaiter().GetResult();
+        }
+
         Directory.Delete(temp, true);
         Console.WriteLine($"{_passed} passed, {_failed} failed");
 
@@ -509,7 +519,7 @@ internal static class Program
         Check(stderr.ToString().Contains("key=none", StringComparison.Ordinal), "e2e: dotenvx private key is not passed");
         Check(yes.Requests.Count == 1 && yes.Requests[0].SecretNames.SequenceEqual(["DB_URL"]), "e2e: the approver saw the requested names");
         string audit = StateDatabaseTests.AuditText(auditPath);
-        Check(audit.Contains("./script.sh", StringComparison.Ordinal) && !audit.Contains(Secret, StringComparison.Ordinal) && audit.Contains("\"exitCode\":7", StringComparison.Ordinal), "e2e: the signed audit events have the program and exit code, no values");
+        Check(audit.Contains("script.sh", StringComparison.Ordinal) && !audit.Contains(Secret, StringComparison.Ordinal) && audit.Contains("\"exitCode\":7", StringComparison.Ordinal), "e2e: the signed audit events have the program and exit code, no values");
         Check(JsonDocument.Parse(audit.Split('\n')[0]).RootElement.GetProperty("type").GetString() == "authorization" && audit.Split((char)10).Length == 3, "e2e: three signed events (authorization, launch, execution)");
 
         // several secrets in one run: exactly the named ones, and a third is left out
