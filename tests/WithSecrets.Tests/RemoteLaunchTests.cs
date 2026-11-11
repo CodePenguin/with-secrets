@@ -349,7 +349,6 @@ internal static class RemoteLaunchTests
             await GrantContents(check, root);
             await TwoHosts(check, root);
             await Exposure(check, root);
-            await Pairing(check, root);
         }
         finally
         {
@@ -1106,21 +1105,8 @@ internal static class RemoteLaunchTests
         CliCommand? Parse(params string[] args) => CliArgs.Parse(args, out _);
         check(Parse("service", "--machine-port", "8790") is CliCommand.Service { MachinePort: 8790, MachineBind: "127.0.0.1" } && Parse("service") is CliCommand.Service { MachinePort: null }, "command line: service --machine-port N serves the machine endpoint on loopback; plain service serves none");
         check(Parse("service", "--machine-port", "8790", "--machine-bind", "0.0.0.0") is null && Parse("service", "--machine-cert", "x.pfx") is null && Parse("service", "--machine-bind", "127.0.0.1") is null, "command line: 0.0.0.0 is never accepted, a bind without a port is refused and there is no certificate flag (the certificate is the machine's own)");
-        check(Parse("admin", "https://127.0.0.1:8790") is CliCommand.AdminPair { Url: "https://127.0.0.1:8790" } && Parse("admin") is CliCommand.AdminApp && Parse("admin", "--service-port", "9000") is CliCommand.AdminApp, "command line: admin ADDRESS names an authority (pairing is task M2); bare admin is still the local app");
-        check(Parse("admin", "http://127.0.0.1:8790") is null && Parse("admin", "list") is null && Parse("admin", "https://127.0.0.1:8790", "--authority-fingerprint", new string('A', 64)) is null, "command line: a plain http address is refused, admin keeps no verbs and the 5b --authority-fingerprint pairing is gone");
+        check(Parse("pair") is CliCommand.Pair && Parse("pair", "--debug") is CliCommand.Pair { Debug: true } && Parse("admin") is CliCommand.AdminApp && Parse("admin", "--service-port", "9000") is CliCommand.AdminApp, "command line: pair is a top-level command with no argument; bare admin is still the local app");
+        check(Parse("pair", "wsp1;https://127.0.0.1:8790;x;y") is null && Parse("pair", "--code", "x") is null && Parse("admin", "https://127.0.0.1:8790") is null && Parse("admin", "list") is null, "command line: pair takes no invitation, code or address argument (a code on the command line is refused), and admin keeps no verbs and no ADDRESS");
         await Task.CompletedTask;
-    }
-
-    // ---------- pairing is a seam ----------
-
-    private static async Task Pairing(Action<bool, string> check, string root)
-    {
-        using Auth auth = Auth.Create(root);
-        TestMachine machine = new(Path.Combine(root, "paired-" + Guid.NewGuid().ToString("N")[..6], "state"), trusted: false, hostName: "wsl-paired");
-        using LocalDeployment deployment = machine.Deployment;
-        StringWriter output = new();
-        StringWriter error = new();
-        int code = await AuthorityPairing.RunAsync(new CliCommand.AdminPair(auth.Url), output, error);
-        check(code != 0 && (output.ToString() + error.ToString()).Contains("not available", StringComparison.OrdinalIgnoreCase) && auth.Machine.Deployment.Store.Find(machine.Fingerprint) is null && deployment.HostConfig.Load().Config is null, "pairing: the admin ADDRESS command is a stub for now: it says pairing is not available and changes nothing");
     }
 }

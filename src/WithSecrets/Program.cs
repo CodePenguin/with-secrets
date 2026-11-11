@@ -73,10 +73,10 @@ internal static class Program
             return await AdminAppCommand.RunAsync(app.ServicePort, Console.Out, Console.Error, ServiceTrust.From(HostConfigFile.InFolder(StorePath())), OpenInBrowser(app));
         }
 
-        // admin ADDRESS: reserved for pairing with an authority (task M2); for now it only says so. Opens no store and no state.db.
-        if (command is CliCommand.AdminPair pair)
+        // pair: pairing this machine with an authority by a one-time invitation (hidden prompt, or unattended from a secret file or WITH_SECRETS_PAIRING). Opens no store and no state.db.
+        if (command is CliCommand.Pair)
         {
-            return await RunPairAsync(pair);
+            return await RunPairAsync();
         }
 
         // approve takes the same road to the service: the service shows the page and the authority records the grant; nothing is launched.
@@ -202,7 +202,22 @@ internal static class Program
     /// <summary>The host service in the foreground, until Ctrl+C. Windows service installation and start at logon come later.</summary>
     private static string StorePath() => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), StoreFolder);
 
-    private static async Task<int> RunPairAsync(CliCommand.AdminPair command) => await AuthorityPairing.RunAsync(command, Console.Out, Console.Error);
+    private static async Task<int> RunPairAsync() => await AuthorityPairing.RunAsync(PairingEnvironment.ForThisProcess(OpenPairingMachine), Console.Out, Console.Error);
+
+    /// <summary>This machine's identity for pairing: the persistent key Windows keeps (made on first use, non-exportable), its identity certificate beside host.json, and the host name.</summary>
+    private static PairingMachine OpenPairingMachine()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException();
+        }
+
+        string folder = StorePath();
+        CngSigningKey key = CngSigningKey.OpenOrCreate(KeyNames.Machine, out _);
+
+        return new PairingMachine(key, MachineIdentityFile.LoadOrCreate(folder, key, TimeProvider.System), Environment.MachineName, HostConfigFile.InFolder(folder));
+    }
+
     private static int RunService(CliCommand command, StateDatabase state, SecretStore store, GrantStore grants, string folder)
     {
         int? port = ServiceEndpoint.Resolve(command.ServicePort, Environment.GetEnvironmentVariable, out string? portError);

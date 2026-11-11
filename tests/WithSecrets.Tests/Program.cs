@@ -451,6 +451,11 @@ internal static class Program
             RecoveryTests.Run(Check).GetAwaiter().GetResult();
         }
 
+        if (Wants("Pairing"))
+        {
+            PairingTests.Run(Check).GetAwaiter().GetResult();
+        }
+
         if (Wants("OneFlow"))
         {
             OneFlowTests.Run(Check).GetAwaiter().GetResult();

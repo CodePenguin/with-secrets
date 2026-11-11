@@ -33,6 +33,12 @@ public sealed record PasskeyDto(string Name, string Detail, DateTimeOffset Creat
 
 public sealed record PasskeysDto(bool Available, string? Problem, IReadOnlyList<PasskeyDto> Items);
 
+/// <summary>An invitation's standing: status only (pending, consumed, expired or revoked). Never a code, a verifier or a bundle.</summary>
+public sealed record InvitationDto(string Id, string Status, DateTimeOffset Created, DateTimeOffset Expires, DateTimeOffset? Ended, string? Machine, bool CanRevoke);
+
+/// <summary>What creating an invitation answers, once: the credential bundle (it holds the code). It is not stored and cannot be read again.</summary>
+public sealed record InvitationCreatedDto(string Id, DateTimeOffset Expires, string Bundle);
+
 public sealed partial class AdminService
 {
     internal static string Version { get; } = typeof(AdminService).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false) is [System.Reflection.AssemblyInformationalVersionAttribute info, ..]
@@ -221,5 +227,16 @@ public sealed partial class AdminService
         {
             return new PasskeysDto(false, C(failure.Message), []);
         }
+    }
+}
+
+public sealed partial class AdminService
+{
+    /// <summary>The invitations by status only (expired ones are ended first, audited).</summary>
+    internal IReadOnlyList<InvitationDto> InvitationsView()
+    {
+        DateTimeOffset now = _clock.GetUtcNow();
+
+        return [.. _p.Store.Invitations().Select(item => new InvitationDto(item.Id, item.StatusAt(now), item.Created, item.Expires, item.Ended, item.MachineFingerprint is null ? null : KeyIdentity.Display(item.MachineFingerprint), item.StatusAt(now) == "pending"))];
     }
 }

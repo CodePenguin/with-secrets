@@ -247,6 +247,79 @@ public sealed partial class AdminService
 
                         return (decision.Approved, decision.Detail, "admin passkey");
                     });
+
+            case "pairing-create":
+                if (_p.Pairing is not { } creating)
+                {
+                    refusal = "pairing is not available in this service";
+
+                    return null;
+                }
+
+                if (creating.Unavailable is { } cannot)
+                {
+                    refusal = cannot;
+
+                    return null;
+                }
+
+                string authorityUrl = creating.AuthorityUrl!;
+                int lifetime = (int)PairingProtocol.InvitationLifetime.TotalMinutes;
+                System.Runtime.CompilerServices.StrongBox<InvitationCreatedDto?> box = new();
+
+                return new AdminPlan("create-pairing-invitation",
+                    $"create a one-time pairing invitation for a new machine. It can register ONE machine and is valid for {lifetime} minutes. The invitation (an address, an identifier and a random pairing code) is shown once on this page after your tap and can never be shown again. "
+                    + "A machine that pairs with it only becomes Pending: you still check its fingerprint and host name here and approve it with another passkey tap.\nAuthority address: " + authorityUrl,
+                    [("authority", authorityUrl), ("valid-minutes", lifetime.ToString(CultureInfo.InvariantCulture))],
+                    a =>
+                    {
+                        (CreatedInvitation? created, string? problem) = creating.Create(a.Admin!.Actor);
+                        if (created is null)
+                        {
+                            return problem ?? "the invitation could not be made";
+                        }
+
+                        box.Value = new InvitationCreatedDto(created.Id, created.Expires, created.Bundle);
+
+                        return null;
+                    }, Output: box);
+
+            case "pairing-revoke":
+                if (_p.Pairing is not { } revoking)
+                {
+                    refusal = "pairing is not available in this service";
+
+                    return null;
+                }
+
+                string? typedId = Arg(args, "id");
+                if (typedId is null || !PairingProtocol.IsToken(typedId, PairingProtocol.IdBytes))
+                {
+                    refusal = "give the invitation's identifier";
+                    status = 400;
+
+                    return null;
+                }
+
+                _p.Store.ExpireInvitations();
+                if (_p.Store.Invitation(typedId) is not { } invitation)
+                {
+                    refusal = "no invitation has that identifier";
+                    status = 404;
+
+                    return null;
+                }
+
+                if (invitation.StatusAt(_clock.GetUtcNow()) != "pending")
+                {
+                    refusal = "the invitation is " + invitation.StatusAt(_clock.GetUtcNow()) + "; only a pending one can be revoked";
+
+                    return null;
+                }
+
+                return new AdminPlan("revoke-pairing-invitation", $"revoke the pairing invitation {typedId} (created {CanonicalJson.Time(invitation.Created)}). It can no longer be used. A machine that already paired with it is not affected",
+                    [("invitation", typedId)],
+                    a => revoking.Revoke(typedId, a.Admin!.Actor) ? null : "the invitation is no longer pending");
         }
 
         if (op.StartsWith("machine-", StringComparison.Ordinal))

@@ -155,6 +155,12 @@ public static class ChildRunner
             }
         }
 
+        // The child never gets the pairing credential (WITH_SECRETS_PAIRING, WITH_SECRETS_PAIRING_FILE), whoever put it in the environment it is built from.
+        foreach (string name in start.Environment.Keys.Where(PairingInput.IsPairingVariable).ToList())
+        {
+            start.Environment.Remove(name);
+        }
+
         // The child never gets the dotenvx private key, even if the agent's own environment holds one.
         foreach (string name in start.Environment.Keys.Where(key => key.StartsWith("DOTENV_PRIVATE_KEY", StringComparison.OrdinalIgnoreCase)).ToList())
         {

@@ -75,6 +75,8 @@ internal sealed partial class AdminApi
         ("grant-revoke", ["id"]),
         ("passkey-enroll", []),
         ("passkey-unenroll", ["name"]),
+        ("pairing-create", []),
+        ("pairing-revoke", ["id"]),
     ];
 
     private static readonly string[] AuditFilters = ["machine", "since", "until", "type", "outcome", "grant", "folder", "text", "last"];
@@ -128,6 +130,7 @@ internal sealed partial class AdminApi
             new("GET", Prefix + "/audit/changes", "searchAuditChanges", "Search the authority's own audit history (administrator operations, machine and grant changes). Filters: machine, since, until, text, last.", "audit", ApiAccess.Read, 200, "AuditChangeList", null, AuditQueries(), null, AuditChangesAsync),
             new("GET", Prefix + "/audit/gaps", "listAuditGaps", "The open holes in a machine's audit numbering. Filter: machine.", "audit", ApiAccess.Read, 200, "AuditGapList", null, [new ApiQuery("machine", S.Str(max: 80), "A machine's fingerprint or the start of it.")], null, AuditGapsAsync),
             new("GET", Prefix + "/settings", "getSettings", "Audit retention, the unlock mode, the session timeouts and the authority key in use (read-only session).", "settings", ApiAccess.Read, 200, "Settings", null, [], null, _ => Task.FromResult(new ApiResult(200, admin.SettingsView()))),
+            new("GET", Prefix + "/pairing/invitations", "listPairingInvitations", "The pairing invitations by status only (pending, consumed, expired or revoked); never a code or a bundle (read-only session).", "pairing", ApiAccess.Read, 200, "InvitationList", null, [], null, _ => Task.FromResult(new ApiResult(200, new { items = admin.InvitationsView() }))),
             new("GET", Prefix + "/passkeys", "listPasskeys", "The enrolled passkeys (names and kinds; no key material).", "passkeys", ApiAccess.Read, 200, "Passkeys", null, [], null, _ => Task.FromResult(new ApiResult(200, admin.PasskeysView()))),
             new("POST", Prefix + "/authorizations", "createAuthorization", "Ask to authorize one change: answers the link of a one-use passkey page whose signed text names the operation and every security-relevant parameter, and the text to show. The tap (user verification) makes the authorization usable once, for exactly that operation and those parameters, for " + AdminService.LifetimeText + " seconds. It changes nothing by itself.", "authorizations", ApiAccess.Authorize, 201, "Authorization", AuthorizationRequest(), [], null, CreateAuthorizationAsync),
             new("GET", Prefix + "/authorizations/{id}", "getAuthorization", "Where an authorization stands (pending, verified, refused, consumed or expired). Only for the caller it was made for (its session, or for the unlock its browser).", "authorizations", ApiAccess.Owner, 200, "Authorization", null, [], null, GetAuthorizationAsync),
@@ -148,6 +151,8 @@ internal sealed partial class AdminApi
             Mutation("POST", "/grants/{id}/extend", "grant-extend", "extendGrant", "Extend a grant by minutes, or to no end.", "grants", "minutes", "indefinite"),
             Mutation("POST", "/grants/{id}/renew", "grant-renew", "renewGrant", "Renew an ended grant for minutes from now, or to no end.", "grants", "minutes", "indefinite"),
             Mutation("POST", "/grants/{id}/revoke", "grant-revoke", "revokeGrant", "Revoke a grant (it ends now and its machine is told).", "grants"),
+            Mutation("POST", "/pairing/invitations", "pairing-create", "createPairingInvitation", "Create a one-time pairing invitation for a new machine. The answer carries the invitation bundle (address, identifier and pairing code) ONCE; it is never stored in readable form, never logged and cannot be read again.", "pairing"),
+            Mutation("POST", "/pairing/invitations/{id}/revoke", "pairing-revoke", "revokePairingInvitation", "Revoke a pending pairing invitation (it can no longer be used).", "pairing"),
             Mutation("POST", "/passkeys", "passkey-enroll", "addPasskey", "Add a passkey: after its authorization the enrollment pages (their own passkey taps) are started; the answer is the link of the first.", "passkeys"),
             Mutation("POST", "/passkeys/{name}/remove", "passkey-unenroll", "removePasskey", "Remove a passkey (any key but the last admin key).", "passkeys"),
         ];

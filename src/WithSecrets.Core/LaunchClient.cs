@@ -276,7 +276,8 @@ public static class LaunchClient
         Dictionary<string, string> map = new(StringComparer.Ordinal);
         foreach (DictionaryEntry item in Environment.GetEnvironmentVariables())
         {
-            if (item.Key is string name && item.Value is string value)
+            // The pairing credential is a local credential of the pairing command: never part of what a run sends on (and so never in an approval page, an audit row or a child).
+            if (item.Key is string name && item.Value is string value && !PairingInput.IsPairingVariable(name))
             {
                 map[name] = value;
             }

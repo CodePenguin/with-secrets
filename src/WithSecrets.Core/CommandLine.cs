@@ -18,8 +18,8 @@ public abstract record CliCommand
     /// <summary>service [--port N] [--machine-port N [--machine-bind ADDRESS]]: run the host service in the foreground (loopback only for the API; the optional machine listener serves only the machine API, over TLS 1.3 mutual authentication and HTTP/2, for another machine's host service, such as the one in WSL).</summary>
     public sealed record Service(int? MachinePort = null, string MachineBind = "127.0.0.1") : CliCommand;
 
-    /// <summary>admin ADDRESS: pair this machine's host service with the authority at ADDRESS (built in the next task; today it only says so and changes nothing).</summary>
-    public sealed record AdminPair(string Url) : CliCommand;
+    /// <summary>pair [--debug]: pair this machine with an authority using the one-time invitation an administrator made in the admin web app (hidden prompt, or unattended from a secret file or WITH_SECRETS_PAIRING). Human-only when it must prompt; a new top-level command because administration has no verbs.</summary>
+    public sealed record Pair : CliCommand;
     /// <summary>admin (no further words): go to the authority's admin web app, where all administration lives (machines, grants, audit, settings, lock and unlock). It has no verbs.</summary>
     public sealed record AdminApp : CliCommand;
 
@@ -139,6 +139,14 @@ public static class CliArgs
         name change of a machine; extend, renew or revoke a grant; passkeys; settings; the authority key; lock and unlock) is its own fresh
         passkey tap on a one-use page that names that change. Add --service-port N when the service is not on the default port.
 
+        Pairing a machine with an authority: an administrator creates a one-time pairing invitation in the authority's admin web app (Pairing:
+        one passkey tap; the invitation is shown once and is valid for 10 minutes) and gives it to the new machine, which runs: with-secrets pair
+        It asks for the invitation without showing it, or reads it unattended from a secret file (the path in WITH_SECRETS_PAIRING_FILE, or the Docker
+        secret named with-secrets-pairing) or from WITH_SECRETS_PAIRING (a file is preferred). The invitation is never a command-line argument and its
+        code is never sent: the machine and the authority prove to each other that they hold it, the machine verifies the authority before it sends
+        anything about itself, and then it waits Pending. It prints only its fingerprint and host name; the administrator checks them in the admin
+        web app and approves with a passkey tap.
+
         Audit trail. The host service signs an audit event with the machine key for every run (the authorization decision, the launch
         outcome and the execution outcome are separate events, numbered per machine) and commits the authorization event to its own
         outbox BEFORE a secret is decrypted: if that cannot be done the run does not happen (exit 5). It sends the events to the authority
@@ -196,14 +204,14 @@ public static class CliArgs
                 return ParseAdminApp(args, out error);
             }
 
-            if (args[1].Contains("://", StringComparison.Ordinal))
-            {
-                return ParseAdminPair(args, out error);
-            }
-
             error = "admin has no subcommands: all administration is in the authority's admin web app. Run: with-secrets admin   (it prints the link and the service's status)";
 
             return null;
+        }
+
+        if (args.Count > 0 && args[0] == "pair")
+        {
+            return ParsePair(args, out error);
         }
 
         if (args.Count > 0 && args[0] == "approve")
@@ -292,13 +300,13 @@ public static class CliArgs
         return new CliCommand.AdminApp { ServicePort = port, Debug = debug };
     }
 
-    private const string AdminPairUsage = "Usage: with-secrets admin ADDRESS [--debug]. ADDRESS is where the authority's machine listener is (an https address, for example https://127.0.0.1:8790). Pairing this machine with an authority is not built yet: the command says so and changes nothing.";
+    private const string PairUsage = "Usage: with-secrets pair [--debug]. It asks for the pairing invitation (hidden) that an administrator made in the authority's admin web app, or reads it from a secret file (WITH_SECRETS_PAIRING_FILE, or the Docker secret with-secrets-pairing) or from WITH_SECRETS_PAIRING. The invitation is never a command-line argument.";
 
-    /// <summary>admin ADDRESS [--debug].</summary>
-    private static CliCommand? ParseAdminPair(IReadOnlyList<string> args, out string error)
+    /// <summary>pair [--debug]: nothing else (the authority's address is in the invitation).</summary>
+    private static CliCommand? ParsePair(IReadOnlyList<string> args, out string error)
     {
         bool debug = false;
-        for (int index = 2; index < args.Count; index++)
+        for (int index = 1; index < args.Count; index++)
         {
             if (args[index] == "--debug")
             {
@@ -306,24 +314,17 @@ public static class CliArgs
             }
             else
             {
-                error = AdminPairUsage;
+                error = PairUsage;
 
                 return null;
             }
         }
 
-        string url = args[1].TrimEnd('/');
-        if (RemoteTarget.Address(url, out _) is { } problem)
-        {
-            error = "ADDRESS: " + problem;
-
-            return null;
-        }
-
         error = "";
 
-        return new CliCommand.AdminPair(url) { Debug = debug };
+        return new CliCommand.Pair { Debug = debug };
     }
+
     /// <summary>service [--port N] [--debug]: nothing else.</summary>
     private static CliCommand? ParseService(IReadOnlyList<string> args, out string error)
     {

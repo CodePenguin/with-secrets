@@ -859,6 +859,9 @@ public sealed partial class AuthorityStore
             {
                 // An additive table (the identity certificates enrolled machines presented): no schema version change, so a database from before it just gains the table.
                 StateDatabase.Execute(connection, null, CertificateSchema);
+
+                // Also additive: the pairing invitations (protected verifier keys, never a code).
+                StateDatabase.Execute(connection, null, InvitationSchema);
             }
 
             Volatile.Write(ref _checked, 1);

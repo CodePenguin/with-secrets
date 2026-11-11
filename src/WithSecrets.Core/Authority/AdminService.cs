@@ -15,7 +15,7 @@ public sealed record AdminCaller(AdminSession? Session);
 
 /// <summary>What the service needs to run the administration of the authority.</summary>
 public sealed record AdminServiceParts(AuthorityStore Store, AuthorityLock Lock, AdminAuthorizer Authorizer, Func<Action<string>, IAdminAsker> Askers, IUnlockProtection Protection, Action OnUnlocked, int Port,
-    AuthorityKeyRing Keys, LocalAuthority Authority, HostConfigFile HostConfig, string? LocalFingerprint, IPasskeyAdmin? Passkeys, TimeProvider? Clock = null);
+    AuthorityKeyRing Keys, LocalAuthority Authority, HostConfigFile HostConfig, string? LocalFingerprint, IPasskeyAdmin? Passkeys, TimeProvider? Clock = null, PairingService? Pairing = null);
 
 /// <summary>
 /// The authority's administration, served by the service on its own loopback port as a small server-rendered web app (<see cref="AdminWeb" />). Everything an administrator does lives here;
@@ -541,4 +541,4 @@ public sealed partial class AdminService
 
 /// <summary>One operation as it will be asked and applied: its name, the sentence the person reads, its parameters (all of them are signed), and what runs after the verified tap.</summary>
 internal sealed record AdminPlan(string Operation, string Sentence, IReadOnlyList<(string Name, string Value)> Parameters, Func<AdminAuthorization, string?> Apply, byte[]? Material = null,
-    Func<Action<string>, Func<string?>, (bool Ok, string Detail, string Actor)>? Delegated = null, Action<string>? OnRefused = null);
+    Func<Action<string>, Func<string?>, (bool Ok, string Detail, string Actor)>? Delegated = null, Action<string>? OnRefused = null, System.Runtime.CompilerServices.StrongBox<InvitationCreatedDto?>? Output = null);

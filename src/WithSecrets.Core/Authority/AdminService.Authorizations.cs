@@ -17,7 +17,7 @@ public enum AuthorizationState
 public sealed record AuthorizationView(string Id, string Operation, AuthorizationState State, string? Detail, string? Link, string Sentence, IReadOnlyList<(string Name, string Value)> Parameters, DateTimeOffset Created, DateTimeOffset Expires);
 
 /// <summary>What a mutation came to: applied (200), a passkey page to open for a delegated operation (202), or a refusal with its code, status and one safe line.</summary>
-internal sealed record MutationResult(int Status, string? Code, string? Detail, string? Link = null)
+internal sealed record MutationResult(int Status, string? Code, string? Detail, string? Link = null, InvitationCreatedDto? Invitation = null)
 {
     public bool Applied => Status == 200;
 }
@@ -365,7 +365,19 @@ public sealed partial class AdminService
 
             string? failure = ApplyAuthorized(plan, result, result.Admin!);
 
-            return failure is null ? new MutationResult(200, null, null) : new MutationResult(409, "operation-failed", ApprovalSummary.Clean(failure));
+            if (failure is not null)
+            {
+                return new MutationResult(409, "operation-failed", ApprovalSummary.Clean(failure));
+            }
+
+            // The bundle of a new invitation goes into this one answer and nowhere else: the box is emptied here, so it cannot be fetched again.
+            InvitationCreatedDto? created = plan.Output?.Value;
+            if (plan.Output is { } box)
+            {
+                box.Value = null;
+            }
+
+            return new MutationResult(200, null, null, null, created);
         }
         finally
         {

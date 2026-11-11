@@ -737,7 +737,7 @@ internal sealed partial class AdminApi
         MutationResult result = await admin.MutateAsync(owner, op, args, authorization, call.Context.RequestAborted);
         if (result.Status is 200 or 202)
         {
-            return new ApiResult(result.Status, new MutationResponse(op, result.Status == 200 ? "applied" : "started", result.Link));
+            return new ApiResult(result.Status, new MutationResponse(op, result.Status == 200 ? "applied" : "started", result.Link, result.Invitation));
         }
 
         return new ApiResult(result.Status, new ApiProblem(result.Status, result.Code ?? "operation-refused", result.Detail ?? "refused"));
@@ -750,4 +750,4 @@ internal sealed record NameValueDto(string Name, string Value);
 
 internal sealed record AuthorizationDto(string Id, string Operation, string State, string? Detail, string? Link, string Sentence, IReadOnlyList<NameValueDto> Parameters, DateTimeOffset Created, DateTimeOffset Expires, int LifetimeSeconds);
 
-internal sealed record MutationResponse(string Operation, string Outcome, string? Link);
+internal sealed record MutationResponse(string Operation, string Outcome, string? Link, InvitationCreatedDto? Invitation = null);

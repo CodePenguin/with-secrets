@@ -191,8 +191,10 @@ public sealed class HostService : IDisposable
             return new TargetAdminAsker(primary, local);
         });
         IPasskeyAdmin? passkeys = options.PasskeyAdminFactory?.Invoke() ?? (options.State is { } passkeyState ? new StatePasskeyAdmin(passkeyState) : null);
-        Admin = new AdminService(new AdminServiceParts(options.Deployment.Store, Lock, new AdminAuthorizer(options.Deployment.Store, verifier, options.Deployment.Clock), askers, options.UnlockProtection ?? UnlockProtections.ForThisPlatform(), AfterUnlock, port,
-            options.Deployment.Keys, options.Deployment.Authority, options.Deployment.HostConfig, options.Deployment.Fingerprint, passkeys, options.Deployment.Clock));
+        IUnlockProtection protection = options.UnlockProtection ?? UnlockProtections.ForThisPlatform();
+        Pairing = new PairingService(options.Deployment.Store, protection, options.Deployment.IdentityCertificate, () => MachineUrl, options.Deployment.Clock);
+        Admin = new AdminService(new AdminServiceParts(options.Deployment.Store, Lock, new AdminAuthorizer(options.Deployment.Store, verifier, options.Deployment.Clock), askers, protection, AfterUnlock, port,
+            options.Deployment.Keys, options.Deployment.Authority, options.Deployment.HostConfig, options.Deployment.Fingerprint, passkeys, options.Deployment.Clock, Pairing));
 
         // The host's audit: events are signed with the machine key and committed to the outbox (beside authority.db) before a run decrypts anything; the uploader sends them on its own.
         HostAuditOutbox outbox = HostAuditOutbox.InFolder(Path.GetDirectoryName(options.Deployment.Store.FilePath)!, options.Deployment.MachineKey, options.Deployment.Clock);
@@ -205,6 +207,12 @@ public sealed class HostService : IDisposable
 
     /// <summary>The port of the machine listener, or null when this service serves none.</summary>
     public int? MachinePort => _machineListener?.Port;
+
+    /// <summary>Pairing: creating invitations for the admin app, and the handler behind the machine listener's pairing route.</summary>
+    public PairingService Pairing { get; }
+
+    /// <summary>The address machines pair with and connect to (the machine listener's bind address and port), or null when this service serves no machine endpoint.</summary>
+    private string? MachineUrl => _machineListener is { } listener && _options.MachineEndpoint is { } endpoint ? "https://" + (endpoint.Bind.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6 ? "[" + endpoint.Bind + "]" : endpoint.Bind.ToString()) + ":" + listener.Port.ToString(System.Globalization.CultureInfo.InvariantCulture) : null;
 
     /// <summary>For tests: the machine listener (null when none is served).</summary>
     internal MachineListener? MachineListener => _machineListener;
@@ -342,6 +350,7 @@ public sealed class HostService : IDisposable
         }
 
         _launches = new AuthorityLaunchHandler(_options.Deployment.Authority, _options.Deployment.Keys, _options.Deployment.Store, _options.Store, MachineApprover, Lock, _options.Deployment.Clock);
+        endpoint.Pairing ??= new PairingHandler(Pairing);
         _machineListener = MachineListener.Start(_options.Deployment.Authority, _options.Deployment.Keys, _options.Deployment.Store, _options.Deployment.Tls, endpoint, _launches);
     }
     /// <summary>The approver for a launch another machine asked for: the same page, passkeys and settings as a local launch, shown here.</summary>

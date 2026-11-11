@@ -96,18 +96,18 @@ public sealed class MachinePeers(AuthorityStore store, TimeProvider clock)
 }
 
 /// <summary>What the pairing seam is handed: the HTTP request (already past the transport policy) and who the certificate says the caller is.</summary>
-public sealed record PairingContext(HttpContext Http, PeerIdentity Peer, X509Certificate2 Certificate);
+public sealed record PairingContext(HttpContext Http, PeerIdentity Peer, X509Certificate2 Certificate, byte[] Body);
 
-/// <summary>The seam for the pairing route: a later task answers first contact and registration here. Until then the route answers 501 "not-implemented" and does nothing.</summary>
+/// <summary>The pairing route's handler (the one route an unenrolled certificate may reach). Without one (a listener nobody gave pairing to) the route answers 501 "not-implemented" and does nothing.</summary>
 public interface IPairingHandler
 {
-    /// <summary>Handles the request. Returns the HTTP status and the error or result code to answer with (the listener writes the safe body).</summary>
-    Task<(int Status, string Code)> HandleAsync(PairingContext context, CancellationToken cancel);
+    /// <summary>Handles the request (the body is already read, within the fixed limit). Returns the answer: a refusal code with its status, or the small JSON reply.</summary>
+    Task<PairingReply> HandleAsync(PairingContext context, CancellationToken cancel);
 }
 
 internal sealed class NotImplementedPairing : IPairingHandler
 {
-    public Task<(int Status, string Code)> HandleAsync(PairingContext context, CancellationToken cancel) => Task.FromResult((501, "not-implemented"));
+    public Task<PairingReply> HandleAsync(PairingContext context, CancellationToken cancel) => Task.FromResult(new PairingReply(501, "not-implemented", null));
 }
 
 /// <summary>Where the machine listener listens, and (for tests) how it behaves. The limits are fixed built-in constants of the product; only a test narrows them.</summary>
@@ -134,7 +134,7 @@ public sealed class MachineListenerOptions
     internal int MaxBodyBytes { get; init; } = 4 * 1024 * 1024;
 
     /// <summary>The pairing route's body limit.</summary>
-    internal int MaxPairingBodyBytes { get; init; } = 64 * 1024;
+    internal int MaxPairingBodyBytes { get; init; } = PairingProtocol.MaxBodyBytes;
 
     /// <summary>Requests being served at once, in all, and per machine. More are refused (429), never queued.</summary>
     internal int MaxConcurrent { get; init; } = 64;
@@ -158,7 +158,7 @@ public sealed class MachineListenerOptions
 
     internal TimeProvider Clock { get; init; } = TimeProvider.System;
 
-    internal IPairingHandler? Pairing { get; init; }
+    internal IPairingHandler? Pairing { get; set; }
 }
 
 /// <summary>
@@ -185,6 +185,7 @@ public sealed class MachineListener : IDisposable
     private readonly WebApplication _app;
     private readonly CancellationTokenSource _stop = new();
     private readonly ConcurrentDictionary<string, MachineState> _machines = new(StringComparer.Ordinal);
+    private readonly MachineState _pairingState = new();
     private readonly ConcurrentDictionary<string, Connection> _connections = new(StringComparer.Ordinal);
     private readonly Lock _signalLock = new();
     private TaskCompletionSource _changed = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -356,7 +357,7 @@ public sealed class MachineListener : IDisposable
 
     private static string NewCorrelation() => Convert.ToHexString(RandomNumberGenerator.GetBytes(8)).ToLowerInvariant();
 
-    private static async Task WriteAsync(HttpContext context, int status, string json)
+    internal static async Task WriteAsync(HttpContext context, int status, string json)
     {
         byte[] bytes = Encoding.UTF8.GetBytes(json);
         context.Response.StatusCode = status;
@@ -493,7 +494,8 @@ public sealed class MachineListener : IDisposable
 
         context.Features.Get<IHttpMaxRequestBodySizeFeature>()?.MaxRequestBodySize = bodyLimit;
 
-        MachineState state = _machines.GetOrAdd(peer.Fingerprint, _ => new MachineState());
+        // Every caller of the pairing route shares ONE state (the route is open to certificates nobody enrolled, so nothing may grow with the number of identities they invent).
+        MachineState state = pairing ? _pairingState : _machines.GetOrAdd(peer.Fingerprint, _ => new MachineState());
         int global = Interlocked.Increment(ref _global);
         int mine = Interlocked.Increment(ref state.InFlight);
         if (global > _options.MaxConcurrent || mine > _options.MaxConcurrentPerMachine)
@@ -564,10 +566,27 @@ public sealed class MachineListener : IDisposable
     {
         using CancellationTokenSource limit = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted, _stop.Token);
         limit.CancelAfter(_options.OperationTimeout);
-        (int status, string code) = await _pairing.HandleAsync(new PairingContext(context, peer, certificate), limit.Token);
-        if (!context.Response.HasStarted)
+        byte[]? body = await ReadBodyAsync(context, _options.MaxPairingBodyBytes, limit.Token);
+        if (body is null)
         {
-            await FailAsync(context, status, correlation, code);
+            await FailAsync(context, 413, correlation, "too-large");
+
+            return;
+        }
+
+        PairingReply reply = await _pairing.HandleAsync(new PairingContext(context, peer, certificate, body), limit.Token);
+        if (context.Response.HasStarted)
+        {
+            return;
+        }
+
+        if (reply.Body is { } json)
+        {
+            await WriteAsync(context, reply.Status, json);
+        }
+        else
+        {
+            await FailAsync(context, reply.Status, correlation, reply.Code);
         }
     }
 

@@ -134,11 +134,29 @@ internal sealed partial class AdminApi
                 ("lifetimeSeconds", S.Int(description: "How long a verified authorization may wait for its mutation.")),
             ]),
             ["AuthorizationRequest"] = AuthorizationRequest(),
+            ["Invitation"] = S.Obj(
+            [
+                ("id", S.Str(description: "The invitation's identifier (not secret on its own: it is useless without the pairing code, which is never listed).")),
+                ("status", S.Str(values: ["pending", "consumed", "expired", "revoked"])),
+                ("created", S.Time()),
+                ("expires", S.Time()),
+                ("ended", S.Time(nullable: true)),
+                ("machine", S.Str(nullable: true, description: "The fingerprint of the machine that used it, once consumed.")),
+                ("canRevoke", S.Bool()),
+            ]),
+            ["InvitationList"] = S.Obj([("items", S.Arr(S.Ref("Invitation")))]),
+            ["InvitationCreated"] = S.Obj(
+            [
+                ("id", S.Str()),
+                ("expires", S.Time()),
+                ("bundle", S.Str(description: "The credential bundle: address, identifier and pairing code. Shown ONCE, in this answer. It is not stored in readable form, not logged and cannot be fetched again; give it to the new machine's pairing command (hidden prompt, an environment variable or, preferably, a secret file).")),
+            ]),
             ["MutationResponse"] = S.Obj(
             [
                 ("operation", S.Str()),
                 ("outcome", S.Str(values: ["applied", "started"], description: "applied: done. started: the first passkey page of an operation with pages of its own is at `link`.")),
                 ("link", S.Str(nullable: true)),
+                ("invitation", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("InvitationCreated"), new JsonObject { ["type"] = "null" }) }),
             ]),
         };
 
