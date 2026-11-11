@@ -459,6 +459,47 @@ public static class MachineIdentityFile
 {
     public const string FileName = "machine-identity.cer";
 
+    /// <summary>A certificate is renewed when this little validity is left (renewed before it expires, not after).</summary>
+    public static readonly TimeSpan RenewalWindow = TimeSpan.FromDays(30);
+
+    /// <summary>True when the certificate has less than <see cref="RenewalWindow" /> left (or cannot be read).</summary>
+    public static bool RenewalDue(byte[] certificate, DateTimeOffset now)
+    {
+        try
+        {
+            using X509Certificate2 parsed = X509CertificateLoader.LoadCertificate(certificate);
+
+            return new DateTimeOffset(parsed.NotAfter.ToUniversalTime()) - now < RenewalWindow;
+        }
+        catch (System.Security.Cryptography.CryptographicException)
+        {
+            return true;
+        }
+    }
+
+    /// <summary>A new certificate for the same key (the caller tells the authority before storing it).</summary>
+    public static byte[] Renewed(ISigningKey identityKey, TimeProvider clock) => MachineCertificates.CreateIdentity(identityKey, clock.GetUtcNow());
+
+    /// <summary>Replaces the certificate file atomically.</summary>
+    public static void Store(string folder, byte[] certificate)
+    {
+        Directory.CreateDirectory(folder);
+        string path = Path.Combine(folder, FileName);
+        string temp = path + "." + Guid.NewGuid().ToString("N") + ".new";
+        try
+        {
+            File.WriteAllBytes(temp, certificate);
+            File.Move(temp, path, true);
+        }
+        finally
+        {
+            if (File.Exists(temp))
+            {
+                File.Delete(temp);
+            }
+        }
+    }
+
     public static byte[] LoadOrCreate(string folder, ISigningKey identityKey, TimeProvider clock)
     {
         string path = Path.Combine(folder, FileName);

@@ -193,6 +193,37 @@ public sealed partial class AuthorityStore
             ("$fp", fingerprint), ("$cert", Convert.ToBase64String(certificate)), ("$now", Time(Now)));
     }
 
+    /// <summary>
+    /// A Trusted machine's renewed identity certificate: accepted when it is valid for the very key the authority has for the machine (self-signature, profile, validity), and then it replaces the stored one; audited. Returns null when
+    /// accepted (also when it is the stored one again), else why not. The machine's status, revision and grants are untouched.
+    /// </summary>
+    public string? RenewCertificate(string fingerprint, byte[] certificate)
+    {
+        if (certificate.Length is 0 or > 4096)
+        {
+            return "the certificate is unusable";
+        }
+
+        return Write((connection, transaction) =>
+        {
+            MachineRecord? machine = Query(connection, transaction, "SELECT * FROM machines WHERE fingerprint = $fp", Machine, ("$fp", fingerprint)).FirstOrDefault();
+            if (machine is not { Status: MachineStatus.Trusted })
+            {
+                return "only a Trusted machine renews its identity certificate";
+            }
+
+            if (MachineCertificates.ValidateIdentity(certificate, Now, machine.PublicKey) is { } problem)
+            {
+                return problem;
+            }
+
+            SetCertificate(connection, transaction, fingerprint, certificate);
+            Audit(connection, transaction, "machine-identity-renewed", fingerprint, null, fingerprint, "identity certificate replaced by one for the same key (SHA-256 " + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(certificate))[..16] + ")");
+
+            return (string?)null;
+        });
+    }
+
     /// <summary>The public identity certificate (DER) the machine enrolled with, or null (a machine enrolled without one cannot connect over TLS). Public data only.</summary>
     public byte[]? Certificate(string fingerprint)
     {

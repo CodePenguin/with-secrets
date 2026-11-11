@@ -846,6 +846,26 @@ public sealed class MachineListener : IDisposable
                     return Mine(reconcile.MachineFingerprint) ? Ok(RemoteWire.Write(await _authority.ReconcileAsync(reconcile, cancel))) : Fail("wrong-machine");
                 case RemoteOps.KeyTransitions:
                     return RemoteWire.TryReadText(body, "after", out string after) ? Ok(RemoteWire.Write(await _authority.KeyTransitionsAsync(after, cancel))) : Fail("bad-request");
+                case RemoteOps.RenewIdentity:
+                {
+                    if (!RemoteWire.TryReadText(body, "certificate", out string certificateText) || certificateText.Length > 8192)
+                    {
+                        return Fail("bad-request");
+                    }
+
+                    byte[] renewed;
+                    try
+                    {
+                        renewed = Convert.FromBase64String(certificateText);
+                    }
+                    catch (FormatException)
+                    {
+                        return Fail("bad-request");
+                    }
+
+                    return _store.RenewCertificate(peer.Fingerprint, renewed) is not null ? Fail("invalid-certificate") : Ok(RemoteWire.Empty);
+                }
+
                 case RemoteOps.AuthorityKey:
                     return _keys.ActivePublicKey() is { } signing ? Ok("{\"publicKey\":\"" + Convert.ToBase64String(signing) + "\"}") : Fail("unsupported");
                 case RemoteOps.PendingInvalidations:

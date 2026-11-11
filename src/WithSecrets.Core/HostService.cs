@@ -378,6 +378,22 @@ public sealed class HostService : IDisposable
         public ApprovalDecision Request(ApprovalRequest request) => ApprovalDecision.Deny(reason);
     }
 
+    /// <summary>Renews the machine's identity certificate when it is near its end (checked at every check-in with the authority: start and each reconnect). A failure is logged and retried at the next one.</summary>
+    private void RenewIdentity(CancellationToken cancel)
+    {
+        try
+        {
+            if (_options.Deployment.RenewIdentityIfDueAsync(cancel).GetAwaiter().GetResult())
+            {
+                AppLog.Warn("this machine's identity certificate was renewed (same key)");
+            }
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            AppLog.Warn("renewing the identity certificate failed: {Type}", error.GetType().Name);
+        }
+    }
+
     private void StartupReconcile()
     {
         try
@@ -385,6 +401,10 @@ public sealed class HostService : IDisposable
             using CancellationTokenSource limit = new(TimeSpan.FromSeconds(10));
             _options.Deployment.Remote?.EnsureAuthorityKeyPinnedAsync(limit.Token).GetAwaiter().GetResult();
             Volatile.Write(ref _ready, Authorization.ReconcileAsync(limit.Token).GetAwaiter().GetResult() != HostAuthorization.Reconciliation.Unreachable);
+            if (Ready)
+            {
+                RenewIdentity(limit.Token);
+            }
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
@@ -726,6 +746,7 @@ public sealed class HostService : IDisposable
 
                         Volatile.Write(ref _ready, true);
                         reconnected = false;
+                        RenewIdentity(_stop.Token);
                     }
 
                     await Authorization.PollAsync(_stop.Token);

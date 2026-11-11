@@ -158,6 +158,7 @@ internal static partial class RemoteAuthorityTests
         await Skew(check, root);
         await ReleaseCheckpoint(check, root);
         await TransientFailures(check, root);
+        await IdentityRenewal(check, root);
     }
 
     private static async Task OnePoll(Action<bool, string> check, string root)
@@ -341,5 +342,37 @@ internal static partial class RemoteAuthorityTests
         gate.Unlock(UnlockMethod.Seam);
         (_, WireMessage? retried, _, _) = await raw.Call(RemoteOps.Decide, "decide-transient", RemoteWire.Write(envelope));
         check(failed is { Ok: false, Error: "locked" } && retried is not { Error: "locked" }, "transient: a failure caused by the authority locking mid-operation is not remembered under the request id (failed " + failed?.Error + ", then " + (retried?.Ok == true ? "ok" : retried?.Error) + ")");
+    }
+    private static async Task IdentityRenewal(Action<bool, string> check, string root)
+    {
+        TestClock clock = new();
+        using Net net = Net.Start(root, null, null, clock);
+        Peer host = net.Host("renewer");
+        Peer pending = net.Host("not-approved", approve: false);
+        host.Machine.Deployment.UseRemote(host.Remote);
+        AuthorityStore store = net.Authority.Deployment.Store;
+        byte[] original = host.Machine.Deployment.IdentityCertificate;
+        check(!await host.Machine.Deployment.RenewIdentityIfDueAsync() && store.Certificate(host.Fingerprint)!.AsSpan().SequenceEqual(original), "renewal: a certificate with plenty of validity left is not renewed");
+
+        // The authority's own checks: the same key only, and Trusted machines only; the stored certificate is untouched by a refusal.
+        using EcKey stranger = new();
+        byte[] foreign = MachineCertificates.CreateIdentity(stranger, clock.GetUtcNow());
+        byte[] sameKey = MachineCertificates.CreateIdentity(host.Machine.MachineKey, clock.GetUtcNow());
+        check(store.RenewCertificate(host.Fingerprint, foreign) is not null && store.RenewCertificate(host.Fingerprint, [1, 2, 3]) is not null && store.RenewCertificate(pending.Fingerprint, MachineCertificates.CreateIdentity(pending.Machine.MachineKey, clock.GetUtcNow())) is not null && store.Certificate(host.Fingerprint)!.AsSpan().SequenceEqual(original),
+            "renewal: a certificate for another key, garbage, or a machine that is not Trusted is refused and the stored certificate stays");
+
+        // Due: the authority hears of the new certificate over the authenticated connection first; the machine switches only after that.
+        clock.Advance(TimeSpan.FromDays(3640));
+        net.Authority.Deployment.Store.Disable(host.Fingerprint, "test admin");
+        bool whileDisabled = await host.Machine.Deployment.RenewIdentityIfDueAsync();
+        check(!whileDisabled && host.Machine.Deployment.IdentityCertificate.AsSpan().SequenceEqual(original) && store.Certificate(host.Fingerprint)!.AsSpan().SequenceEqual(original), "renewal: a machine the authority does not accept (Disabled) cannot renew, and nothing changes on either side");
+        net.Authority.Deployment.Store.Enable(host.Fingerprint, "test admin");
+        int revision = store.Find(host.Fingerprint)!.SecurityRevision;
+        bool renewed = await host.Machine.Deployment.RenewIdentityIfDueAsync();
+        byte[] now = host.Machine.Deployment.IdentityCertificate;
+        byte[] onDisk = File.ReadAllBytes(Path.Combine(Path.GetDirectoryName(host.Machine.Deployment.HostConfig.FilePath)!, MachineIdentityFile.FileName));
+        check(renewed && !now.AsSpan().SequenceEqual(original) && store.Certificate(host.Fingerprint)!.AsSpan().SequenceEqual(now) && onDisk.AsSpan().SequenceEqual(now) && MachineCertificates.FingerprintOf(now) == host.Fingerprint, "renewal: a due certificate is renewed with the same key (same fingerprint): the authority stores it first, then the machine's file is replaced");
+        check(store.Audit().Any(entry => entry.Event == "machine-identity-renewed") && store.Find(host.Fingerprint) is { Status: MachineStatus.Trusted } trusted && trusted.SecurityRevision == revision, "renewal: the renewal is audited at the authority and does not change the machine's status or security revision");
+        check(!await host.Machine.Deployment.RenewIdentityIfDueAsync(), "renewal: it is not renewed again until it is due again");
     }
 }

@@ -52,6 +52,30 @@ public sealed class LocalDeployment(AuthorityStore store, AuthorityKeyRing keys,
     /// <summary>This machine's self-signed identity certificate (DER, public data), made from the identity key on first need and kept beside host.json; it is what enrollment presents and what peers validate temporary TLS certificates against.</summary>
     public byte[] IdentityCertificate => _identityCertificate ??= MachineIdentityFile.LoadOrCreate(Path.GetDirectoryName(hostConfig.FilePath)!, machineKey, clock);
 
+    /// <summary>
+    /// Renews this machine's identity certificate before it expires (same key, so the same fingerprint): in remote mode the authority is told first, over the authenticated connection, and only when it accepted the new certificate
+    /// is the file replaced (so the authority never holds a certificate older than the one this machine presents). Returns true when a renewal happened. Nothing changes on any failure; it is tried again at the next check.
+    /// </summary>
+    public async Task<bool> RenewIdentityIfDueAsync(CancellationToken cancel = default)
+    {
+        byte[] current = IdentityCertificate;
+        if (_remote is null || !MachineIdentityFile.RenewalDue(current, clock.GetUtcNow()))
+        {
+            return false;
+        }
+
+        byte[] renewed = MachineIdentityFile.Renewed(machineKey, clock);
+        if (!await _remote.RenewIdentityAsync(renewed, cancel))
+        {
+            return false;
+        }
+
+        MachineIdentityFile.Store(Path.GetDirectoryName(hostConfig.FilePath)!, renewed);
+        _identityCertificate = renewed;
+
+        return true;
+    }
+
     /// <summary>A deployment over any keys (tests, tools). <paramref name="authorityKey" /> opens the authority key of a generation.</summary>
     public static LocalDeployment Create(string folder, ISigningKey machineKey, Func<int, ISigningKey> authorityKey, string hostName, TimeProvider? clock = null, Func<int, ISigningKey>? create = null)
     {

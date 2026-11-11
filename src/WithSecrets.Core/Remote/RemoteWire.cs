@@ -17,6 +17,9 @@ internal static class RemoteOps
     public const string AcknowledgeGrantEvent = "ack-grant-event";
     public const string AuditUpload = "audit-upload";
 
+    /// <summary>Host to authority: this machine's renewed identity certificate (same key, valid self-signature and profile). The authority checks it against the key it has for the machine, replaces the stored one and audits it. Provisional mechanism: 10.2 says a renewal is accepted without re-enrollment but not how the authority hears of it.</summary>
+    public const string RenewIdentity = "renew-identity";
+
     /// <summary>Host to authority: authorize one launch at the authority (approval, decryption there), answered with a <see cref="LaunchAnswer" />. Never repeated under the same id. The answer is streamed: the approval-link notices as they are made, then the answer.</summary>
     public const string LaunchAuthorize = "launch-authorize";
 
@@ -34,7 +37,7 @@ internal static class RemoteOps
 
     public static readonly string[] Requests =
     [
-        Decide, KeyTransitions, PendingInvalidations, AcknowledgeInvalidation, Grant, Reconcile, PendingGrantEvents, AcknowledgeGrantEvent, AuditUpload, LaunchAuthorize, Poll, AuthorityKey,
+        Decide, KeyTransitions, PendingInvalidations, AcknowledgeInvalidation, Grant, Reconcile, PendingGrantEvents, AcknowledgeGrantEvent, AuditUpload, RenewIdentity, LaunchAuthorize, Poll, AuthorityKey,
     ];
 }
 /// <summary>One application message (a request, a notification, or a response): the body of an HTTP request or response, or one line of a streamed response.</summary>

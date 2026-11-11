@@ -101,8 +101,25 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, ILaunchAuthority, 
     /// <summary>Raised when the connection to the authority ended unexpectedly (a poll or a request failed in transport, or the authority said <c>locked</c>): a host cancels the launches that have not started.</summary>
     public event Action? LinkEnded;
 
-    /// <summary>Raised when a new TLS connection was established after an earlier one (a reconnect). The host then checks in again (status and security revision) before relying on what it holds.</summary>
-    public event Action? Reconnected;
+    /// <summary>
+    /// Tells the authority this machine's renewed identity certificate (same key; <see cref="RemoteOps.RenewIdentity" />). The request id is made from the certificate, so repeating it is the same request. Returns true when the authority
+    /// accepted it; the machine keeps using the old certificate until then.
+    /// </summary>
+    public async Task<bool> RenewIdentityAsync(byte[] identityCertificate, CancellationToken cancel = default)
+    {
+        string id = "renew-identity:" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(identityCertificate))[..32];
+        string body = "{\"certificate\":\"" + Convert.ToBase64String(identityCertificate) + "\"}";
+        try
+        {
+            await CallAsync(RemoteOps.RenewIdentity, id, body, cancel);
+
+            return true;
+        }
+        catch (Exception error) when (error is RemoteTransportException or RemoteRefusedException)
+        {
+            return false;
+        }
+    }
 
     /// <summary>Closes every connection (the next call connects again with a fresh handshake).</summary>
     public void Disconnect()
@@ -306,10 +323,7 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, ILaunchAuthority, 
             return false;
         }
 
-        if (Interlocked.Increment(ref _connections) > 1)
-        {
-            Reconnected?.Invoke();
-        }
+        Interlocked.Increment(ref _connections);
 
         return true;
     }
