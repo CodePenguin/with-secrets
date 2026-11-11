@@ -231,10 +231,8 @@ internal static class ApiHardeningTests
         check(pages.All(page => page.Link is not null && page.PostStatus == 201), "lock: while callers without a session fill their pages, every request for a Lock page is answered with one (none is refused)");
         check(Tap(app, pages[0], app.Laptop) != 200, "lock: the oldest page, pushed out by newer ones, is closed");
         Tapped newest = pages[^1];
-        check(Tap(app, newest, app.Laptop) == 200 && await lockers[^1].WaitAuthorizationAsync(newest.AuthorizationId!) == "verified", "lock: the newest page takes the tap");
-        (HttpMethod method, string path, string json) = lockers[^1].MutationRequest(AdminService.OpLock, newest.AuthorizationId);
-        (int locked, _) = await lockers[^1].SendAsync(method, path, json);
-        check(locked == 200 && app.Service.Lock.IsLocked && app.Service.Admin.Sessions.Count == 0 && (await admin.GetAsync("/api/v1/machines")).Status == 401, "lock: a fresh tap (no session, a Lock page of its own) locks, and ends every session");
+        check(Tap(app, newest, app.Laptop) == 200, "lock: the newest page takes the tap");
+        check(await HostServiceTests.WaitFor(() => app.Service.Lock.IsLocked) && app.Service.Admin.Sessions.Count == 0 && (await admin.GetAsync("/api/v1/machines")).Status == 401, "lock: a fresh tap (no session, a Lock page of its own) locks, and ends every session");
     }
 
     // ---- L1, L2: the key that was signed, and a lock that comes between planning and keeping ----
@@ -245,24 +243,30 @@ internal static class ApiHardeningTests
         AdminBrowser b = await app.SignedIn();
 
         // L1: two rotations are authorized (each names "Current key: K1"); the first is applied, so the second is for a key that is no longer current.
-        Tapped first = await b.OpAsyncWithoutMutation("authority-key-rotate", app.Laptop);
-        Tapped second = await b.OpAsyncWithoutMutation("authority-key-rotate", app.Laptop);
-        check(await b.WaitAuthorizationAsync(first.AuthorizationId!) == "verified" && await b.WaitAuthorizationAsync(second.AuthorizationId!) == "verified", "key: two rotations are authorized");
+        // The service applies each change when its tap is verified, so two sessions each ask for a rotation (each page names the current key) and the second tap comes after the first rotation was applied.
+        AdminBrowser other = await app.SignedIn();
+        Tapped first = await b.OpAsyncWithoutMutation("authority-key-rotate", null);
+        Tapped second = await other.OpAsyncWithoutMutation("authority-key-rotate", null);
         string k1 = app.Store.ActiveKey()?.Fingerprint ?? "";
-        (HttpMethod m1, string p1, string j1) = b.MutationRequest("authority-key-rotate", first.AuthorizationId);
-        (int rotated, _) = await b.SendAsync(m1, p1, j1);
+        check(first.Link is not null && second.Link is not null && Tap(app, first, app.Laptop) == 200 && await b.WaitAuthorizationAsync(first.AuthorizationId!) == "consumed", "key: two rotations are authorized, and the first tap rotates the key");
+        app.Clock.Advance(TimeSpan.FromSeconds(31));
         string k2 = app.Store.ActiveKey()?.Fingerprint ?? "";
-        (HttpMethod m2, string p2, string j2) = b.MutationRequest("authority-key-rotate", second.AuthorizationId);
-        (int stale, string staleBody) = await b.SendAsync(m2, p2, j2);
+        int secondTap = Tap(app, second, app.Laptop);
+        await other.WaitAuthorizationAsync(second.AuthorizationId!);
+        (HttpMethod m2, string p2, string j2) = other.MutationRequest("authority-key-rotate", second.AuthorizationId);
+        (int stale, string staleBody) = await other.SendAsync(m2, p2, j2);
+        int rotated = secondTap == 200 ? 200 : 0;
         check(rotated == 200 && k2 != k1 && stale == 409 && Code(staleBody) == "operation-failed" && app.Store.ActiveKey()?.Fingerprint == k2 && staleBody.Contains("authority key changed", StringComparison.Ordinal), "key: the second rotation was signed for the old key, so it is refused when applied and the key is still the first rotation's");
 
         // The same for a lock that was authorized for a key that was rotated away since.
-        Tapped lockTap = await b.OpAsyncWithoutMutation(AdminService.OpLock, app.Laptop);
-        Tapped third = await b.OpAsyncWithoutMutation("authority-key-rotate", app.Laptop);
-        await b.WaitAuthorizationAsync(lockTap.AuthorizationId!);
+        Tapped lockTap = await b.OpAsyncWithoutMutation(AdminService.OpLock, null);
+        Tapped third = await b.OpAsyncWithoutMutation("authority-key-rotate", null);
+        app.Clock.Advance(TimeSpan.FromSeconds(31));
+        Tap(app, third, app.Laptop);
         await b.WaitAuthorizationAsync(third.AuthorizationId!);
-        (HttpMethod m3, string p3, string j3) = b.MutationRequest("authority-key-rotate", third.AuthorizationId);
-        await b.SendAsync(m3, p3, j3);
+        app.Clock.Advance(TimeSpan.FromSeconds(31));
+        Tap(app, lockTap, app.Laptop);
+        await b.WaitAuthorizationAsync(lockTap.AuthorizationId!);
         (HttpMethod ml, string pl, string jl) = b.MutationRequest(AdminService.OpLock, lockTap.AuthorizationId);
         (int staleLock, _) = await b.SendAsync(ml, pl, jl);
         check(staleLock == 409 && !app.Service.Lock.IsLocked, "key: a lock that was authorized for a key that has since been rotated is refused when applied");
@@ -353,11 +357,10 @@ internal static class ApiHardeningTests
         Tapped tapped = await c.OpAsyncWithoutMutation("set-audit-retention", app.Laptop, ("days", "30"));
         await c.WaitAuthorizationAsync(tapped.AuthorizationId!);
         (_, string state, _) = await c.GetAsync("/api/v1/authorizations/" + tapped.AuthorizationId);
-        DateTimeOffset expires = DateTimeOffset.Parse(Member(state, "expires")!, System.Globalization.CultureInfo.InvariantCulture);
-        TimeSpan left = expires - app.Clock.GetUtcNow();
-        check(Member(state, "state") == "verified" && left > TimeSpan.FromSeconds(100) && left <= AdminService.AuthorizationLifetime, "expiry: a verified authorization says it ends 120 seconds after its tap (" + left.TotalSeconds + "s left)");
+        check(Member(state, "state") == "consumed" && state.Contains("\"outcome\":\"applied\"", StringComparison.Ordinal) && app.Store.AuditRetentionDays() == 30, "expiry: a tap that was verified has already made its change, and the authorization says it was applied (there is no window to wait out)");
 
         // L6: a failure of the store is one fixed sentence, never the text of the exception.
+        Tapped held = await c.OpAsyncWithoutMutation("set-audit-retention", null, ("days", "31"));
         using (SqliteConnection hold = new("Data Source=" + app.Store.FilePath + ";Pooling=False"))
         {
             hold.Open();
@@ -367,7 +370,9 @@ internal static class ApiHardeningTests
                 begin.ExecuteNonQuery();
             }
 
-            (HttpMethod method, string path, string json) = c.MutationRequest("set-audit-retention", tapped.AuthorizationId, ("days", "30"));
+            Tap(app, held, app.Laptop);
+            await c.WaitAuthorizationAsync(held.AuthorizationId!);
+            (HttpMethod method, string path, string json) = c.MutationRequest("set-audit-retention", held.AuthorizationId, ("days", "31"));
             (int failed, string failedBody) = await c.SendAsync(method, path, json);
             using JsonDocument failure = JsonDocument.Parse(failedBody);
             string detail = failure.RootElement.TryGetProperty("detail", out JsonElement d) ? d.GetString() ?? "" : "";
@@ -394,13 +399,13 @@ internal static class ApiHardeningTests
         using AdminApp app = new(root);
         AdminBrowser b = await app.SignedIn();
         Tapped tapped = await b.OpAsyncWithoutMutation("set-audit-retention", app.Laptop, ("days", "12"));
-        check(await b.WaitAuthorizationAsync(tapped.AuthorizationId!) == "verified", "race: the authorization is verified");
+        check(await b.WaitAuthorizationAsync(tapped.AuthorizationId!) == "consumed" && app.Store.AuditRetentionDays() == 12, "race: the tap made the change when it was verified");
         (HttpMethod method, string path, string json) = b.MutationRequest("set-audit-retention", tapped.AuthorizationId, ("days", "12"));
         Task<(int Status, string Body)>[] sends = [.. Enumerable.Range(0, 8).Select(_ => b.SendAsync(method, path, json))];
         (int Status, string Body)[] answers = await Task.WhenAll(sends);
-        int applied = answers.Count(answer => answer.Status == 200);
-        int used = answers.Count(answer => answer.Status == 403 && Code(answer.Body) is "authorization-used" or "authorization-invalid");
+        int applied = answers.Count(answer => answer.Status == 200 && Member(answer.Body, "outcome") == "applied");
+        int used = answers.Count(answer => answer.Status == 200 && Member(answer.Body, "outcome") == "already-applied");
         int appliedRows = AuditText(app.Store).Split('\n').Count(line => line.Contains("set-audit-retention", StringComparison.Ordinal) && line.Contains("applied", StringComparison.Ordinal));
-        check(applied == 1 && used == 7 && app.Store.AuditRetentionDays() == 12 && appliedRows == 1, "race: eight mutations that carry one authorization at the same time apply it exactly once (" + applied + " applied, " + used + " refused, " + appliedRows + " audit rows)");
+        check(applied == 1 && used == 7 && app.Store.AuditRetentionDays() == 12 && appliedRows == 1, "race: eight mutations that carry one authorization at the same time apply nothing again: one is the answer, seven are told it was already applied (" + applied + " applied, " + used + " repeats, " + appliedRows + " audit rows)");
     }
 }

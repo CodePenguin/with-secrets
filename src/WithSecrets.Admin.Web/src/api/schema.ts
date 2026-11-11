@@ -289,11 +289,12 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Where an authorization stands (pending, verified, refused, consumed or expired). Only for the caller it was made for (its session, or for the unlock its browser). */
+        /** Where an authorization stands (pending, verified, refused, consumed or expired) and, once its tap was verified, how the change it authorized came out (`result`: the service applies it at the tap, so this is readable after a reload or from another tab; a new invitation's bundle is given once, when collect=invitation is asked for or by the first retry of the mutation). Only for the caller it was made for (its session, or for the unlock its browser). */
         get: operations["getAuthorization"];
         put?: never;
         post?: never;
-        delete?: never;
+        /** Cancel an authorization whose passkey tap has not been made: a tap on its page afterwards changes nothing. Only for the caller it was made for. 409 when the tap was already judged (its change was made or refused and cannot be taken back). */
+        delete: operations["cancelAuthorization"];
         options?: never;
         head?: never;
         patch?: never;
@@ -900,6 +901,20 @@ export interface components {
             expires: string;
             /** @description How long a verified authorization may wait for its mutation. */
             lifetimeSeconds: number;
+            result: components["schemas"]["AuthorizationResult"] | null;
+        };
+        AuthorizationResult: {
+            /**
+             * @description applied: the service made the change when the tap was verified. started: the operation's own passkey pages continue at `link`. failed: the tap was good but the change was refused or could not be made (see `code` and `detail`); nothing was changed.
+             * @enum {string}
+             */
+            outcome: "applied" | "started" | "failed";
+            code: string | null;
+            detail: string | null;
+            link: string | null;
+            invitation: components["schemas"]["InvitationCreated"] | null;
+            /** @description True when a new invitation's bundle was already given (or held for 5 minutes without being collected): it is never given again. */
+            invitationGone: boolean;
         };
         /** @description The operation and every parameter that the passkey will sign. The mutation that follows must repeat exactly these. */
         AuthorizationRequest: {
@@ -940,10 +955,10 @@ export interface components {
         MutationResponse: {
             operation: string;
             /**
-             * @description applied: done. started: the first passkey page of an operation with pages of its own is at `link`.
+             * @description applied: done (the service made the change when the tap was verified). started: the first passkey page of an operation with pages of its own is at `link`. already-applied and already-started: a retry for an authorization that was already answered; nothing was applied again.
              * @enum {string}
              */
-            outcome: "applied" | "started";
+            outcome: "applied" | "started" | "already-applied" | "already-started";
             link: string | null;
             invitation: components["schemas"]["InvitationCreated"] | null;
         };
@@ -2432,7 +2447,10 @@ export interface operations {
     };
     getAuthorization: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Give the bundle of a new invitation in this answer (once; it is never given again). */
+                collect?: "invitation";
+            };
             header?: never;
             path: {
                 id: string;
@@ -2448,6 +2466,73 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Authorization"];
+                };
+            };
+            /** @description The request is not valid (invalid-request, invalid-json). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such resource (not-found). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The Host is not a loopback name (host-not-allowed). */
+            421: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request failed (internal-error). Nothing the response does not say was changed. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    cancelAuthorization: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Success. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Done"];
                 };
             };
             /** @description The request is not valid (invalid-request, invalid-json). */

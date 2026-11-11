@@ -1,122 +1,146 @@
 import { cleanup, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it } from 'vitest'
-import { authorization, machine, problem, signedIn, violations } from '../../test/fakeApi'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { pendingAuthorization, setPendingAuthorization } from '../../api/client'
+import { authorization, machine, problem, signedIn, status, violations } from '../../test/fakeApi'
 import { renderApp } from '../../test/render'
 
+const applied = { outcome: 'applied' as const, code: null, detail: null, link: null, invitation: null, invitationGone: false }
+const LINK = 'http://localhost:54321/passkey-page-token'
+const getPath = 'GET /api/v1/authorizations/auth-id-0001'
+const deletePath = 'DELETE /api/v1/authorizations/auth-id-0001'
 const approvePath = 'POST /api/v1/machines/' + machine().fingerprint + '/approve'
 
-/** The machines view with one pending machine; the service creates an authorization that becomes verified after `pendingPolls` looks. */
-function setup(options: { pendingPolls?: number; state?: 'verified' | 'refused' | 'expired'; created?: Partial<ReturnType<typeof authorization>>; mutation?: ReturnType<typeof problem> | null } = {}) {
-  let looks = 0
-  const fake = signedIn({
-    'POST /api/v1/authorizations': {
-      status: 201,
-      body: authorization({ parameters: [{ name: 'fingerprint', value: machine().fingerprint }, { name: 'name', value: 'ci box' }], ...options.created }),
-    },
-    'GET /api/v1/authorizations/auth-id-0001': () => {
-      looks++
+let opened: ReturnType<typeof vi.spyOn>
+beforeEach(() => {
+  opened = vi.spyOn(window, 'open').mockReturnValue(null)
+})
+afterEach(() => {
+  opened.mockRestore()
+})
 
-      return { body: authorization({ state: looks > (options.pendingPolls ?? 1) ? (options.state ?? 'verified') : 'pending', detail: options.state === 'refused' ? 'the passkey page refused it' : null }) }
-    },
-    [approvePath]: options.mutation ?? { body: { operation: 'machine-approve', outcome: 'applied', link: null } },
-  })
-
-  return fake
+type Options = {
+  pendingPolls?: number
+  settled?: Partial<ReturnType<typeof authorization>>
+  created?: Partial<ReturnType<typeof authorization>>
+  createReply?: ReturnType<typeof problem>
 }
 
-async function openApprove(user: ReturnType<typeof userEvent.setup>, name = 'ci box') {
-  renderApp('/machines')
-  await user.click(await screen.findByRole('button', { name: /approve/i }))
-  const dialog = await screen.findByRole('dialog')
-  const field = within(dialog).getByLabelText(/friendly name/i)
-  await user.clear(field)
-  await user.type(field, name)
+/** The machines view with one pending machine; the service creates an authorization, the tap is made elsewhere, and after `pendingPolls` looks the service reports what the tap came to. */
+function setup(options: Options = {}) {
+  let looks = 0
 
-  return dialog
+  return signedIn({
+    'GET /api/v1/pairing/invitations': { body: { items: [] } },
+    'POST /api/v1/authorizations':
+      options.createReply ?? {
+        status: 201,
+        body: authorization({ parameters: [{ name: 'fingerprint', value: machine().fingerprint }, { name: 'name', value: 'build-host' }], ...options.created }),
+      },
+    [getPath]: () => {
+      looks++
+      const settled = looks > (options.pendingPolls ?? 1)
+
+      return { body: authorization({ state: settled ? 'consumed' : 'pending', result: settled ? applied : null, ...(settled ? options.settled : {}) }) }
+    },
+    [deletePath]: { body: { ok: true } },
+  })
+}
+
+async function openApprove(user: ReturnType<typeof userEvent.setup>) {
+  renderApp('/machines')
+  await user.click(await screen.findByRole('button', { name: /^approve/i }))
+
+  return screen.findByRole('dialog')
 }
 
 describe('an administrative change', () => {
-  it('names the exact operation and parameters, needs the tap, then performs the one mutation with the authorization id', async () => {
+  it('is one step: Continue opens the passkey page, and the service makes the change at the tap (this page only reads the outcome)', async () => {
     const user = userEvent.setup()
     const fake = setup()
     const dialog = await openApprove(user)
-    await user.click(within(dialog).getByRole('button', { name: 'Review' }))
-
-    // The review names the operation and every parameter, before anything is asked of the service.
-    expect(within(dialog).getByText('machine-approve')).toBeInTheDocument()
-    expect(within(dialog).getByText(machine().fingerprint)).toBeInTheDocument()
-    expect(within(dialog).getByText('ci box')).toBeInTheDocument()
+    // The name starts as the host name.
+    expect(within(dialog).getByLabelText(/friendly name/i)).toHaveValue('build-host')
+    expect(within(dialog).queryByRole('button', { name: 'Review' })).toBeNull()
     expect(fake.count('POST /api/v1/authorizations')).toBe(0)
     expect(await violations(dialog)).toEqual([])
 
-    await user.click(within(dialog).getByRole('button', { name: /ask for passkey authorization/i }))
-    const open = await within(dialog).findByRole('link', { name: /open the passkey page/i })
-    expect(open).toHaveAttribute('href', 'http://localhost:54321/passkey-page-token')
-    expect(open).toHaveAttribute('target', '_blank')
-    expect(open.getAttribute('rel')).toContain('noopener')
-    expect(within(dialog).getByText(/Approve this machine ab12 cd34 ef56 ab12 as "ci box"/)).toBeInTheDocument()
-    expect(fake.calls.find((call) => call.path === '/api/v1/authorizations')?.body).toEqual({ operation: 'machine-approve', parameters: { fingerprint: machine().fingerprint, name: 'ci box' } })
-    // No mutation before the tap is verified.
-    expect(fake.count(approvePath)).toBe(0)
+    await user.click(within(dialog).getByRole('button', { name: 'Continue to passkey' }))
 
-    await waitFor(() => expect(fake.count(approvePath)).toBe(1))
-    expect(fake.calls.find((call) => call.path.endsWith('/approve'))?.body).toEqual({ authorization: 'auth-id-0001', name: 'ci box' })
-    expect(fake.calls.find((call) => call.path.endsWith('/approve'))?.headers['X-Admin-Token']).toBe('session-secret-1')
-    expect(await within(dialog).findByText(/Approve machine ab12 cd34 ef56 ab12 as "ci box"\./)).toBeInTheDocument()
-    expect(within(dialog).getByRole('button', { name: 'Close' })).toBeInTheDocument()
+    // Review, ask and open are one click: the passkey page was opened (own tab, no opener) for exactly the operation and parameters asked.
+    await waitFor(() => expect(opened).toHaveBeenCalledWith(LINK, '_blank', 'noopener,noreferrer'))
+    expect(fake.calls.find((call) => call.path === '/api/v1/authorizations')?.body).toEqual({ operation: 'machine-approve', parameters: { fingerprint: machine().fingerprint, name: 'build-host' } })
+    expect(await within(dialog).findByText('Waiting for your passkey tap')).toBeInTheDocument()
+    expect(within(dialog).getByRole('link', { name: /did not open/i })).toHaveAttribute('href', LINK)
+
+    // The tap is made on the other page; the service applies it. This page makes no mutation call.
+    expect(await within(dialog).findByRole('button', { name: 'Close' })).toBeInTheDocument()
+    expect(within(dialog).getByText('Done')).toBeInTheDocument()
+    expect(fake.count(approvePath)).toBe(0)
+    expect(fake.calls.filter((call) => call.method !== 'GET').map((call) => call.method + ' ' + call.path)).toEqual(['POST /api/v1/authorizations'])
+    expect(pendingAuthorization()).toBeNull()
   })
 
-  it('does nothing when it is cancelled before the tap', async () => {
+  it('cancels the request at the service when it is cancelled before the tap', async () => {
     const user = userEvent.setup()
     const fake = setup({ pendingPolls: 1000 })
     const dialog = await openApprove(user)
-    await user.click(within(dialog).getByRole('button', { name: 'Review' }))
-    await user.click(within(dialog).getByRole('button', { name: /ask for passkey authorization/i }))
-    await within(dialog).findByRole('link', { name: /open the passkey page/i })
-    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Continue to passkey' }))
+    await user.click(await within(dialog).findByRole('button', { name: 'Cancel the request' }))
 
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    await waitFor(() => expect(fake.count(deletePath)).toBe(1))
     expect(fake.count(approvePath)).toBe(0)
+    expect(pendingAuthorization()).toBeNull()
   })
 
-  it('does not perform the change when the authorization is refused, and says why', async () => {
+  it('does not report a change when the authorization is refused, and says why', async () => {
     const user = userEvent.setup()
-    const fake = setup({ state: 'refused' })
+    const fake = setup()
+    fake.on(getPath, { body: authorization({ state: 'refused', detail: 'the passkey page refused it' }) })
     const dialog = await openApprove(user)
-    await user.click(within(dialog).getByRole('button', { name: 'Review' }))
-    await user.click(within(dialog).getByRole('button', { name: /ask for passkey authorization/i }))
+    await user.click(within(dialog).getByRole('button', { name: 'Continue to passkey' }))
 
     expect(await within(dialog).findByText('the passkey page refused it')).toBeInTheDocument()
     expect(within(dialog).getByRole('alert')).toHaveTextContent('The change was not made')
-    expect(fake.count(approvePath)).toBe(0)
+    expect(pendingAuthorization()).toBeNull()
   })
 
-  it('does not perform the change when the service authorizes something other than what was asked', async () => {
+  it('shows a good tap whose change could not be made as not made, with the service sentence', async () => {
     const user = userEvent.setup()
-    const fake = setup({ created: { operation: 'machine-disable', parameters: [{ name: 'fingerprint', value: machine().fingerprint }] } })
+    setup({ settled: { result: { outcome: 'failed' as const, code: 'operation-failed', detail: 'the machine changed since the page was opened', link: null, invitation: null, invitationGone: false } } })
     const dialog = await openApprove(user)
-    await user.click(within(dialog).getByRole('button', { name: 'Review' }))
-    await user.click(within(dialog).getByRole('button', { name: /ask for passkey authorization/i }))
-
-    expect(await within(dialog).findByText(/other than what was asked/)).toBeInTheDocument()
-    expect(fake.count('GET /api/v1/authorizations/auth-id-0001')).toBe(0)
-    expect(fake.count(approvePath)).toBe(0)
-  })
-
-  it('shows the service refusal of the mutation as plain text and offers a fresh start (a new authorization)', async () => {
-    const user = userEvent.setup()
-    const fake = setup({ mutation: problem(403, 'authorization-invalid', 'the authorization is not valid for this change <b>x</b>') })
-    const dialog = await openApprove(user)
-    await user.click(within(dialog).getByRole('button', { name: 'Review' }))
-    await user.click(within(dialog).getByRole('button', { name: /ask for passkey authorization/i }))
+    await user.click(within(dialog).getByRole('button', { name: 'Continue to passkey' }))
 
     const alert = await within(dialog).findByRole('alert')
-    expect(alert).toHaveTextContent('the authorization is not valid for this change <b>x</b>')
+    expect(alert).toHaveTextContent('the machine changed since the page was opened')
+    expect(alert).toHaveTextContent('operation-failed')
+  })
+
+  it('does not wait for the service when it authorizes something other than what was asked, and cancels that authorization', async () => {
+    const user = userEvent.setup()
+    const fake = setup({ created: { operation: 'machine-disable' } })
+    const dialog = await openApprove(user)
+    await user.click(within(dialog).getByRole('button', { name: 'Continue to passkey' }))
+
+    expect(await within(dialog).findByText(/other than what was asked/)).toBeInTheDocument()
+    expect(fake.count(getPath)).toBe(0)
+    await waitFor(() => expect(fake.count(deletePath)).toBe(1))
+    expect(opened).not.toHaveBeenCalled()
+  })
+
+  it('shows the service refusal as plain text and offers a fresh start (a new authorization)', async () => {
+    const user = userEvent.setup()
+    const fake = setup({ createReply: problem(409, 'operation-refused', 'this machine is not pending <b>x</b>') })
+    const dialog = await openApprove(user)
+    await user.click(within(dialog).getByRole('button', { name: 'Continue to passkey' }))
+
+    const alert = await within(dialog).findByRole('alert')
+    expect(alert).toHaveTextContent('this machine is not pending <b>x</b>')
     expect(alert.querySelector('b')).toBeNull()
-    expect(alert).toHaveTextContent('authorization-invalid')
+    expect(alert).toHaveTextContent('operation-refused')
     await user.click(within(dialog).getByRole('button', { name: 'Start over' }))
-    await user.click(within(dialog).getByRole('button', { name: /ask for passkey authorization/i }))
+    await user.click(within(dialog).getByRole('button', { name: 'Continue to passkey' }))
     await waitFor(() => expect(fake.count('POST /api/v1/authorizations')).toBe(2))
   })
 
@@ -124,13 +148,10 @@ describe('an administrative change', () => {
     const user = userEvent.setup()
     const fake = setup()
     for (const round of [1, 2]) {
-      const dialog = await openApprove(user, 'ci box')
-      await user.click(within(dialog).getByRole('button', { name: 'Review' }))
-      await user.click(within(dialog).getByRole('button', { name: /ask for passkey authorization/i }))
-      await within(dialog).findByRole('button', { name: 'Close' })
+      const dialog = await openApprove(user)
+      await user.click(within(dialog).getByRole('button', { name: 'Continue to passkey' }))
+      await user.click(await within(dialog).findByRole('button', { name: 'Close' }))
       expect(fake.count('POST /api/v1/authorizations')).toBe(round)
-      expect(fake.count(approvePath)).toBe(round)
-      await user.click(within(dialog).getByRole('button', { name: 'Close' }))
       await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
       cleanup()
     }
@@ -145,10 +166,62 @@ describe('an administrative change', () => {
     const days = within(dialog).getByLabelText(/days to keep/i)
     await user.clear(days)
     await user.type(days, 'abc')
-    await user.click(within(dialog).getByRole('button', { name: 'Review' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Continue to passkey' }))
 
     expect(days).toHaveAttribute('aria-invalid', 'true')
     expect(within(dialog).getByRole('alert')).toHaveTextContent(/whole number/)
     expect(days.getAttribute('aria-describedby')).toContain('error')
+    expect(opened).not.toHaveBeenCalled()
+  })
+})
+
+describe('a tap is never lost: the page that comes back reads what the service made of it', () => {
+  it('keeps only the id and the sentence of the waiting authorization in this tab, never the link or a parameter', async () => {
+    const user = userEvent.setup()
+    setup({ pendingPolls: 1000 })
+    const dialog = await openApprove(user)
+    await user.click(within(dialog).getByRole('button', { name: 'Continue to passkey' }))
+    await within(dialog).findByRole('button', { name: 'Cancel the request' })
+
+    expect(pendingAuthorization()).toMatchObject({ id: 'auth-id-0001', operation: 'machine-approve', title: 'Approve this machine' })
+    const text = JSON.stringify({ ...sessionStorage })
+    expect(text).not.toContain('passkey-page-token')
+    expect(text).not.toContain(machine().fingerprint)
+    expect(JSON.stringify({ ...localStorage })).not.toContain('auth-id-0001')
+  })
+
+  it('a reloaded tab opens on the waiting authorization and shows its result, with no mutation call', async () => {
+    const fake = setup({ pendingPolls: 1 })
+    setPendingAuthorization({ id: 'auth-id-0001', operation: 'machine-approve', title: 'Approve this machine', summary: 'Approve machine ab12 cd34 ef56 ab12 as "ci box".' })
+    renderApp('/machines')
+
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText(/reloaded while a passkey tap was waiting/)).toBeInTheDocument()
+    expect(await within(dialog).findByRole('button', { name: 'Close' })).toBeInTheDocument()
+    expect(within(dialog).getByText(/Approve machine ab12 cd34 ef56 ab12 as "ci box"\./)).toBeInTheDocument()
+    expect(fake.calls.some((call) => call.method === 'POST')).toBe(false)
+    expect(pendingAuthorization()).toBeNull()
+  })
+
+  it('a lock ends the session and the authorization: the page asks the authority, and says it is locked', async () => {
+    const fake = setup()
+    fake.on(getPath, problem(401, 'session-required', 'no session'))
+    fake.on('GET /api/v1/status', { body: status({ locked: true }) })
+    setPendingAuthorization({ id: 'auth-id-0001', operation: 'lock', title: 'Lock the authority', summary: 'Lock the authority now.' })
+    renderApp('/machines')
+
+    const dialog = await screen.findByRole('dialog')
+    expect(await within(dialog).findByText('The authority is locked.')).toBeInTheDocument()
+  })
+
+  it('a session that ended before the result could be read says so, and where to look', async () => {
+    const fake = setup()
+    fake.on(getPath, problem(404, 'not-found', 'no such authorization for this caller'))
+    setPendingAuthorization({ id: 'auth-id-0001', operation: 'machine-approve', title: 'Approve this machine', summary: 'x' })
+    renderApp('/machines')
+
+    const dialog = await screen.findByRole('dialog')
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(/audit history/)
+    expect(pendingAuthorization()).toBeNull()
   })
 })

@@ -1,10 +1,9 @@
-import { api } from '../../api/client'
-import type { Grant, Invitation, Machine, MutationResponse, OperationName, ParameterValue, Passkey } from '../../api/types'
+import type { Grant, Invitation, Machine, OperationName, ParameterValue, Passkey } from '../../api/types'
 
 /**
  * Every administrative change the page can ask for, as data: what the person fills in, the exact operation and parameters the passkey will
- * authorize (identical in the authorization request and in the mutation that spends it), and the call that performs it.
- * The server enforces all of it; nothing here is a security control.
+ * authorize (what the authorization request carries; the service makes the change when the tap is verified, so this page makes no second call). The server enforces
+ * all of it; nothing here is a security control.
  */
 
 export type FieldDef = {
@@ -25,7 +24,6 @@ export type Prepared = {
   parameters: Record<string, ParameterValue>
   /** One sentence naming what will happen, shown before the passkey page is asked for. */
   summary: string
-  perform: (authorization: string) => Promise<MutationResponse>
 }
 
 export type OperationDef = {
@@ -67,30 +65,30 @@ function integer(values: FormValues, field: FieldDef, errors: Record<string, str
   return number
 }
 
-function simple(key: string, title: string, operation: OperationName, summary: string, perform: (authorization: string) => Promise<MutationResponse>, extra: Partial<OperationDef> = {}): OperationDef {
-  return { key, title, ...extra, prepare: () => ({ operation, parameters: {}, summary, perform }) }
+function simple(key: string, title: string, operation: OperationName, summary: string, extra: Partial<OperationDef> = {}): OperationDef {
+  return { key, title, ...extra, prepare: () => ({ operation, parameters: {}, summary }) }
 }
 
 // ---- the authority ----
 
 export const unlock = (): OperationDef =>
-  simple('unlock', 'Unlock the authority', 'unlock', 'Unlock the authority so that secret requests can be served again.', (authorization) => api.post('/api/v1/unlock', { body: { authorization } }), {
+  simple('unlock', 'Unlock the authority', 'unlock', 'Unlock the authority so that secret requests can be served again.', {
     intro: 'Unlocking needs your passkey. It does not need a signed-in session.',
   })
 
 export const lock = (): OperationDef =>
-  simple('lock', 'Lock the authority', 'lock', 'Lock the authority now: secret requests stop, held keys are discarded, and every session and authorization ends.', (authorization) => api.post('/api/v1/lock', { body: { authorization } }), {
+  simple('lock', 'Lock the authority', 'lock', 'Lock the authority now: secret requests stop, held keys are discarded, and every session and authorization ends.', {
     danger: true,
     warning: 'Every signed-in session ends, including this one. You will need to unlock and sign in again.',
   })
 
 export const rotateAuthorityKey = (): OperationDef =>
-  simple('rotate-key', 'Rotate the authority signing key', 'authority-key-rotate', 'Rotate the authority signing key (a transition the current key signs).', (authorization) => api.post('/api/v1/authority-key/rotate', { body: { authorization } }), {
+  simple('rotate-key', 'Rotate the authority signing key', 'authority-key-rotate', 'Rotate the authority signing key (a transition the current key signs).', {
     intro: 'Hosts follow the transition the current key signs.',
   })
 
 export const recoverAuthorityKey = (): OperationDef =>
-  simple('recover-key', 'Recover the authority signing key', 'authority-key-recover', 'Recover the authority signing key without a transition.', (authorization) => api.post('/api/v1/authority-key/recover', { body: { authorization } }), {
+  simple('recover-key', 'Recover the authority signing key', 'authority-key-recover', 'Recover the authority signing key without a transition.', {
     danger: true,
     warning: 'There is no transition: every other host has to enroll again.',
   })
@@ -103,7 +101,6 @@ export const setUnlockPolicy = (policy: 'manual' | 'unattended'): OperationDef =
     policy === 'manual' ? 'Require a manual unlock' : 'Allow unattended unlock',
     policy === 'manual' ? 'policy-manual' : 'policy-unattended',
     policy === 'manual' ? 'Set the unlock mode to manual: the authority stays locked after a start until you unlock it.' : 'Set the unlock mode to unattended: the authority unlocks itself at start without a passkey tap.',
-    (authorization) => api.put('/api/v1/settings/unlock-policy', { body: { authorization, policy } }),
     policy === 'unattended' ? { danger: true, warning: 'This is the weaker mode: anyone who can start this service as you gets an unlocked authority.' } : {},
   )
 
@@ -123,7 +120,6 @@ export const setAuditRetention = (current: number, max: number): OperationDef =>
       operation: 'set-audit-retention',
       parameters: { days },
       summary: days === 0 ? 'Keep audit events for ever.' : `Keep audit events for ${days} days.`,
-      perform: (authorization) => api.put('/api/v1/settings/audit-retention', { body: { authorization, days } }),
     }
   },
 })
@@ -147,7 +143,6 @@ export const setSessionTimeouts = (idle: number, absolute: number, maxIdle: numb
         operation: 'set-session-timeouts',
         parameters: { idle: idleMinutes, absolute: absoluteMinutes },
         summary: `End a session after ${idleMinutes} minutes without use, or ${absoluteMinutes} minutes at most.`,
-        perform: (authorization) => api.put('/api/v1/settings/session-timeouts', { body: { authorization, idle: idleMinutes, absolute: absoluteMinutes } }),
       }
     },
   }
@@ -174,8 +169,10 @@ export function approveMachine(machine: Machine): OperationDef {
     key: 'machine-approve',
     title: machine.status === 'pending' ? 'Approve this machine' : 'Re-pin the authority key for this machine',
     about: machineFacts(machine),
+    ...(named ? { intro: 'Approve only if this fingerprint and host name are the ones that machine itself shows. The name below is filled in from the host name; change it if you like.' } : {}),
     fields: [field],
-    initial: { name: machine.friendlyName ?? '' },
+    // A pending machine starts with its host name as the friendly name (the person may change it; the service still refuses an empty one).
+    initial: { name: machine.friendlyName ?? (named ? machine.hostName.slice(0, 40) : '') },
     prepare: (values) => {
       const name = text(values, 'name')
       if (named && !name) return { errors: { name: 'Enter a friendly name.' } }
@@ -186,13 +183,12 @@ export function approveMachine(machine: Machine): OperationDef {
         operation: 'machine-approve',
         parameters,
         summary: `Approve machine ${machine.display}${name ? ` as "${name}"` : ''}.`,
-        perform: (authorization) => api.post('/api/v1/machines/{fingerprint}/approve', { path: { fingerprint: machine.fingerprint }, body: { authorization, ...(name ? { name } : {}) } }),
       }
     },
   }
 }
 
-function machineSimple(machine: Machine, key: string, title: string, operation: OperationName, summary: string, path: '/api/v1/machines/{fingerprint}/disable' | '/api/v1/machines/{fingerprint}/enable' | '/api/v1/machines/{fingerprint}/untrust' | '/api/v1/machines/{fingerprint}/approve-host-change', extra: Partial<OperationDef> = {}): OperationDef {
+function machineSimple(machine: Machine, key: string, title: string, operation: OperationName, summary: string, extra: Partial<OperationDef> = {}): OperationDef {
   return {
     key,
     title,
@@ -202,21 +198,20 @@ function machineSimple(machine: Machine, key: string, title: string, operation: 
       operation,
       parameters: { fingerprint: machine.fingerprint },
       summary,
-      perform: (authorization) => api.post(path, { path: { fingerprint: machine.fingerprint }, body: { authorization } }),
     }),
   }
 }
 
 export const disableMachine = (machine: Machine) =>
-  machineSimple(machine, 'machine-disable', 'Disable this machine', 'machine-disable', `Disable machine ${machine.display}: it is denied until enabled, and its grants end.`, '/api/v1/machines/{fingerprint}/disable', { danger: true })
+  machineSimple(machine, 'machine-disable', 'Disable this machine', 'machine-disable', `Disable machine ${machine.display}: it is denied until enabled, and its grants end.`, { danger: true })
 
-export const enableMachine = (machine: Machine) => machineSimple(machine, 'machine-enable', 'Enable this machine', 'machine-enable', `Enable machine ${machine.display}; it starts clean.`, '/api/v1/machines/{fingerprint}/enable')
+export const enableMachine = (machine: Machine) => machineSimple(machine, 'machine-enable', 'Enable this machine', 'machine-enable', `Enable machine ${machine.display}; it starts clean.`)
 
 export const untrustMachine = (machine: Machine) =>
-  machineSimple(machine, 'machine-untrust', 'Withdraw trust from this machine', 'machine-untrust', `Withdraw trust from machine ${machine.display}.`, '/api/v1/machines/{fingerprint}/untrust', { danger: true })
+  machineSimple(machine, 'machine-untrust', 'Withdraw trust from this machine', 'machine-untrust', `Withdraw trust from machine ${machine.display}.`, { danger: true })
 
 export const approveHostChange = (machine: Machine) =>
-  machineSimple(machine, 'machine-host-change', 'Accept the new host name', 'machine-host-change', `Accept the host name "${machine.pendingHostName ?? ''}" that machine ${machine.display} reported.`, '/api/v1/machines/{fingerprint}/approve-host-change', {
+  machineSimple(machine, 'machine-host-change', 'Accept the new host name', 'machine-host-change', `Accept the host name "${machine.pendingHostName ?? ''}" that machine ${machine.display} reported.`, {
     intro: `The machine now reports the host name "${machine.pendingHostName ?? ''}" instead of "${machine.hostName}". Accept it only if you expected the change.`,
   })
 
@@ -238,7 +233,6 @@ export function renameMachine(machine: Machine): OperationDef {
         operation: 'machine-rename',
         parameters: { fingerprint: machine.fingerprint, name },
         summary: `Rename machine ${machine.display} to "${name}" (display only).`,
-        perform: (authorization) => api.post('/api/v1/machines/{fingerprint}/rename', { path: { fingerprint: machine.fingerprint }, body: { authorization, name } }),
       }
     },
   }
@@ -264,7 +258,6 @@ export function trustMachine(machine: Machine): OperationDef {
         operation: 'machine-trust',
         parameters: { fingerprint: machine.fingerprint, confirm },
         summary: `Trust machine ${machine.display} again.`,
-        perform: (authorization) => api.post('/api/v1/machines/{fingerprint}/trust', { path: { fingerprint: machine.fingerprint }, body: { authorization, confirm } }),
       }
     },
   }
@@ -291,7 +284,6 @@ export const revokeGrant = (grant: Grant): OperationDef => ({
     operation: 'grant-revoke',
     parameters: { id: grant.id },
     summary: `Revoke grant ${grant.id}: it ends now and its machine is told.`,
-    perform: (authorization) => api.post('/api/v1/grants/{id}/revoke', { path: { id: grant.id }, body: { authorization } }),
   }),
 })
 
@@ -312,7 +304,6 @@ export function changeGrantEnd(grant: Grant, verb: 'extend' | 'renew'): Operatio
       if (!never) count = integer(values, { ...minutes, required: true }, errors)
       if (!never && count === null) return { errors }
       const parameters: Record<string, ParameterValue> = never ? { id: grant.id, indefinite: true } : { id: grant.id, minutes: count as number }
-      const body = never ? { indefinite: true } : { minutes: count as number }
       const summary = never
         ? `${verb === 'extend' ? 'Extend' : 'Renew'} grant ${grant.id} so that it has no end.`
         : verb === 'extend'
@@ -323,7 +314,6 @@ export function changeGrantEnd(grant: Grant, verb: 'extend' | 'renew'): Operatio
         operation: verb === 'extend' ? 'grant-extend' : 'grant-renew',
         parameters,
         summary,
-        perform: (authorization) => api.post(verb === 'extend' ? '/api/v1/grants/{id}/extend' : '/api/v1/grants/{id}/renew', { path: { id: grant.id }, body: { authorization, ...body } }),
       }
     },
   }
@@ -332,7 +322,7 @@ export function changeGrantEnd(grant: Grant, verb: 'extend' | 'renew'): Operatio
 // ---- passkeys ----
 
 export const addPasskey = (): OperationDef =>
-  simple('passkey-add', 'Add a passkey', 'passkey-enroll', 'Add a passkey: the enrollment pages follow, each with its own passkey tap.', (authorization) => api.post('/api/v1/passkeys', { body: { authorization } }), {
+  simple('passkey-add', 'Add a passkey', 'passkey-enroll', 'Add a passkey: the enrollment pages follow, each with its own passkey tap.', {
     intro: 'After this authorization the enrollment pages open one after another. Each asks for its own passkey tap.',
   })
 
@@ -349,7 +339,6 @@ export const removePasskey = (passkey: Passkey): OperationDef => ({
     operation: 'passkey-unenroll',
     parameters: { name: passkey.name },
     summary: `Remove the passkey "${passkey.name}".`,
-    perform: (authorization) => api.post('/api/v1/passkeys/{name}/remove', { path: { name: passkey.name }, body: { authorization } }),
   }),
 })
 
@@ -357,7 +346,7 @@ export const removePasskey = (passkey: Passkey): OperationDef => ({
 
 /** The service names the address and the lifetime in the sentence the passkey signs; this page only asks. */
 export const createPairingInvitation = (): OperationDef =>
-  simple('pairing-create', 'Create a pairing invitation', 'pairing-create', 'Create a one-time invitation for one new machine to pair with this authority (valid 10 minutes). The invitation bundle is shown once.', (authorization) => api.post('/api/v1/pairing/invitations', { body: { authorization } }), {
+  simple('pairing-create', 'Create a pairing invitation', 'pairing-create', 'Create a one-time invitation for one new machine to pair with this authority (valid 10 minutes). The invitation bundle is shown once.', {
     intro: 'The invitation lets one machine ask to be added. The machine is still Pending until you approve it here. The bundle is shown once, after your tap, and can never be shown again.',
   })
 
@@ -373,6 +362,5 @@ export const revokePairingInvitation = (invitation: Invitation): OperationDef =>
     operation: 'pairing-revoke',
     parameters: { id: invitation.id },
     summary: `Revoke pairing invitation ${invitation.id}: it can no longer be used.`,
-    perform: (authorization) => api.post('/api/v1/pairing/invitations/{id}/revoke', { path: { id: invitation.id }, body: { authorization } }),
   }),
 })

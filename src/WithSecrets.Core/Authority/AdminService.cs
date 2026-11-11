@@ -293,7 +293,7 @@ public sealed partial class AdminService
     /// without a session share a limited number (a further one is refused, nothing waiting is closed). Lock pages have a lane of their own that nothing else uses up. <paramref name="epoch" /> is the lock
     /// count from before the plan was made: a lock since then ends the request.
     /// </summary>
-    private async Task<AdminStart> Run(AdminPlan plan, string caller, int epoch, CancellationToken cancel, Func<AdminPlan, IAdminAsker, Action<string>, CancellationToken, string>? execute = null, bool keepMaterial = false)
+    private async Task<AdminStart> Run(AdminPlan plan, string caller, int epoch, CancellationToken cancel, Func<AdminPlan, IAdminAsker, Action<string>, CancellationToken, string>? execute = null, bool keepMaterial = false, Action? afterPage = null)
     {
         bool lockLane = plan.Operation == "lock-authority";
         string slot = (lockLane ? "L" : "") + caller;
@@ -386,6 +386,7 @@ public sealed partial class AdminService
 
                 source.Dispose();
                 pending.Done.TrySetResult();
+                afterPage?.Invoke();
             }
         }, CancellationToken.None);
 

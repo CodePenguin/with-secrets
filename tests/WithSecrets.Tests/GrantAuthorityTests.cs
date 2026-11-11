@@ -1052,7 +1052,7 @@ internal static class GrantAuthorityTests
         string staleState = await browser.WaitAuthorizationAsync(stalePage.AuthorizationId!);
         (HttpMethod staleMethod, string stalePath, string staleBody) = browser.MutationRequest("grant-revoke", stalePage.AuthorizationId, ("id", id));
         (int staleMutation, _) = await browser.SendAsync(staleMethod, stalePath, staleBody);
-        check(fx.Store.FindGrant(id) is { Status: "active" } && staleStatus != 0 && staleState == "verified" && staleMutation == 409, "admin grants revoke: a grant that changed after the tap is not revoked by the stale authorization (409)");
+        check(fx.Store.FindGrant(id) is { Status: "active" } && staleStatus != 0 && staleState == "consumed" && staleMutation == 409, "admin grants revoke: a grant that changed between the authorization and the tap is not revoked by the tap (failed, 409)");
 
         Tapped revoke = await Op("grant-revoke", laptop, true, null, ("id", id));
         check(revoke.ApproveStatus == 200 && await HostServiceTests.WaitFor(() => fx.Store.FindGrant(id) is { Status: "revoked" }) && revoke.Page.Contains("revoke this grant", StringComparison.Ordinal), "admin grants revoke: the tap revokes it and the page named exactly that action");

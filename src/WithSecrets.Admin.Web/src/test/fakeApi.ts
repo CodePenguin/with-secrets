@@ -119,6 +119,7 @@ export const authorization = (extra: Partial<Authorization> = {}): Authorization
   created: '2026-11-09T10:00:00Z',
   expires: '2026-11-09T10:10:00Z',
   lifetimeSeconds: 120,
+  result: null,
   ...extra,
 })
 
@@ -133,6 +134,7 @@ export function signedIn(extra: Record<string, Handler> = {}): FakeApi {
     'GET /api/v1/status': { body: status() },
     'GET /api/v1/session': { body: session() },
     'GET /api/v1/machines': { body: { items: [machine()] } },
+    'GET /api/v1/pairing/invitations': { body: { items: [] } },
     'GET /api/v1/grants': { body: { items: [grant()] } },
     'GET /api/v1/settings': { body: settings() },
     'GET /api/v1/passkeys': { body: { available: true, problem: null, items: [{ name: 'admin key', detail: 'platform passkey', created: '2026-11-01T10:00:00Z', admin: true }] } },

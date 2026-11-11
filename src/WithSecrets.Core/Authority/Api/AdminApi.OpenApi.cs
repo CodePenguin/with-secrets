@@ -142,6 +142,16 @@ internal sealed partial class AdminApi
                 ("created", S.Time()),
                 ("expires", S.Time()),
                 ("lifetimeSeconds", S.Int(description: "How long a verified authorization may wait for its mutation.")),
+                ("result", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("AuthorizationResult"), new JsonObject { ["type"] = "null" }) }),
+            ]),
+            ["AuthorizationResult"] = S.Obj(
+            [
+                ("outcome", S.Str(values: ["applied", "started", "failed"], description: "applied: the service made the change when the tap was verified. started: the operation's own passkey pages continue at `link`. failed: the tap was good but the change was refused or could not be made (see `code` and `detail`); nothing was changed.")),
+                ("code", S.Str(nullable: true)),
+                ("detail", S.Str(nullable: true)),
+                ("link", S.Str(nullable: true)),
+                ("invitation", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("InvitationCreated"), new JsonObject { ["type"] = "null" }) }),
+                ("invitationGone", S.Bool("True when a new invitation's bundle was already given (or held for " + AdminService.BundleHold.TotalMinutes + " minutes without being collected): it is never given again.")),
             ]),
             ["AuthorizationRequest"] = AuthorizationRequest(),
             ["Invitation"] = S.Obj(
@@ -164,7 +174,7 @@ internal sealed partial class AdminApi
             ["MutationResponse"] = S.Obj(
             [
                 ("operation", S.Str()),
-                ("outcome", S.Str(values: ["applied", "started"], description: "applied: done. started: the first passkey page of an operation with pages of its own is at `link`.")),
+                ("outcome", S.Str(values: ["applied", "started", "already-applied", "already-started"], description: "applied: done (the service made the change when the tap was verified). started: the first passkey page of an operation with pages of its own is at `link`. already-applied and already-started: a retry for an authorization that was already answered; nothing was applied again.")),
                 ("link", S.Str(nullable: true)),
                 ("invitation", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("InvitationCreated"), new JsonObject { ["type"] = "null" }) }),
             ]),

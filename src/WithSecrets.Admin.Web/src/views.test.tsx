@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { setBrowserSecret } from './api/client'
 import { authorization, installFakeApi, machine, problem, session, signedIn, status, violations } from './test/fakeApi'
 import { renderApp } from './test/render'
@@ -181,21 +181,24 @@ describe('sign-in', () => {
 
 describe('the locked authority', () => {
   it('can be unlocked without a session, with its own authorization', async () => {
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(null)
     const user = userEvent.setup()
     const fake = installFakeApi({
       'GET /api/v1/status': { body: status({ locked: true }) },
       'GET /api/v1/session': { body: signedOut() },
       'POST /api/v1/authorizations': { status: 201, body: authorization({ operation: 'unlock', parameters: [], sentence: 'Unlock the authority.' }) },
-      'GET /api/v1/authorizations/auth-id-0001': { body: authorization({ operation: 'unlock', state: 'verified', parameters: [] }) },
-      'POST /api/v1/unlock': { body: { operation: 'unlock', outcome: 'applied', link: null } },
+      'GET /api/v1/authorizations/auth-id-0001': { body: authorization({ operation: 'unlock', state: 'consumed', parameters: [], result: { outcome: 'applied', code: null, detail: null, link: null, invitation: null, invitationGone: false } }) },
     })
     renderApp('/')
     await user.click(await screen.findByRole('button', { name: 'Unlock the authority' }))
     const dialog = await screen.findByRole('dialog')
-    await user.click(within(dialog).getByRole('button', { name: /ask for passkey authorization/i }))
+    await user.click(within(dialog).getByRole('button', { name: 'Continue to passkey' }))
 
-    await waitFor(() => expect(fake.count('POST /api/v1/unlock')).toBe(1))
-    expect(fake.calls.find((call) => call.path === '/api/v1/unlock')?.body).toEqual({ authorization: 'auth-id-0001' })
+    // One step; the service makes the change at the tap, and this page only reads the result (no unlock call of its own).
+    expect(await within(dialog).findByText('Done')).toBeInTheDocument()
+    expect(fake.count('POST /api/v1/unlock')).toBe(0)
+    expect(fake.calls.find((call) => call.path === '/api/v1/authorizations')?.body).toEqual({ operation: 'unlock', parameters: {} })
+    expect(openSpy).toHaveBeenCalledOnce()
   })
 })
 

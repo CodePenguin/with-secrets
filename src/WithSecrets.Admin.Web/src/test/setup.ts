@@ -1,7 +1,7 @@
 import '@testing-library/jest-dom/vitest'
 import { cleanup } from '@testing-library/react'
 import { afterEach, beforeEach } from 'vitest'
-import { setBrowserSecret, setSessionSecret } from '../api/client'
+import { setBrowserSecret, setPendingAuthorization, setSessionSecret } from '../api/client'
 
 // jsdom has no showModal/close on <dialog>: a faithful enough stand-in (open attribute, close event).
 if (!HTMLDialogElement.prototype.showModal) {
@@ -22,4 +22,5 @@ afterEach(() => {
   cleanup()
   setSessionSecret(null)
   setBrowserSecret(null)
+  setPendingAuthorization(null)
 })

@@ -2026,7 +2026,102 @@
     "/api/v1/authorizations/{id}": {
       "get": {
         "operationId": "getAuthorization",
-        "summary": "Where an authorization stands (pending, verified, refused, consumed or expired). Only for the caller it was made for (its session, or for the unlock its browser).",
+        "summary": "Where an authorization stands (pending, verified, refused, consumed or expired) and, once its tap was verified, how the change it authorized came out (\u0060result\u0060: the service applies it at the tap, so this is readable after a reload or from another tab; a new invitation\u0027s bundle is given once, when collect=invitation is asked for or by the first retry of the mutation). Only for the caller it was made for (its session, or for the unlock its browser).",
+        "tags": [
+          "authorizations"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 4,
+              "maxLength": 80,
+              "description": "The grant\u0027s id, or an unambiguous start of it."
+            }
+          },
+          {
+            "name": "collect",
+            "in": "query",
+            "required": false,
+            "description": "Give the bundle of a new invitation in this answer (once; it is never given again).",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "invitation"
+              ]
+            }
+          }
+        ],
+        "x-access": "caller",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Authorization"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "cancelAuthorization",
+        "summary": "Cancel an authorization whose passkey tap has not been made: a tap on its page afterwards changes nothing. Only for the caller it was made for. 409 when the tap was already judged (its change was made or refused and cannot be taken back).",
         "tags": [
           "authorizations"
         ],
@@ -2050,7 +2145,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Authorization"
+                  "$ref": "#/components/schemas/Done"
                 }
               }
             }
@@ -6328,6 +6423,16 @@
           "lifetimeSeconds": {
             "type": "integer",
             "description": "How long a verified authorization may wait for its mutation."
+          },
+          "result": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AuthorizationResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": false,
@@ -6341,7 +6446,63 @@
           "parameters",
           "created",
           "expires",
-          "lifetimeSeconds"
+          "lifetimeSeconds",
+          "result"
+        ]
+      },
+      "AuthorizationResult": {
+        "type": "object",
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "applied",
+              "started",
+              "failed"
+            ],
+            "description": "applied: the service made the change when the tap was verified. started: the operation\u0027s own passkey pages continue at \u0060link\u0060. failed: the tap was good but the change was refused or could not be made (see \u0060code\u0060 and \u0060detail\u0060); nothing was changed."
+          },
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "link": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "invitation": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/InvitationCreated"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "invitationGone": {
+            "type": "boolean",
+            "description": "True when a new invitation\u0027s bundle was already given (or held for 5 minutes without being collected): it is never given again."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "outcome",
+          "code",
+          "detail",
+          "link",
+          "invitation",
+          "invitationGone"
         ]
       },
       "AuthorizationRequest": {
@@ -6494,9 +6655,11 @@
             "type": "string",
             "enum": [
               "applied",
-              "started"
+              "started",
+              "already-applied",
+              "already-started"
             ],
-            "description": "applied: done. started: the first passkey page of an operation with pages of its own is at \u0060link\u0060."
+            "description": "applied: done (the service made the change when the tap was verified). started: the first passkey page of an operation with pages of its own is at \u0060link\u0060. already-applied and already-started: a retry for an authorization that was already answered; nothing was applied again."
           },
           "link": {
             "type": [

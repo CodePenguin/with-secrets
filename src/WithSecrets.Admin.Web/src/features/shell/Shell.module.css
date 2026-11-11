@@ -110,6 +110,18 @@
   border-top: 1px solid var(--border-soft);
 }
 
+/* Phones: six links stay in two or three short rows, every one a full-size touch target. */
+@media (max-width: 40rem) {
+  .nav ul {
+    gap: 0;
+    padding: var(--space-1) var(--space-2);
+  }
+
+  .nav a {
+    padding: 0 var(--space-3);
+  }
+}
+
 /* Wide screens: the navigation becomes a side column. */
 @media (min-width: 60rem) {
   .shell {

@@ -5,7 +5,9 @@ import type { paths } from './schema'
  * - Same origin only (relative URLs), cookies of this origin only.
  * - A session is its cookie AND a secret that the service gives once (POST /session/claim; before a session POST /browser gives the browser's). The cookie is sent to every localhost port by the browser, the
  *   secret is not: it is kept in this tab's sessionStorage (per origin, so per port; gone when the tab closes; never localStorage) so that a reload stays signed in, and is sent as X-Admin-Token on every
- *   request, reads included. The service never gives it a second time. It is the only thing the application keeps in browser storage.
+ *   request, reads included. The service never gives it a second time. Besides the two secrets the application keeps one more small record in this tab's sessionStorage: which authorization is waiting for its passkey tap
+ *   (its id, the title and the one-sentence summary of the change; never a parameter value, a link or an invitation bundle), so that a tab that is reloaded or discarded between the tap and the result can still show
+ *   what became of it (the service makes the change at the tap and keeps the outcome).
  * - Every refusal becomes an ApiError that carries only what the problem document says (a safe sentence and a code).
  */
 
@@ -64,6 +66,31 @@ function write(key: string, value: string | null): void {
     else sessionStorage.setItem(key, value)
   } catch {
     // Storage is not available: the secret is then lost on reload, and the page signs in again.
+  }
+}
+
+const PENDING_KEY = 'ws.pending-authorization'
+const PENDING_MAX_AGE_MS = 40 * 60 * 1000
+
+/** The authorization this tab is waiting on: only what is needed to ask the service what became of it, and to name it. */
+export type PendingAuthorization = { id: string; operation: string; title: string; summary: string; at: number }
+
+export function setPendingAuthorization(value: Omit<PendingAuthorization, 'at'> | null): void {
+  write(PENDING_KEY, value === null ? null : JSON.stringify({ ...value, at: Date.now() }))
+}
+
+/** The waiting authorization of this tab, unless it is too old to be anything the service still holds. */
+export function pendingAuthorization(): PendingAuthorization | null {
+  const text = read(PENDING_KEY)
+  if (!text) return null
+  try {
+    const value = JSON.parse(text) as Partial<PendingAuthorization>
+    if (typeof value.id !== 'string' || typeof value.operation !== 'string' || typeof value.title !== 'string' || typeof value.summary !== 'string' || typeof value.at !== 'number') return null
+    if (Date.now() - value.at > PENDING_MAX_AGE_MS) return null
+
+    return { id: value.id, operation: value.operation, title: value.title, summary: value.summary, at: value.at }
+  } catch {
+    return null
   }
 }
 

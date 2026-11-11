@@ -1,13 +1,16 @@
-import { useMachines } from '../../api/queries'
-import type { Machine } from '../../api/types'
+import { useEffect, useRef } from 'react'
+import { useInvitations, useMachines } from '../../api/queries'
+import type { Invitation, Machine } from '../../api/types'
 import { Badge, Empty, Facts, PageHeader } from '../../components/Card'
 import { Button } from '../../components/Button'
-import { Loading, Notice, ProblemAlert } from '../../components/Feedback'
+import { Loading, Notice, ProblemAlert, useAnnounce } from '../../components/Feedback'
 import list from '../../components/List.module.css'
 import { Time } from '../../lib/format'
 import { usePageTitle } from '../../lib/usePageTitle'
-import { approveHostChange, approveMachine, disableMachine, enableMachine, renameMachine, trustMachine, untrustMachine, type OperationDef } from '../authorization/operations'
+import { approveHostChange, approveMachine, createPairingInvitation, disableMachine, enableMachine, renameMachine, revokePairingInvitation, trustMachine, untrustMachine, type OperationDef } from '../authorization/operations'
+import { usePollInterval } from '../authorization/poll'
 import { useStartOperation } from '../authorization/OperationProvider'
+import styles from './MachinesPage.module.css'
 
 const actionLabels: Record<Machine['actions'][number], string> = {
   approve: 'Approve',
@@ -33,65 +36,152 @@ function tone(status: Machine['status']): 'ok' | 'warn' | 'bad' | 'neutral' {
   return status === 'trusted' ? 'ok' : status === 'pending' ? 'warn' : status === 'disabled' || status === 'untrusted' ? 'bad' : 'neutral'
 }
 
+function invitationTone(status: Invitation['status']): 'ok' | 'warn' | 'bad' | 'neutral' {
+  return status === 'pending' ? 'warn' : status === 'consumed' ? 'ok' : 'neutral'
+}
+
+type Start = (def: OperationDef) => void
+
+/** One machine: its facts once, and what can be done to it. A machine that has just paired (Pending) is shown by the "paired" section above the list, not twice. */
+function MachineItem({ machine, start, level }: { machine: Machine; start: Start; level: 'h2' | 'h3' }) {
+  const name = machine.friendlyName ?? machine.hostName
+  const Heading = level
+
+  return (
+    <li className={[list.item, machine.status === 'pending' ? styles.pairedItem : ''].join(' ')}>
+      <div className={list.itemHeader}>
+        <Heading>{name}</Heading>
+        <Badge tone={tone(machine.status)}>{machine.status}</Badge>
+        {machine.thisMachine ? <Badge tone="neutral">This machine</Badge> : null}
+        {machine.pendingHostName ? <Badge tone="warn">New host name reported</Badge> : null}
+      </div>
+      {machine.copyWarning ? (
+        <Notice kind="warning" title="This machine's identity may have been copied">
+          <p>
+            Its connection was replaced by a connection from a different address {machine.copyWarning.count} times within 10 minutes (from {machine.copyWarning.firstAddress} and {machine.copyWarning.lastAddress}). Two programs may be using this
+            machine's key. Disable this machine if you did not start both.
+          </p>
+        </Notice>
+      ) : null}
+      <Facts
+        items={[
+          ['Fingerprint', <span key="f" className={styles.mono}>{machine.display}</span>],
+          ['Host name', machine.hostName],
+          ...(machine.pendingHostName ? ([['Reported host name', machine.pendingHostName]] as const) : []),
+          ['Revision', String(machine.revision)],
+          ['Enrolled', <Time key="c" value={machine.created} />],
+          ['Updated', <Time key="u" value={machine.updated} />],
+        ]}
+      />
+      {machine.actions.length > 0 ? (
+        <div className={list.actions}>
+          {machine.actions.map((action) => (
+            <Button key={action} variant={action === 'approve' ? 'primary' : 'secondary'} onClick={() => start(builders[action](machine))}>
+              {actionLabels[action]}
+              <span className="visually-hidden"> {name}</span>
+            </Button>
+          ))}
+        </div>
+      ) : null}
+    </li>
+  )
+}
+
+/**
+ * Machines, and how a new one gets here: "Add a machine" makes a pairing invitation (its own fresh passkey tap, the bundle shown once), the machine pairs itself with it and appears as a card at the top
+ * ("A machine paired", with its fingerprint and host name to check against that machine's own screen, and Approve), the list holds every other machine, and the invitations are listed by status below.
+ * The view asks again every few seconds, so a machine that pairs while this page is open appears by itself.
+ */
 export function MachinesPage() {
   usePageTitle('Machines')
-  const machines = useMachines(true)
+  const pollMs = usePollInterval() * 5
+  const machines = useMachines(true, pollMs)
+  const invitations = useInvitations(true, pollMs)
   const start = useStartOperation()
+  const announce = useAnnounce()
+  const waiting = machines.data?.filter((machine) => machine.status === 'pending') ?? []
+  const others = machines.data?.filter((machine) => machine.status !== 'pending') ?? []
+
+  // A machine that pairs while this view is open is announced (the card appears at the top; nothing moves focus).
+  const known = useRef<Set<string> | null>(null)
+  useEffect(() => {
+    if (!machines.data) return
+    const now = new Set(waiting.map((machine) => machine.fingerprint))
+    if (known.current) {
+      const fresh = waiting.filter((machine) => !known.current?.has(machine.fingerprint))
+      if (fresh.length > 0) announce(`A machine paired: ${fresh.map((machine) => machine.hostName).join(', ')}. Check its fingerprint and host name, then approve it.`)
+    }
+    known.current = now
+  }, [machines.data]) // eslint-disable-line react-hooks/exhaustive-deps -- compared against the machines already seen
 
   return (
     <>
-      <PageHeader title="Machines" />
-      <p>Each machine that asks for secrets has its own identity. A machine is only served once you approve it here.</p>
+      <PageHeader title="Machines">
+        <Button variant="primary" onClick={() => start(createPairingInvitation())}>
+          Add a machine
+        </Button>
+      </PageHeader>
+      <p>Each machine that asks for secrets has its own identity, and is served only once you approve it here. To add one, choose Add a machine and give the invitation to the new machine.</p>
       {machines.isPending ? <Loading what="machines" /> : null}
       {machines.isError ? <ProblemAlert error={machines.error} title="The machines could not be listed" /> : null}
-      {machines.data?.some((machine) => machine.status === 'pending') ? <p>A Pending machine is waiting for you. Before you approve it, check that its fingerprint and host name are the ones shown on the machine itself when it paired.</p> : null}
-      {machines.data?.length === 0 ? <Empty>No machine has enrolled yet.</Empty> : null}
-      {machines.data && machines.data.length > 0 ? (
-        <ul className={list.list} aria-label="Machines">
-          {machines.data.map((machine) => {
-            const name = machine.friendlyName ?? machine.hostName
 
-            return (
-              <li key={machine.fingerprint} className={list.item}>
+      {waiting.length > 0 ? (
+        <section className={styles.paired} aria-labelledby="paired-heading">
+          <h2 id="paired-heading">{waiting.length === 1 ? 'A machine paired and is waiting for you' : `${waiting.length} machines paired and are waiting for you`}</h2>
+          <p className={styles.what}>Check that the fingerprint and host name are the ones that machine itself shows, then approve it. Approve only a machine you expected.</p>
+          <ul className={list.list} aria-label="Machines waiting for approval">
+            {waiting.map((machine) => (
+              <MachineItem key={machine.fingerprint} machine={machine} start={start} level="h3" />
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {machines.data?.length === 0 ? <Empty>No machine has enrolled yet.</Empty> : null}
+      {others.length > 0 ? (
+        <ul className={list.list} aria-label="Machines">
+          {others.map((machine) => (
+            <MachineItem key={machine.fingerprint} machine={machine} start={start} level="h2" />
+          ))}
+        </ul>
+      ) : null}
+
+      <section className={styles.section} aria-labelledby="invitations-heading">
+        <h2 id="invitations-heading">Invitations</h2>
+        <p>
+          An invitation lets one new machine ask to be added. It is valid for 10 minutes and works once. It is shown only when you make it; this list shows status only. After the machine pairs it appears above, waiting for your approval.
+        </p>
+        {invitations.isError ? <ProblemAlert error={invitations.error} title="The invitations could not be listed" /> : null}
+        {invitations.data?.length === 0 ? <Empty>No invitation has been created.</Empty> : null}
+        {invitations.data && invitations.data.length > 0 ? (
+          <ul className={[list.list, list.compact].join(' ')} aria-label="Invitations">
+            {invitations.data.map((invitation) => (
+              <li key={invitation.id} className={list.item}>
                 <div className={list.itemHeader}>
-                  <h2>{name}</h2>
-                  <Badge tone={tone(machine.status)}>{machine.status}</Badge>
-                  {machine.thisMachine ? <Badge tone="neutral">This machine</Badge> : null}
-                  {machine.pendingHostName ? <Badge tone="warn">New host name reported</Badge> : null}
+                  <h3 className={styles.mono}>{invitation.id}</h3>
+                  <Badge tone={invitationTone(invitation.status)}>{invitation.status}</Badge>
                 </div>
-                {machine.copyWarning ? (
-                  <Notice kind="warning" title="This machine's identity may have been copied">
-                    <p>
-                      Its connection was replaced by a connection from a different address {machine.copyWarning.count} times within 10 minutes (from {machine.copyWarning.firstAddress} and {machine.copyWarning.lastAddress}). Two programs may be using
-                      this machine's key. Disable this machine if you did not start both.
-                    </p>
-                  </Notice>
-                ) : null}
                 <Facts
                   items={[
-                    ['Fingerprint', <span key="f" className={list.mono}>{machine.display}</span>],
-                    ['Host name', machine.hostName],
-                    ...(machine.pendingHostName ? ([['Reported host name', machine.pendingHostName]] as const) : []),
-                    ['Revision', String(machine.revision)],
-                    ['Enrolled', <Time key="c" value={machine.created} />],
-                    ['Updated', <Time key="u" value={machine.updated} />],
+                    ['Created', <Time key="c" value={invitation.created} />],
+                    ['Expires', <Time key="e" value={invitation.expires} />],
+                    ...(invitation.ended ? ([['Ended', <Time key="n" value={invitation.ended} />]] as const) : []),
+                    ...(invitation.machine ? ([['Machine', <span key="m" className={styles.mono}>{invitation.machine}</span>]] as const) : []),
                   ]}
                 />
-                {machine.actions.length > 0 ? (
+                {invitation.canRevoke ? (
                   <div className={list.actions}>
-                    {machine.actions.map((action) => (
-                      <Button key={action} variant={action === 'approve' ? 'primary' : 'secondary'} onClick={() => start(builders[action](machine))}>
-                        {actionLabels[action]}
-                        <span className="visually-hidden"> {name}</span>
-                      </Button>
-                    ))}
+                    <Button onClick={() => start(revokePairingInvitation(invitation))}>
+                      Revoke
+                      <span className="visually-hidden"> invitation {invitation.id}</span>
+                    </Button>
                   </div>
                 ) : null}
               </li>
-            )
-          })}
-        </ul>
-      ) : null}
+            ))}
+          </ul>
+        ) : null}
+      </section>
     </>
   )
 }

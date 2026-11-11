@@ -36,6 +36,7 @@
 
 .mono {
   font-family: var(--font-mono);
+  overflow-wrap: anywhere;
 }
 
 .compact {

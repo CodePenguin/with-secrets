@@ -1,7 +1,7 @@
 import { useEffect, useId, useReducer, useRef, useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { ApiError, api } from '../../api/client'
-import type { Authorization, MutationResponse } from '../../api/types'
+import { ApiError, api, setPendingAuthorization, type PendingAuthorization } from '../../api/client'
+import type { Authorization, AuthorizationResult } from '../../api/types'
 import { Button, ButtonLink } from '../../components/Button'
 import { Dialog } from '../../components/Dialog'
 import { Field, checkClass, controlClass } from '../../components/Field'
@@ -12,47 +12,39 @@ import { usePollInterval } from './poll'
 import type { FormValues, OperationDef, Prepared } from './operations'
 import styles from './OperationDialog.module.css'
 
+/** What a waiting dialog knows of its authorization: after a reload only the id (the rest is read from the service). */
+type Waiting = { id: string; operation: string; summary: string; link: string | null; parameters: ReadonlyArray<{ name: string; value: string }> | null }
+
 type State =
-  | { phase: 'form'; values: FormValues; errors: Record<string, string> }
-  | { phase: 'review'; values: FormValues; prepared: Prepared }
-  | { phase: 'asking'; values: FormValues; prepared: Prepared }
-  | { phase: 'waiting'; values: FormValues; prepared: Prepared; authorization: Authorization }
-  | { phase: 'applying'; values: FormValues; prepared: Prepared; authorization: Authorization }
-  | { phase: 'done'; prepared: Prepared; result: MutationResponse }
-  | { phase: 'failed'; error: unknown; values: FormValues; prepared: Prepared | null }
+  | { phase: 'form'; errors: Record<string, string> }
+  | { phase: 'review' }
+  | { phase: 'asking'; prepared: Prepared }
+  | { phase: 'waiting'; waiting: Waiting; prepared: Prepared | null }
+  | { phase: 'done'; summary: string; result: AuthorizationResult }
+  | { phase: 'failed'; error: unknown; prepared: Prepared | null }
 
 type Action =
-  | { type: 'reviewed'; prepared: Prepared; values: FormValues }
-  | { type: 'invalid'; errors: Record<string, string>; values: FormValues }
-  | { type: 'back'; values: FormValues }
-  | { type: 'asking' }
-  | { type: 'created'; authorization: Authorization }
-  | { type: 'verified' }
-  | { type: 'done'; result: MutationResponse }
+  | { type: 'invalid'; errors: Record<string, string> }
+  | { type: 'asking'; prepared: Prepared }
+  | { type: 'created'; waiting: Waiting }
+  | { type: 'done'; summary: string; result: AuthorizationResult }
   | { type: 'failed'; error: unknown }
+  | { type: 'again'; hasFields: boolean }
 
 function reducer(state: State, action: Action): State {
   switch (action.type) {
-    case 'reviewed':
-      return { phase: 'review', values: action.values, prepared: action.prepared }
     case 'invalid':
-      return { phase: 'form', values: action.values, errors: action.errors }
-    case 'back':
-      return { phase: 'form', values: action.values, errors: {} }
+      return { phase: 'form', errors: action.errors }
     case 'asking':
-      return state.phase === 'review' ? { ...state, phase: 'asking' } : state
+      return { phase: 'asking', prepared: action.prepared }
     case 'created':
-      return state.phase === 'asking' ? { phase: 'waiting', values: state.values, prepared: state.prepared, authorization: action.authorization } : state
-    case 'verified':
-      return state.phase === 'waiting' ? { ...state, phase: 'applying' } : state
+      return { phase: 'waiting', waiting: action.waiting, prepared: state.phase === 'asking' ? state.prepared : null }
     case 'done':
-      return state.phase === 'applying' ? { phase: 'done', prepared: state.prepared, result: action.result } : state
-    case 'failed': {
-      const prepared = 'prepared' in state ? state.prepared : null
-      const values = 'values' in state ? state.values : {}
-
-      return { phase: 'failed', error: action.error, values, prepared }
-    }
+      return { phase: 'done', summary: action.summary, result: action.result }
+    case 'failed':
+      return { phase: 'failed', error: action.error, prepared: 'prepared' in state ? state.prepared : null }
+    case 'again':
+      return action.hasFields ? { phase: 'form', errors: {} } : { phase: 'review' }
   }
 }
 
@@ -71,80 +63,122 @@ export function safeLink(link: string | null | undefined): string | null {
 
 /**
  * The service answers with the authorization it made: its operation must be the one that was asked. Its parameters are what the passkey signs (the service may add what it derived, for
- * example the full fingerprint or the host name), so they are shown to the person, not compared: the service itself refuses the mutation unless it repeats exactly what was authorized.
+ * example the full fingerprint or the host name), so they are shown to the person, not compared: the service itself only ever applies the plan it made for what was authorized.
  */
 function sameOperation(requested: Prepared, got: Authorization): boolean {
   return got.operation === requested.operation
 }
 
-type Props = { def: OperationDef; onClose: () => void }
+/** The passkey page opens in its own tab, right after the service made the authorization (the click that asked for it is still recent). Without an opener: the page it opens can never reach this one. */
+function openPasskeyPage(link: string): void {
+  window.open(link, '_blank', 'noopener,noreferrer')
+}
+
+/** Best effort: an authorization that this page no longer waits for is cancelled, so a tap on its page afterwards changes nothing. */
+function cancelAuthorization(id: string): void {
+  void api.delete('/api/v1/authorizations/{id}', { path: { id } }).catch(() => undefined)
+}
+
+const nothing: AuthorizationResult = { outcome: 'applied', code: null, detail: null, link: null, invitation: null, invitationGone: false }
+
+type Props = { def?: OperationDef; resume?: PendingAuthorization; onClose: () => void }
 
 /**
- * One administrative change from start to end, in one modal dialog:
- * 1. the form (when the change takes input) and a review that names the exact operation and every parameter the passkey will authorize;
- * 2. a request for the authorization (nothing changes), whose one-use passkey page the person opens and taps on (the page the service serves);
- * 3. when the tap is verified, the one mutation that carries the authorization id (every change needs its own; nothing is reused).
+ * One administrative change from start to end, in one modal dialog and one step before the passkey page:
+ * 1. the form (when the change takes input), or for a change without input the facts, and ONE button, "Continue to passkey": it asks the service for the authorization (it changes nothing by itself) and opens
+ *    the service's own one-use passkey page in its own tab; the facts of the operation are shown once, as the service will have the passkey sign them;
+ * 2. the person taps there. The SERVICE makes the change the tap authorized, when the tap is verified (single use, bound to the operation and its parameters): this page only asks what became of it, so a tab that
+ *    was backgrounded, discarded, reloaded or idled out meanwhile loses nothing. A reloaded tab finds the waiting authorization again (its id is kept in this tab's session storage) and shows its result.
  * The page sets no time limit of its own: it waits as long as the person needs. The service's own limits are shown as they come.
  */
-export function OperationDialog({ def, onClose }: Props) {
+export function OperationDialog({ def, resume, onClose }: Props) {
   const queryClient = useQueryClient()
   const announce = useAnnounce()
   const pollMs = usePollInterval()
   const formId = useId()
-  const initial: State = def.fields?.length ? { phase: 'form', values: def.initial ?? {}, errors: {} } : { phase: 'review', values: {}, prepared: firstPrepared(def) }
+  const hasFields = (def?.fields?.length ?? 0) > 0
+  const initial: State = resume
+    ? { phase: 'waiting', waiting: { id: resume.id, operation: resume.operation, summary: resume.summary, link: null, parameters: null }, prepared: null }
+    : hasFields
+      ? { phase: 'form', errors: {} }
+      : { phase: 'review' }
   const [state, dispatch] = useReducer(reducer, initial)
-  const applied = useRef<string | null>(null)
-  const [draft, setDraft] = useState<FormValues>(def.initial ?? {})
+  const [draft, setDraft] = useState<FormValues>(def?.initial ?? {})
+  const mounted = useRef(true)
 
-  const authorization = state.phase === 'waiting' || state.phase === 'applying' ? state.authorization : null
-  const authorizationId = authorization?.id
-
-  // Ask for the authorization (it changes nothing by itself).
   useEffect(() => {
-    if (state.phase !== 'asking') return
-    const prepared = state.prepared
-    let live = true
-    api
-      .post('/api/v1/authorizations', { body: { operation: prepared.operation, parameters: prepared.parameters } })
-      .then((made) => {
-        if (!live) return
-        if (!sameOperation(prepared, made)) {
-          dispatch({ type: 'failed', error: new ApiError(0, 'authorization-mismatch', 'Not the same operation', 'The service answered with an authorization for something other than what was asked. Nothing was done.') })
-        } else {
-          dispatch({ type: 'created', authorization: made })
-        }
-      })
-      .catch((error: unknown) => live && dispatch({ type: 'failed', error }))
+    mounted.current = true
 
     return () => {
-      live = false
+      mounted.current = false
     }
-  }, [state])
+  }, [])
 
-  // Wait for the tap: ask where the authorization stands until it is verified (no time limit of this page's own).
+  const waiting = state.phase === 'waiting' ? state.waiting : null
+  const waitingId = waiting?.id
+  const waitingOperation = waiting?.operation
+  const waitingSummary = waiting?.summary ?? ''
+  const title = def?.title ?? resume?.title ?? ''
+
+  // Wait for the tap: ask where the authorization stands, and what came of it, until it is settled (no time limit of this page's own).
   useEffect(() => {
-    if (state.phase !== 'waiting') return
-    const id = state.authorization.id
+    if (!waitingId) return
     let live = true
     let timer: ReturnType<typeof setTimeout> | undefined
+    const settle = (action: Action) => {
+      if (!live) return
+      setPendingAuthorization(null)
+      dispatch(action)
+      void queryClient.invalidateQueries()
+    }
+    const outcomeUnknown = async () => {
+      // A lock ends every session and every authorization, so the answer to "what became of it" is the authority's state.
+      if (waitingOperation === 'lock') {
+        try {
+          if ((await api.get('/api/v1/status')).locked) {
+            settle({ type: 'done', summary: 'The authority is locked.', result: nothing })
+
+            return
+          }
+        } catch {
+          // Fall through to the general sentence.
+        }
+      }
+      settle({
+        type: 'failed',
+        error: new ApiError(
+          0,
+          'outcome-unknown',
+          'What became of the request cannot be read',
+          'Your session ended, or the service no longer holds this request. If you tapped your passkey, the change was made: sign in and look at the audit history (changes). If you did not tap, nothing was changed.',
+        ),
+      })
+    }
     const look = async () => {
       try {
-        const current = await api.get('/api/v1/authorizations/{id}', { path: { id } })
+        const current = await api.get('/api/v1/authorizations/{id}', { path: { id: waitingId }, query: { collect: 'invitation' } })
         if (!live) return
-        if (current.state === 'verified') {
-          dispatch({ type: 'verified' })
-        } else if (current.state === 'pending') {
+        if (current.state === 'consumed' && current.result) {
+          const result = current.result
+          if (result.outcome === 'failed') {
+            settle({ type: 'failed', error: new ApiError(0, result.code ?? 'operation-failed', 'The change was not made', result.detail ?? 'The tap was verified but the change could not be made. Nothing was changed.') })
+          } else {
+            settle({ type: 'done', summary: waitingSummary, result })
+          }
+        } else if (current.state === 'pending' || current.state === 'verified' || current.state === 'consumed') {
           timer = setTimeout(() => void look(), pollMs)
         } else {
           const why = current.detail ?? (current.state === 'expired' ? 'The authorization ran out before it was used.' : 'The authorization was ' + current.state + '.')
-          dispatch({ type: 'failed', error: new ApiError(0, 'authorization-' + current.state, 'Authorization ' + current.state, why) })
+          settle({ type: 'failed', error: new ApiError(0, 'authorization-' + current.state, 'Authorization ' + current.state, why) })
         }
       } catch (error) {
         if (!live) return
         if (error instanceof ApiError && error.status === 0) {
           timer = setTimeout(() => void look(), pollMs * 3)
+        } else if (error instanceof ApiError && (error.status === 401 || error.status === 404)) {
+          void outcomeUnknown()
         } else {
-          dispatch({ type: 'failed', error })
+          settle({ type: 'failed', error })
         }
       }
     }
@@ -154,53 +188,67 @@ export function OperationDialog({ def, onClose }: Props) {
       live = false
       if (timer) clearTimeout(timer)
     }
-  }, [state.phase, authorizationId, pollMs]) // eslint-disable-line react-hooks/exhaustive-deps -- state.authorization is read only when the phase is waiting
-
-  // Verified: perform the one mutation with this authorization (once).
-  useEffect(() => {
-    if (state.phase !== 'applying') return
-    const id = state.authorization.id
-    if (applied.current === id) return
-    applied.current = id
-    state.prepared
-      .perform(id)
-      .then((result) => {
-        dispatch({ type: 'done', result })
-        void queryClient.invalidateQueries()
-      })
-      .catch((error: unknown) => {
-        dispatch({ type: 'failed', error })
-        void queryClient.invalidateQueries()
-      })
-  }, [state, queryClient])
+  }, [waitingId]) // eslint-disable-line react-hooks/exhaustive-deps -- the waiting authorization is read only when its id changes
 
   useEffect(() => {
     const message: Partial<Record<State['phase'], string>> = {
       asking: 'Asking the service for an authorization.',
-      waiting: 'Waiting for your passkey tap on the passkey page.',
-      applying: 'Your passkey tap was verified. Making the change.',
-      done: 'Done. ' + (state.phase === 'done' ? state.prepared.summary : ''),
+      waiting: 'The passkey page is open in its own tab. Waiting for your passkey tap there.',
+      done: 'Done. ' + (state.phase === 'done' ? state.summary : ''),
       failed: 'The change was not made.',
     }
     const text = message[state.phase]
     if (text) announce(text)
   }, [state.phase]) // eslint-disable-line react-hooks/exhaustive-deps -- announced once per phase
 
-  function submitForm(event: FormEvent) {
-    event.preventDefault()
-    const values = draft
-    const result = def.prepare(values)
-    if ('errors' in result) dispatch({ type: 'invalid', errors: result.errors, values })
-    else dispatch({ type: 'reviewed', prepared: result, values })
+  /** One step: ask the service for the authorization and open its passkey page. Nothing changes until the tap there. */
+  async function continueToPasskey(prepared: Prepared) {
+    dispatch({ type: 'asking', prepared })
+    try {
+      const made = await api.post('/api/v1/authorizations', { body: { operation: prepared.operation, parameters: prepared.parameters } })
+      if (!mounted.current) {
+        // The dialog was closed while the service was answering: nothing is left waiting for it.
+        cancelAuthorization(made.id)
+
+        return
+      }
+      if (!sameOperation(prepared, made)) {
+        cancelAuthorization(made.id)
+        dispatch({ type: 'failed', error: new ApiError(0, 'authorization-mismatch', 'Not the same operation', 'The service answered with an authorization for something other than what was asked. Nothing was done.') })
+
+        return
+      }
+      setPendingAuthorization({ id: made.id, operation: made.operation, title, summary: prepared.summary })
+      const link = safeLink(made.link)
+      if (link) openPasskeyPage(link)
+      dispatch({ type: 'created', waiting: { id: made.id, operation: made.operation, summary: prepared.summary, link, parameters: made.parameters } })
+    } catch (error) {
+      if (mounted.current) dispatch({ type: 'failed', error })
+    }
   }
 
-  const busy = state.phase === 'asking' || state.phase === 'applying'
-  const link = authorization ? safeLink(authorization.link) : null
-  const confirmVariant = def.danger ? 'danger' : 'primary'
+  function close() {
+    if (state.phase === 'waiting') {
+      // Cancelling a waiting request cancels it at the service too: a tap on its page afterwards changes nothing.
+      cancelAuthorization(state.waiting.id)
+    }
+    setPendingAuthorization(null)
+    onClose()
+  }
+
+  function submitForm(event: FormEvent) {
+    event.preventDefault()
+    if (!def || state.phase !== 'form') return
+    const result = def.prepare(draft)
+    if ('errors' in result) dispatch({ type: 'invalid', errors: result.errors })
+    else void continueToPasskey(result)
+  }
+
+  const confirmVariant = def?.danger ? 'danger' : 'primary'
 
   let body
   let footer
-  if (state.phase === 'form') {
+  if (state.phase === 'form' && def) {
     body = (
       <form id={formId} onSubmit={submitForm} noValidate className={styles.form}>
         {def.intro ? <p>{def.intro}</p> : null}
@@ -229,72 +277,69 @@ export function OperationDialog({ def, onClose }: Props) {
             }
           </Field>
         ))}
+        <p className={styles.hint}>Continue opens your passkey page in a new tab. Nothing changes until you tap your passkey there, and that page shows exactly what you are authorizing.</p>
       </form>
     )
     footer = (
       <>
-        <Button key="cancel" onClick={onClose}>
+        <Button key="cancel" onClick={close}>
           Cancel
         </Button>
-        <Button key="review" variant={confirmVariant} type="submit" form={formId}>
-          Review
+        <Button key="continue" variant={confirmVariant} type="submit" form={formId}>
+          Continue to passkey
         </Button>
       </>
     )
-  } else if (state.phase === 'review' || state.phase === 'asking') {
+  } else if ((state.phase === 'review' || state.phase === 'asking') && def) {
+    const shown = state.phase === 'asking' ? state.prepared : firstPrepared(def)
     body = (
       <>
         {def.intro ? <p>{def.intro}</p> : null}
         {def.about ? <Facts items={def.about} /> : null}
         {def.warning ? <Notice kind="warning">{def.warning}</Notice> : null}
-        <Authorizing prepared={state.prepared} />
-        <p>Your passkey will be asked for on a separate page, and it will show this same operation. Nothing changes until you tap there.</p>
+        <Authorizing prepared={shown} />
+        <p className={styles.hint}>Continue opens your passkey page in a new tab. Nothing changes until you tap your passkey there.</p>
       </>
     )
     footer = (
       <>
-        <Button key="cancel" onClick={onClose}>
+        <Button key="cancel" onClick={close}>
           Cancel
         </Button>
-        {def.fields?.length ? (
-          <Button key="back" disabled={busy} onClick={() => dispatch({ type: 'back', values: state.values })}>
-            Back
-          </Button>
-        ) : null}
-        <Button key="ask" variant={confirmVariant} disabled={busy} onClick={() => dispatch({ type: 'asking' })} autoFocus>
-          {busy ? 'Asking...' : 'Ask for passkey authorization'}
+        <Button key="continue" variant={confirmVariant} disabled={state.phase === 'asking'} onClick={() => void continueToPasskey(shown)} autoFocus>
+          {state.phase === 'asking' ? 'Opening the passkey page...' : 'Continue to passkey'}
         </Button>
       </>
     )
-  } else if (state.phase === 'waiting' || state.phase === 'applying') {
+  } else if (state.phase === 'waiting') {
+    const link = state.waiting.link
     body = (
       <>
-        <p>This is exactly what your passkey signs. Check that the passkey page shows the same thing.</p>
-        <blockquote className={styles.sentence}>{state.authorization.sentence}</blockquote>
-        <Authorizing prepared={state.prepared} signed={state.authorization.parameters} />
-        {state.phase === 'waiting' ? (
-          link ? (
-            <>
-              <p>
-                <ButtonLink href={link} target="_blank" rel="noopener noreferrer" variant={confirmVariant} autoFocus>
-                  Open the passkey page (new tab)
-                </ButtonLink>
-              </p>
-              <p>Tap your passkey on that page, then come back here. This page waits for as long as you need and carries on by itself once the tap is verified.</p>
-            </>
+        {def?.about ? <Facts items={def.about} /> : null}
+        {state.prepared ? <Authorizing prepared={state.prepared} signed={state.waiting.parameters ?? undefined} /> : <p className={styles.summary}>{state.waiting.summary}</p>}
+        <Notice kind="info" title="Waiting for your passkey tap">
+          {resume ? (
+            <p>This page was reloaded while a passkey tap was waiting. It is asking the service what became of it. If you have not tapped yet, tap on the passkey page that is still open in its own tab.</p>
           ) : (
-            <Notice kind="warning" title="No usable passkey page link">
-              The service did not give a link to its own passkey page. Cancel and try again.
-            </Notice>
-          )
-        ) : (
-          <p>Your passkey tap was verified. Making the change now.</p>
+            <p>The passkey page is open in its own tab. Check that it names the operation above, and tap there. The service makes the change when the tap is verified, so you can leave this tab: it shows the result when you come back.</p>
+          )}
+        </Notice>
+        {link ? (
+          <p>
+            <ButtonLink href={link} target="_blank" rel="noopener noreferrer" variant="secondary">
+              The passkey page did not open? Open it here
+            </ButtonLink>
+          </p>
+        ) : resume ? null : (
+          <Notice kind="warning" title="No usable passkey page link">
+            The service did not give a link to its own passkey page that this page will open. Cancel and try again.
+          </Notice>
         )}
       </>
     )
     footer = (
-      <Button key="cancel" onClick={onClose} disabled={state.phase === 'applying'}>
-        Cancel
+      <Button key="cancel" onClick={close}>
+        Cancel the request
       </Button>
     )
   } else if (state.phase === 'done') {
@@ -302,9 +347,14 @@ export function OperationDialog({ def, onClose }: Props) {
     body = (
       <>
         <Notice kind="ok" title="Done">
-          {state.prepared.summary}
+          {state.summary}
         </Notice>
         {state.result.invitation ? <BundleOnce invitation={state.result.invitation} /> : null}
+        {state.result.invitationGone ? (
+          <Notice kind="warning" title="This invitation was already shown">
+            The invitation was made, but it was shown before (or was not collected in time) and cannot be shown again. Revoke it in the invitation list and create a new one.
+          </Notice>
+        ) : null}
         {state.result.outcome === 'started' ? (
           next ? (
             <p>
@@ -320,24 +370,25 @@ export function OperationDialog({ def, onClose }: Props) {
       </>
     )
     footer = (
-      <Button key="close" variant="primary" onClick={onClose} autoFocus>
+      <Button key="close" variant="primary" onClick={close} autoFocus>
         Close
       </Button>
     )
   } else {
+    const failed = state as Extract<State, { phase: 'failed' }>
     body = (
       <>
-        <ProblemAlert error={state.error} title="The change was not made" />
-        <p>Nothing was changed by this attempt unless the message above says so. Every change needs its own new authorization.</p>
+        <ProblemAlert error={failed.error} title="The change was not made" />
+        <p>Nothing was changed by this attempt unless the message above says so. Every change needs its own new passkey tap.</p>
       </>
     )
     footer = (
       <>
-        <Button key="close" onClick={onClose}>
+        <Button key="close" onClick={close}>
           Close
         </Button>
-        {state.prepared ? (
-          <Button key="again" variant="primary" onClick={() => dispatch({ type: 'reviewed', prepared: state.prepared as Prepared, values: state.values })}>
+        {failed.prepared && def ? (
+          <Button key="again" variant="primary" onClick={() => dispatch({ type: 'again', hasFields })}>
             Start over
           </Button>
         ) : null}
@@ -345,12 +396,22 @@ export function OperationDialog({ def, onClose }: Props) {
     )
   }
 
-  const stepName = state.phase === 'applying' ? 'waiting' : state.phase === 'asking' ? 'review' : state.phase
+  const stepName = state.phase === 'asking' ? 'review' : state.phase
 
   return (
-    <Dialog title={def.title} onCancel={() => (state.phase === 'applying' ? undefined : onClose())} footer={footer} step={stepName}>
+    <Dialog title={title} onCancel={close} footer={footer} step={stepName}>
       <p className="visually-hidden" role="status" aria-live="polite">
-        {state.phase === 'form' ? 'Step 1: enter the details.' : state.phase === 'review' ? 'Review what will be authorized.' : state.phase === 'waiting' ? 'Waiting for your passkey tap.' : state.phase === 'done' ? 'Done.' : state.phase === 'failed' ? 'The change was not made.' : ''}
+        {state.phase === 'form'
+          ? 'Enter the details, then continue to the passkey page.'
+          : state.phase === 'review'
+            ? 'Check what will be authorized, then continue to the passkey page.'
+            : state.phase === 'waiting'
+              ? 'Waiting for your passkey tap.'
+              : state.phase === 'done'
+                ? 'Done.'
+                : state.phase === 'failed'
+                  ? 'The change was not made.'
+                  : ''}
       </p>
       {body}
     </Dialog>
@@ -364,9 +425,8 @@ function firstPrepared(def: OperationDef): Prepared {
   return result
 }
 
-/** The operation and every parameter, by name: what the authorization will be bound to. */
+/** The operation and every parameter, by name, once: before the service answered, what this page will ask for; after, what the passkey signs (the service's own list). */
 function Authorizing({ prepared, signed }: { prepared: Prepared; signed?: ReadonlyArray<{ name: string; value: string }> }) {
-  // After the service has made the authorization, its own list (what the passkey signs) is shown; before, the parameters this page will ask for.
   const entries: Array<[string, string]> = signed ? signed.map((item) => [item.name, item.value]) : Object.entries(prepared.parameters).map(([name, value]) => [name, String(value)])
 
   return (

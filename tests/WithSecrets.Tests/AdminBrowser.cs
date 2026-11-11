@@ -257,11 +257,14 @@ internal sealed class AdminBrowser(HostService service, HttpClient http)
         return new Tapped(status, link, null, approved, url, TestState.LastProofBody, pageText, id);
     }
 
-    /// <summary>Waits until the service has judged the tap of an authorization (it does so a moment after the page says Approved). Returns the state.</summary>
+    /// <summary>
+    /// Waits until the service has judged the tap of an authorization and made the change it authorized (it does both a moment after the page says Approved). Returns the state: "consumed" when the change was
+    /// made (or refused: see the result), "refused", "expired" or "unknown" (an authorization that is gone, for example after a lock).
+    /// </summary>
     public async Task<string> WaitAuthorizationAsync(string id)
     {
         string state = "pending";
-        for (int i = 0; i < 100 && state == "pending"; i++)
+        for (int i = 0; i < 100 && state is "pending" or "verified"; i++)
         {
             (int status, string body) = await SendAsync(HttpMethod.Get, "/api/v1/authorizations/" + id, null);
             if (status != 200)
@@ -271,7 +274,7 @@ internal sealed class AdminBrowser(HostService service, HttpClient http)
 
             using JsonDocument doc = JsonDocument.Parse(body);
             state = doc.RootElement.GetProperty("state").GetString()!;
-            if (state == "pending")
+            if (state is "pending" or "verified")
             {
                 await Task.Delay(50);
             }
@@ -293,7 +296,7 @@ internal sealed class AdminBrowser(HostService service, HttpClient http)
 
         (int status, string body) = await PostAsync("/api/v1/authorizations", AuthorizationBody(op, args));
         Tapped tapped = await Tap(status, body, signer, userVerified, change);
-        if (tapped.AuthorizationId is null || tapped.ApproveStatus != 200 || await WaitAuthorizationAsync(tapped.AuthorizationId) != "verified")
+        if (tapped.AuthorizationId is null || tapped.ApproveStatus != 200 || await WaitAuthorizationAsync(tapped.AuthorizationId) is not ("verified" or "consumed"))
         {
             return tapped;
         }

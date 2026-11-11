@@ -26,6 +26,7 @@ internal static class Program
         ("i6-spa-settings-change", ScenariosSpa.Settings),
         ("i7-spa-refused-without-authorization", ScenariosSpa.RefusedWithoutAuthorization),
         ("i8-spa-accept-host-name", ScenariosSpa.AcceptHostName),
+        ("i9-spa-reload-between-tap-and-result", ScenariosSpa.ReloadBetweenTapAndResult),
         ("j1-spa-accessibility", ScenariosSpa.Accessibility),
         ("k1-spa-pair-machine", ScenariosPairing.PairMachine),
     ];

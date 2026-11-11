@@ -27,6 +27,7 @@ internal static class ApiTests
             await ForgeryAndOrigin(check, root);
             await SensitiveMatrix(check, root);
             await Binding(check, root);
+            await ApiTapTimeTests.Run(check, root);
             await MachineFunctions(check, root);
             await SettingsAndPasskeys(check, root);
             await Pending(check, root);
@@ -211,7 +212,7 @@ internal static class ApiTests
         AdminBrowser two = await app.SignedIn();
         check(app.Service.Admin.Sessions.Count == 2, "session: two browsers can be signed in at once");
         Tapped lockTap = await one.OpAsync(AdminService.OpLock, app.Laptop);
-        check(lockTap.MutationStatus == 200 && app.Service.Lock.IsLocked, "lock: the admin key's fresh tap locks");
+        check(lockTap.ApproveStatus == 200 && await HostServiceTests.WaitFor(() => app.Service.Lock.IsLocked), "lock: the admin key's fresh tap locks");
         check(app.Service.Admin.Sessions.Count == 0 && (await one.GetAsync("/api/v1/machines")).Status == 401 && (await two.GetAsync("/api/v1/grants")).Status == 401, "lock: it destroys every session at once");
         // M4: with the authority locked the key operations (and every other change) are refused before any page, and the refusal is audited.
         AdminSession forged = new("t", "laptop", app.Clock.GetUtcNow(), "c");
@@ -357,7 +358,7 @@ internal static class ApiTests
             TestState.Post(app.Http, done.PageUrl + "/proof", done.ProofBody);
             (HttpMethod method2, string path2, string json2) = b.MutationRequest(op, done.AuthorizationId, args);
             (int again, string againBody) = await b.SendAsync(method2, path2, json2);
-            check(Snapshot(app) == settled && again == 403 && Code(againBody) == "authorization-used", $"sensitive {label}: replaying the proof, or the authorization, changes nothing (the authorization is spent)");
+            check(Snapshot(app) == settled && again == 200 && againBody.Contains("\"already-applied\"", StringComparison.Ordinal), $"sensitive {label}: replaying the proof, or the authorization, applies nothing again (the retry is answered as already applied)");
         }
 
         // A session alone (and the sign-in tap before it) changes nothing and asks for a page of its own.
@@ -440,11 +441,11 @@ internal static class ApiTests
         (int madeUp, string madeUpBody) = await Send("machine-disable", "AAAAAAAAAAAAAAAAAAAA", ("fingerprint", fp));
         check(noAuthorization == 400 && madeUp == 403 && Code(madeUpBody) == "authorization-invalid" && Snapshot(app) == start && app.Asked == asked, "binding: a session alone changes nothing; no authorization (400) or a made-up one (403) is refused and asks for no passkey (" + noAuthorizationBody.Length + ")");
 
-        // b. An authorization for one operation does not authorize another, and is spent by the attempt.
+        // b. An authorization for one operation does not authorize another. The service made the change its tap authorized when the tap was verified, so a request for another operation changes nothing.
         (Tapped rename, string renameState) = await Authorized("machine-rename", ("fingerprint", fp), ("name", "alpha"));
         (int wrongOp, string wrongOpBody) = await Send("machine-disable", rename.AuthorizationId, ("fingerprint", fp));
         (int afterWrongOp, string afterWrongOpBody) = await Send("machine-rename", rename.AuthorizationId, ("fingerprint", fp), ("name", "alpha"));
-        check(renameState == "verified" && wrongOp == 403 && Code(wrongOpBody) == "authorization-mismatch" && afterWrongOp == 403 && app.Store.Find(app.Fingerprint)!.FriendlyName != "alpha" && Snapshot(app) == start, "binding: an authorization for another operation is refused (mismatch) and is spent, so the right operation can no longer use it (" + Code(afterWrongOpBody) + ")");
+        check(renameState == "consumed" && wrongOp == 403 && Code(wrongOpBody) == "authorization-mismatch" && app.Store.Find(app.Fingerprint)!.Status == MachineStatus.Trusted && app.Store.Find(app.Fingerprint)!.FriendlyName == "alpha" && afterWrongOp == 200 && afterWrongOpBody.Contains("\"applied\"", StringComparison.Ordinal), "binding: an authorization for another operation is refused (mismatch) and changes nothing; the right request is answered with the outcome of the change its tap made (" + Code(afterWrongOpBody) + ")");
 
         // c. Other parameters: another name, another spelling of the fingerprint.
         (Tapped alpha, _) = await Authorized("machine-rename", ("fingerprint", fp), ("name", "alpha"));
@@ -455,7 +456,7 @@ internal static class ApiTests
         check(otherFingerprint == 403 && Code(otherFingerprintBody) == "authorization-mismatch", "binding: the same operation with another spelling of the machine is refused (mismatch)");
         (Tapped extra, _) = await Authorized("machine-rename", ("fingerprint", fp), ("name", "alpha"));
         (int moreParameters, string moreParametersBody) = await Send("machine-rename", extra.AuthorizationId, ("fingerprint", fp), ("name", "alpha"), ("minutes", "5"));
-        check(moreParameters is 400 or 403 && Snapshot(app) == start, "binding: an extra parameter is refused (" + moreParameters + " " + Code(moreParametersBody) + ")");
+        check(moreParameters is 400 or 403 && app.Store.Find(app.Fingerprint)!.FriendlyName == "alpha" && app.Store.Find(app.Fingerprint)!.Status == MachineStatus.Trusted, "binding: an extra parameter is refused (" + moreParameters + " " + Code(moreParametersBody) + ")");
 
         // d. Another caller cannot spend it, or even see it.
         AdminBrowser thief = await app.SignedIn();
@@ -463,30 +464,28 @@ internal static class ApiTests
         (HttpMethod tm, string tp, string tj) = thief.MutationRequest("machine-rename", mine.AuthorizationId, ("fingerprint", fp), ("name", "gamma"));
         (int stolen, string stolenBody) = await thief.SendAsync(tm, tp, tj);
         (int seen, _) = await thief.SendAsync(HttpMethod.Get, "/api/v1/authorizations/" + mine.AuthorizationId, null);
-        check(stolen == 403 && Code(stolenBody) == "authorization-invalid" && seen == 404 && app.Store.Find(app.Fingerprint)!.FriendlyName != "gamma", "binding: another session cannot spend or look at an authorization made for this one");
-        (int owner, _) = await Send("machine-rename", mine.AuthorizationId, ("fingerprint", fp), ("name", "gamma"));
-        check(owner == 200 && app.Store.Find(app.Fingerprint)!.FriendlyName == "gamma", "binding: the caller it was made for spends it once, with exactly its parameters");
+        check(stolen == 403 && Code(stolenBody) == "authorization-invalid" && seen == 404, "binding: another session cannot spend or look at an authorization made for this one");
+        (int owner, string ownerBody) = await Send("machine-rename", mine.AuthorizationId, ("fingerprint", fp), ("name", "gamma"));
+        (int ownerSees, string ownerSeesBody) = await b.SendAsync(HttpMethod.Get, "/api/v1/authorizations/" + mine.AuthorizationId, null);
+        check(owner == 200 && ownerBody.Contains("\"applied\"", StringComparison.Ordinal) && ownerSees == 200 && ownerSeesBody.Contains("\"outcome\":\"applied\"", StringComparison.Ordinal) && app.Store.Find(app.Fingerprint)!.FriendlyName == "gamma", "binding: the caller it was made for gets the outcome of the change its tap made, and no other");
 
         // e. An earlier authorization never satisfies another operation.
         (int reuse, string reuseBody) = await Send("machine-disable", mine.AuthorizationId, ("fingerprint", fp));
-        check(reuse == 403 && Code(reuseBody) == "authorization-used" && app.Store.Find(app.Fingerprint)!.Status == MachineStatus.Trusted, "binding: a spent authorization satisfies no later change (used)");
+        check(reuse == 403 && Code(reuseBody) == "authorization-mismatch" && app.Store.Find(app.Fingerprint)!.Status == MachineStatus.Trusted, "binding: a spent authorization satisfies no other change (mismatch)");
 
-        // f. Expired: the tap was good, the mutation came too late.
+        // f. The change was made at the tap, so a retry long after changes nothing; an authorization whose tap never came expires.
         (Tapped late, string lateState) = await Authorized("machine-rename", ("fingerprint", fp), ("name", "late"));
         app.Clock.Advance(AdminService.AuthorizationLifetime + TimeSpan.FromSeconds(5));
-        (int expired, string expiredBody) = await Send("machine-rename", late.AuthorizationId, ("fingerprint", fp), ("name", "late"));
-        check(lateState == "verified" && expired == 403 && Code(expiredBody) == "authorization-expired" && app.Store.Find(app.Fingerprint)!.FriendlyName == "gamma", "binding: a verified authorization older than " + AdminService.LifetimeText + " seconds is refused (expired)");
-        (Tapped inTime, _) = await Authorized("machine-rename", ("fingerprint", fp), ("name", "in time"));
-        app.Clock.Advance(AdminService.AuthorizationLifetime - TimeSpan.FromSeconds(10));
-        (int stillGood, _) = await Send("machine-rename", inTime.AuthorizationId, ("fingerprint", fp), ("name", "in time"));
-        check(stillGood == 200, "binding: just inside its lifetime it still works (the control for the expiry)");
+        await Send("machine-rename", late.AuthorizationId, ("fingerprint", fp), ("name", "late"));
+        (int retried, string retriedBody) = await Send("machine-rename", late.AuthorizationId, ("fingerprint", fp), ("name", "late"));
+        check(lateState == "consumed" && retried == 200 && retriedBody.Contains("\"already-applied\"", StringComparison.Ordinal) && app.Store.Find(app.Fingerprint)!.FriendlyName == "late", "binding: the change was made at the tap; a retry after " + AdminService.LifetimeText + " seconds is answered as already applied and applies nothing again");
 
         // g. A tap by another key, or without user verification, never becomes a usable authorization.
         Tapped outsider = await b.OpAsyncWithoutMutation("machine-rename", app.Phone, ("fingerprint", fp), ("name", "outsider"));
         Tapped noUv = await b.OpAsyncWithoutMutation("machine-rename", app.Laptop, userVerified: false, args: [("fingerprint", fp), ("name", "no uv")]);
         (int fromOutsider, _) = await Send("machine-rename", outsider.AuthorizationId, ("fingerprint", fp), ("name", "outsider"));
         (int fromNoUv, _) = await Send("machine-rename", noUv.AuthorizationId, ("fingerprint", fp), ("name", "no uv"));
-        check(fromOutsider == 403 && fromNoUv == 403 && app.Store.Find(app.Fingerprint)!.FriendlyName == "in time", "binding: a tap by a non-admin key, or without user verification, authorizes nothing");
+        check(fromOutsider == 403 && fromNoUv == 403 && app.Store.Find(app.Fingerprint)!.FriendlyName == "late", "binding: a tap by a non-admin key, or without user verification, authorizes nothing");
 
         // h. The passkey signs the operation and every parameter: they are the page's text and the authorization's text.
         string text = alpha.Page;
@@ -494,30 +493,49 @@ internal static class ApiTests
         (int createStatus, string created) = await b.PostAsync("/api/v1/authorizations", AdminBrowser.AuthorizationBody("machine-rename", ("fingerprint", fp), ("name", "shown")));
         check(createStatus == 201 && Member(created, "operation") == "machine-rename" && Member(created, "sentence")!.Contains("Parameter friendly-name: shown", StringComparison.Ordinal) && Member(created, "state") == "pending" && Member(created, "lifetimeSeconds") == AdminService.LifetimeText, "binding: the authorization carries the exact text to show the person, its state and its lifetime");
 
-        // i. A lock ends every authorization: a tap before the lock authorizes nothing after it.
-        (Tapped beforeLock, string beforeLockState) = await Authorized("machine-rename", ("fingerprint", fp), ("name", "before lock"));
+        // i. A lock ends every authorization: a page that was waiting before the lock authorizes nothing after it, and the lock discards what was kept.
+        Tapped waitingBeforeLock = await b.OpAsyncWithoutMutation("machine-rename", null, ("fingerprint", fp), ("name", "before lock"));
+        (Tapped beforeLock, string beforeLockState) = await Authorized("machine-rename", ("fingerprint", fp), ("name", "tapped before lock"));
         app.Service.Lock.Lock("test");
         check(app.Service.Admin.AuthorizationCount == 0, "binding: a lock discards every authorization");
         app.Service.Lock.Unlock(UnlockMethod.Seam);
         AdminBrowser again = await app.SignedIn();
-        (HttpMethod am, string ap, string aj) = again.MutationRequest("machine-rename", beforeLock.AuthorizationId, ("fingerprint", fp), ("name", "before lock"));
+        (HttpMethod am, string ap, string aj) = again.MutationRequest("machine-rename", beforeLock.AuthorizationId, ("fingerprint", fp), ("name", "tapped before lock"));
         (int afterLock, _) = await again.SendAsync(am, ap, aj);
-        check(beforeLockState == "verified" && afterLock == 403 && app.Store.Find(app.Fingerprint)!.FriendlyName == "in time", "binding: an authorization from before a lock is refused after the unlock");
+        (int lateTap, _) = TestState.Approve(app.Http, waitingBeforeLock.PageUrl, "http://localhost:" + new Uri(waitingBeforeLock.Link!).Port, "localhost", app.Laptop);
+        check(beforeLockState == "consumed" && afterLock == 403 && lateTap != 200 && app.Store.Find(app.Fingerprint)!.FriendlyName == "tapped before lock", "binding: after a lock and an unlock an old authorization is gone (403) and the page that was waiting takes no tap");
 
-        // j. Policy: the unlock mode is one route; the operation follows the body, so a tap for manual is not a tap for unattended.
+        // j. Policy: the unlock mode is one route; the operation follows the body, so a tap for unattended is not a tap for manual.
         AdminBrowser c = await app.SignedIn();
         app.Clock.Advance(TimeSpan.FromSeconds(31));
         Tapped unattended = await c.OpAsyncWithoutMutation("policy-unattended", app.Laptop);
         await c.WaitAuthorizationAsync(unattended.AuthorizationId!);
         (int wrongPolicy, string wrongPolicyBody) = await c.SendAsync(HttpMethod.Put, "/api/v1/settings/unlock-policy", "{\"authorization\":\"" + unattended.AuthorizationId + "\",\"policy\":\"manual\"}");
-        check(wrongPolicy == 403 && Code(wrongPolicyBody) == "authorization-mismatch" && app.Store.GetUnlockPolicy() == UnlockPolicy.Manual, "binding: an authorization for the unattended unlock mode does not set another mode");
+        check(wrongPolicy == 403 && Code(wrongPolicyBody) == "authorization-mismatch" && app.Store.GetUnlockPolicy() == UnlockPolicy.Unattended, "binding: an authorization for the unattended unlock mode does not set another mode (the tap made the mode it named)");
         Tapped retention = await c.OpAsyncWithoutMutation("set-audit-retention", app.Laptop, ("days", "10"));
         await c.WaitAuthorizationAsync(retention.AuthorizationId!);
         (int wrongDays, string wrongDaysBody) = await c.SendAsync(HttpMethod.Put, "/api/v1/settings/audit-retention", "{\"authorization\":\"" + retention.AuthorizationId + "\",\"days\":0}");
-        check(wrongDays == 403 && Code(wrongDaysBody) == "authorization-mismatch" && app.Store.AuditRetentionDays() == 365, "binding: an authorization for 10 days does not set 0 (keep everything)");
+        check(wrongDays == 403 && Code(wrongDaysBody) == "authorization-mismatch" && app.Store.AuditRetentionDays() == 10, "binding: an authorization for 10 days does not set 0 (keep everything)");
 
         string audit = AuditText(app.Store);
-        check(audit.Contains("authorization mismatch", StringComparison.Ordinal) && audit.Contains("authorization used", StringComparison.Ordinal) && audit.Contains("authorization expired", StringComparison.Ordinal) && audit.Contains("authorization invalid", StringComparison.Ordinal), "binding: every refusal (mismatch, used, expired, invalid) is in the audit history");
+        check(audit.Contains("authorization mismatch", StringComparison.Ordinal) && audit.Contains("authorization invalid", StringComparison.Ordinal), "binding: every refusal (mismatch, invalid) is in the audit history");
+
+        // k. An authorization whose tap never came expires (in its own app: the clock moves far, and a passkey page is only good for the time it was made for).
+        using AdminApp slow = new(root, protection: true);
+        AdminBrowser sb = await slow.SignedIn();
+        await sb.LoadAsync();
+        (int untappedStatus, string untapped) = await sb.PostAsync("/api/v1/authorizations", AdminBrowser.AuthorizationBody("machine-rename", ("fingerprint", slow.Fingerprint[..20]), ("name", "untapped")));
+        for (int step = 0; step < 3; step++)
+        {
+            // The session is kept in use (its idle timeout is shorter than the time an untapped authorization may wait: 35 minutes; it is forgotten after 37).
+            slow.Clock.Advance(TimeSpan.FromMinutes(12));
+            await sb.GetAsync("/api/v1/machines");
+        }
+
+        (HttpMethod xm, string xp, string xj) = sb.MutationRequest("machine-rename", Member(untapped, "id"), ("fingerprint", slow.Fingerprint[..20]), ("name", "untapped"));
+        (int expired, string expiredBody) = await sb.SendAsync(xm, xp, xj);
+        check(untappedStatus == 201 && expired == 403 && Code(expiredBody) == "authorization-expired" && slow.Store.Find(slow.Fingerprint)!.FriendlyName != "untapped" && AuditText(slow.Store).Contains("authorization expired", StringComparison.Ordinal), "binding: an authorization whose tap never came expires (expired), changes nothing and is audited");
+
     }
 
     // ---- the machine functions of the old admin verbs ----
@@ -607,20 +625,24 @@ internal static class ApiTests
         check(host.MutationStatus == 200 && store.Find(fp) is { HostName: "other-host", PendingHostName: null } && host.Page.Contains("other-host", StringComparison.Ordinal), "machine host-change: the page shows the new name; the tap binds it");
 
         // A state that changed after the tap: the stale authorization changes nothing.
-        Tapped staleTapped = await b.OpAsyncWithoutMutation("machine-disable", app.Laptop, ("fingerprint", fp[..20]));
-        await b.WaitAuthorizationAsync(staleTapped.AuthorizationId!);
+        // The service applies the change when the tap is verified, so the state that changes is one that changed between the authorization and the tap.
+        Tapped staleTapped = await b.OpAsyncWithoutMutation("machine-disable", null, ("fingerprint", fp[..20]));
         store.Disable(fp, "someone else");
         int revision = store.Find(fp)!.SecurityRevision;
+        TestState.Approve(app.Http, staleTapped.PageUrl, "http://localhost:" + new Uri(staleTapped.Link!).Port, "localhost", app.Laptop);
+        string staleState = await b.WaitAuthorizationAsync(staleTapped.AuthorizationId!);
+        (_, string staleView) = await b.SendAsync(HttpMethod.Get, "/api/v1/authorizations/" + staleTapped.AuthorizationId, null);
         (HttpMethod sm, string sp, string sj) = b.MutationRequest("machine-disable", staleTapped.AuthorizationId, ("fingerprint", fp[..20]));
         (int staleStatus, string staleBody) = await b.SendAsync(sm, sp, sj);
-        check(store.Find(fp) is { Status: MachineStatus.Disabled } stillDisabled && stillDisabled.SecurityRevision == revision && staleStatus == 409 && Code(staleBody) == "operation-failed", "machine functions: a machine that changed after the tap is not changed again by the stale authorization (409)");
+        check(store.Find(fp) is { Status: MachineStatus.Disabled } stillDisabled && stillDisabled.SecurityRevision == revision && staleState == "consumed" && staleView.Contains("\"outcome\":\"failed\"", StringComparison.Ordinal) && staleStatus == 409 && Code(staleBody) == "operation-failed", "machine functions: a machine that changed between the authorization and the tap is not changed again by the tap (failed, 409)");
         store.Enable(fp, "test");
 
         // A different host name arriving after the tap is not applied.
         store.RecordHostMismatch(fp, "shown-name");
-        Tapped race = await b.OpAsyncWithoutMutation("machine-host-change", app.Laptop, ("fingerprint", fp[..20]));
-        await b.WaitAuthorizationAsync(race.AuthorizationId!);
+        Tapped race = await b.OpAsyncWithoutMutation("machine-host-change", null, ("fingerprint", fp[..20]));
         store.RecordHostMismatch(fp, "other-name");
+        TestState.Approve(app.Http, race.PageUrl, "http://localhost:" + new Uri(race.Link!).Port, "localhost", app.Laptop);
+        await b.WaitAuthorizationAsync(race.AuthorizationId!);
         (HttpMethod rm, string rp, string rj) = b.MutationRequest("machine-host-change", race.AuthorizationId, ("fingerprint", fp[..20]));
         (int raceStatus, _) = await b.SendAsync(rm, rp, rj);
         check(store.Find(fp) is { HostName: "other-host" } && raceStatus == 409, "machine host-change: a host name that replaced the shown one is not applied by the tap (" + store.Find(fp)!.HostName + ")");
@@ -685,7 +707,7 @@ internal static class ApiTests
         await Task.Delay(300);
         check(two.Link is not null && closed != 200 && app.Store.Find(app.Fingerprint)!.FriendlyName != "one", "pending: a newer request closes the page of the older one; a tap on the old page changes nothing");
         (int okStatus, _) = TestState.Approve(app.Http, two.PageUrl, "http://localhost:" + new Uri(two.Link!).Port, "localhost", app.Laptop);
-        check(okStatus == 200 && await b.WaitAuthorizationAsync(two.AuthorizationId!) == "verified", "pending: the newest page still works");
+        check(okStatus == 200 && await b.WaitAuthorizationAsync(two.AuthorizationId!) == "consumed", "pending: the newest page still works (its tap made the change)");
         (HttpMethod m2, string p2, string j2) = b.MutationRequest("machine-rename", two.AuthorizationId, ("fingerprint", fp), ("name", "two"));
         check((await b.SendAsync(m2, p2, j2)).Status == 200 && app.Store.Find(app.Fingerprint)!.FriendlyName == "two", "pending: and its mutation applies it");
 
@@ -709,10 +731,7 @@ internal static class ApiTests
         Tapped lockPage = await b.OpAsync(AdminService.OpLock, null);
         check(lockPage.Link is not null, "pending: the lock page is made even while another page is waiting");
         (int lockStatus, _) = TestState.Approve(app.Http, lockPage.PageUrl, "http://localhost:" + new Uri(lockPage.Link!).Port, "localhost", app.Laptop);
-        await b.WaitAuthorizationAsync(lockPage.AuthorizationId!);
-        (HttpMethod lm, string lp, string lj) = b.MutationRequest(AdminService.OpLock, lockPage.AuthorizationId);
-        (int lockMutation, _) = await b.SendAsync(lm, lp, lj);
-        check(lockStatus == 200 && lockMutation == 200 && app.Service.Lock.IsLocked, "pending: the lock still goes through");
+        check(lockStatus == 200 && await HostServiceTests.WaitFor(() => app.Service.Lock.IsLocked), "pending: the lock still goes through (its tap locks the authority)");
         (int pendingStatus, _) = TestState.Approve(app.Http, pendingRename.PageUrl, "http://localhost:" + new Uri(pendingRename.Link!).Port, "localhost", app.Laptop);
         check(pendingStatus != 200 && app.Store.Find(app.Fingerprint)!.FriendlyName != "will not happen", "pending: the page that was waiting when the lock came was closed by it, and its tap changes nothing");
 
@@ -750,8 +769,8 @@ internal static class ApiTests
         check(bad.ApproveStatus == 403 && app.Service.Lock.IsLocked, "locked: a non-admin key cannot unlock");
         Tapped unlock = await b.OpAsync(AdminService.OpUnlock, app.Laptop);
         check(unlock.MutationStatus == 200 && !app.Service.Lock.IsLocked && Member((await b.GetAsync("/api/v1/status")).Html, "locked") == "false", "locked: an admin key's own authorization unlocks, and the status follows");
-        (int replay, _) = await b.SendAsync(HttpMethod.Post, "/api/v1/unlock", "{\"authorization\":\"" + unlock.AuthorizationId + "\"}");
-        check(replay == 403 && !app.Service.Lock.IsLocked, "locked: the unlock authorization cannot be spent again");
+        (int replay, string replayBody) = await b.SendAsync(HttpMethod.Post, "/api/v1/unlock", "{\"authorization\":\"" + unlock.AuthorizationId + "\"}");
+        check(replay == 200 && replayBody.Contains("\"already-applied\"", StringComparison.Ordinal) && !app.Service.Lock.IsLocked, "locked: the unlock authorization is answered as already applied and unlocks nothing twice");
     }
 
     // ---- versions and the fallback ----

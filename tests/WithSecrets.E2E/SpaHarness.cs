@@ -21,7 +21,7 @@ internal sealed class SpaApp : IDisposable
 
 /// <summary>
 /// What a person does in the administration application, as page steps. The passkey tap is never in the application's page: it is on the service's own one-use page, which the application offers as
-/// a link that opens in a new tab. <see cref="Tap" /> clicks that link and taps there, with the same (virtual) passkey as the rest of the scenario.
+/// a page that the dialog's "Continue to passkey" opens in a new tab by itself (the sign-in offers a link). <see cref="Continue" /> and <see cref="Tap" /> tap there, with the same (virtual) passkey as the rest of the scenario.
 /// </summary>
 internal static class Spa
 {
@@ -77,6 +77,37 @@ internal static class Spa
         await link.First.WaitForAsync(new() { Timeout = 20000 });
         s.Check(await link.First.GetAttributeAsync("target") == "_blank" && (await link.First.GetAttributeAsync("rel") ?? "").Contains("noopener", StringComparison.Ordinal), "the application opens the passkey page in a new tab (target _blank, noopener)");
         IPage popup = await c.Page.RunAndWaitForPopupAsync(() => link.First.ClickAsync());
+
+        return await TapPopup(c, s, popup, beforeTap);
+    }
+
+    /// <summary>
+    /// The one step of an administrative change: the dialog's "Continue to passkey" asks the service for the authorization and opens its passkey page in a new tab by itself. Returns that tab (not yet tapped).
+    /// The click is counted in <see cref="Clicks" />.
+    /// </summary>
+    public static async Task<IPage> OpenPasskeyPage(Ctx c, S s, ILocator dialog)
+    {
+        IPage popup = await c.Page.RunAndWaitForPopupAsync(() => dialog.GetByRole(AriaRole.Button, new() { Name = "Continue to passkey" }).ClickAsync());
+        Clicks++;
+
+        return popup;
+    }
+
+    /// <summary>Continue to passkey, then the tap on the page it opened (two clicks), the same as a person does. Returns what the passkey page said.</summary>
+    public static async Task<string> Continue(Ctx c, S s, ILocator dialog, Func<IPage, string, Task>? beforeTap = null) => await TapPopup(c, s, await OpenPasskeyPage(c, s, dialog), beforeTap);
+
+    /// <summary>Clicks a control of the application and counts the click.</summary>
+    public static async Task Click(ILocator locator)
+    {
+        await locator.ClickAsync();
+        Clicks++;
+    }
+
+    /// <summary>The clicks a person made since <see cref="Clicks" /> was last set to zero (the passkey page's own Approve counts).</summary>
+    public static int Clicks { get; set; }
+
+    public static async Task<string> TapPopup(Ctx c, S s, IPage popup, Func<IPage, string, Task>? beforeTap)
+    {
         ICDPSession cdp = await c.Context.NewCDPSessionAsync(popup);
         await cdp.SendAsync("WebAuthn.enable");
         JsonElement? added = await cdp.SendAsync("WebAuthn.addVirtualAuthenticator", AuthenticatorOptions());
@@ -96,6 +127,7 @@ internal static class Spa
         }
 
         await popup.Locator("#approve").ClickAsync(new() { Timeout = 20000 });
+        Clicks++;
         await popup.WaitForFunctionAsync("() => { var e = document.getElementById('status'); return !!e && e.textContent.indexOf('Approved') >= 0; }", null, new() { Timeout = 20000 });
 
         // Back to the scenario's authenticator: the sign counts the tap moved.

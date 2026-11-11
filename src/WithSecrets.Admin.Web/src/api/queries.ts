@@ -68,12 +68,13 @@ export function useSession() {
   })
 }
 
-export function useMachines(enabled: boolean) {
-  return useQuery({ queryKey: keys.machines, queryFn: async () => (await api.get('/api/v1/machines')).items, enabled })
+/** `poll`: ask again every so many milliseconds (the Machines view does, so a machine that has just paired appears by itself). */
+export function useMachines(enabled: boolean, poll: number | false = false) {
+  return useQuery({ queryKey: keys.machines, queryFn: async () => (await api.get('/api/v1/machines')).items, enabled, refetchInterval: poll })
 }
 
-export function useInvitations(enabled: boolean) {
-  return useQuery({ queryKey: keys.invitations, queryFn: async () => (await api.get('/api/v1/pairing/invitations')).items, enabled })
+export function useInvitations(enabled: boolean, poll: number | false = false) {
+  return useQuery({ queryKey: keys.invitations, queryFn: async () => (await api.get('/api/v1/pairing/invitations')).items, enabled, refetchInterval: poll })
 }
 
 export function useGrants(enabled: boolean) {

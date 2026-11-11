@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { installFakeApi, grant, machine } from '../../test/fakeApi'
+import { grant, machine } from '../../test/fakeApi'
 import { approveMachine, changeGrantEnd, removePasskey, renameMachine, revokeGrant, setAuditRetention, setSessionTimeouts, setUnlockPolicy, trustMachine, unlock, type OperationDef, type Prepared } from './operations'
 
 function prepared(def: OperationDef, values: Record<string, string | boolean> = {}): Prepared {
@@ -10,15 +10,12 @@ function prepared(def: OperationDef, values: Record<string, string | boolean> = 
 }
 
 describe('operations: what is authorized is exactly what is performed', () => {
-  it('machine approve: the authorized parameters are the path value and the name, repeated by the mutation', async () => {
-    const fake = installFakeApi({ 'POST /api/v1/machines/ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12/approve': { body: { operation: 'machine-approve', outcome: 'applied', link: null } } })
+  it('machine approve: the authorized parameters are the fingerprint and the name; a pending machine starts with its host name', () => {
     const m = machine()
     const p = prepared(approveMachine(m), { name: 'ci box' })
     expect(p.operation).toBe('machine-approve')
     expect(p.parameters).toEqual({ fingerprint: m.fingerprint, name: 'ci box' })
-    await p.perform('AUTHID123')
-
-    expect(fake.calls[0]?.body).toEqual({ authorization: 'AUTHID123', name: 'ci box' })
+    expect(approveMachine(m).initial).toEqual({ name: 'build-host' })
     expect(p.summary).toContain('ci box')
   })
 
@@ -52,19 +49,15 @@ describe('operations: what is authorized is exactly what is performed', () => {
     expect(prepared(revokeGrant(g)).operation).toBe('grant-revoke')
   })
 
-  it('the unlock mode is the operation (policy-manual / policy-unattended), with no parameters', async () => {
-    const fake = installFakeApi({ 'PUT /api/v1/settings/unlock-policy': { body: { operation: 'policy-unattended', outcome: 'applied', link: null } } })
+  it('the unlock mode is the operation (policy-manual / policy-unattended), with no parameters', () => {
     const p = prepared(setUnlockPolicy('unattended'))
     expect(p.operation).toBe('policy-unattended')
     expect(p.parameters).toEqual({})
-    await p.perform('AUTHID123')
-    expect(fake.calls[0]?.body).toEqual({ authorization: 'AUTHID123', policy: 'unattended' })
     expect(prepared(unlock()).operation).toBe('unlock')
   })
 
-  it('passkey removal carries the name in the path', async () => {
-    const fake = installFakeApi({ 'POST /api/v1/passkeys/old%20key/remove': { status: 200, body: { operation: 'passkey-unenroll', outcome: 'applied', link: null } } })
-    await prepared(removePasskey({ name: 'old key', detail: 'x', created: '2026-01-01T00:00:00Z', admin: false })).perform('AUTHID123')
-    expect(fake.calls[0]?.path).toBe('/api/v1/passkeys/old%20key/remove')
+  it('passkey removal names the passkey', () => {
+    const p = prepared(removePasskey({ name: 'old key', detail: 'x', created: '2026-01-01T00:00:00Z', admin: false }))
+    expect(p.parameters).toEqual({ name: 'old key' })
   })
 })

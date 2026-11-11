@@ -648,7 +648,7 @@ internal sealed partial class AdminApi
     }
 
     private AuthorizationDto Dto(AuthorizationView view) => new(view.Id, view.Operation, view.State.ToString().ToLowerInvariant(), view.Detail, view.Link, view.Sentence, [.. view.Parameters.Select(item => new NameValueDto(item.Name, item.Value))], view.Created, view.Expires,
-        (int)AdminService.AuthorizationLifetime.TotalSeconds);
+        (int)AdminService.AuthorizationLifetime.TotalSeconds, view.Result is { } result ? new AuthorizationResultDto(result.Outcome, result.Code, result.Detail, result.Link, result.Invitation, result.InvitationGone) : null);
 
     private async Task<ApiResult> CreateAuthorizationAsync(ApiCall call)
     {
@@ -688,9 +688,33 @@ internal sealed partial class AdminApi
     private Task<ApiResult> GetAuthorizationAsync(ApiCall call)
     {
         object? owner = OwnerOf(call);
-        AuthorizationView? view = owner is null ? null : admin.FindAuthorization(owner, call.Path["id"]);
+        IQueryCollection query = call.Context.Request.Query;
+        if (query.Keys.Any(key => key != "collect") || query["collect"].Count > 1 || (query.TryGetValue("collect", out Microsoft.Extensions.Primitives.StringValues collect) && collect[0] != "invitation"))
+        {
+            return Task.FromResult(new ApiResult(400, new ApiProblem(400, "invalid-request", "the only query parameter of this route is collect=invitation")));
+        }
+
+        AuthorizationView? view = owner is null ? null : admin.FindAuthorization(owner, call.Path["id"], query.ContainsKey("collect"));
 
         return Task.FromResult(view is not null ? new ApiResult(200, Dto(view)) : new ApiResult(404, new ApiProblem(404, "not-found", "no such authorization for this caller")));
+    }
+
+    private Task<ApiResult> CancelAuthorizationAsync(ApiCall call)
+    {
+        if (!call.Context.Request.Headers.ContainsKey("Origin"))
+        {
+            return Task.FromResult(new ApiResult(403, new ApiProblem(403, "origin-required", "this request must come from the administration page: it carries no Origin")));
+        }
+
+        object? owner = OwnerOf(call);
+        bool? cancelled = owner is null ? null : admin.CancelAuthorization(owner, call.Path["id"]);
+
+        return Task.FromResult(cancelled switch
+        {
+            null => new ApiResult(404, new ApiProblem(404, "not-found", "no such authorization for this caller")),
+            false => new ApiResult(409, new ApiProblem(409, "already-judged", "the passkey tap of this authorization was already judged; its change was made or refused and cannot be taken back")),
+            _ => new ApiResult(200, new { ok = true }),
+        });
     }
 
     private async Task<ApiResult> MutateAsync(ApiCall call, string operation, string[] pathParameters)
@@ -737,7 +761,7 @@ internal sealed partial class AdminApi
         MutationResult result = await admin.MutateAsync(owner, op, args, authorization, call.Context.RequestAborted);
         if (result.Status is 200 or 202)
         {
-            return new ApiResult(result.Status, new MutationResponse(op, result.Status == 200 ? "applied" : "started", result.Link, result.Invitation));
+            return new ApiResult(result.Status, new MutationResponse(op, (result.Repeat ? "already-" : "") + (result.Status == 200 ? "applied" : "started"), result.Link, result.Invitation));
         }
 
         return new ApiResult(result.Status, new ApiProblem(result.Status, result.Code ?? "operation-refused", result.Detail ?? "refused"));
@@ -748,6 +772,8 @@ internal sealed record ApiCall(HttpContext Context, Dictionary<string, string> P
 
 internal sealed record NameValueDto(string Name, string Value);
 
-internal sealed record AuthorizationDto(string Id, string Operation, string State, string? Detail, string? Link, string Sentence, IReadOnlyList<NameValueDto> Parameters, DateTimeOffset Created, DateTimeOffset Expires, int LifetimeSeconds);
+internal sealed record AuthorizationDto(string Id, string Operation, string State, string? Detail, string? Link, string Sentence, IReadOnlyList<NameValueDto> Parameters, DateTimeOffset Created, DateTimeOffset Expires, int LifetimeSeconds, AuthorizationResultDto? Result = null);
+
+internal sealed record AuthorizationResultDto(string Outcome, string? Code, string? Detail, string? Link, InvitationCreatedDto? Invitation, bool InvitationGone);
 
 internal sealed record MutationResponse(string Operation, string Outcome, string? Link, InvitationCreatedDto? Invitation = null);

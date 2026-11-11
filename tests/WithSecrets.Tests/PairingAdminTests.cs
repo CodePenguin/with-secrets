@@ -40,7 +40,7 @@ internal static class PairingAdminTests
             "pairing api: the list shows the invitation's status only; the bundle and the code can never be fetched again");
         (HttpMethod rm, string rp, string rj) = b.MutationRequest("pairing-create", created.AuthorizationId);
         (int replay, string replayBody) = await b.SendAsync(rm, rp, rj);
-        check(replay == 403 && Code(replayBody) == "authorization-used" && !replayBody.Contains(codeText, StringComparison.Ordinal) && app.Store.Invitations().Count == 1, "pairing api: repeating the creation does not return the bundle again and makes no second invitation");
+        check(replay == 200 && replayBody.Contains("\"already-applied\"", StringComparison.Ordinal) && !replayBody.Contains(codeText, StringComparison.Ordinal) && app.Store.Invitations().Count == 1, "pairing api: repeating the creation does not return the bundle again and makes no second invitation");
 
         // The authority holds no code: scan its files and its audit.
         byte[] code = System.Buffers.Text.Base64Url.DecodeFromChars(codeText);
