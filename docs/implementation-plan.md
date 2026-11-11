@@ -138,8 +138,8 @@ This plan turns the accepted target design in [architecture.md](architecture.md#
 - [x] Direct reconnect with bounded exponential backoff and jitter; idempotent retries under the same id; a release with a lost answer is not retried.
 - [x] Existing invalidation and grant-event delivery carried by HTTP/2 long polling (one outstanding poll, no heartbeat); reconnect checks status and revision.
 - [x] Tests: suites `Remote` (transport) and `RemoteLaunch` (CLI-level launches through the new transport); see `IMPLEMENTATION_PROGRESS.md`, "Task M1".
-- [ ] Pairing invitation flow, pairing-only bootstrap and proof, registration on the pairing route, credential supply, Pending refresh and abuse limits: **task M2**. The pairing route exists as a seam that answers 501.
-- [ ] Pairing tests and the "no machine data before the authority's proof is verified" tests: task M2.
+- [x] Pairing invitation flow, pairing-only bootstrap and proof, registration on the pairing route, credential supply (hidden prompt, environment variable, secret file, Docker secret), Pending refresh and abuse limits: **task M2** (branch `impl/mtls-pairing`).
+- [x] Pairing tests and the "no machine data before the authority's proof is verified" tests: task M2 (suite `Pairing`, the pairing checks of `Api`, SPA tests, E2E `k1-spa-pair-machine`).
 ## Phase 6 — Admin experience, hardening, and platform integration
 
 **Goal:** Complete the operational experience and validate real deployments.

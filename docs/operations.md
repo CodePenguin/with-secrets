@@ -39,7 +39,39 @@ Every later change in the app is its own request, its own one-use passkey page a
 
 ### More machines
 
-A second machine (for example WSL) is a separate identity. On the authority's machine run `with-secrets service --machine-port 8790` (loopback by default; `--machine-bind ADDRESS` for one other address; the machine port is separate from the browser and client port and speaks only TLS 1.3 with a certificate on both sides, HTTP/2). The other machine is introduced to the authority by **pairing**, which is the next task (M2) and is not available yet: `with-secrets admin https://HOST:8790` says so and changes nothing. Once a machine is known, an administrator approves it in the app **Machines** view after comparing its fingerprint. See section 8 for WSL.
+A second machine (for example WSL) is a separate identity. On the authority's machine run `with-secrets service --machine-port 8790` (loopback by default; `--machine-bind ADDRESS` for one other address; the machine port is separate from the browser and client port and speaks only TLS 1.3 with a certificate on both sides, HTTP/2). The other machine is introduced to the authority by **pairing** (below).
+
+#### Pairing procedure
+
+1. On the authority: admin app, **Pairing**, **Create an invitation**, tap the passkey on the page that opens and **copy the bundle** shown once (`wsp1;https://HOST:8790;ID;CODE`). It is valid 10 minutes and registers one machine. It cannot be shown again: if it is lost, revoke the invitation (or let it expire) and create another.
+2. On the new machine: `with-secrets pair`, paste the bundle at the hidden prompt. The machine prints its fingerprint and host name and says it is Pending.
+3. On the authority: **Machines**, find the Pending machine, compare the fingerprint and host name with what the machine printed, **Approve** with a tap. Host then pins the authority key by itself on its first run.
+4. Check: run a command on the new machine that needs a secret; the authority's approval page opens on the authority.
+
+#### Unattended pairing and Docker secrets
+
+For a container or a provisioning script put the bundle in a file and let `with-secrets pair` read it, so it is never in a command line, an image layer or `docker inspect`:
+
+```
+# docker compose
+services:
+  host:
+    secrets: [with-secrets-pairing]
+secrets:
+  with-secrets-pairing:
+    file: ./pairing.bundle     # one line: the bundle; delete the file after pairing
+```
+
+A Docker secret appears as `/run/secrets/with-secrets-pairing`, which `with-secrets pair` reads with no variable. Any other file: set `WITH_SECRETS_PAIRING_FILE=/path/to/file`. `WITH_SECRETS_PAIRING` holds the bundle itself and is the weakest form (an environment is visible to the process's owner and often to tooling); prefer a file. A file is preferred over the variable when both are set. The command clears both variables from its own environment after reading, and neither is passed to any program a host service launches. Delete the file after pairing: the invitation is useless once used or expired, but the file is a credential until then. With no terminal and no unattended source `pair` asks for nothing and exits 2.
+
+#### Pairing troubleshooting
+
+- **"the authority could not prove that it holds this invitation" (exit 3).** The bundle is wrong or for another authority, the address in it is not the authority that created it, or something sits in between. Nothing about this machine was sent. Create a new invitation and copy the whole bundle again.
+- **"pairing was refused" (exit 3).** One answer for a wrong, expired, used, revoked or withdrawn invitation, and for a machine the authority already knows as Trusted, Disabled or Untrusted (those are never changed by pairing). The authority's audit says which (Audit view, events starting `pairing-`). Create a new invitation; for a known machine use the Machines view instead.
+- **"too busy".** Fixed limits: 30 refused attempts in 10 minutes in all, 4 registrations at once, 32 machines waiting. Wait ten minutes or approve/remove waiting machines.
+- **The Create button says no address.** The authority service has no machine endpoint: start it with `--machine-port`.
+- **Cannot connect.** The address in the bundle must be reachable from the new machine (firewall; with WSL NAT use `--machine-bind` on the vEthernet address).
+- **The machine stays Pending after pairing.** That is intended: approve it under Machines.
 
 ## 3. Day to day
 
@@ -109,7 +141,7 @@ A machine that starts reporting another host name is **not** accepted by itself:
 
 1. Build for `linux-x64` and start the WSL service.
 2. Windows: `with-secrets service --machine-port 8790` (mirrored networking: loopback works; NAT mode: bind the vEthernet(WSL) address with `--machine-bind` and add the firewall rule yourself; the certificate is the machine's own, there is no certificate file to supply).
-3. WSL: pair the host with the authority (pairing is task M2; `with-secrets admin https://HOST:8790` will be the command).
+3. Windows admin app: **Pairing**, create an invitation (tap) and copy the bundle. WSL: `with-secrets pair` and paste it (see section 2, "Pairing procedure").
 4. Windows admin app: approve the pending machine after comparing its fingerprint.
 5. WSL: run a command that needs a secret; open the authority link printed on Windows and tap the passkey.
 6. Confirm the child saw the value and the Windows audit history shows the signed events.
