@@ -317,7 +317,7 @@ internal static class OperationsTests
             byte[] held = host.Keys.HeldBytes!;
             int audits = app.Store.Audit(1000).Count;
             Tapped locked = await b.OpAsync(AdminService.OpLock, app.Laptop);
-            check(locked.MutationStatus == 200 && app.Service.Lock.IsLocked && !host.Keys.IsHeld && held.All(value => value == 0), label + ": a lock by tap drops the held key and zeroes its bytes");
+            check(locked.ApproveStatus == 200 && await HostServiceTests.WaitFor(() => app.Service.Lock.IsLocked && !host.Keys.IsHeld) && held.All(value => value == 0), label + ": a lock by tap drops the held key and zeroes its bytes");
             HostServiceTests.Raw whileLocked = await HostServiceTests.Post(app.Rig, HostServiceTests.Req(app.Rig, program));
             check(whileLocked.Status == HttpStatusCode.Locked && app.Secrets.Reads == cycle - 1, label + ": while locked a run is refused (423) and nothing is decrypted");
 
