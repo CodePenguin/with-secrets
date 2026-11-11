@@ -133,7 +133,7 @@ This plan turns the accepted target design in [architecture.md](architecture.md#
 - [x] Direct HTTPS, TLS 1.3 mutual authentication, HTTP/2 only; the relay, the custom handshake, AES-GCM sessions, relay wire layer and the 5b `--authority-fingerprint` pairing are removed.
 - [x] Persistent self-signed identity certificate (profile per architecture 10.2: CA with path length 0, DigitalSignature and KeyCertSign, ten years) and strict validator; machine registration carries it (`machine_certificates`, additive table).
 - [x] Per-instance in-memory TLS key, 24-hour temporary leaf signed by the identity key, rotation one hour before expiry, per-handshake selection, client pool rotation with a bounded drain.
-- [x] Narrow custom-root validation in both directions (identity independent of address); unknown-but-valid certificates reach only the pairing route, which is a 501 stub.
+- [x] Narrow custom-root validation in both directions (identity independent of address); unknown-but-valid certificates reach only the pairing route, which serves the pairing protocol (task M2).
 - [x] Transport policy (no redirects or proxy, no-store, no compression, UTF-8 JSON, safe errors with correlation id, fixed bounds), GOAWAY then close on revocation, per-request authorization, final checkpoint before release.
 - [x] Direct reconnect with bounded exponential backoff and jitter; idempotent retries under the same id; a release with a lost answer is not retried.
 - [x] Existing invalidation and grant-event delivery carried by HTTP/2 long polling (one outstanding poll, no heartbeat); reconnect checks status and revision.

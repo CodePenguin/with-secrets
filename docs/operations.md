@@ -62,6 +62,10 @@ secrets:
     file: ./pairing.bundle     # one line: the bundle; delete the file after pairing
 ```
 
+`pair` refuses a secret file that other accounts can read (Unix: any group or other permission bit; Windows: an ACL entry allowing read to anyone but you, SYSTEM and Administrators) and says so without reading it; the Docker secret mount is not checked. After pairing the file is left where it is; it is spent, delete it (or let your Docker secret lifecycle do it). The host service does not pair by itself at startup: run `with-secrets pair` first (unattended is fine).
+
+Pairing a host that already trusts another authority is refused unless a person types `replace` at a terminal (it prints both identities); an unattended run always refuses. Pairing attempts are limited per invitation and per peer address; a pending invitation is never locked out by other people's failed attempts. A host renews its machine identity certificate by itself (same key) when under 30 days remain, checked at start and reconnect.
+
 A Docker secret appears as `/run/secrets/with-secrets-pairing`, which `with-secrets pair` reads with no variable. Any other file: set `WITH_SECRETS_PAIRING_FILE=/path/to/file`. `WITH_SECRETS_PAIRING` holds the bundle itself and is the weakest form (an environment is visible to the process's owner and often to tooling); prefer a file. A file is preferred over the variable when both are set. The command clears both variables from its own environment after reading, and neither is passed to any program a host service launches. Delete the file after pairing: the invitation is useless once used or expired, but the file is a credential until then. With no terminal and no unattended source `pair` asks for nothing and exits 2.
 
 #### Pairing troubleshooting
