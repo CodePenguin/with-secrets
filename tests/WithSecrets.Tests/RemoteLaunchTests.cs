@@ -219,15 +219,19 @@ internal static class RemoteLaunchTests
         {
             Host host = new();
             host.Machine = new TestMachine(Path.Combine(root, "wsl-" + Guid.NewGuid().ToString("N")[..8], "state"), trusted: false, hostName: hostName);
-            RemoteAuthorityConfig config = auth.Config;
-            host.Machine.Deployment.HostConfig.SetRemote(host.Machine.Fingerprint, config);
+            // The host pairs with the authority the way a machine does: an invitation from the authority, the pairing client, a Pending record (task M2); host.json then names the authority.
+            (CreatedInvitation? invitation, string? why) = auth.Service.Pairing.Create("test admin");
+            PairingResult paired = await PairingClient.RunAsync(new PairingClientOptions { Bundle = PairingBundle.TryParse(invitation?.Bundle ?? throw new InvalidOperationException("no invitation: " + why))!, MachineKey = host.Machine.MachineKey, IdentityCertificate = host.Machine.Deployment.IdentityCertificate, HostName = hostName, HostConfig = host.Machine.Deployment.HostConfig, MachineTls = host.Machine.Deployment.Tls });
+            if (!paired.Ok)
+            {
+                throw new InvalidOperationException("the host could not pair: " + paired.Message);
+            }
+
+            RemoteAuthorityConfig config = host.Machine.Deployment.HostConfig.Load().Config!.Remote!;
             host.Remote = new RemoteAuthority(config, host.Machine.Deployment.Tls, host.Machine.Deployment.HostConfig) { RetryPause = TimeSpan.FromMilliseconds(50), Retries = 6 };
             host.Machine.Deployment.UseRemote(host.Remote);
             host.Proxy = new LaunchProxy(host.Remote);
             host.Machine.Deployment.Link = host.Proxy;
-
-            // Pairing is task M2: until it exists the authority is told about the machine directly (its identity certificate included), as pairing will leave it: Pending.
-            auth.Machine.Deployment.Store.Register(host.Machine.MachineKey.PublicKey, hostName, "test pairing", host.Machine.Deployment.IdentityCertificate);
 
             if (approve)
             {

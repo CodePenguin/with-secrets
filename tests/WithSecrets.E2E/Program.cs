@@ -27,6 +27,7 @@ internal static class Program
         ("i7-spa-refused-without-authorization", ScenariosSpa.RefusedWithoutAuthorization),
         ("i8-spa-accept-host-name", ScenariosSpa.AcceptHostName),
         ("j1-spa-accessibility", ScenariosSpa.Accessibility),
+        ("k1-spa-pair-machine", ScenariosPairing.PairMachine),
     ];
 
     private static async Task<int> Main(string[] args)
