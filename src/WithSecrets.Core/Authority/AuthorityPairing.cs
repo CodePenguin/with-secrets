@@ -1,7 +1,7 @@
 namespace WithSecrets;
 
 /// <summary>This machine's identity as the pairing command needs it (the caller owns and disposes the key).</summary>
-public sealed record PairingMachine(ISigningKey Key, byte[] IdentityCertificate, string HostName, HostConfigFile HostConfig);
+public sealed record PairingMachine(ISigningKey Key, byte[] IdentityCertificate, string HostName, HostConfigFile HostConfig, Action<string, string>? Audit = null);
 
 /// <summary>Everything the pairing command touches outside itself, so a test can drive it without a terminal, a real environment or a real key store.</summary>
 public sealed class PairingEnvironment
@@ -84,6 +84,8 @@ public static class AuthorityPairing
                     HostConfig = machine.HostConfig,
                     Clock = environment.Clock,
                     OnRequest = environment.OnRequest,
+                    ConfirmReplaceAuthority = question => environment.Console.Confirm(question, "replace"),
+                    Audit = machine.Audit,
                 }, cancel);
             }
             catch (Exception failure) when (failure is IOException or UnauthorizedAccessException or ArgumentException)

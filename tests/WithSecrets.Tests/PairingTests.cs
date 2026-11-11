@@ -25,7 +25,7 @@ namespace WithSecrets.Tests;
 /// for unknown certificates, what the pairing route can and cannot do, that the client sends nothing about the machine before it has verified the authority, the fixed limits, the durable audit (and that no code, proof or key is anywhere
 /// on disk or in output), the input sources (hidden prompt, secret file, environment variable) and that the credential is not passed on to a program.
 /// </summary>
-internal static class PairingTests
+internal static partial class PairingTests
 {
     // ---------- fixtures ----------
 
@@ -200,7 +200,7 @@ internal static class PairingTests
             return new PairingRegistrationRequest(bundle.InvitationId, who.Certificate, who.Fingerprint, hostName, nonce, who.Key.Sign(PairingProtocol.PossessionMessage(bundle.InvitationId, AuthorityFingerprint, who.Fingerprint, hostName, nonce)), tamperProof?.Invoke(proof) ?? proof);
         }
 
-        public async Task<(PairingResult Result, List<(string Step, byte[] Body, string Client)> Requests)> Pair(Host host, PairingBundle bundle)
+        public async Task<(PairingResult Result, List<(string Step, byte[] Body, string Client)> Requests)> Pair(Host host, PairingBundle bundle, Func<string, bool>? confirm = null, Action<string, string>? audit = null)
         {
             List<(string, byte[], string)> requests = [];
             PairingResult result = await PairingClient.RunAsync(new PairingClientOptions
@@ -220,6 +220,8 @@ internal static class PairingTests
                     }
                 },
                 Retries = 0,
+                ConfirmReplaceAuthority = confirm,
+                Audit = audit,
             });
 
             return (result, requests);
@@ -306,6 +308,8 @@ internal static class PairingTests
 
             return typed;
         }
+
+        public bool Confirm(string question, string word) => false;
     }
 
     // ---------- scanning ----------
@@ -367,6 +371,7 @@ internal static class PairingTests
             await Audit(check, root);
             await Inputs(check, root);
             await Children(check, root);
+            await Repairing(check, root);
         }
         finally
         {

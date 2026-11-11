@@ -28,12 +28,31 @@ public interface IPairingConsole
 
     /// <summary>Shows <paramref name="prompt" /> and reads a line without echoing it. Null at the end of input.</summary>
     string? ReadHidden(string prompt);
+
+    /// <summary>
+    /// Asks a person at this terminal a question that only a person may answer (a deliberate, typed word). False when nobody is there: an unattended run (a file or variable supplied the invitation) can never confirm.
+    /// </summary>
+    bool Confirm(string question, string word);
 }
 
 /// <summary>The real terminal: characters are read without being shown (<c>Console.ReadKey(intercept: true)</c>).</summary>
 public sealed class TerminalPairingConsole : IPairingConsole
 {
     public bool IsInteractive => !Console.IsInputRedirected && !Console.IsOutputRedirected && !Console.IsErrorRedirected;
+
+    public bool Confirm(string question, string word)
+    {
+        if (!IsInteractive)
+        {
+            return false;
+        }
+
+        Console.Error.WriteLine(question);
+        Console.Error.Write("Type " + word + " and press Enter to confirm, anything else to stop: ");
+        string? answer = Console.In.ReadLine();
+
+        return string.Equals(answer?.Trim(), word, StringComparison.Ordinal);
+    }
 
     public string? ReadHidden(string prompt)
     {
@@ -156,6 +175,15 @@ public sealed class PairingClientOptions
 
     /// <summary>For tests: the machine's own TLS certificate (default: a new one made from the identity key for this run).</summary>
     public TemporaryCertificate? MachineTls { get; init; }
+
+    /// <summary>
+    /// Asked (with a description of the two identities) when this machine already trusts another authority identity (a different remote authority, or a signing key pinned in local mode) and the invitation proves a different one. Null or false
+    /// refuses and changes nothing: replacing the authority this machine trusts is a deliberate act a person confirms at a terminal.
+    /// </summary>
+    public Func<string, bool>? ConfirmReplaceAuthority { get; init; }
+
+    /// <summary>Told (event name, detail; public data only) when the person confirmed replacing the authority, before host.json is changed. The command writes it to the durable audit.</summary>
+    public Action<string, string>? Audit { get; init; }
 }
 
 /// <summary>
@@ -210,6 +238,24 @@ public static class PairingClient
             string authorityFingerprint = MachineCertificates.FingerprintOf(bootstrap.Reply.AuthorityCertificate)!;
             byte[] authorityCertificate = bootstrap.Reply.AuthorityCertificate;
 
+            // 2b. The authority is proven. If this machine already trusts a DIFFERENT authority identity, changing it is explicit: a person confirms at a terminal, or nothing is sent and nothing changes (the same identity keeps its pin).
+            HostConfig? existing = options.HostConfig.Load().Config;
+            string? existingIdentity = existing?.Remote?.AuthorityIdentityFingerprint;
+            bool pinned = existing?.Authority is not null;
+            bool replacing = existingIdentity is not null ? existingIdentity != authorityFingerprint : pinned;
+            if (replacing)
+            {
+                string question = "This machine already trusts " + (existingIdentity is not null ? "the authority " + KeyIdentity.Display(existingIdentity) : "an authority signing key (" + KeyIdentity.Display(existing!.Authority!.Fingerprint) + ", pinned in local mode)")
+                    + ". This invitation is from the authority " + KeyIdentity.Display(authorityFingerprint) + ". Pairing replaces the trusted authority and drops the pinned authority signing key; the new authority must then approve this machine.";
+                if (options.ConfirmReplaceAuthority?.Invoke(question) != true)
+                {
+                    return Fail("this machine already trusts " + (existingIdentity is not null ? "another authority (" + KeyIdentity.Display(existingIdentity) + ")" : "an authority signing key") + " and this invitation is from a different one (" + KeyIdentity.Display(authorityFingerprint)
+                        + "). Nothing was sent and nothing was changed. To replace it deliberately run with-secrets pair again at a terminal and confirm when asked", authorityFingerprint);
+                }
+
+                options.Audit?.Invoke("pairing-authority-replaced", "the person confirmed replacing the trusted authority " + (existingIdentity is null ? "(a pinned signing key)" : KeyIdentity.Display(existingIdentity)) + " by " + KeyIdentity.Display(authorityFingerprint));
+            }
+
             // 3. Registration on a fresh connection pinned to the proven authority identity.
             byte[] nonce = RandomNumberGenerator.GetBytes(PairingProtocol.NonceBytes);
             PairingRegistrationRequest registration = new(options.Bundle.InvitationId, options.IdentityCertificate, machineFingerprint, options.HostName, nonce,
@@ -229,7 +275,7 @@ public static class PairingClient
             }
 
             // 4. Remember the authority: where it is and which identity it must have. The signing key is pinned when an administrator approves this machine.
-            options.HostConfig.SetRemote(machineFingerprint, new RemoteAuthorityConfig(options.Bundle.Authority, authorityFingerprint, authorityCertificate));
+            options.HostConfig.SetRemote(machineFingerprint, new RemoteAuthorityConfig(options.Bundle.Authority, authorityFingerprint, authorityCertificate), dropPin: replacing);
 
             return new PairingResult(true, "registered; waiting for an administrator to approve this machine", machineFingerprint, options.HostName, authorityFingerprint);
         }

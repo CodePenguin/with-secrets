@@ -215,7 +215,11 @@ internal static class Program
         string folder = StorePath();
         CngSigningKey key = CngSigningKey.OpenOrCreate(KeyNames.Machine, out _);
 
-        return new PairingMachine(key, MachineIdentityFile.LoadOrCreate(folder, key, TimeProvider.System), Environment.MachineName, HostConfigFile.InFolder(folder));
+        return new PairingMachine(key, MachineIdentityFile.LoadOrCreate(folder, key, TimeProvider.System), Environment.MachineName, HostConfigFile.InFolder(folder), (name, detail) =>
+        {
+            AuthorityStore store = AuthorityStore.InFolder(folder);
+            store.RecordPairingEvent(name, null, detail);
+        });
     }
 
     private static int RunService(CliCommand command, StateDatabase state, SecretStore store, GrantStore grants, string folder)

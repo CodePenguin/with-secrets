@@ -133,7 +133,7 @@ public sealed class HostConfigFile(string path)
     /// Selects remote-authority mode (or, with null, local mode) for this machine. Public data only: the authority's endpoint address and its identity certificate (with its fingerprint).
     /// The pinned key and the machine fingerprint are kept as they are. The file is replaced atomically.
     /// </summary>
-    public void SetRemote(string machineFingerprint, RemoteAuthorityConfig? remote)
+    public void SetRemote(string machineFingerprint, RemoteAuthorityConfig? remote, bool dropPin = false)
     {
         if (remote is not null && RemoteTarget.Problem(remote) is { } problem)
         {
@@ -141,7 +141,7 @@ public sealed class HostConfigFile(string path)
         }
 
         HostConfigLoad load = Load();
-        Write(new HostConfig(machineFingerprint, load.Config?.MachineFingerprint == machineFingerprint ? load.Config.Authority : null, remote));
+        Write(new HostConfig(machineFingerprint, !dropPin && load.Config?.MachineFingerprint == machineFingerprint ? load.Config.Authority : null, remote));
     }
 
     /// <summary>
