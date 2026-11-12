@@ -1862,6 +1862,15 @@ internal static partial class WebApprovalTests
             check(served == "var a = 1;\nvar b = 2;\n" && servedStyle == "p { }\nh1 { }\n", "web: CRLF script and style are served with LF");
             check(csp.Contains("script-src " + Hash(served) + ";", StringComparison.Ordinal) && csp.Contains("style-src " + Hash(servedStyle) + ";", StringComparison.Ordinal), "web: CSP hashes match the LF text served from CRLF source");
 
+            OneShotResponse runPrompt = ApprovalPage.Build(
+                new ApprovalPrompt("Run this program", "Program: example"),
+                new ProofStart("webauthn", "{}"), "n", [1], TimeSpan.Zero, "var a = 1;", "p { }");
+            Dictionary<string, string> runData = JsonSerializer.Deserialize<Dictionary<string, string>>(Between(runPrompt.Body, "<script type=" + (char)34 + "application/json" + (char)34 + " id=" + (char)34 + "start" + (char)34 + ">", "</script>"))!;
+            check(runPrompt.Body.Contains(">Approve once</button>", StringComparison.Ordinal)
+                && !runData.ContainsKey("confirmedMessage")
+                && Between(runPrompt.Body, "<script>", "</script>").Contains("Approved once. You can close this page.", StringComparison.Ordinal),
+                "web: ordinary agent approval retains its original action and completion wording");
+
             OneShotResponse adminPrompt = ApprovalPage.Build(
                 new ApprovalPrompt("Check this change", "Action: change a setting", "Confirm this change", "Change confirmed. The change was made."),
                 new ProofStart("webauthn", "{}"), "n", [1], TimeSpan.Zero, "var a = 1;", "p { }");
