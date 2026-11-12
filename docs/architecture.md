@@ -377,7 +377,7 @@ State of the items of the accepted design (the text of 10.2 and 10.5 is the desi
 | Local service, machine identity, signed audit, grants (no offline lease: a host fails closed), authority lock (10.2) | **Built** (Phases 1 to 4b); procedures exercised in suites `Operations`, `Authority`, `AuthorityLock`, `GrantAuthority`, `AuditTrail`; operations guide `docs/operations.md` |
 | Remote authority communication and the WSL path where the authority holds the store (10.2) | **Transport built (task M1), pairing built (task M2).** Direct HTTPS with mutual TLS 1.3 and HTTP/2 replaced the earlier relay and application-level encrypted channel (see "Task M1 current implementation" below); pairing (task M2, below) introduces a host to an authority with an invitation from the admin app and `with-secrets pair`. Authority-side launch, grant and delivery rules carried over unchanged. Linux machine key store built (task M3, below: an owner-only file, weaker than CNG); the real Windows-authority / WSL-host run is not yet completed; a container client cannot reach the loopback-only service (decisions open) |
 | Administration API and web application (10.5) | **Built** (Phases 6a to 6b-2); single-EXE publish and verification in `scripts/`; manual accessibility checklist is the maintainer's |
-| Task 19: project `.env` declarations | **Phase A built**; accepted `--env` layering and Dotenvx encrypted-value integration remain implementation work (see 10.1) |
+| Task 19: project `.env` declarations | **Phase A built; encrypted values built (task M5)**; accepted `--env` layering remains implementation work (see 10.1) |
 | Secret providers, mounts, write-only provider credentials (10.3) | Not built |
 | Application-specific request declarations, curl add-on (10.4) | Not built |
 | Task 16: privilege separation (service or daemon under another OS account) | Future, priority not decided |
@@ -388,14 +388,14 @@ State of the items of the accepted design (the text of 10.2 and 10.5 is the desi
 
 ### 10.1 Project environment declarations and Dotenvx
 
-**Status:** Phase A project declarations are implemented in `EnvDeclarations.cs`. Host service and remote authority are design-only. Integration with the existing Dotenvx loading/evaluation behavior, including encrypted project `.env` values and profile selection, remains follow-up work.
+**Status:** Phase A project declarations are implemented in `EnvDeclarations.cs`. Host service and remote authority are design-only. Current implementation (task M5): effective `encrypted:` values are decrypted after approval through the project's Dotenvx wrapper (`DotenvxCipher`, Dotenvx.Primitives), with the private key read from the store under the Dotenvx name; the ciphertext SHA-256 is part of the request fingerprint, and the host service decrypts over the remote path too. Integration with the existing Dotenvx loading/evaluation behavior (interpolation, profile selection) remains follow-up work.
 
 **Ownership boundary**
 
 - Use the existing `Dotenvx.Core` NuGet package unchanged. The maintainer owns the C# port, not Dotenvx core; do not propose modifying either to accommodate with-secrets.
 - Dotenvx remains responsible for its existing parsing/loading, interpolation/evaluation, encrypted `.env` value handling, and standard environment construction/injection behavior.
 - with-secrets owns project-file selection/composition policy, classification of effective declarations, `secret://` resolution, provider mounts, approval, audit/request binding, and launching the child.
-- The current Phase A parser is a deliberately limited implementation and rejects an effective encrypted declaration. That is current state, not the desired long-term parser boundary. Integrate with the existing package rather than reimplementing Dotenvx semantics.
+- The current parser is a deliberately limited implementation; it accepts an effective encrypted declaration and decrypts it after approval (task M5). That is current state, not the desired long-term parser boundary. Integrate with the existing package rather than reimplementing Dotenvx semantics.
 
 **File selection**
 
@@ -456,7 +456,7 @@ DATABASE_PASSWORD=secret://personal/database/password
 | `secret://` references and renamed environment mapping | Implemented and tested |
 | `--secrets` additions and read-only `--needs` | Implemented and tested |
 | Approval display of paths, secret mappings, and ordinary values | Implemented in Phase A |
-| Dotenvx encrypted project values through existing `Dotenvx.Core` | Follow-up integration; current Phase A parser rejects effective encrypted values |
+| Dotenvx encrypted project values through existing `Dotenvx.Core` | Built in task M5 through the project's Dotenvx wrapper over Dotenvx.Primitives (see the progress file); interpolation and profiles remain follow-up |
 | Dotenvx profile selection | Open pending verification against current Dotenvx behavior |
 | Additional `--env NAME` layering | Deferred |
 
