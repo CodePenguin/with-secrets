@@ -40,7 +40,8 @@ export function Shell() {
   const main = useRef<HTMLElement>(null)
   const menuButton = useRef<HTMLButtonElement>(null)
   const location = useLocation()
-  const [navigationOpen, setNavigationOpen] = useState(false)
+  const [openNavigationPath, setOpenNavigationPath] = useState<string | null>(null)
+  const navigationOpen = openNavigationPath === location.pathname
   useFocusHeadingOnNavigation(main)
   const status = useStatus()
   const session = useSession()
@@ -57,15 +58,11 @@ export function Shell() {
   const backend = status.data?.version
 
   useEffect(() => {
-    setNavigationOpen(false)
-  }, [location.pathname])
-
-  useEffect(() => {
     if (!navigationOpen) return
 
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape') {
-        setNavigationOpen(false)
+        setOpenNavigationPath(null)
         menuButton.current?.focus()
       }
     }
@@ -107,7 +104,7 @@ export function Shell() {
           className={styles.navToggle}
           aria-expanded={navigationOpen}
           aria-controls="main-navigation-links"
-          onClick={() => setNavigationOpen((open) => !open)}
+          onClick={() => setOpenNavigationPath((open) => (open === location.pathname ? null : location.pathname))}
         >
           Menu
         </button>
@@ -118,7 +115,7 @@ export function Shell() {
                 to={link.to}
                 end={link.end}
                 className={({ isActive }) => (isActive ? styles.active : undefined)}
-                onClick={() => setNavigationOpen(false)}
+                onClick={() => setOpenNavigationPath(null)}
               >
                 {link.label}
               </NavLink>
