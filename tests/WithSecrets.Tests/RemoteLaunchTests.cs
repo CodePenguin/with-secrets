@@ -103,14 +103,14 @@ internal static class RemoteLaunchTests
 
         public IReadOnlyList<ApprovalRequest> Pages => [.. Approvers.OfType<FakeApprover>().SelectMany(item => item.Requests)];
 
-        public static Auth Create(string root, Func<IApprover>? approver = null, bool realPage = false, bool needsUnlock = false, TimeSpan? idle = null)
+        public static Auth Create(string root, Func<IApprover>? approver = null, bool realPage = false, bool needsUnlock = false, TimeSpan? idle = null, Dictionary<string, string>? values = null)
         {
             Auth auth = new();
             string folder = Path.Combine(root, "auth-" + Guid.NewGuid().ToString("N")[..8], "state");
             auth.Machine = new TestMachine(folder, trusted: true, hostName: "windows-authority");
             auth.State = StateDatabase.InFolder(folder);
             TestState.Add(auth.State, auth.Laptop.Record("localhost", "laptop") with { Created = DateTimeOffset.UtcNow });
-            auth.Store = new HostServiceTests.CountingStore(new Dictionary<string, string> { ["TOKEN"] = Real, ["OTHER_KEY"] = RealOther }, needsUnlock);
+            auth.Store = new HostServiceTests.CountingStore(values ?? new Dictionary<string, string> { ["TOKEN"] = Real, ["OTHER_KEY"] = RealOther }, needsUnlock);
             if (approver is not null)
             {
                 auth.Maker = approver;
@@ -343,6 +343,7 @@ internal static class RemoteLaunchTests
         {
             WireForms(check);
             await PageAtTheAuthority(check, root, capture, logs);
+            await EncryptedEnvValues(check, root);
             await Refusals(check, root);
             await Deliveries(check, root);
             await HostileAuthorityInput(check, root);
@@ -460,6 +461,49 @@ internal static class RemoteLaunchTests
         check(refused.Raw.Result is { Outcome: LaunchOutcome.Denied, ExitCode: RunCommand.Denied } && !refused.Started && deny.Store.Reads == 0 && refused.Raw.Stderr.Contains("did not approve", StringComparison.Ordinal), "refusal: the person's refusal at the authority is a denial, nothing is decrypted and nothing runs (" + refused.Raw.Result + ")");
         _ = before;
         deny.Dispose();
+    }
+
+    /// <summary>
+    /// A Dotenvx encrypted .env value through a remote authority: the request carries the ciphertext, the authority's page and fingerprint cover it, the key secret is delivered like
+    /// any secret, and the host decrypts it. The same rules hold as in local mode (a protected name is refused, a swapped ciphertext is another request).
+    /// </summary>
+    private static async Task EncryptedEnvValues(Action<bool, string> check, string root)
+    {
+        const string Plain = "Remote-Decrypted-8842";
+        (string publicKey, string privateKey) = DotenvxCipher.Instance.NewKeyPair();
+        string cipher = DotenvxCipher.Instance.Encrypt(Plain, publicKey);
+        using Auth auth = Auth.Create(root, values: new Dictionary<string, string> { ["DOTENV_PRIVATE_KEY"] = privateKey });
+        using Host host = await Host.Create(root, auth, "wsl-enc");
+        (string program, string valueFile) = ValueScript(host.Rig, "enc");
+        string envFile = Path.Combine(host.Rig.Work, ".env");
+
+        LaunchRequest Make(string text, string variable = "TOKEN") => HostServiceTests.Req(host.Rig, program, pairs: []) with
+        {
+            SecretNames = ["DOTENV_PRIVATE_KEY"],
+            EnvFiles = [envFile],
+            Encrypted = [new LaunchEncrypted(variable, envFile, "DOTENV_PRIVATE_KEY", text)],
+        };
+
+        File.Delete(valueFile);
+        HostServiceTests.Raw raw = await HostServiceTests.Post(host.Rig, Make(cipher));
+        string? value = Read(valueFile);
+        check(raw.Result is { Outcome: LaunchOutcome.Exited, ExitCode: 4 } && value == Plain && raw.Stdout.Contains("t=[REDACTED]", StringComparison.Ordinal), "remote encrypted: the host decrypts with the key the authority delivered, the child has the value and the output is redacted (" + raw.Result + " " + raw.Stderr.Trim() + ")");
+        check(auth.Pages.Count == 1 && auth.Pages[0].SecretNames.SequenceEqual(["DOTENV_PRIVATE_KEY"]) && auth.Pages[0].Decrypts is [{ Variable: "TOKEN", KeySecret: "DOTENV_PRIVATE_KEY" }] && auth.Pages[0].Decrypts![0].CipherSha256 == DecryptItem.HashOf(cipher), "remote encrypted: the authority's page lists the key secret and the decrypt item with the hash of the ciphertext");
+        string page = ApprovalSummary.BuildMessage(auth.Pages[0]);
+        check(page.Contains("decrypt with secret DOTENV_PRIVATE_KEY: TOKEN (cipher sha256 " + DecryptItem.HashOf(cipher)[..12] + ")", StringComparison.Ordinal) && !Leaks(page, Plain) && !Leaks(page, privateKey) && !page.Contains(cipher["encrypted:".Length..], StringComparison.Ordinal), "remote encrypted: the page text has the decrypt line and no value, key or ciphertext");
+        check(host.Rig.Store.Reads == 0 && auth.Store.Reads == 1 && !Leaks(string.Join("\n", raw.Lines), Plain) && !Leaks(string.Join("\n", raw.Lines), privateKey), "remote encrypted: the host read no store, the authority decrypted once, the client's events carry neither the value nor the key");
+        check(!DiskLeaks(host.Folder, privateKey), "remote encrypted: the host's disk holds no key");
+
+        // a protected name is refused at the host service before the authority is asked
+        int pages = auth.Pages.Count;
+        HostServiceTests.Raw refused = await HostServiceTests.Post(host.Rig, Make(cipher, "NODE_OPTIONS"));
+        check(refused.Result is { Outcome: not LaunchOutcome.Exited } && auth.Pages.Count == pages && refused.Stderr.Contains("NODE_OPTIONS", StringComparison.Ordinal), "remote encrypted: an encrypted value for NODE_OPTIONS is refused, the authority is not asked (" + refused.Result + ")");
+
+        // a swapped ciphertext is a different request: the authority's page shows the other hash
+        string swapped = DotenvxCipher.Instance.Encrypt("https://attacker.example", publicKey);
+        File.Delete(valueFile);
+        await HostServiceTests.Post(host.Rig, Make(swapped));
+        check(auth.Pages.Count == pages + 1 && auth.Pages[^1].Decrypts![0].CipherSha256 == DecryptItem.HashOf(swapped) && auth.Pages[^1].Decrypts![0].CipherSha256 != auth.Pages[0].Decrypts![0].CipherSha256, "remote encrypted: a swapped ciphertext is another request at the authority (its hash differs)");
     }
 
     // ---------- refusals that need no page ----------
