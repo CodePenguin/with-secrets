@@ -57,6 +57,7 @@
 
 .nav {
   grid-area: nav;
+  min-width: 0;
   background: var(--surface-2);
   border-bottom: 1px solid var(--border-soft);
 }
@@ -68,6 +69,10 @@
   list-style: none;
   margin: 0;
   padding: var(--space-2) var(--space-3);
+}
+
+.nav li {
+  min-width: 0;
 }
 
 .nav a {
@@ -91,6 +96,26 @@
   box-shadow: inset 0 -0.25rem 0 var(--accent);
 }
 
+.navToggle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--target);
+  margin: var(--space-2) var(--space-3);
+  padding: 0 var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.navToggle:hover {
+  background: var(--surface-2);
+}
+
 .main {
   grid-area: main;
   width: 100%;
@@ -110,20 +135,52 @@
   border-top: 1px solid var(--border-soft);
 }
 
-/* Phones: six links stay in two or three short rows, every one a full-size touch target. */
-@media (max-width: 40rem) {
+/* Medium layouts keep one predictable row; the nav scrolls independently if labels need more room. */
+@media (min-width: 52rem) and (max-width: 63.999rem) {
   .nav ul {
-    gap: 0;
-    padding: var(--space-1) var(--space-2);
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+  }
+
+  .nav li {
+    flex: 0 0 auto;
+  }
+}
+
+/* Narrow layouts disclose navigation instead of wrapping six destinations into several rows. */
+@media (max-width: 51.999rem) {
+  .navToggle {
+    display: inline-flex;
+  }
+
+  .nav ul {
+    display: none;
+    flex-direction: column;
+    align-items: stretch;
+    padding: 0 var(--space-2) var(--space-2);
+  }
+
+  .nav[data-open='true'] ul {
+    display: flex;
+  }
+
+  .nav li,
+  .nav a {
+    width: 100%;
   }
 
   .nav a {
     padding: 0 var(--space-3);
   }
+
+  .nav a.active {
+    box-shadow: inset 0.25rem 0 0 var(--accent);
+  }
 }
 
-/* Wide screens: the navigation becomes a side column. */
-@media (min-width: 60rem) {
+/* The side rail appears only when it leaves the main view a comfortable reading width. */
+@media (min-width: 64rem) {
   .shell {
     grid-template-columns: 14rem minmax(0, 1fr);
     grid-template-rows: auto 1fr auto;
