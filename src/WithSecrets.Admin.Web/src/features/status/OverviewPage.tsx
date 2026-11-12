@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom'
 import { useGrants, useMachines, useStatus } from '../../api/queries'
-import { Badge, Card, Facts, PageHeader } from '../../components/Card'
+import { Card, Facts, PageHeader } from '../../components/Card'
 import { Button } from '../../components/Button'
 import { Loading, Notice, ProblemAlert } from '../../components/Feedback'
 import { usePageTitle } from '../../lib/usePageTitle'
