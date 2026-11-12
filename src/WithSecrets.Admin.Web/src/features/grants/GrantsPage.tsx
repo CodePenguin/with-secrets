@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import { useGrants } from '../../api/queries'
 import type { Grant } from '../../api/types'
 import { Badge, Empty, Facts, PageHeader } from '../../components/Card'
@@ -41,6 +42,9 @@ export function GrantsPage() {
               <Facts
                 items={[
                   ['Machine', grant.machineName ?? grant.fingerprint],
+                  ['Machine fingerprint', <code key="fingerprint" className={list.mono}>{grant.fingerprint}</code>],
+                  ['Related host events', <Link key="events" to={`/audit?${new URLSearchParams({ grant: grant.id }).toString()}`}>View events for this grant</Link>],
+                  ['Related authority changes', <Link key="changes" to={`/audit/changes?${new URLSearchParams({ machine: grant.fingerprint }).toString()}`}>View changes for this machine</Link>],
                   ['Status', grant.status],
                   ['Secrets (names only)', grant.secretNames],
                   ['Program', grant.program],
