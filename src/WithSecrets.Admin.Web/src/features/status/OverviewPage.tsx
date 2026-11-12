@@ -50,7 +50,6 @@ export function OverviewPage() {
       <Card title="Authority">
         <Facts
           items={[
-            ['State', s.locked ? <Badge tone="warn">Locked</Badge> : <Badge tone="ok">Unlocked</Badge>],
             ['Unlock mode', s.unlockMode],
             ['Unlocked how', s.unlockedHow ?? 'not unlocked'],
             ['Service version', s.version],
@@ -61,13 +60,34 @@ export function OverviewPage() {
       </Card>
 
       <Card title="Needs your attention">
-        <ul>
-          <li>
-            {pending === undefined ? 'Machines: loading' : pending === 0 ? 'No machine is waiting for approval.' : <Link to="/machines">{pending} machine(s) waiting for approval</Link>}
-          </li>
-          <li>{changed ? <Link to="/machines">{changed} machine(s) reported a new host name</Link> : 'No machine reported a new host name.'}</li>
-          <li>{active === undefined ? 'Grants: loading' : <Link to="/grants">{active} active grant(s)</Link>}</li>
-        </ul>
+        {machines.isError ? <ProblemAlert error={machines.error} title="Machine attention could not be loaded" /> : null}
+        {machines.data ? (
+          <ul>
+            <li>
+              {pending === 0 ? 'No machine is waiting for approval.' : pending === 1 ? <Link to="/machines">1 machine is waiting for approval</Link> : <Link to="/machines">{pending} machines are waiting for approval</Link>}
+            </li>
+            <li>
+              {changed === 0 ? 'No machine reported a new host name.' : changed === 1 ? <Link to="/machines">1 machine reported a new host name</Link> : <Link to="/machines">{changed} machines reported a new host name</Link>}
+            </li>
+          </ul>
+        ) : machines.isPending ? (
+          <Loading what="machine attention" />
+        ) : null}
+      </Card>
+
+      <Card title="At a glance">
+        {grants.isError ? <ProblemAlert error={grants.error} title="Active grants could not be loaded" /> : null}
+        {grants.data ? (
+          active === 0 ? (
+            <p>No active grants.</p>
+          ) : (
+            <p>
+              <Link to="/grants">{active} active {active === 1 ? 'grant' : 'grants'}</Link>
+            </p>
+          )
+        ) : grants.isPending ? (
+          <Loading what="active grants" />
+        ) : null}
       </Card>
     </>
   )
