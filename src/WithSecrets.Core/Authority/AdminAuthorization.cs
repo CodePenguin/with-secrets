@@ -112,7 +112,7 @@ public sealed class AdminAuthorizer(AuthorityStore store, IApprovalVerifier veri
         ApprovalDecision asked;
         try
         {
-            asked = asker.Ask(new ApprovalPrompt(heading, PageText(sentence, operation, parameters) + "\n" + TicketPrefix + ticket), cancel);
+            asked = asker.Ask(new ApprovalPrompt(heading, PageText(sentence, operation, parameters) + "\n" + TicketPrefix + ticket, "Confirm this change", "Change confirmed. The change was made."), cancel);
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
