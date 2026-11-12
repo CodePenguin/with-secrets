@@ -152,7 +152,8 @@ function Events({ filters }: { filters: AuditFilters }) {
                 ['Reason', event.reason || 'none'],
                 ['Grant', event.grantId ? <Link key="grant" to={`/audit?${new URLSearchParams({ grant: event.grantId }).toString()}`}>{event.grantId}</Link> : 'none'],
                 ['Exit code', event.exitCode === null ? 'none' : String(event.exitCode)],
-                ['Sequence', String(event.sequence)],\n                ['Received by authority', <Time key="received" value={event.received} />],
+                ['Sequence', String(event.sequence)],
+                ['Received by authority', <Time key="received" value={event.received} />],
                 // The metadata is data the host signed (names and fingerprints): shown as plain text, never as markup.
                 ...Object.entries(event.metadata)
                   .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
