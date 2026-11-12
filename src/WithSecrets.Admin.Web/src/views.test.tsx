@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { setBrowserSecret } from './api/client'
-import { authorization, installFakeApi, machine, problem, session, signedIn, status, violations } from './test/fakeApi'
+import { authorization, grant, installFakeApi, machine, problem, session, signedIn, status, violations } from './test/fakeApi'
 import { renderApp } from './test/render'
 
 const signedOut = () => session({ authenticated: false, admin: null, started: null, idleExpires: null, absoluteExpires: null })
@@ -280,6 +280,65 @@ describe('audit search', () => {
       expect(last?.query.get('type')).toBe('launch')
     })
     expect(await screen.findByText('No events found.')).toBeInTheDocument()
+  })
+})
+
+describe('grant and audit navigation', () => {
+  it('links a grant to its host events and machine authority changes', async () => {
+    signedIn({ 'GET /api/v1/grants': { body: { items: [grant()] } } })
+    renderApp('/grants')
+
+    expect(await screen.findByRole('link', { name: 'View events for this grant' })).toHaveAttribute('href', '/audit?grant=grant-0001')
+    expect(screen.getByRole('link', { name: 'View changes for this machine' })).toHaveAttribute(
+      'href',
+      '/audit/changes?machine=' + grant().fingerprint,
+    )
+  })
+
+  it('links audit records to filtered evidence and shows both event timestamps', async () => {
+    signedIn({
+      'GET /api/v1/audit/events': {
+        body: {
+          items: [{
+            eventId: 'event-1',
+            sequence: 12,
+            time: '2026-11-09T10:00:00Z',
+            received: '2026-11-09T10:00:03Z',
+            machine: machine().fingerprint,
+            type: 'launch',
+            outcome: 'started',
+            reason: '',
+            requestId: 'request-1',
+            folder: 'C:\\work',
+            program: 'deploy.cmd',
+            arguments: [],
+            grantId: 'grant-0001',
+            exitCode: null,
+            metadata: {},
+          }],
+        },
+      },
+    })
+    renderApp('/audit')
+
+    expect(await screen.findByRole('link', { name: machine().fingerprint })).toHaveAttribute(
+      'href',
+      '/audit/changes?machine=' + machine().fingerprint,
+    )
+    expect(screen.getByRole('link', { name: 'grant-0001' })).toHaveAttribute('href', '/audit?grant=grant-0001')
+    expect(screen.getByText('Received by authority')).toBeInTheDocument()
+    expect(screen.getByText(/10:00:03/)).toBeInTheDocument()
+  })
+
+  it('can clear URL-backed audit filters', async () => {
+    const user = userEvent.setup()
+    signedIn()
+    renderApp('/audit?text=deploy.cmd')
+
+    expect(await screen.findByLabelText(/contains text/i)).toHaveValue('deploy.cmd')
+    await user.click(screen.getByRole('button', { name: 'Clear filters' }))
+    expect(screen.getByLabelText(/contains text/i)).toHaveValue('')
+    expect(screen.queryByRole('button', { name: 'Clear filters' })).toBeNull()
   })
 })
 
