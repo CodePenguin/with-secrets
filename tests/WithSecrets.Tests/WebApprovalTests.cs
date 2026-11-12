@@ -1861,6 +1861,14 @@ internal static partial class WebApprovalTests
             static string Hash(string text) => "'sha256-" + Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(text))) + "'";
             check(served == "var a = 1;\nvar b = 2;\n" && servedStyle == "p { }\nh1 { }\n", "web: CRLF script and style are served with LF");
             check(csp.Contains("script-src " + Hash(served) + ";", StringComparison.Ordinal) && csp.Contains("style-src " + Hash(servedStyle) + ";", StringComparison.Ordinal), "web: CSP hashes match the LF text served from CRLF source");
+
+            OneShotResponse adminPrompt = ApprovalPage.Build(
+                new ApprovalPrompt("Check this change", "Action: change a setting", "Confirm this change", "Change confirmed. The change was made."),
+                new ProofStart("webauthn", "{}"), "n", [1], TimeSpan.Zero, "var a = 1;", "p { }");
+            Dictionary<string, string> adminData = JsonSerializer.Deserialize<Dictionary<string, string>>(Between(adminPrompt.Body, "<script type=" + (char)34 + "application/json" + (char)34 + " id=" + (char)34 + "start" + (char)34 + ">", "</script>"))!;
+            check(adminPrompt.Body.Contains(">Confirm this change</button>", StringComparison.Ordinal)
+                && adminData.GetValueOrDefault("confirmedMessage") == "Change confirmed. The change was made.",
+                "web: administrator passkey prompt has its own confirm action and completion wording");
         }
 
         // Ask cleans what it shows, line by line, and binds the proof to that text.
