@@ -121,6 +121,29 @@ describe('the shell', () => {
   })
 })
 
+describe('the overview', () => {
+  it('keeps active grants as a neutral summary rather than an attention condition', async () => {
+    signedIn()
+    renderApp('/')
+
+    const activeGrant = await screen.findByRole('link', { name: '1 active grant' })
+    expect(activeGrant.closest('li')).toBeNull()
+  })
+
+  it('shows recoverable errors instead of leaving optional data in a loading state', async () => {
+    signedIn({
+      'GET /api/v1/machines': problem(503, 'machines-unavailable', 'machines are unavailable'),
+      'GET /api/v1/grants': problem(503, 'grants-unavailable', 'grants are unavailable'),
+    })
+    renderApp('/')
+
+    expect(await screen.findByText('Machine attention could not be loaded')).toBeInTheDocument()
+    expect(await screen.findByText('Active grants could not be loaded')).toBeInTheDocument()
+    expect(screen.queryByText('Machines: loading')).toBeNull()
+    expect(screen.queryByText('Grants: loading')).toBeNull()
+  })
+})
+
 describe('sign-in', () => {
   it('starts a read-only session with one tap on the service page and then shows the views', async () => {
     const user = userEvent.setup()
