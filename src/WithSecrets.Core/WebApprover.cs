@@ -961,23 +961,36 @@ internal static class ApprovalPage
 
     /// <summary>The page style, also used by the enrollment page.</summary>
     internal const string Style = """
-        :root { color-scheme: light; }
-        body { font-family: system-ui, sans-serif; margin: 0; padding: 1.5rem; background: #fff; color: #111; }
-        main { max-width: 60rem; margin: 0 auto; }
-        h1 { font-size: 1.25rem; }
-        pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f4f4f4; border: 1px solid #bbb; padding: 1rem; }
-        .buttons { display: flex; gap: 1rem; margin-top: 1rem; }
-        button { font-size: 1rem; padding: 0.6rem 1.4rem; }
-        #status { min-height: 1.5em; font-weight: bold; }
+        :root { color-scheme: light; font-family: system-ui, sans-serif; background: #f5f7fa; color: #172033; }
+        * { box-sizing: border-box; }
+        body { margin: 0; padding: clamp(1rem, 3vw, 2rem); background: #f5f7fa; color: #172033; line-height: 1.5; }
+        main { width: 100%; max-width: 54rem; margin: 0 auto; padding: clamp(1.25rem, 3vw, 2rem); background: #fff; border: 1px solid #d7deea; border-radius: 0.75rem; box-shadow: 0 0.25rem 1rem rgb(23 32 51 / 7%); }
+        h1 { margin: 0 0 1.25rem; color: #142b4a; font-size: clamp(1.35rem, 3vw, 1.75rem); line-height: 1.25; }
+        pre { margin: 0; padding: 1rem; white-space: pre-wrap; overflow-wrap: anywhere; background: #f7f9fc; border: 1px solid #d7deea; border-radius: 0.5rem; color: #172033; font: inherit; }
+        .buttons { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1.25rem; }
+        button, select { min-height: 2.75rem; font: inherit; }
+        button { padding: 0.6rem 1.2rem; border: 1px solid #9aa8ba; border-radius: 0.4rem; background: #fff; color: #172033; font-weight: 600; cursor: pointer; }
+        #approve { border-color: #174ea6; background: #174ea6; color: #fff; }
+        button:hover:not(:disabled) { filter: brightness(0.94); }
+        button:focus-visible, select:focus-visible { outline: 3px solid #2563eb; outline-offset: 3px; }
+        button:disabled, select:disabled { cursor: not-allowed; opacity: 0.58; }
+        #status { min-height: 1.5em; margin: 1rem 0 0; font-weight: 600; }
         .reuse { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; margin-top: 1rem; }
-        select { font-size: 1rem; padding: 0.5rem; }
-        .hint { margin: 0.4rem 0 0; color: #333; }
-        .warn { border: 0.3rem solid #7a3e00; background: #fff3e0; color: #111; padding: 0.8rem 1rem; margin: 0 0 1rem; }
-        .warn h2 { font-size: 1.1rem; margin: 0 0 0.5rem; }
+        select { max-width: 100%; padding: 0.5rem 2rem 0.5rem 0.65rem; border: 1px solid #9aa8ba; border-radius: 0.4rem; background: #fff; color: #172033; }
+        .hint { margin: 0.75rem 0 0; color: #43516a; }
+        .warn { margin: 0 0 1rem; padding: 0.9rem 1rem; border: 1px solid #a85b00; border-left-width: 0.35rem; border-radius: 0.4rem; background: #fff7e8; color: #392508; }
+        .warn h2 { margin: 0 0 0.5rem; font-size: 1.1rem; }
         .warn ul { margin: 0.5rem 0; padding-left: 1.2rem; }
         .warn li { margin: 0.5rem 0; }
-        .warn code { overflow-wrap: anywhere; word-break: break-all; font-weight: bold; }
-        .warn .why { color: #333; }
+        .warn code { overflow-wrap: anywhere; word-break: break-all; font-weight: 700; }
+        .warn .why { color: #59421f; }
+        @media (max-width: 34rem) {
+            main { padding: 1rem; border-radius: 0.5rem; }
+            .buttons { flex-direction: column-reverse; }
+            .buttons button, .reuse button, .reuse select { width: 100%; }
+            .reuse { align-items: stretch; }
+            .reuse label { width: 100%; }
+        }
         """;
 
     /// <summary>
