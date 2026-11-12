@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import { useSettings } from '../../api/queries'
 import { Card, Facts, PageHeader } from '../../components/Card'
 import { Button } from '../../components/Button'
@@ -19,8 +20,6 @@ export function SettingsPage() {
   return (
     <>
       <PageHeader title="Settings" />
-      <p>Every change here needs its own fresh passkey tap, even if you just made another.</p>
-
       <Card title="Unlock mode">
         <Facts items={[['Current mode', s.unlockMode]]} />
         <p>{s.unlockModeDescription}</p>
@@ -42,6 +41,7 @@ export function SettingsPage() {
           ]}
         />
         <Button onClick={() => start(setSessionTimeouts(s.sessionIdleMinutes, s.sessionAbsoluteMinutes, s.maxSessionIdleMinutes, s.maxSessionAbsoluteMinutes))}>Change session timeouts...</Button>
+        <p>Manage the credentials that can administer this authority on the <Link to="/passkeys">Passkeys</Link> page.</p>
       </Card>
 
       <Card title="Authority signing key">
