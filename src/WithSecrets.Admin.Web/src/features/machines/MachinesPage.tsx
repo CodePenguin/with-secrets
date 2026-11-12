@@ -66,6 +66,7 @@ function MachineItem({ machine, start, level }: { machine: Machine; start: Start
       <Facts
         items={[
           ['Fingerprint', <span key="f" className={styles.mono}>{machine.display}</span>],
+          ['Full fingerprint', <details key="ff"><summary>Show full fingerprint</summary><code className={styles.mono}>{machine.fingerprint}</code></details>],
           ['Host name', machine.hostName],
           ...(machine.pendingHostName ? ([['Reported host name', machine.pendingHostName]] as const) : []),
           ['Revision', String(machine.revision)],
