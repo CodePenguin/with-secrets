@@ -82,6 +82,34 @@ describe('the shell', () => {
     expect(await screen.findByText(/different versions/)).toBeInTheDocument()
   })
 
+  it('opens the compact navigation and Escape closes it with focus returned to the menu button', async () => {
+    const user = userEvent.setup()
+    signedIn()
+    renderApp('/machines')
+    const menu = await screen.findByRole('button', { name: 'Menu' })
+
+    expect(menu).toHaveAttribute('aria-expanded', 'false')
+    await user.click(menu)
+    expect(menu).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('link', { name: 'Passkeys' })).toBeInTheDocument()
+
+    await user.keyboard('{Escape}')
+    expect(menu).toHaveAttribute('aria-expanded', 'false')
+    expect(menu).toHaveFocus()
+  })
+
+  it('closes the compact navigation after choosing a destination', async () => {
+    const user = userEvent.setup()
+    signedIn()
+    renderApp('/machines')
+    const menu = await screen.findByRole('button', { name: 'Menu' })
+    await user.click(menu)
+    await user.click(screen.getByRole('link', { name: 'Grants' }))
+
+    expect(await screen.findByRole('heading', { level: 1, name: 'Grants' })).toBeInTheDocument()
+    expect(menu).toHaveAttribute('aria-expanded', 'false')
+  })
+
   it("moves focus to the new view's heading after a navigation", async () => {
     const user = userEvent.setup()
     signedIn()
