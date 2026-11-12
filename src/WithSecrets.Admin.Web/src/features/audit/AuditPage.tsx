@@ -104,6 +104,11 @@ export function AuditPage({ view }: { view: View }) {
             <Button variant="primary" type="submit">
               Search
             </Button>
+            {params.size > 0 ? (
+              <Button variant="secondary" type="button" onClick={() => setParams(new URLSearchParams())}>
+                Clear filters
+              </Button>
+            ) : null}
           </div>
         </form>
       </Card>
