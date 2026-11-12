@@ -8,7 +8,7 @@ using System.Text.Json;
 namespace WithSecrets;
 
 /// <summary>What the page asks the person: a heading and the full text they must read.</summary>
-public sealed record ApprovalPrompt(string Heading, string Text);
+public sealed record ApprovalPrompt(string Heading, string Text, string? ConfirmLabel = null, string? ConfirmedMessage = null);
 
 /// <summary>
 /// Asks the person on a web page served once from 127.0.0.1. Only a proof that <see cref="IProofMethod.Verify" /> accepts can
@@ -116,7 +116,7 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
             }
 
             lines.Add(ApprovalSummary.IssuedLine(DateTimeOffset.UtcNow));
-            prompt = new ApprovalPrompt(ApprovalSummary.Clean(prompt.Heading), string.Join('\n', lines));
+            prompt = prompt with { Heading = ApprovalSummary.Clean(prompt.Heading), Text = string.Join('\n', lines) };
             PageFlow? flow = PageFlow.Current;
             Session session = new(method, reuse, manifest, prfState, rows, flow is null ? null : flow.TakeNext, code);
             using PageSlot server = PageFlow.Open("a", settings.Port, session.Handle).Keep();
@@ -862,7 +862,7 @@ internal static class ApprovalPage
                                     follow(data.next);
                                     return;
                                 }
-                                finish(minutes > 0 ? "Approved for " + minutes + " minutes. You can close this page." : "Approved once. You can close this page.");
+                                finish(typeof start.confirmedMessage === "string" && minutes === 0 ? start.confirmedMessage : minutes > 0 ? "Approved for " + minutes + " minutes. You can close this page." : "Approved once. You can close this page.");
                                 if (start.recovery === "1" && data) {
                                     finish("Done. The keys were changed. Write down the recovery code below before you close this page.");
                                     showRecovery(data);
@@ -1050,6 +1050,10 @@ internal static class ApprovalPage
             ["bind"] = Base64Url.EncodeToString(bind),
             ["nonce"] = nonce
         };
+        if (prompt.ConfirmedMessage is not null)
+        {
+            data["confirmedMessage"] = prompt.ConfirmedMessage;
+        }
         if (manifest is not null)
         {
             data["manifest"] = manifest;
@@ -1093,7 +1097,7 @@ internal static class ApprovalPage
         page.Append("<div class=\"buttons\">");
         page.Append("<button id=\"deny\" type=\"button\" autofocus>Deny</button>");
         page.Append("<button id=\"approve\" type=\"button\" disabled data-delay=\"")
-            .Append(delay.ToString(CultureInfo.InvariantCulture)).Append("\">Approve once</button>");
+            .Append(delay.ToString(CultureInfo.InvariantCulture)).Append("\">").Append(WebUtility.HtmlEncode(prompt.ConfirmLabel ?? "Approve once")).Append("</button>");
         page.Append("</div>\n");
         if (reuse.IsOn)
         {
