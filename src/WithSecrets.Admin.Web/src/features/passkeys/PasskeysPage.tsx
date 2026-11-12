@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import { usePasskeys } from '../../api/queries'
 import { Badge, Empty, Facts, PageHeader } from '../../components/Card'
 import { Button } from '../../components/Button'
@@ -21,6 +22,7 @@ export function PasskeysPage() {
         </Button>
       </PageHeader>
       <p>Admin passkeys can administer this authority. Approval-only passkeys can approve requests but cannot change authority settings. The kind describes the credential; the badge shows what it is allowed to do.</p>
+      <p>For authority behavior and signing-key maintenance, see <Link to="/settings">Settings</Link>.</p>
       {passkeys.isPending ? <Loading what="passkeys" /> : null}
       {passkeys.isError ? <ProblemAlert error={passkeys.error} title="The passkeys could not be listed" /> : null}
       {passkeys.data && !passkeys.data.available ? (
