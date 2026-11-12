@@ -1,5 +1,5 @@
 import type { FormEvent } from 'react'
-import { NavLink, useSearchParams } from 'react-router-dom'
+import { Link, NavLink, useSearchParams } from 'react-router-dom'
 import { useAuditChanges, useAuditEvents, useAuditGaps, type AuditFilters } from '../../api/queries'
 import { Badge, Card, Empty, Facts, PageHeader } from '../../components/Card'
 import { Button } from '../../components/Button'
@@ -27,7 +27,7 @@ const labels: Record<keyof AuditFilters, string> = {
   folder: 'Working directory contains',
   since: 'From (ISO 8601)',
   until: 'Until (ISO 8601)',
-  last: 'Most to show (1 to 1000)',
+  last: 'Maximum results (1 to 1000)',
 }
 
 const hints: Partial<Record<keyof AuditFilters, string>> = {
@@ -76,7 +76,7 @@ export function AuditPage({ view }: { view: View }) {
       <h2>{title}</h2>
       <p>
         {view === 'events'
-          ? 'What hosts reported: authorization, launch and execution outcomes, and administrative changes. Arguments are shown redacted; the metadata lists names and fingerprints only. No secret value is ever kept here.'
+          ? 'What hosts reported: authorization, launch and execution outcomes, and administrative changes. Credential-shaped values are masked before storage when recognized; bare secret arguments may not be recognized. Avoid putting secrets in command-line arguments. Metadata contains descriptive names and fingerprints, not secret values.'
           : view === 'changes'
             ? 'What changed at the authority: administrator operations and machine and grant changes.'
             : 'Open holes in a machine\'s audit numbering (events that were expected and have not arrived).'}
@@ -115,7 +115,7 @@ export function AuditPage({ view }: { view: View }) {
 function Count({ n, what }: { n: number; what: string }) {
   return (
     <p role="status" className={styles.count}>
-      {n === 0 ? `No ${what} found.` : `${n} ${what} found.`}
+      {n === 0 ? `No ${what} match these filters.` : `Showing ${n} ${what}.`}
     </p>
   )
 }
@@ -140,14 +140,14 @@ function Events({ filters }: { filters: AuditFilters }) {
             </div>
             <Facts
               items={[
-                ['Machine', event.machine],
+                ['Machine', event.machine ? <Link key="machine" to={`/audit/changes?${new URLSearchParams({ machine: event.machine }).toString()}`}>{event.machine}</Link> : 'none'],
                 ['Program', event.program || 'none'],
                 ['Arguments', event.arguments.length ? event.arguments.join(' ') : 'none'],
                 ['Working directory', event.folder || 'none'],
                 ['Reason', event.reason || 'none'],
-                ['Grant', event.grantId || 'none'],
+                ['Grant', event.grantId ? <Link key="grant" to={`/audit?${new URLSearchParams({ grant: event.grantId }).toString()}`}>{event.grantId}</Link> : 'none'],
                 ['Exit code', event.exitCode === null ? 'none' : String(event.exitCode)],
-                ['Sequence', String(event.sequence)],
+                ['Sequence', String(event.sequence)],\n                ['Received by authority', <Time key="received" value={event.received} />],
                 // The metadata is data the host signed (names and fingerprints): shown as plain text, never as markup.
                 ...Object.entries(event.metadata)
                   .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
@@ -179,7 +179,7 @@ function Changes({ filters }: { filters: AuditFilters }) {
             <Facts
               items={[
                 ['By', change.actor],
-                ['Machine', change.machine ?? 'none'],
+                ['Machine', change.machine ? <Link key="machine" to={`/audit/changes?${new URLSearchParams({ machine: change.machine }).toString()}`}>{change.machine}</Link> : 'none'],
                 ['Detail', change.detail],
               ]}
             />
@@ -210,7 +210,7 @@ function Gaps({ machine }: { machine: string }) {
             </div>
             <Facts
               items={[
-                ['Machine', gap.machine],
+                ['Machine', <Link key="machine" to={`/audit/gaps?${new URLSearchParams({ machine: gap.machine }).toString()}`}>{gap.machine}</Link>],
                 ['Kind', gap.kind],
                 ['Detected', <Time key="d" value={gap.detected} />],
                 ['Resolved', <Time key="r" value={gap.resolved} />],
