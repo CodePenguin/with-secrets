@@ -199,7 +199,7 @@ function Gaps({ machine }: { machine: string }) {
   const gaps = useAuditGaps(machine, true)
   if (gaps.isPending) return <Loading what="gaps" />
   if (gaps.isError) return <ProblemAlert error={gaps.error} title="The gaps could not be listed" />
-  if (gaps.data.length === 0) return <Empty>No open gap in any machine&apos;s audit numbering.</Empty>
+  if (gaps.data.length === 0) return <Empty>No numbering anomaly matches this filter.</Empty>
 
   return (
     <>
