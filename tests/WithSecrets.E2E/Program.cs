@@ -9,6 +9,7 @@ internal static class Program
         ("a-first-run-config", Scenarios.FirstRunConfig),
         ("b-set-remove", Scenarios2.SetRemove),
         ("c-run-approval", Scenarios3.RunApproval),
+        ("c2-run-code-changes", Scenarios3.CodeChanges),
         ("d-rotate-key", Scenarios4.Rotate),
         ("e-recover", Scenarios5.Recover),
         ("f-enroll-same-host", Scenarios6.EnrollSameHost),

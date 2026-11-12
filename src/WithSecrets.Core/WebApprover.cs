@@ -972,7 +972,59 @@ internal static class ApprovalPage
         .reuse { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; margin-top: 1rem; }
         select { font-size: 1rem; padding: 0.5rem; }
         .hint { margin: 0.4rem 0 0; color: #333; }
+        .warn { border: 0.3rem solid #7a3e00; background: #fff3e0; color: #111; padding: 0.8rem 1rem; margin: 0 0 1rem; }
+        .warn h2 { font-size: 1.1rem; margin: 0 0 0.5rem; }
+        .warn ul { margin: 0.5rem 0; padding-left: 1.2rem; }
+        .warn li { margin: 0.5rem 0; }
+        .warn code { overflow-wrap: anywhere; word-break: break-all; font-weight: bold; }
+        .warn .why { color: #333; }
         """;
+
+    /// <summary>
+    /// Takes the warning block about variables that change how the program loads code or where it sends data (see
+    /// <see cref="ApprovalSummary.CodeChangesHeading" />) out of the text and builds its own section for it, to be put above the text and the
+    /// approve control. The text is unchanged otherwise. The block is the one the summary wrote (a line the agent wrote starts with the code marker, so it
+    /// cannot start the block); every value is HTML-encoded. Null section: the text has no such block.
+    /// </summary>
+    internal static (string Text, string? Section) SplitWarning(string text)
+    {
+        string[] lines = text.Split('\n');
+        string start = "Warning: " + ApprovalSummary.CodeChangesHeading + ".";
+        int first = Array.IndexOf(lines, start);
+        int last = first < 0 ? -1 : Array.IndexOf(lines, ApprovalSummary.CodeChangesCover, first);
+        if (first < 0 || last < 0)
+        {
+            return (text, null);
+        }
+
+        StringBuilder section = new();
+        section.Append("<section class=\"warn\" aria-labelledby=\"warn-title\">\n<h2 id=\"warn-title\">Warning: ").Append(WebUtility.HtmlEncode(ApprovalSummary.CodeChangesHeading)).Append("</h2>\n<ul>\n");
+        for (int index = first + 1; index < last; index++)
+        {
+            string line = lines[index];
+            if (line.StartsWith(ApprovalSummary.CodeMarker, StringComparison.Ordinal))
+            {
+                string pair = line[ApprovalSummary.CodeMarker.Length..];
+                int equals = pair.IndexOf('=', StringComparison.Ordinal);
+                string name = equals < 0 ? pair : pair[..equals];
+                section.Append("<li><code class=\"name\">").Append(WebUtility.HtmlEncode(name)).Append("</code>");
+                if (equals >= 0)
+                {
+                    section.Append(" = <code class=\"value\">").Append(WebUtility.HtmlEncode(pair[(equals + 1)..])).Append("</code>");
+                }
+
+                section.Append('\n');
+            }
+            else if (line.StartsWith(ApprovalSummary.CodeChangesWhy, StringComparison.Ordinal))
+            {
+                section.Append("<br><span class=\"why\">").Append(WebUtility.HtmlEncode(line[ApprovalSummary.CodeChangesWhy.Length..])).Append("</span></li>\n");
+            }
+        }
+
+        section.Append("</ul>\n<p><strong>").Append(WebUtility.HtmlEncode(ApprovalSummary.CodeChangesCover)).Append("</strong></p>\n</section>\n");
+
+        return (string.Join('\n', lines.Take(first).Concat(lines.Skip(last + 1))), section.ToString());
+    }
 
     public static OneShotResponse Build(ApprovalPrompt prompt, ProofStart start, string nonce, byte[] bind, TimeSpan approveDelay, ReuseOffer? reuse = null, string? manifest = null, string? prfKey = null, bool recovery = false, string? code = null)
     {
@@ -1031,7 +1083,13 @@ internal static class ApprovalPage
         page.Append("<title>Approve a request</title>\n");
         page.Append("<style>").Append(style).Append("</style>\n</head>\n<body>\n<main>\n");
         page.Append("<h1>").Append(WebUtility.HtmlEncode(prompt.Heading)).Append("</h1>\n");
-        page.Append("<pre id=\"request\">").Append(WebUtility.HtmlEncode(prompt.Text)).Append("</pre>\n");
+        (string requestText, string? warning) = SplitWarning(prompt.Text);
+        if (warning is not null)
+        {
+            page.Append(warning);
+        }
+
+        page.Append("<pre id=\"request\">").Append(WebUtility.HtmlEncode(requestText)).Append("</pre>\n");
         page.Append("<div class=\"buttons\">");
         page.Append("<button id=\"deny\" type=\"button\" autofocus>Deny</button>");
         page.Append("<button id=\"approve\" type=\"button\" disabled data-delay=\"")

@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.WebSockets;
@@ -344,6 +345,7 @@ internal static class RemoteLaunchTests
             WireForms(check);
             await PageAtTheAuthority(check, root, capture, logs);
             await EncryptedEnvValues(check, root);
+            await CodeChangesParity(check, root);
             await Refusals(check, root);
             await Deliveries(check, root);
             await HostileAuthorityInput(check, root);
@@ -504,6 +506,43 @@ internal static class RemoteLaunchTests
         File.Delete(valueFile);
         await HostServiceTests.Post(host.Rig, Make(swapped));
         check(auth.Pages.Count == pages + 1 && auth.Pages[^1].Decrypts![0].CipherSha256 == DecryptItem.HashOf(swapped) && auth.Pages[^1].Decrypts![0].CipherSha256 != auth.Pages[0].Decrypts![0].CipherSha256, "remote encrypted: a swapped ciphertext is another request at the authority (its hash differs)");
+    }
+
+    /// <summary>
+    /// M6 parity: ordinary code-loading variables of a remote host's launch show the same warning section on the authority's own page, before the approve
+    /// control, with the visible values escaped, and a changed value is another request at the authority.
+    /// </summary>
+    private static async Task CodeChangesParity(Action<bool, string> check, string root)
+    {
+        const string Hostile = "<script>alert(1)</script> & <b>";
+        using Auth auth = Auth.Create(root, realPage: true);
+        using Host host = await Host.Create(root, auth, "wsl-code");
+        using HttpClient browser = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(30) };
+        (string program, _) = ValueScript(host.Rig, "codechg");
+        string page = "";
+        string raw = "";
+        LaunchRequest request = HostServiceTests.Req(host.Rig, program, ordinary: new Dictionary<string, string> { ["NODE_OPTIONS"] = Hostile, ["HTTPS_PROXY"] = "http://proxy.example:3128", ["LD_LIBRARY_PATH"] = "/opt/lib", ["GIT_SSH_COMMAND"] = "ssh -i key", ["LOG_LEVEL"] = "quiet" });
+        HostServiceTests.Raw result = await HostServiceTests.Post(host.Rig, request, item =>
+        {
+            if (item.Kind == LaunchEvent.ApprovalKind)
+            {
+                Uri uri = new(item.Link!);
+                string baseUrl = "http://127.0.0.1:" + uri.Port + uri.AbsolutePath;
+                raw = TestState.Get(browser, baseUrl).Body;
+                page = WebUtility.HtmlDecode(raw);
+                TestState.Approve(browser, baseUrl, uri.GetLeftPart(UriPartial.Authority), uri.IdnHost, auth.Laptop);
+            }
+        });
+        int section = raw.IndexOf("<section class=\"warn\"", StringComparison.Ordinal);
+        int pre = raw.IndexOf("<pre id=\"request\">", StringComparison.Ordinal);
+        int approve = raw.IndexOf("id=\"approve\"", StringComparison.Ordinal);
+        string sectionHtml = section < 0 ? "" : raw[section..raw.IndexOf("</section>", section, StringComparison.Ordinal)];
+        check(result.Result is { Outcome: LaunchOutcome.Exited } && section > 0 && section < pre && pre < approve && Regex.Matches(raw, "class=\"warn\"").Count == 1, "remote code changes: the authority's page has one warning section, before the request text and the approve control (" + result.Result + ")");
+        check(sectionHtml.Contains("This run changes how the program loads code or where it sends data", StringComparison.Ordinal) && sectionHtml.Contains("Your approval covers exactly these values.", StringComparison.Ordinal) && sectionHtml.Contains("<code class=\"name\">HTTPS_PROXY</code> = <code class=\"value\">http://proxy.example:3128</code>", StringComparison.Ordinal) && sectionHtml.Contains("loads code", StringComparison.Ordinal) && sectionHtml.Contains("changes the library path", StringComparison.Ordinal) && sectionHtml.Contains("routes network traffic", StringComparison.Ordinal) && sectionHtml.Contains("changes git behaviour", StringComparison.Ordinal), "remote code changes: the section carries the heading, each name with its visible value, a reason per class and the covers-exactly sentence, as in local mode");
+        check(!sectionHtml.Contains("<script", StringComparison.Ordinal) && !sectionHtml.Contains("<b>", StringComparison.Ordinal) && sectionHtml.Contains("&lt;script&gt;alert(1)&lt;/script&gt; &amp; &lt;b&gt;", StringComparison.Ordinal) && page.Contains("LOG_LEVEL=quiet", StringComparison.Ordinal), "remote code changes: a value with HTML is escaped on the authority's page, and an ordinary variable stays in the text");
+        string first = request.Digest();
+        LaunchRequest other = HostServiceTests.Req(host.Rig, program, ordinary: new Dictionary<string, string> { ["NODE_OPTIONS"] = Hostile, ["HTTPS_PROXY"] = "http://attacker.example:3128", ["LD_LIBRARY_PATH"] = "/opt/lib", ["GIT_SSH_COMMAND"] = "ssh -i key", ["LOG_LEVEL"] = "quiet" }, id: request.RequestId);
+        check(other.Digest() != first, "remote code changes: a changed value is another request (another digest)");
     }
 
     // ---------- refusals that need no page ----------

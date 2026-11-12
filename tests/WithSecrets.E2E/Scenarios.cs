@@ -216,6 +216,47 @@ internal static class Scenarios3
         s.NoProblems(c);
     }
 
+    /// <summary>
+    /// M6: a project .env that sets variables which change how the program loads code or where it sends data. The page shows one prominent warning section
+    /// before the approve control, with every name, its visible value (escaped, never HTML) and a reason; axe finds no WCAG 2.2 A/AA violation at desktop and phone width.
+    /// </summary>
+    public static async Task CodeChanges(Host host, S s)
+    {
+        using Rig rig = new();
+        await using Ctx c = await Ctx.NewAsync(host);
+        await Flows.Configure(rig, c);
+        await SeedSecret(rig, c);
+        File.WriteAllLines(Path.Combine(rig.Work, "check.cmd"), Script);
+        File.WriteAllText(Path.Combine(rig.Work, ".env"), "NODE_OPTIONS=--require ./hook.js\nHTTPS_PROXY=http://proxy.example:3128\nLD_LIBRARY_PATH=/opt/lib\nGIT_SSH_COMMAND=ssh -o \"<img src=x onerror=alert(1)>\" & <b>\nLOG_LEVEL=quiet\n");
+
+        using Cmd<int> run = Cmds.Run(rig, "E2E_SECRET", ["cmd", "/d", "/c", "check.cmd"]);
+        await c.Page.GotoAsync(await run.LinkAsync());
+        await c.TextAppears("#request");
+        ILocator warning = c.Page.Locator("section.warn");
+        s.Check(await warning.CountAsync() == 1, "exactly one warning section is on the page");
+        string warned = await warning.InnerTextAsync();
+        s.Check(warned.Contains("This run changes how the program loads code or where it sends data") && warned.Contains("Your approval covers exactly these values."), "the warning has the heading and the sentence that the approval covers exactly these values");
+        foreach (string expected in new[] { "NODE_OPTIONS", "--require ./hook.js", "HTTPS_PROXY", "http://proxy.example:3128", "LD_LIBRARY_PATH", "/opt/lib", "GIT_SSH_COMMAND", "loads code", "library path", "network traffic", "git behaviour" })
+        {
+            s.Check(warned.Contains(expected, StringComparison.Ordinal), "the warning shows " + expected);
+        }
+
+        s.Check(!warned.Contains("LOG_LEVEL") && (await c.Page.InnerTextAsync("#request")).Contains("LOG_LEVEL=quiet") && !(await c.Page.InnerTextAsync("#request")).Contains("Warning:"), "an ordinary variable is in the request text, not in the warning, and the request text holds no second warning");
+        s.Check(warned.Contains("<img src=x onerror=alert(1)>") && await c.Page.Locator("section.warn img, section.warn b").CountAsync() == 0, "a value with HTML is shown as text, never as markup");
+        bool before = await c.Page.EvaluateAsync<bool>("() => !!(document.querySelector('section.warn').compareDocumentPosition(document.querySelector('#approve')) & Node.DOCUMENT_POSITION_FOLLOWING)");
+        s.Check(before, "the warning comes before the approve control in the page");
+        s.Check(await c.PasskeyCalls() == 0, "tap rule: no passkey prompt on load of the approval page");
+        await Spa.Axe(c, s, "the run approval page with the warning (desktop)");
+        await c.Page.SetViewportSizeAsync(375, 667);
+        await Spa.Axe(c, s, "the run approval page with the warning (phone width)");
+        bool scrolls = await c.Page.EvaluateAsync<bool>("() => document.documentElement.scrollWidth > window.innerWidth + 1");
+        s.Check(!scrolls, "the page does not scroll sideways at phone width");
+        await c.Page.SetViewportSizeAsync(1280, 800);
+        await c.Click("#deny");
+        await run.Result.WaitAsync(TimeSpan.FromSeconds(30));
+        s.NoProblems(c);
+    }
+
 }
 internal static class Scenarios4
 {

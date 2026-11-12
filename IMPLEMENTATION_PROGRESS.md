@@ -592,3 +592,9 @@ Update (task M3): the Linux machine key store now exists (an owner-only key file
 - **Limits raised**: 1 MB file, 16 files, 200 pairs, 400 entries per file, name 128, value 4096. Secret names accept any case; case twins and look-alikes warn.
 - **Audit**: signed event metadata `decrypts` (`VARIABLE=KEY:FINGERPRINT`), failed decrypt = launch/failed reason `env-decrypt-failed`.
 - **Tests**: suites `EnvDeclarations` (incl. `ReviewFixes`, `EnvEncryptedHttp`), `LaunchContract`, `RemoteLaunch`; see `.superpowers/sdd/2026-11-01-web-approval-passkey/task-m5-report.md`.
+
+## Task M6: prominent warning for code-loading variables on the approval page (branch `impl/mtls-pairing`)
+
+- **Decision (maintainer, binding)**: ordinary visible code-loading, library-path, proxy and git variables are not stripped and not refused; they stay bound in the fingerprint; the page shows them prominently. Values the page cannot show stay refused (M5).
+- **Built**: `ApprovalSummary.CodeChanges` and one `Warning: This run changes how the program loads code or where it sends data.` block (name=value, a `Why:` reason per class, `Your approval covers exactly these values.`) that replaces the M5 warning line and is no longer repeated in the "Other variables" list; `ApprovalPage.SplitWarning` renders that block as its own `<section class="warn">` (heading, list, escaped values) above the request text and the Deny/Approve controls; remote mode uses the same code path. The inherited-environment filter also knows every `DYLD_*` name and `LD_AUDIT`.
+- **Tests**: suite `EnvDeclarations` (`CodeChangesTests`, 27 variable classes, escaping, order, fingerprint), `RemoteLaunch` (parity on the authority's page), E2E `c2-run-code-changes` (axe at desktop and phone width). See `.superpowers/sdd/2026-11-01-web-approval-passkey/task-m6-report.md`.

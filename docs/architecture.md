@@ -388,7 +388,7 @@ State of the items of the accepted design (the text of 10.2 and 10.5 is the desi
 
 ### 10.1 Project environment declarations and Dotenvx
 
-**Status:** Phase A project declarations are implemented in `EnvDeclarations.cs`. Host service and remote authority are design-only. Current implementation (task M5): effective `encrypted:` values are decrypted after approval through the project's Dotenvx wrapper (`DotenvxCipher`, Dotenvx.Primitives), with the private key read from the store under the Dotenvx name; the ciphertext SHA-256 is part of the request fingerprint, and the host service decrypts over the remote path too. Integration with the existing Dotenvx loading/evaluation behavior (interpolation, profile selection) remains follow-up work.
+**Status:** Phase A project declarations are implemented in `EnvDeclarations.cs`. Host service and remote authority are design-only. Current implementation (task M5): effective `encrypted:` values are decrypted after approval through the project's Dotenvx wrapper (`DotenvxCipher`, Dotenvx.Primitives), with the private key read from the store under the Dotenvx name; the ciphertext SHA-256 is part of the request fingerprint, and the host service decrypts over the remote path too. Current implementation (task M6): ordinary visible values of code-loading, library-path, proxy and git variables are passed on as written and bound in the fingerprint, and the approval page (local and at a remote authority) shows one warning section above the request text and the approve control with each name, its value and a reason per class. Integration with the existing Dotenvx loading/evaluation behavior (interpolation, profile selection) remains follow-up work.
 
 **Ownership boundary**
 

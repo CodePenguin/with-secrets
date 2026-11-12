@@ -49,6 +49,7 @@ internal static class EnvDeclarationTests
         Directory.CreateDirectory(folder);
         try
         {
+            CodeChangesTests.Run(check);
             Names(check);
             Parser(check);
             Grammar(check);
@@ -839,9 +840,9 @@ internal static class EnvDeclarationTests
             RunResult run = await Execute(parent, folder, script, dump, new RecordingSource(new() { ["TOKEN_SECRET"] = Token }), approver, []);
             string text = ApprovalSummary.BuildMessage(approver.Requests[0]);
             string echo = ApprovalSummary.BuildMessage(approver.Requests[0], showValues: false);
-            int warning = text.IndexOf("Warning: the .env files set variables that change which code runs", StringComparison.Ordinal);
-            check(run.Code == 0 && warning > 0 && warning < text.IndexOf("Env file:", StringComparison.Ordinal) && warning < text.IndexOf("  | NOISE_000", StringComparison.Ordinal) && text.Contains("HTTPS_PROXY, NODE_OPTIONS.", StringComparison.Ordinal), "flooding: the warning names NODE_OPTIONS and HTTPS_PROXY before the first of 150 long values (" + run.Code + " " + run.Err.Trim() + ")");
-            check(echo.Contains("HTTPS_PROXY, NODE_OPTIONS.", StringComparison.Ordinal), "flooding: the terminal echo carries the warning too");
+            int warning = text.IndexOf("Warning: " + ApprovalSummary.CodeChangesHeading, StringComparison.Ordinal);
+            check(run.Code == 0 && warning > 0 && warning < text.IndexOf("Env file:", StringComparison.Ordinal) && warning < text.IndexOf("  | NOISE_000", StringComparison.Ordinal) && text.Contains("  | HTTPS_PROXY=http://proxy.example:3128", StringComparison.Ordinal) && text.Contains("  | NODE_OPTIONS=--require ./x-hook.js", StringComparison.Ordinal), "flooding: the warning shows NODE_OPTIONS and HTTPS_PROXY with their values before the first of 150 long values (" + run.Code + " " + run.Err.Trim() + ")");
+            check(echo.Contains("  | HTTPS_PROXY" + (char)10 + "  Why: ", StringComparison.Ordinal) && !echo.Contains("x-hook.js", StringComparison.Ordinal), "flooding: the terminal echo carries the warning too");
             check(run.EnvDump.Contains("NODE_OPTIONS=--require ./x-hook.js", StringComparison.Ordinal), "flooding: the values are still passed on (they are bound by the fingerprint and shown)");
             (folder, script, dump) = Project(parent, "LOG_LEVEL=ok1\nTOKEN=secret://TOKEN_SECRET\n");
             approver = new(true);

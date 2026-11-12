@@ -91,18 +91,15 @@ public static class ApprovalSummary
             text.Append('\n').Append(ScriptBlock(script));
         }
 
+        // Ordinary variables that change which code runs, where data is sent or how git behaves: one block, before the long .env lists. The approval
+        // page shows it as its own section above the text and the approve control (the program gets these values as written; the page is the only control).
+        AppendCodeChanges(text, request, showValues);
+
         // The .env block comes after the command and the code, so a long .env cannot push them out of sight. Every pair is on its own
         // line; every ordinary value is shown (the page is the control for variables the program may treat as code); the terminal
         // echo (showValues false) lists names only.
         if (request.EnvFiles is { Count: > 0 } || request.Decrypts is { Count: > 0 } || request.Mappings is { } mapped && mapped.Any(pair => pair.Variable != pair.Secret))
         {
-            // First in the block, before any long list of values can push it out of sight: the ordinary variables that change which code runs, where
-            // network traffic goes or who a commit is by (the program gets them as written, and the page is the only control for them).
-            if ((request.EnvValues?.Keys ?? request.EnvNames ?? []).Where(EnvDeclarations.IsProtectedVariable).Order(StringComparer.Ordinal).ToList() is { Count: > 0 } sensitive)
-            {
-                text.Append('\n').Append("Warning: the .env files set variables that change which code runs, where network traffic goes or who a commit is by: ").Append(string.Join(", ", sensitive.Select(Clean))).Append(". Read their values below.");
-            }
-
             foreach (string file in request.EnvFiles ?? [])
             {
                 text.Append('\n').Append("Env file: ").Append(Clean(file));
@@ -121,15 +118,17 @@ public static class ApprovalSummary
             text.Append((char)10).Append(EnvironmentBinding.Line(inherited));
         }
 
-        if (showValues && request.EnvValues is { Count: > 0 } values)
+        // The variables of the warning block above are not listed again.
+        HashSet<string> warned = [.. CodeChanges(request).Select(item => item.Name)];
+        if (showValues && request.EnvValues?.Where(item => !warned.Contains(item.Key)).OrderBy(item => item.Key, StringComparer.Ordinal).ToList() is { Count: > 0 } values)
         {
             text.Append('\n').Append("Other variables from .env (values shown):");
-            foreach ((string name, string value) in values.OrderBy(item => item.Key, StringComparer.Ordinal))
+            foreach ((string name, string value) in values)
             {
                 text.Append('\n').Append(CodeMarker).Append(Clean(name + "=" + value));
             }
         }
-        else if (request.EnvNames is { Count: > 0 } others)
+        else if (request.EnvNames?.Where(name => !warned.Contains(name)).ToList() is { Count: > 0 } others)
         {
             text.Append('\n').Append("Other variables from .env (names only): ").Append(string.Join(", ", others.Select(Clean)));
         }
@@ -160,6 +159,71 @@ public static class ApprovalSummary
 
     /// <summary>The most script bytes (UTF-8) the text shows.</summary>
     public const int MaxScriptBytes = 16 * 1024;
+
+    /// <summary>The heading of the warning block (the page shows the block, from its "Warning:" line to <see cref="CodeChangesCover" />, as its own section).</summary>
+    public const string CodeChangesHeading = "This run changes how the program loads code or where it sends data";
+
+    /// <summary>The last line of the warning block.</summary>
+    public const string CodeChangesCover = "Your approval covers exactly these values.";
+
+    /// <summary>The start of the line that gives the reason for the variable above it in the warning block.</summary>
+    public const string CodeChangesWhy = "  Why: ";
+
+    private const string LoadsCodeReason = "loads code: the program, or a tool it starts, loads or runs code that the variable names.";
+    private const string LibraryPathReason = "changes the library path: the program may load libraries or modules from the places the variable names.";
+    private const string NetworkReason = "routes network traffic: requests may go through the address the variable names.";
+    private const string GitReason = "changes git behaviour: it can change which settings or program git uses, or who a commit is by.";
+
+    /// <summary>
+    /// The ordinary variables of the request that change which code runs, where data is sent or how git behaves, by name (ordinal order), with
+    /// the one-line reason for the class of each. A Dotenvx private key is never given to the program, so it is not listed.
+    /// </summary>
+    public static IReadOnlyList<(string Name, string Reason)> CodeChanges(ApprovalRequest request)
+    {
+        return [.. (request.EnvValues?.Keys ?? request.EnvNames ?? []).Where(name => !name.StartsWith("DOTENV_PRIVATE_KEY", StringComparison.OrdinalIgnoreCase) && EnvDeclarations.IsProtectedVariable(name))
+            .Order(StringComparer.Ordinal).Select(name => (name, ReasonFor(name)))];
+    }
+
+    private static string ReasonFor(string name)
+    {
+        string upper = name.ToUpperInvariant();
+        if (upper.StartsWith("GIT_", StringComparison.Ordinal))
+        {
+            return GitReason;
+        }
+
+        if (upper.EndsWith("_PROXY", StringComparison.Ordinal))
+        {
+            return NetworkReason;
+        }
+
+        if (upper is "LD_LIBRARY_PATH" or "NODE_PATH" or "PYTHONPATH" or "PYTHONHOME" or "PYTHONUSERBASE" or "PERL5LIB" or "PERLLIB" or "RUBYLIB"
+            || upper.StartsWith("DYLD_", StringComparison.Ordinal) && upper != "DYLD_INSERT_LIBRARIES")
+        {
+            return LibraryPathReason;
+        }
+
+        return LoadsCodeReason;
+    }
+
+    private static void AppendCodeChanges(StringBuilder text, ApprovalRequest request, bool showValues)
+    {
+        IReadOnlyList<(string Name, string Reason)> changes = CodeChanges(request);
+        if (changes.Count == 0)
+        {
+            return;
+        }
+
+        text.Append('\n').Append("Warning: ").Append(CodeChangesHeading).Append('.');
+        foreach ((string name, string reason) in changes)
+        {
+            string shown = showValues && request.EnvValues is { } values && values.TryGetValue(name, out string? value) ? name + "=" + value : name;
+            text.Append('\n').Append(CodeMarker).Append(Clean(shown));
+            text.Append('\n').Append(CodeChangesWhy).Append(reason);
+        }
+
+        text.Append('\n').Append(CodeChangesCover);
+    }
 
     /// <summary>
     /// Starts every line of agent-written code in the text. No line the agent writes can start a page line (such as

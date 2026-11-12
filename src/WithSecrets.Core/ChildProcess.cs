@@ -79,11 +79,11 @@ public static class ChildRunner
         "NODE_OPTIONS", "BASH_ENV", "ENV", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME", "PYTHONINSPECT", "PERL5OPT", "PERL5LIB",
         "RUBYOPT", "RUBYLIB", "DOTNET_STARTUP_HOOKS", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES",
         "PERLLIB", "ZDOTDIR", "PYTHONUSERBASE", "PYTHONWARNINGS", "NODE_PATH", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_EXEC_PATH",
-        "GIT_SSH_COMMAND", "GIT_ASKPASS", "SHELLOPTS", "BASHOPTS", "PS4", "PS0", "PROMPT_COMMAND"
+        "GIT_SSH_COMMAND", "GIT_ASKPASS", "SHELLOPTS", "BASHOPTS", "PS4", "PS0", "PROMPT_COMMAND", "LD_AUDIT"
     ];
 
     /// <summary>Environment variable names starting with these are removed too (bash exports functions as BASH_FUNC_name%%).</summary>
-    internal static readonly string[] CodeLoadingPrefixes = ["BASH_FUNC_"];
+    internal static readonly string[] CodeLoadingPrefixes = ["BASH_FUNC_", "DYLD_"];
 
     /// <summary>True when the child must not inherit this variable (see <see cref="CodeLoadingVariables" />).</summary>
     internal static bool IsCodeLoading(string name, bool caseInsensitive)
