@@ -615,7 +615,7 @@ internal static class HostServiceTests
 
         LaunchRequest ordinaryBad = Req(rig, rig.Script("z", "echo z", "echo z"), ordinary: new Dictionary<string, string> { ["NODE_OPTIONS"] = "--x" });
         Raw ordinaryRun = await Post(rig, ordinaryBad);
-        check(ordinaryRun.Result is { Outcome: LaunchOutcome.Failed, ExitCode: 2 }, "request rejection: a code-loading ordinary variable in the plan is refused, not dropped");
+        check(ordinaryRun.Result is { Outcome: LaunchOutcome.Exited, ExitCode: 0 }, "request rejection: a visible code-loading ordinary variable is passed on, not refused (maintainer decision; the page shows it) (" + ordinaryRun.Result + ")");
 
         LaunchRequest namesDiffer = Req(rig, rig.Script("w", "echo w", "echo w"), ordinary: new Dictionary<string, string> { ["LOG_LEVEL"] = "x" }) with { EnvNames = ["OTHER_NAME"] };
         Raw namesRun = await Post(rig, namesDiffer);
@@ -628,7 +628,7 @@ internal static class HostServiceTests
         LaunchRequest many = Req(rig, rig.Script("u", "echo u", "echo u"), [], [.. Enumerable.Range(0, EnvDeclarations.MaxPairs + 1).Select(index => ("VAR_" + index, "TOKEN"))]);
         Raw manyRun = await Post(rig, many);
         check(manyRun.Status == HttpStatusCode.BadRequest || manyRun.Result is { Outcome: LaunchOutcome.Failed, ExitCode: 2 }, "request rejection: more pairs than the limit are refused");
-        check(rig.Store.Reads == 0 || rig.Store.Reads == 1, "exit code: failures before the approval decrypt nothing (" + rig.Store.Reads + " reads, the one run that started)");
+        check(rig.Store.Reads <= 2, "exit code: failures before the approval decrypt nothing (" + rig.Store.Reads + " reads, the runs that started)");
 
         // A denial reads nothing and starts nothing; an approver that throws is a denial too.
         using Rig denied = new(parent, approver: () => new FakeApprover(false));

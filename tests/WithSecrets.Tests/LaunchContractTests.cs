@@ -205,7 +205,7 @@ internal static class LaunchContractTests
     private static void NoSecretValues(Action<bool, string> check)
     {
         Regex forbidden = new("secretvalue|plaintext|password|privatekey|storekey|^key$|unlock|decrypted|^values?$|secretbytes|secrettext|^payload$|^secrets$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-        Type[] contracts = [typeof(LaunchRequest), typeof(LaunchMapping), typeof(LaunchResult), typeof(LaunchBinding)];
+        Type[] contracts = [typeof(LaunchRequest), typeof(LaunchMapping), typeof(LaunchEncrypted), typeof(LaunchResult), typeof(LaunchBinding)];
         HashSet<Type> seen = [];
         Queue<Type> queue = new(contracts);
         while (queue.Count > 0)

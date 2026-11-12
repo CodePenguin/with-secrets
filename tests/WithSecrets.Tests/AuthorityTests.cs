@@ -175,6 +175,7 @@ internal static class AuthorityTests
             ["EnvNames"] = request with { EnvNames = [.. request.EnvNames, "B"] },
             ["EnvVariables"] = request with { EnvVariables = new Dictionary<string, string> { ["A"] = "c" } },
             ["InheritedEnvironment"] = request with { InheritedEnvironment = new Dictionary<string, string> { ["PATH"] = "x" } },
+            ["Encrypted"] = request with { Encrypted = [.. request.Encrypted, new LaunchEncrypted("V", "x.env", "DOTENV_PRIVATE_KEY", "encrypted:AAAA")] },
         };
         string[] properties = [.. typeof(LaunchRequest).GetProperties(BindingFlags.Public | BindingFlags.Instance).Where(property => property.Name != "EqualityContract").Select(property => property.Name).Order(StringComparer.Ordinal)];
         check(properties.SequenceEqual(variants.Keys.Order(StringComparer.Ordinal)), "envelope: every field of the launch request is tested (a new field must be added here)");
