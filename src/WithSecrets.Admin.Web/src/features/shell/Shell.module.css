@@ -149,7 +149,7 @@
 }
 
 /* Narrow layouts disclose navigation instead of wrapping six destinations into several rows. */
-@media (max-width: 51.999rem) {
+@media (max-width: 52rem) {
   .navToggle {
     display: inline-flex;
   }
@@ -159,6 +159,7 @@
     flex-direction: column;
     align-items: stretch;
     padding: 0 var(--space-2) var(--space-2);
+    overflow-x: visible;
   }
 
   .nav[data-open='true'] ul {
