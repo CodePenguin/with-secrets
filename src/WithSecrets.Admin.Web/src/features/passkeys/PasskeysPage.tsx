@@ -20,7 +20,7 @@ export function PasskeysPage() {
           Add a passkey...
         </Button>
       </PageHeader>
-      <p>The passkeys that approve requests and administer this authority. Only names and kinds are shown, never key material.</p>
+      <p>Admin passkeys can administer this authority. Approval-only passkeys can approve requests but cannot change authority settings. The kind describes the credential; the badge shows what it is allowed to do.</p>
       {passkeys.isPending ? <Loading what="passkeys" /> : null}
       {passkeys.isError ? <ProblemAlert error={passkeys.error} title="The passkeys could not be listed" /> : null}
       {passkeys.data && !passkeys.data.available ? (
