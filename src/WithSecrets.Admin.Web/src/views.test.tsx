@@ -299,6 +299,7 @@ describe('settings and passkey context', () => {
 
     expect(await screen.findByText(/Admin passkeys can administer this authority/)).toBeInTheDocument()
     expect(screen.getByText(/The kind describes the credential; the badge shows what it is allowed to do/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings')
   })
 })
 
