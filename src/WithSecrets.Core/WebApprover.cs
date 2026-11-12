@@ -1097,7 +1097,7 @@ internal static class ApprovalPage
         page.Append("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
         page.Append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
         page.Append("<meta name=\"referrer\" content=\"no-referrer\">\n");
-        page.Append("<title>Approve a request</title>\n");
+        page.Append("<title>").Append(WebUtility.HtmlEncode(prompt.Heading)).Append("</title>\n");
         page.Append("<style>").Append(style).Append("</style>\n</head>\n<body>\n<main>\n");
         page.Append("<h1>").Append(WebUtility.HtmlEncode(prompt.Heading)).Append("</h1>\n");
         (string requestText, string? warning) = SplitWarning(prompt.Text);
