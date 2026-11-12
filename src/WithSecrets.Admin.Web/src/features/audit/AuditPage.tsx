@@ -104,7 +104,7 @@ export function AuditPage({ view }: { view: View }) {
             <Button variant="primary" type="submit">
               Search
             </Button>
-            {params.size > 0 ? (
+            {params.toString().length > 0 ? (
               <Button variant="secondary" type="button" onClick={() => setParams(new URLSearchParams())}>
                 Clear filters
               </Button>
