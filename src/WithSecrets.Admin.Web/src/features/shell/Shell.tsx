@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { api, setSessionSecret } from '../../api/client'
@@ -38,6 +38,9 @@ function useFocusHeadingOnNavigation(main: React.RefObject<HTMLElement | null>) 
 
 export function Shell() {
   const main = useRef<HTMLElement>(null)
+  const menuButton = useRef<HTMLButtonElement>(null)
+  const location = useLocation()
+  const [navigationOpen, setNavigationOpen] = useState(false)
   useFocusHeadingOnNavigation(main)
   const status = useStatus()
   const session = useSession()
@@ -52,6 +55,24 @@ export function Shell() {
   })
   const signedIn = session.data?.authenticated === true
   const backend = status.data?.version
+
+  useEffect(() => {
+    setNavigationOpen(false)
+  }, [location.pathname])
+
+  useEffect(() => {
+    if (!navigationOpen) return
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setNavigationOpen(false)
+        menuButton.current?.focus()
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [navigationOpen])
 
   return (
     <div className={styles.shell}>
@@ -79,11 +100,26 @@ export function Shell() {
           ) : null}
         </div>
       </header>
-      <nav aria-label="Main" className={styles.nav}>
-        <ul>
+      <nav id="main-navigation" aria-label="Main" className={styles.nav} data-open={navigationOpen}>
+        <button
+          ref={menuButton}
+          type="button"
+          className={styles.navToggle}
+          aria-expanded={navigationOpen}
+          aria-controls="main-navigation-links"
+          onClick={() => setNavigationOpen((open) => !open)}
+        >
+          Menu
+        </button>
+        <ul id="main-navigation-links">
           {links.map((link) => (
             <li key={link.to}>
-              <NavLink to={link.to} end={link.end} className={({ isActive }) => (isActive ? styles.active : undefined)}>
+              <NavLink
+                to={link.to}
+                end={link.end}
+                className={({ isActive }) => (isActive ? styles.active : undefined)}
+                onClick={() => setNavigationOpen(false)}
+              >
                 {link.label}
               </NavLink>
             </li>
