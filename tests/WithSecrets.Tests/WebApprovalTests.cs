@@ -2260,8 +2260,8 @@ internal static partial class WebApprovalTests
         check(CliArgs.Parse(["--set", twenty], out _) is CliCommand.Set { Names.Count: 20 }, "cli: --set takes 20 names");
         string[][] refused =
         [
-            ["--set"], ["--set", ","], ["--set", " "], ["--set", "A,DOTENV_KEY"], ["--set", "DOTENV_PUBLIC_KEY"], ["--set", "lower"],
-            ["--set", twenty + ",N20"], ["--remove"], ["--remove", ","], ["--remove", "DOTENV_PRIVATE_KEY"], ["--remove", "A-B"],
+            ["--set"], ["--set", ","], ["--set", " "], ["--set", "A,DOTENV_KEY"], ["--set", "DOTENV_PUBLIC_KEY"], ["--set", "1lower"],
+            ["--set", twenty + ",N20"], ["--remove"], ["--remove", ","], ["--remove", "DOTENV_PUBLIC_KEY"], ["--remove", "A-B"],
             ["--remove", "A", "--local"], ["--set", "A", "--local"],
         ];
         foreach (string[] args in refused)
@@ -2809,7 +2809,7 @@ internal static partial class WebApprovalTests
 
             // Names that cannot be stored: refused before any page opens.
             string[] tooMany = [.. Enumerable.Range(0, 21).Select(index => "N" + index)];
-            foreach (string[] names in new[] { new[] { "bad" }, ["DOTENV_PRIVATE_KEY"], ["A_NEW", "DOTENV_PUBLIC_KEY"], ["A_NEW", "A_NEW"], [], tooMany, ["A-B"] })
+            foreach (string[] names in new[] { new[] { "1bad" }, ["DOTENV_X"], ["A_NEW", "DOTENV_PUBLIC_KEY"], ["A_NEW", "A_NEW"], [], tooMany, ["A-B"] })
             {
                 (PasskeyStore passkeys, SecretStore store, _) = Fresh(oldData);
                 long version = TestState.Current(store.Database)!.Version;

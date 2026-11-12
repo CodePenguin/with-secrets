@@ -67,7 +67,8 @@ public sealed record ChildSpec(
     string WorkingDirectory,
     IReadOnlyDictionary<string, string> Secrets,
     IReadOnlyDictionary<string, string>? Ordinary = null,
-    IReadOnlyDictionary<string, string>? InheritedEnvironment = null);
+    IReadOnlyDictionary<string, string>? InheritedEnvironment = null,
+    IReadOnlyList<string>? RedactAlso = null);
 
 /// <summary>Runs the program with the secrets as environment variables and redacts what it prints.</summary>
 public static class ChildRunner
@@ -174,10 +175,11 @@ public static class ChildRunner
             start.Environment.Remove(name);
         }
 
-        // Ordinary .env values: the agent wrote them, so the code-loading variables stay out of them too. Not redacted, not secret.
+        // Ordinary .env values: all of them were shown in full on the approval page, code-loading names included, so they are passed
+        // on. Only a Dotenvx private key never goes to the program. Not redacted, not secret.
         foreach ((string name, string value) in spec.Ordinary ?? new Dictionary<string, string>())
         {
-            if (!IsCodeLoading(name, OperatingSystem.IsWindows()) && !name.StartsWith("DOTENV_PRIVATE_KEY", StringComparison.OrdinalIgnoreCase))
+            if (!name.StartsWith("DOTENV_PRIVATE_KEY", StringComparison.OrdinalIgnoreCase))
             {
                 start.Environment[name] = value;
             }
@@ -185,6 +187,12 @@ public static class ChildRunner
 
         foreach ((string name, string value) in spec.Secrets)
         {
+            // Final filter (the run refuses before it gets here): a secret value, which the approval page cannot show, never goes to a variable that changes which code runs.
+            if (EnvDeclarations.IsProtectedVariable(name))
+            {
+                continue;
+            }
+
             start.Environment[name] = value;
         }
 
@@ -333,8 +341,8 @@ public sealed class PreparedChild
         {
             // The child gets no standard input (it reads end of file at once), so nothing can feed it code the page did not show.
             started.StandardInput.Close();
-            Task output = ChildRunner.Pump(started.StandardOutput, new StreamRedactor(_spec.Secrets.Values), stdout);
-            Task errors = ChildRunner.Pump(started.StandardError, new StreamRedactor(_spec.Secrets.Values), stderr);
+            Task output = ChildRunner.Pump(started.StandardOutput, new StreamRedactor(_spec.Secrets.Values.Concat(_spec.RedactAlso ?? [])), stdout);
+            Task errors = ChildRunner.Pump(started.StandardError, new StreamRedactor(_spec.Secrets.Values.Concat(_spec.RedactAlso ?? [])), stderr);
             await started.WaitForExitAsync();
             await Task.WhenAll(output, errors);
 

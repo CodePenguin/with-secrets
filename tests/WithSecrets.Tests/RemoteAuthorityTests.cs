@@ -327,7 +327,7 @@ internal static partial class RemoteAuthorityTests
     {
         DateTimeOffset now = DateTimeOffset.UtcNow;
 
-        return new LaunchRequest(LaunchProtocol.Version, id, now, now.AddMinutes(5), "bm9uY2UtMDAwMDAwMDE" + Guid.NewGuid().ToString("N")[..6], ["TOKEN"], [new LaunchMapping("TOKEN", "TOKEN")], "remote test", "/work/tool.sh", [], "/work", [], [], new Dictionary<string, string>(), new Dictionary<string, string>());
+        return new LaunchRequest(LaunchProtocol.Version, id, now, now.AddMinutes(5), "bm9uY2UtMDAwMDAwMDE" + Guid.NewGuid().ToString("N")[..6], ["TOKEN"], [new LaunchMapping("TOKEN", "TOKEN")], "remote test", "/work/tool.sh", [], "/work", [], [], new Dictionary<string, string>(), new Dictionary<string, string>(), []);
     }
 
     private static async Task<bool> Until(Func<bool> condition, int seconds = 10)

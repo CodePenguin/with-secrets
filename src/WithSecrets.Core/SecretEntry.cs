@@ -256,6 +256,28 @@ public sealed class SecretEntry(EnrollmentTarget primaryTarget, EnrollmentTarget
             string origin = settings.PageOrigin(server.Port);
             List<(string Name, bool Replace)> fields = [.. names.Select(name => (name, stored.Contains(name)))];
             string text = "Store these secrets: " + string.Join(", ", fields.Select(field => field.Name + (field.Replace ? " (replace)" : " (new)"))) + ".";
+            // Names are case-sensitive: a name that differs from a stored one only by case is a different secret. A warning, not a refusal;
+            // it is part of the bound text, so the person signs what they were warned about. Names are public.
+            foreach (string name in names)
+            {
+                if (SecretNames.CaseTwins(name, stored) is { Count: > 0 } twins)
+                {
+                    text += "\nWarning: " + name + " differs only by case from the existing name" + (twins.Count > 1 ? "s" : "") + ": " + string.Join(", ", twins) + ". Names are case-sensitive, so this is a different secret.";
+                }
+
+                // Two new names of this same request that differ only by case: neither is stored yet, so the check above cannot see them.
+                if (SecretNames.CaseTwins(name, names) is { Count: > 0 } together)
+                {
+                    text += "\nWarning: " + name + " differs only by case from " + string.Join(", ", together) + ", which this request also stores. Names are case-sensitive, so these are different secrets.";
+                }
+
+                // Look-alike characters (l, I, 1 and O, 0) make two names easy to confuse as well.
+                if (SecretNames.LookAlikes(name, stored.Concat(names)) is { Count: > 0 } alike)
+                {
+                    text += "\nWarning: " + name + " looks like " + string.Join(", ", alike) + " (the characters l, I, 1 and O, 0 are easy to confuse). It is a different secret.";
+                }
+            }
+
             if (method.AdminLine() is { } adminLine)
             {
                 text += "\n" + adminLine;

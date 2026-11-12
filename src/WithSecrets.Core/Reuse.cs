@@ -42,7 +42,7 @@ public static class RequestFingerprint
 
         text.Append('\u0001');
         // A plain --secrets run (every variable named like its secret, no .env) keeps the key it always had.
-        if (request.Mappings is not null && (request.Mappings.Any(pair => pair.Variable != pair.Secret) || request.EnvFiles is { Count: > 0 } || request.EnvNames is { Count: > 0 } || request.EnvValues is { Count: > 0 }))
+        if (request.Mappings is not null && (request.Mappings.Any(pair => pair.Variable != pair.Secret) || request.EnvFiles is { Count: > 0 } || request.EnvNames is { Count: > 0 } || request.EnvValues is { Count: > 0 } || request.Decrypts is { Count: > 0 }))
         {
             // Every pair and every file the declarations came from are part of what was approved.
             foreach (SecretMapping pair in request.Mappings.OrderBy(pair => pair.Variable, StringComparer.Ordinal))
@@ -54,6 +54,12 @@ public static class RequestFingerprint
             foreach (string file in (request.EnvFiles ?? []).Order(StringComparer.Ordinal))
             {
                 text.Append(Normalize(file)).Append('\0');
+            }
+
+            text.Append('\u0002');
+            foreach (DecryptItem item in (request.Decrypts ?? []).OrderBy(item => item.Variable, StringComparer.Ordinal))
+            {
+                text.Append(item.Variable).Append('\0').Append(Normalize(item.File)).Append('\0').Append(item.KeySecret).Append('\0').Append(item.CipherSha256).Append('\0');
             }
 
             text.Append('\u0002');

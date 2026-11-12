@@ -68,12 +68,15 @@ public static class LaunchClient
             await stderr.WriteLineAsync("with-secrets: " + note);
         }
 
-        if (plan.Mappings.Count == 0)
+        IReadOnlyList<EncryptedValue> encrypted = plan.Encrypted ?? [];
+        if (plan.Mappings.Count == 0 && encrypted.Count == 0)
         {
             return await Fail(stderr, RunCommand.Usage, "Name the secrets with --secrets NAME[,NAME...]. There is no option for all secrets.");
         }
 
-        string[] invalid = [.. plan.Mappings.Select(mapping => mapping.Secret).Distinct(StringComparer.Ordinal).Where(name => !SecretNames.IsValid(name))];
+        // The key secrets of the encrypted values are requested like any secret (listed, approved, read only after the approval).
+        IReadOnlyList<string> names = [.. plan.Mappings.Select(mapping => mapping.Secret).Concat(encrypted.Select(value => value.KeySecret)).Distinct(StringComparer.Ordinal)];
+        string[] invalid = [.. names.Where(name => !SecretNames.IsValid(name))];
         if (invalid.Length > 0)
         {
             return await Fail(stderr, RunCommand.Usage, $"Invalid secret name: {string.Join(", ", invalid.Select(ApprovalSummary.Clean))}.");
@@ -86,7 +89,7 @@ public static class LaunchClient
             created,
             created.Add(LaunchProtocol.MaxLifetime),
             Base64Url(16),
-            [.. plan.Mappings.Select(mapping => mapping.Secret).Distinct(StringComparer.Ordinal)],
+            names,
             [.. plan.Mappings.Select(mapping => new LaunchMapping(mapping.Variable, mapping.Secret))],
             args.Reason,
             args.Program,
@@ -95,7 +98,8 @@ public static class LaunchClient
             plan.Files,
             [.. plan.Ordinary.Keys.Order(StringComparer.Ordinal)],
             plan.Ordinary,
-            environment);
+            environment,
+            [.. encrypted.Select(value => new LaunchEncrypted(value.Variable, value.File, value.KeySecret, value.Ciphertext))]);
 
         using HttpClient client = handler is null
             ? new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false })

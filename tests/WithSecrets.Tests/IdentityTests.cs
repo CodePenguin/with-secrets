@@ -343,7 +343,7 @@ internal static class IdentityTests
     }
 
     internal static LaunchRequest Sample(string id, DateTimeOffset now) => new(
-        LaunchProtocol.Version, id, now, now.AddMinutes(5), "bm9uY2UtMDAwMDAwMDEx" + id.Replace("-", ""), ["TOKEN"], [new LaunchMapping("TOKEN", "TOKEN")], "identity test", "program", [], Path.GetTempPath(), [], [], new Dictionary<string, string>(), new Dictionary<string, string>());
+        LaunchProtocol.Version, id, now, now.AddMinutes(5), "bm9uY2UtMDAwMDAwMDEx" + id.Replace("-", ""), ["TOKEN"], [new LaunchMapping("TOKEN", "TOKEN")], "identity test", "program", [], Path.GetTempPath(), [], [], new Dictionary<string, string>(), new Dictionary<string, string>(), []);
 
     private sealed class ThrowingAuthority : IAuthority
     {

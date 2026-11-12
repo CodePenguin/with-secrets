@@ -175,7 +175,7 @@ internal static class Program
         Check(CliArgs.Parse(["@" + responseFile, "--", "prog"], out _) is null, "cli: a response file is not expanded");
         File.Delete(responseFile);
         Check(CliArgs.Parse(["[env:PATH=C:\\evil]", "--secrets", "A", "--reason", "x", "--", "prog"], out _) is null, "cli: a directive is not accepted");
-        Check(SecretNames.IsValid("DB_URL") && !SecretNames.IsValid("db_url") && !SecretNames.IsValid("DOTENV_PRIVATE_KEY"), "name rules");
+        Check(SecretNames.IsValid("DB_URL") && SecretNames.IsValid("db_url") && SecretNames.IsValid("DOTENV_PRIVATE_KEY") && !SecretNames.IsValid("DOTENV_PUBLIC_KEY") && !SecretNames.IsValid("1db"), "name rules");
 
         // --- program resolution
         string temp = Path.Combine(Path.GetTempPath(), "with-secrets-test-" + Guid.NewGuid().ToString("N"));

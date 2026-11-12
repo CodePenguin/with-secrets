@@ -94,8 +94,15 @@ public static class ApprovalSummary
         // The .env block comes after the command and the code, so a long .env cannot push them out of sight. Every pair is on its own
         // line; every ordinary value is shown (the page is the control for variables the program may treat as code); the terminal
         // echo (showValues false) lists names only.
-        if (request.EnvFiles is { Count: > 0 } || request.Mappings is { } mapped && mapped.Any(pair => pair.Variable != pair.Secret))
+        if (request.EnvFiles is { Count: > 0 } || request.Decrypts is { Count: > 0 } || request.Mappings is { } mapped && mapped.Any(pair => pair.Variable != pair.Secret))
         {
+            // First in the block, before any long list of values can push it out of sight: the ordinary variables that change which code runs, where
+            // network traffic goes or who a commit is by (the program gets them as written, and the page is the only control for them).
+            if ((request.EnvValues?.Keys ?? request.EnvNames ?? []).Where(EnvDeclarations.IsProtectedVariable).Order(StringComparer.Ordinal).ToList() is { Count: > 0 } sensitive)
+            {
+                text.Append('\n').Append("Warning: the .env files set variables that change which code runs, where network traffic goes or who a commit is by: ").Append(string.Join(", ", sensitive.Select(Clean))).Append(". Read their values below.");
+            }
+
             foreach (string file in request.EnvFiles ?? [])
             {
                 text.Append('\n').Append("Env file: ").Append(Clean(file));
@@ -105,6 +112,8 @@ public static class ApprovalSummary
             {
                 text.Append('\n').Append("Pair: ").Append(Clean(pair.Display)).Append(pair.Variable != pair.Secret ? " (renamed)" : "");
             }
+
+            AppendDecrypts(text, request);
         }
 
         if (request.InheritedEnvironment is { } inherited)
@@ -181,6 +190,51 @@ public static class ApprovalSummary
         }
 
         return text.ToString();
+    }
+
+    /// <summary>
+    /// The encrypted values: names, the key secret and a short fingerprint of each ciphertext, never a value or a ciphertext. The key comes first and the
+    /// file (whose folders the agent chooses) last, so a path cannot pose as the rest of the line. The page also says that anyone with the public key can
+    /// write such a value, and warns for each value whose file is not the project's own.
+    /// </summary>
+    private static void AppendDecrypts(StringBuilder text, ApprovalRequest request)
+    {
+        if (request.Decrypts is not { Count: > 0 } decrypts)
+        {
+            return;
+        }
+
+        foreach (DecryptItem item in decrypts)
+        {
+            text.Append('\n').Append("decrypt with secret ").Append(Clean(item.KeySecret)).Append(": ").Append(Clean(item.Variable)).Append(" (cipher sha256 ").Append(Clean(item.Short)).Append(") from ").Append(Clean(item.File));
+        }
+
+        text.Append('\n').Append("Encrypted values are not shown. Anyone who has the public key in a .env file can write one, so a value is not proof that you made it: compare each cipher fingerprint with the committed file.");
+        foreach (DecryptItem item in decrypts)
+        {
+            if (!IsProjectsOwnEnvFile(item.File, request.WorkingDirectory))
+            {
+                text.Append('\n').Append("Warning: ").Append(Clean(item.Variable)).Append(" is decrypted from a file that is not this project's own .env file (a .env or .env.NAME directly in the working folder): ").Append(Clean(item.File)).Append(". A value copied from another file or project decrypts with the same key.");
+            }
+        }
+    }
+
+    /// <summary>True when the file is a <c>.env</c> or <c>.env.NAME</c> directly in the working folder.</summary>
+    internal static bool IsProjectsOwnEnvFile(string file, string workingDirectory)
+    {
+        try
+        {
+            string name = Path.GetFileName(file);
+            string folder = Path.GetDirectoryName(Path.GetFullPath(file)) ?? "";
+            string work = Path.GetFullPath(workingDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            StringComparison comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
+            return (name.Equals(".env", comparison) || name.StartsWith(".env.", comparison) && name.Length > 5) && string.Equals(folder.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), work, comparison);
+        }
+        catch (Exception error) when (error is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
     }
 
     internal static string ScriptBlock(ScriptView script)

@@ -248,7 +248,8 @@ internal static class HostServiceTests
             [],
             [.. variables.Keys.Order(StringComparer.Ordinal)],
             variables,
-            environment ?? Env());
+            environment ?? Env(),
+            []);
     }
 
     internal static async Task<Raw> Post(Rig rig, LaunchRequest request, Action<LaunchEvent>? onEvent = null, CancellationToken cancel = default, Action<HttpRequestMessage>? tweak = null, string? body = null, string? digest = null, string path = "/v1/launch")
@@ -873,7 +874,7 @@ internal static class HostServiceTests
             using HostService service = HostService.Start(new HostServiceOptions { Lock = AuthorityLock.UnlockedForTests(), State = db, Store = store, Deployment = machine.Deployment, Port = 0, TimeLimit = TimeSpan.FromSeconds(30) });
             using HttpClient client = new(new SocketsHttpHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(60) };
             DateTimeOffset now = DateTimeOffset.UtcNow;
-            LaunchRequest request = new(LaunchProtocol.Version, "http-" + Guid.NewGuid().ToString("N")[..8], now, now.AddMinutes(5), "bm9uY2UtMDAwMDAwMDEx" + Guid.NewGuid().ToString("N")[..6], ["TOKEN"], [new LaunchMapping("TOKEN", "TOKEN")], "approval over http", "./" + program, [], work, [], [], new Dictionary<string, string>(), Env());
+            LaunchRequest request = new(LaunchProtocol.Version, "http-" + Guid.NewGuid().ToString("N")[..8], now, now.AddMinutes(5), "bm9uY2UtMDAwMDAwMDEx" + Guid.NewGuid().ToString("N")[..6], ["TOKEN"], [new LaunchMapping("TOKEN", "TOKEN")], "approval over http", "./" + program, [], work, [], [], new Dictionary<string, string>(), Env(), []);
             string page = "";
             int status = 0;
             using HttpRequestMessage message = new(HttpMethod.Post, "http://127.0.0.1:" + service.Port + "/v1/launch") { Content = new StringContent(request.Canonical(), new UTF8Encoding(false), new MediaTypeHeaderValue("application/json")) };
@@ -1095,7 +1096,7 @@ internal static class HostServiceTests
             }
 
             DateTimeOffset now = DateTimeOffset.UtcNow;
-            LaunchRequest request = new(LaunchProtocol.Version, "page-" + Guid.NewGuid().ToString("N")[..8], now, now.AddMinutes(5), "bm9uY2UtMDAwMDAwMDEx" + Guid.NewGuid().ToString("N")[..6], ["TOKEN"], [new LaunchMapping("TOKEN", "TOKEN")], "page cancel", "./" + program, [], Path.Combine(folder, "work"), [], [], new Dictionary<string, string>(), Env());
+            LaunchRequest request = new(LaunchProtocol.Version, "page-" + Guid.NewGuid().ToString("N")[..8], now, now.AddMinutes(5), "bm9uY2UtMDAwMDAwMDEx" + Guid.NewGuid().ToString("N")[..6], ["TOKEN"], [new LaunchMapping("TOKEN", "TOKEN")], "page cancel", "./" + program, [], Path.Combine(folder, "work"), [], [], new Dictionary<string, string>(), Env(), []);
             using HttpRequestMessage message = new(HttpMethod.Post, "http://127.0.0.1:" + service.Port + "/v1/launch") { Content = new StringContent(request.Canonical(), new UTF8Encoding(false), new MediaTypeHeaderValue("application/json")) };
             message.Headers.Add(HostService.DigestHeader, request.Digest());
             using CancellationTokenSource leave = new();

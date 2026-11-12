@@ -114,16 +114,32 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, TextWrit
 
     private async Task<int> RunPlan(string program, IReadOnlyList<string> typedArguments, string reason, string workingDirectory, EnvPlan plan, IReadOnlyList<string> available, LaunchContext context, bool approveOnly = false)
     {
-        if (plan.Mappings.Count == 0)
+        IReadOnlyList<EncryptedValue> encrypted = plan.Encrypted ?? [];
+        if (plan.Mappings.Count == 0 && encrypted.Count == 0)
         {
             return await Fail(Usage, "Name the secrets with --secrets NAME[,NAME...]. There is no option for all secrets.");
         }
 
-        IReadOnlyList<string> names = [.. plan.Mappings.Select(mapping => mapping.Secret).Distinct(StringComparer.Ordinal)];
+        // The Dotenvx key secrets of the encrypted values that survived composition are requested like any secret: they are listed on
+        // the page, covered by the approval, and read from the store only after it. A key nobody needs is never requested.
+        IReadOnlyList<string> names = [.. plan.Mappings.Select(mapping => mapping.Secret).Concat(encrypted.Select(value => value.KeySecret)).Distinct(StringComparer.Ordinal)];
         string[] invalid = [.. names.Where(name => !SecretNames.IsValid(name))];
         if (invalid.Length > 0)
         {
             return await Fail(Usage, $"Invalid secret name: {string.Join(", ", invalid.Select(ApprovalSummary.Clean))}.");
+        }
+
+        // Before any page: nothing the page cannot show (a secret, a decrypted value) goes to a variable that changes which code runs, where traffic goes or who a
+        // commit is by. The requests that come over the API were checked the same way (EnvDeclarations.FromRequest); this is the same rule for every way in.
+        if (plan.Mappings.Select(mapping => mapping.Variable).Concat(encrypted.Select(value => value.Variable)).FirstOrDefault(EnvDeclarations.IsProtectedVariable) is { } protectedVariable)
+        {
+            return await Fail(Usage, $"A secret cannot be given to {ApprovalSummary.Clean(protectedVariable)}, because it changes which code runs. Nothing was run.");
+        }
+
+        string[] missingKeys = [.. encrypted.Select(value => value.KeySecret).Distinct(StringComparer.Ordinal).Where(name => !available.Contains(name, StringComparer.Ordinal))];
+        if (missingKeys.Length > 0)
+        {
+            return await Fail(Usage, $"Missing secret: {string.Join(", ", missingKeys)}. It holds the Dotenvx private key for {string.Join(", ", encrypted.Where(value => missingKeys.Contains(value.KeySecret)).Select(value => value.Variable))}. Ask the user to add it.");
         }
 
         string[] missing = [.. names.Where(name => !available.Contains(name, StringComparer.Ordinal))];
@@ -242,7 +258,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, TextWrit
         bool remote = context.Authorization is { IsRemote: true };
         ReuseOffer offer = !remote && !store.NeedsUnlock && grants is not null && reuse is { IsOn: true } ? reuse : ReuseOffer.Off;
         Dictionary<string, string> sources = names.ToDictionary(name => name, _ => store.Label, StringComparer.Ordinal);
-        ApprovalRequest request = new(program, resolved, arguments, workingDirectory, reason, names, offer.IsOn ? offer : null, typedArguments, links, Sources: sources, Unlock: store.NeedsUnlock, Script: script, ProgramFile: programFile, Mappings: plan.Mappings, EnvFiles: plan.Files, EnvNames: [.. plan.Ordinary.Keys.Order(StringComparer.Ordinal)], EnvValues: plan.Ordinary, InheritedEnvironment: context.Environment);
+        ApprovalRequest request = new(program, resolved, arguments, workingDirectory, reason, names, offer.IsOn ? offer : null, typedArguments, links, Sources: sources, Unlock: store.NeedsUnlock, Script: script, ProgramFile: programFile, Mappings: plan.Mappings, EnvFiles: plan.Files, EnvNames: [.. plan.Ordinary.Keys.Order(StringComparer.Ordinal)], EnvValues: plan.Ordinary, InheritedEnvironment: context.Environment, Decrypts: [.. encrypted.Select(value => value.ToItem())]);
         Fingerprint fingerprint = RequestFingerprint.Compute(request);
 
         // What the page shows must be the file the fingerprint covers; a file that changed in between is not approved unseen.
@@ -286,6 +302,12 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, TextWrit
         if (request.EnvFiles is { Count: > 0 } envFiles)
         {
             auditMetadata["envFiles"] = string.Join(",", envFiles);
+        }
+
+        if (request.Decrypts is { Count: > 0 } decrypts)
+        {
+            // Names and a short fingerprint of each ciphertext (the hash of a ciphertext is not a secret); never a value, a ciphertext or a key.
+            auditMetadata["decrypts"] = string.Join(",", decrypts.Select(item => item.Variable + "=" + item.KeySecret + ":" + item.Short));
         }
 
         if (fingerprint.Files.Count > 0)
@@ -584,10 +606,38 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, TextWrit
                 // The variable the program sees is the left side of the pair; the redactor gets every value.
                 Dictionary<string, string> injected = request.Mappings!.ToDictionary(mapping => mapping.Variable, mapping => secrets.Text(mapping.Secret), StringComparer.Ordinal);
 
+                // Final filter, whatever the earlier checks said: nothing the page could not show goes to a variable that changes which code runs, where
+                // traffic goes or who a commit is by. Nothing is run and nothing is decrypted.
+                if (request.Mappings!.Select(mapping => mapping.Variable).Concat(encrypted.Select(value => value.Variable)).FirstOrDefault(EnvDeclarations.IsProtectedVariable) is { } protectedName)
+                {
+                    Record(AuditEventTypes.Launch, "failed", "protected-variable", runGrant);
+
+                    return await Fail(Usage, $"A secret value cannot be given to {ApprovalSummary.Clean(protectedName)}, because it changes which code runs. Nothing was run.");
+                }
+
+                // Encrypted .env values: decrypted here, in memory, with the key secret that was approved, by the Dotenvx library. The key is never added
+                // to the child's environment; it is added to what the output redactor masks. A failure names the variable only, never the value or the ciphertext.
+                List<string> redactAlso = [];
+                foreach (EncryptedValue value in encrypted)
+                {
+                    string key = secrets.Text(value.KeySecret);
+                    redactAlso.Add(key);
+                    string? plain = DecryptValue(value, key);
+                    if (plain is null || !UsablePlaintext(plain))
+                    {
+                        // One message and one audit reason for every kind of failure: nothing here tells the cause apart (no oracle), and no value is named.
+                        Record(AuditEventTypes.Launch, "failed", "env-decrypt-failed", runGrant);
+
+                        return await Fail(Usage, $"Cannot use the encrypted .env value of {value.Variable}. Nothing was run.");
+                    }
+
+                    injected[value.Variable] = plain;
+                }
+
                 // Prepare the child and its environment, then commit through the gate: the process starts only if the launch was not
                 // cancelled and the local authorization did not change since it began. The loser of that race starts nothing and
                 // its prepared environment is thrown away. Once started, nothing here touches the child.
-                PreparedChild prepared = ChildRunner.Prepare(new ChildSpec(resolved, arguments, workingDirectory, injected, plan.Ordinary, context.Environment));
+                PreparedChild prepared = ChildRunner.Prepare(new ChildSpec(resolved, arguments, workingDirectory, injected, plan.Ordinary, context.Environment, redactAlso));
                 System.Diagnostics.Process? process = null;
                 string? startFailure = null;
                 bool committed = false;
@@ -677,6 +727,28 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, TextWrit
                 _keys.Discard();
             }
         }
+    }
+
+    /// <summary>The plain text of an encrypted .env value, or null when it does not decrypt. Never throws; the cause is not reported, because it could carry the value.</summary>
+    private static string? DecryptValue(EncryptedValue value, string privateKey)
+    {
+        try
+        {
+            return DotenvxCipher.Instance.Decrypt(privateKey, value.Ciphertext);
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// A decrypted value the child may get: at least the store's minimum length (so the redactor is not steered to blank short words), at most the value
+    /// limit, and no NUL or other control character except a tab. A NUL ends or splits an environment entry (on Windows it can add a variable no name check sees).
+    /// </summary>
+    internal static bool UsablePlaintext(string plain)
+    {
+        return plain.Length >= SecretNames.MinValueLength && plain.Length <= EnvDeclarations.MaxValue && !plain.Any(letter => char.IsControl(letter) && letter != '\t');
     }
 
     /// <summary>

@@ -29,6 +29,12 @@ public static partial class LaunchProtocol
 public sealed record LaunchMapping(string Variable, string Secret);
 
 /// <summary>
+/// A Dotenvx <c>encrypted:</c> value of a .env file: the variable it is for, the file it was read from, the store secret that holds the private key,
+/// and the ciphertext as read (the sender read the file once). A ciphertext is not a secret: anyone who has the public key can make one. The key is never in a request.
+/// </summary>
+public sealed record LaunchEncrypted(string Variable, string File, string KeySecret, string Ciphertext);
+
+/// <summary>
 /// Everything that defines a run, as the CLI sends it and a person approves it. It names secrets and never carries one: the
 /// values stay with whoever launches the program. <see cref="Arguments" /> are the arguments as typed; <see cref="EnvVariables" />
 /// are the ordinary (non-secret) variables from the .env files and <see cref="EnvNames" /> the ordinary names taken from the
@@ -38,7 +44,7 @@ public sealed record LaunchMapping(string Variable, string Secret);
 /// <para>
 /// The canonical text is exactly <c>{"protocolVersion":N,"requestId":S,"created":S,"expires":S,"clientNonce":S,"secretNames":[S,...],
 /// "mappings":[{"variable":S,"secret":S},...],"reason":S,"program":S,"arguments":[S,...],"workingDirectory":S,"envFiles":[S,...],
-/// "envNames":[S,...],"envVariables":{NAME:S,...},"inheritedEnvironment":{NAME:S,...}}</c>: this member order, no white space, both maps sorted by name
+/// "envNames":[S,...],"envVariables":{NAME:S,...},"inheritedEnvironment":{NAME:S,...},"encrypted":[{"variable":S,"file":S,"keySecret":S,"ciphertext":S},...]}</c>: this member order, no white space, both maps sorted by name
 /// (ordinal), lists in the order given, times in UTC in the round-trip ("O") format, numbers as plain integers, and strings as
 /// <see cref="ToolSettings.QuoteJson" /> writes them (the escaping <see cref="Manifest.Canonical" /> uses, plus control
 /// characters). The digest is <see cref="Digest" />: SHA-256 of the UTF-8 bytes of that text, in upper-case hex.
@@ -59,7 +65,8 @@ public sealed record LaunchRequest(
     IReadOnlyList<string> EnvFiles,
     IReadOnlyList<string> EnvNames,
     IReadOnlyDictionary<string, string> EnvVariables,
-    IReadOnlyDictionary<string, string> InheritedEnvironment)
+    IReadOnlyDictionary<string, string> InheritedEnvironment,
+    IReadOnlyList<LaunchEncrypted> Encrypted)
 {
     /// <summary>The canonical JSON text of the request. Equal requests give equal text, whatever the order they were read in.</summary>
     public string Canonical()
@@ -104,8 +111,23 @@ public sealed record LaunchRequest(
         CanonicalJson.Map(text, EnvVariables);
         text.Append(",\"inheritedEnvironment\":");
         CanonicalJson.Map(text, InheritedEnvironment);
+        text.Append(",\"encrypted\":[");
+        first = true;
+        foreach (LaunchEncrypted item in Encrypted)
+        {
+            text.Append(first ? "" : ",").Append("{\"variable\":");
+            first = false;
+            ToolSettings.QuoteJson(text, item.Variable);
+            text.Append(",\"file\":");
+            ToolSettings.QuoteJson(text, item.File);
+            text.Append(",\"keySecret\":");
+            ToolSettings.QuoteJson(text, item.KeySecret);
+            text.Append(",\"ciphertext\":");
+            ToolSettings.QuoteJson(text, item.Ciphertext);
+            text.Append('}');
+        }
 
-        return text.Append('}').ToString();
+        return text.Append("]}").ToString();
     }
 
     /// <summary>The request digest: SHA-256 of the UTF-8 bytes of <see cref="Canonical" />, upper-case hex. It changes when any field changes.</summary>
@@ -163,9 +185,22 @@ public sealed record LaunchRequest(
             return "invalid secret name: " + ApprovalSummary.Clean(bad);
         }
 
-        if (Mappings.Count == 0)
+        if (Mappings.Count == 0 && Encrypted.Count == 0)
         {
             return "the request has no secret-to-variable pairs";
+        }
+
+        if (Encrypted.Count > EnvDeclarations.MaxOrdinary)
+        {
+            return "the request has more than " + EnvDeclarations.MaxOrdinary.ToString(CultureInfo.InvariantCulture) + " encrypted values";
+        }
+
+        foreach (LaunchEncrypted item in Encrypted)
+        {
+            if (!SecretNames.Contains(item.KeySecret, StringComparer.Ordinal))
+            {
+                return "the encrypted value for variable " + ApprovalSummary.Clean(item.Variable) + " names a key secret that the request does not list";
+            }
         }
 
         foreach (LaunchMapping mapping in Mappings)
@@ -208,7 +243,7 @@ public sealed record LaunchRequest(
 
         using (doc)
         {
-            ContractReader reader = new(doc!.RootElement, "protocolVersion", "requestId", "created", "expires", "clientNonce", "secretNames", "mappings", "reason", "program", "arguments", "workingDirectory", "envFiles", "envNames", "envVariables", "inheritedEnvironment");
+            ContractReader reader = new(doc!.RootElement, "protocolVersion", "requestId", "created", "expires", "clientNonce", "secretNames", "mappings", "reason", "program", "arguments", "workingDirectory", "envFiles", "envNames", "envVariables", "inheritedEnvironment", "encrypted");
             if (reader.Problem is not null)
             {
                 error = reader.Problem;
@@ -217,10 +252,11 @@ public sealed record LaunchRequest(
             }
 
             List<LaunchMapping> mappings = [];
+            List<LaunchEncrypted> encrypted = [];
             if (!reader.Int("protocolVersion", out int version) || !reader.Text("requestId", out string? id) || !reader.Time("created", out DateTimeOffset created) || !reader.Time("expires", out DateTimeOffset expires)
                 || !reader.Text("clientNonce", out string? nonce) || !reader.Strings("secretNames", out List<string>? names) || !reader.Text("reason", out string? reason) || !reader.Text("program", out string? program)
                 || !reader.Strings("arguments", out List<string>? arguments) || !reader.Text("workingDirectory", out string? folder) || !reader.Strings("envFiles", out List<string>? files)
-                || !reader.Strings("envNames", out List<string>? envNames) || !reader.Map("envVariables", out Dictionary<string, string>? variables) || !reader.Map("inheritedEnvironment", out Dictionary<string, string>? inherited) || !ReadMappings(reader, mappings))
+                || !reader.Strings("envNames", out List<string>? envNames) || !reader.Map("envVariables", out Dictionary<string, string>? variables) || !reader.Map("inheritedEnvironment", out Dictionary<string, string>? inherited) || !ReadMappings(reader, mappings) || !ReadEncrypted(reader, encrypted))
             {
                 error = reader.Problem;
 
@@ -228,10 +264,33 @@ public sealed record LaunchRequest(
             }
 
             error = null;
-            request = new LaunchRequest(version, id!, created, expires, nonce!, names!, mappings, reason!, program!, arguments!, folder!, files!, envNames!, variables!, inherited!);
+            request = new LaunchRequest(version, id!, created, expires, nonce!, names!, mappings, reason!, program!, arguments!, folder!, files!, envNames!, variables!, inherited!, encrypted);
 
             return true;
         }
+    }
+
+    private static bool ReadEncrypted(ContractReader reader, List<LaunchEncrypted> encrypted)
+    {
+        if (!reader.Array("encrypted", out JsonElement array))
+        {
+            return false;
+        }
+
+        foreach (JsonElement item in array.EnumerateArray())
+        {
+            ContractReader one = new(item, "variable", "file", "keySecret", "ciphertext") { Where = "encrypted" };
+            if (one.Problem is not null || !one.Text("variable", out string? variable) || !one.Text("file", out string? file) || !one.Text("keySecret", out string? key) || !one.Text("ciphertext", out string? cipher))
+            {
+                reader.Fail(one.Problem!);
+
+                return false;
+            }
+
+            encrypted.Add(new LaunchEncrypted(variable!, file!, key!, cipher!));
+        }
+
+        return true;
     }
 
     private static bool ReadMappings(ContractReader reader, List<LaunchMapping> mappings)
@@ -383,7 +442,8 @@ public static class LaunchRequestBinding
             approval.EnvFiles ?? [],
             approval.EnvNames ?? [],
             approval.EnvValues ?? new Dictionary<string, string>(),
-            inheritedEnvironment ?? approval.InheritedEnvironment ?? new Dictionary<string, string>());
+            inheritedEnvironment ?? approval.InheritedEnvironment ?? new Dictionary<string, string>(),
+            [.. (approval.Decrypts ?? []).Select(item => new LaunchEncrypted(item.Variable, item.File, item.KeySecret, ""))]);
 
     /// <summary>Null when the request is the approved one, else which part differs (names the part, never a value).</summary>
     public static string? Mismatch(LaunchRequest request, ApprovalRequest approval)
@@ -432,6 +492,12 @@ public static class LaunchRequestBinding
         if (!request.EnvNames.SequenceEqual(expected.EnvNames, StringComparer.Ordinal))
         {
             return "env names differ from the approval";
+        }
+
+        // The approval holds the hash of each ciphertext, not the ciphertext: the request's ciphertexts must hash to what was approved.
+        if (request.Encrypted.Count != expected.Encrypted.Count || !request.Encrypted.Select(item => (item.Variable, item.File, item.KeySecret, DecryptItem.HashOf(item.Ciphertext))).SequenceEqual((approval.Decrypts ?? []).Select(item => (item.Variable, item.File, item.KeySecret, item.CipherSha256))))
+        {
+            return "encrypted values differ from the approval";
         }
 
         if (request.EnvVariables.Count != expected.EnvVariables.Count || request.EnvVariables.Any(item => !expected.EnvVariables.TryGetValue(item.Key, out string? value) || value != item.Value))

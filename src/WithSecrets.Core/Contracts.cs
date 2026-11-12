@@ -15,16 +15,16 @@ public static class SecretNames
     public const int MaxSegments = 4;
 
     // \z, not $: "$" also matches before a final line break.
-    private static readonly Regex Pattern = new("^[A-Z][A-Z0-9_]*\\z", RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    private static readonly Regex Pattern = new("^[A-Za-z][A-Za-z0-9_]*\\z", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private static readonly Regex Folder = new("^[A-Za-z0-9_.-]{1,64}\\z", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     /// <summary>
     /// The one rule for a secret name, used by --set, --remove, --list, --audit, --needs, .env references and the store.
     /// <c>[folder/]*NAME</c>: 1 to <see cref="MaxSegments" /> segments separated by a single '/', at most
-    /// <see cref="MaxNameLength" /> characters in all. The last segment is UPPER_SNAKE_CASE and does not start with DOTENV_ (those
-    /// belong to dotenvx: public and private keys). Each folder segment is 1 to 64 of letters, digits, '_', '.', '-', and is not
-    /// '.' or '..'. The whole text is the store name; it is data, never a file path. A name is compared exactly (case counts).
+    /// <see cref="MaxNameLength" /> characters in all. The last segment is letters, digits and '_' starting with a letter (any case), and does not start with DOTENV_ (those
+    /// belong to dotenvx: public and private keys) except DOTENV_PRIVATE_KEY, the name a Dotenvx private key is stored under. Each folder segment is 1 to 64 of letters, digits, '_', '.', '-', and is not
+    /// '.' or '..'. The whole text is the store name; it is data, never a file path. A name is compared exactly (case counts); see <see cref="CaseTwins" />.
     /// </summary>
     public static bool IsValid(string name)
     {
@@ -40,13 +40,41 @@ public static class SecretNames
         }
 
         string last = parts[^1];
-        if (!Pattern.IsMatch(last) || last.StartsWith("DOTENV_", StringComparison.Ordinal))
+        if (!Pattern.IsMatch(last) || last.StartsWith("DOTENV_", StringComparison.OrdinalIgnoreCase) && !last.StartsWith(PrivateKeyPrefix, StringComparison.Ordinal))
         {
             return false;
         }
 
         return parts.Take(parts.Length - 1).All(part => Folder.IsMatch(part) && part is not "." and not "..");
     }
+
+    /// <summary>Secrets whose last segment starts with this hold a Dotenvx private key: used only to decrypt .env values, never given to a program.</summary>
+    public const string PrivateKeyPrefix = "DOTENV_PRIVATE_KEY";
+
+    /// <summary>True when the last segment of the name starts with <see cref="PrivateKeyPrefix" />.</summary>
+    public static bool IsPrivateKeyName(string name) => name[(name.LastIndexOf('/') + 1)..].StartsWith(PrivateKeyPrefix, StringComparison.Ordinal);
+
+    /// <summary>
+    /// The names in <paramref name="existing" /> that equal <paramref name="name" /> when case is ignored (whole path, ordinal) but are
+    /// not identical to it. Names are case-sensitive in the store, so these are different secrets that are easy to confuse.
+    /// </summary>
+    public static IReadOnlyList<string> CaseTwins(string name, IEnumerable<string> existing)
+    {
+        return [.. existing.Where(other => string.Equals(other, name, StringComparison.OrdinalIgnoreCase) && !string.Equals(other, name, StringComparison.Ordinal)).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)];
+    }
+
+    /// <summary>
+    /// The names in <paramref name="existing" /> that are not identical to <paramref name="name" /> and do not equal it when case is ignored, but read alike:
+    /// they are equal once I, l and 1 are one character and O and 0 are one character (and case is ignored). APl_KEY and API_KEY are such a pair.
+    /// </summary>
+    public static IReadOnlyList<string> LookAlikes(string name, IEnumerable<string> existing)
+    {
+        string folded = Fold(name);
+
+        return [.. existing.Where(other => !string.Equals(other, name, StringComparison.OrdinalIgnoreCase) && Fold(other) == folded).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)];
+    }
+
+    private static string Fold(string name) => new([.. name.Select(letter => char.ToUpperInvariant(letter) is 'I' or 'L' or '1' ? 'I' : char.ToUpperInvariant(letter) is 'O' or '0' ? 'O' : char.ToUpperInvariant(letter))]);
 
     /// <summary>True when the name can also be an environment variable name: valid and without a folder.</summary>
     public static bool IsEnvName(string name) => name.IndexOf('/', StringComparison.Ordinal) < 0 && IsValid(name);
@@ -82,7 +110,8 @@ public sealed record ApprovalRequest(
     IReadOnlyDictionary<string, string>? EnvValues = null,
     IReadOnlyDictionary<string, string>? InheritedEnvironment = null,
     string? Heading = null,
-    IReadOnlyList<string>? ExtraLines = null);
+    IReadOnlyList<string>? ExtraLines = null,
+    IReadOnlyList<DecryptItem>? Decrypts = null);
 
 /// <summary>
 /// What a person signed on an approval page: the page nonce, the exact text that was bound (see <see cref="RequestBinding" />)

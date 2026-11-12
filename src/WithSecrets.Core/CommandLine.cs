@@ -77,7 +77,7 @@ public abstract record CliCommand
 public static class CliArgs
 {
     /// <summary>What a refused secret name is told.</summary>
-    public const string SecretNameRule = "A secret name is NAME or folder/NAME (up to 3 folders, 200 characters in all). NAME is UPPER_SNAKE_CASE (letters, digits, underscores) and does not start with DOTENV_; a folder uses letters, digits, _ . - (1 to 64) and is not . or ..";
+    public const string SecretNameRule = "A secret name is NAME or folder/NAME (up to 3 folders, 200 characters in all). NAME is letters, digits and underscores starting with a letter, in any case (names are case-sensitive), and does not start with DOTENV_ (except DOTENV_PRIVATE_KEY...); a folder uses letters, digits, _ . - (1 to 64) and is not . or ..";
 
     private const string Description = """
         Run a program with stored secrets, without showing the values to an agent.

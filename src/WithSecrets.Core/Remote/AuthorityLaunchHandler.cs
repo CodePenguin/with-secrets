@@ -279,6 +279,7 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
 
         return new ApprovalRequest(request.Program, context.ResolvedProgram, context.Arguments, request.WorkingDirectory, request.Reason, request.SecretNames, null, request.Arguments, context.Links, context.FingerprintKey, sources, _secrets.NeedsUnlock, context.Script, context.ProgramFile,
             [.. request.Mappings.Select(mapping => new SecretMapping(mapping.Variable, mapping.Secret))], request.EnvFiles, request.EnvNames, request.EnvVariables, request.InheritedEnvironment,
+            Decrypts: [.. request.Encrypted.Select(item => new DecryptItem(item.Variable, item.File, item.KeySecret, DecryptItem.HashOf(item.Ciphertext)))],
             ExtraLines: [$"This request comes from another machine: {ApprovalSummary.Clean(name)} (host name {ApprovalSummary.Clean(message.Decide.HostName)}, key fingerprint {KeyIdentity.Display(machine.Fingerprint)}). The program runs there; the secrets are decrypted here and sent to it over the encrypted machine connection."]);
     }
 
