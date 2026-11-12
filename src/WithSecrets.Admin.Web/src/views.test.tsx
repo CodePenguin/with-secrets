@@ -283,6 +283,25 @@ describe('audit search', () => {
   })
 })
 
+describe('settings and passkey context', () => {
+  it('keeps passkey administration context on the settings task that uses it', async () => {
+    signedIn()
+    renderApp('/settings')
+
+    expect(await screen.findByRole('heading', { level: 1, name: 'Settings' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Passkeys' })).toHaveAttribute('href', '/passkeys')
+    expect(screen.queryByText(/Every change here needs its own fresh passkey tap/)).toBeNull()
+  })
+
+  it('explains credential role separately from credential kind on the passkeys page', async () => {
+    signedIn()
+    renderApp('/passkeys')
+
+    expect(await screen.findByText(/Admin passkeys can administer this authority/)).toBeInTheDocument()
+    expect(screen.getByText(/The kind describes the credential; the badge shows what it is allowed to do/)).toBeInTheDocument()
+  })
+})
+
 describe('grant and audit navigation', () => {
   it('links a grant to its host events and machine authority changes', async () => {
     signedIn({ 'GET /api/v1/grants': { body: { items: [grant()] } } })
