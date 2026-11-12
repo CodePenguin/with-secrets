@@ -79,7 +79,7 @@ export function AuditPage({ view }: { view: View }) {
           ? 'What hosts reported: authorization, launch and execution outcomes, and administrative changes. Credential-shaped values are masked before storage when recognized; bare secret arguments may not be recognized. Avoid putting secrets in command-line arguments. Metadata contains descriptive names and fingerprints, not secret values.'
           : view === 'changes'
             ? 'What changed at the authority: administrator operations and machine and grant changes.'
-            : 'Open holes in a machine\'s audit numbering (events that were expected and have not arrived).'}
+            : 'Sequence diagnostics for a machine, including missing or reused numbers and a new outbox epoch. An anomaly is a reason to investigate, not proof of tampering.'}
       </p>
       <Card>
         <form key={params.toString()} onSubmit={submit} className={styles.form} role="search" aria-label={'Search ' + title.toLowerCase()}>
