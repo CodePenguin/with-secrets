@@ -121,6 +121,18 @@ describe('the shell', () => {
   })
 })
 
+describe('machine identity details', () => {
+  it('keeps the compact fingerprint visible and lets the full fingerprint be inspected', async () => {
+    const user = userEvent.setup()
+    signedIn()
+    renderApp('/machines')
+    await screen.findByRole('heading', { name: 'build-host' })
+
+    await user.click(screen.getByText('Show full fingerprint'))
+    expect(screen.getByText(machine().fingerprint)).toBeInTheDocument()
+  })
+})
+
 describe('the overview', () => {
   it('keeps active grants as a neutral summary rather than an attention condition', async () => {
     signedIn()
