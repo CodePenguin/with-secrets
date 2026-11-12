@@ -105,7 +105,7 @@ internal static class ScenariosPairing
         using HostService hostService = HostService.Start(new HostServiceOptions { Lock = AuthorityLock.UnlockedForTests(), State = hostState, Store = new SecretStore(hostState), Deployment = hostDeployment, Port = 0, TimeLimit = TimeSpan.FromSeconds(60) });
         DateTimeOffset now = DateTimeOffset.UtcNow;
         Dictionary<string, string> environment = Environment.GetEnvironmentVariables().Cast<System.Collections.DictionaryEntry>().ToDictionary(entry => (string)entry.Key, entry => (string)(entry.Value ?? ""), StringComparer.OrdinalIgnoreCase);
-        LaunchRequest request = new(LaunchProtocol.Version, "e2e-" + Guid.NewGuid().ToString("N")[..8], now, now.AddMinutes(5), "bm9uY2UtMDAwMDAwMDE" + Guid.NewGuid().ToString("N")[..6], ["E2E_SECRET"], [new LaunchMapping("E2E_SECRET", "E2E_SECRET")], "e2e paired host", script, [], rig.Work, [], [], new Dictionary<string, string>(), environment);
+        LaunchRequest request = new(LaunchProtocol.Version, "e2e-" + Guid.NewGuid().ToString("N")[..8], now, now.AddMinutes(5), "bm9uY2UtMDAwMDAwMDE" + Guid.NewGuid().ToString("N")[..6], ["E2E_SECRET"], [new LaunchMapping("E2E_SECRET", "E2E_SECRET")], "e2e paired host", script, [], rig.Work, [], [], new Dictionary<string, string>(), environment, []);
         using HttpClient http = new() { Timeout = TimeSpan.FromSeconds(90) };
         using HttpRequestMessage message = new(HttpMethod.Post, $"http://127.0.0.1:{hostService.Port}/v1/launch") { Content = new StringContent(request.Canonical(), new UTF8Encoding(false), new MediaTypeHeaderValue("application/json")) };
         message.Headers.Add(HostService.DigestHeader, request.Digest());
