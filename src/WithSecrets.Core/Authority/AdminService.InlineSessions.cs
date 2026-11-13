@@ -1,0 +1,96 @@
+using System.Globalization;
+
+namespace WithSecrets;
+
+/// <summary>A service-owned sign-in challenge; the browser receives only its passkey options.</summary>
+internal sealed record InlineLoginView(ProofStart Proof);
+
+public sealed partial class AdminService
+{
+    private sealed record InlineLogin(string Browser, string Code, InlineAdminProof Proof, DateTimeOffset Expires);
+
+    private readonly Lock _inlineLoginGate = new();
+    private readonly Dictionary<string, InlineLogin> _inlineLogins = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _checkingInlineLogins = new(StringComparer.Ordinal);
+
+    private void ClearInlineLogins()
+    {
+        lock (_inlineLoginGate)
+        {
+            _inlineLogins.Clear();
+            _checkingInlineLogins.Clear();
+        }
+    }
+
+    internal Task<(InlineLoginView? View, AdminStart Start, string? Ticket)> BeginInlineLoginAsync(string browserId, CancellationToken cancel)
+    {
+        string caller = AdminSessions.BrowserCaller(browserId);
+        if (!TakeStart(caller)) return Task.FromResult<(InlineLoginView?, AdminStart, string?)>((null, new AdminStart(null, "too many requests; wait a minute", 429), null));
+        if (_p.Lock.IsLocked) return Task.FromResult<(InlineLoginView?, AdminStart, string?)>((null, new AdminStart(null, "the authority is locked: unlock it first", 423), null));
+
+        if (Sessions.BeginLogin(browserId) is not { } begun) return Task.FromResult<(InlineLoginView?, AdminStart, string?)>((null, new AdminStart(null, "too many sign-ins are waiting; wait for them to end", 429), null));
+        (string ticket, string code) = begun;
+        AfterPlanForTests?.Invoke();
+        (int idle, int absolute) = _p.Store.SessionTimeouts();
+        string sentence = "start an administrator session on the admin web app. Only tap if you just chose to sign in there yourself. The session lets this browser READ (status, machines, grants, audit, settings) for up to "
+            + absolute.ToString(CultureInfo.InvariantCulture) + " minutes, ending after " + idle.ToString(CultureInfo.InvariantCulture) + " minutes without use; it changes nothing and every change still needs its own passkey tap";
+
+        try
+        {
+            IAdminAsker asker = _p.Askers(_ => { });
+            if (asker.InlineTarget() is not { } target) throw new ProofUnavailableException("no enrolled admin passkey can prove at this address");
+            InlineAdminProof prepared = _p.Authorizer.PrepareInline(sentence, OpLogin, [("login", code)], target, $"http://localhost:{_p.Port.ToString(CultureInfo.InvariantCulture)}");
+            lock (_inlineLoginGate)
+            {
+                foreach (string previous in _inlineLogins.Where(item => item.Value.Browser == browserId).Select(item => item.Key).ToArray()) _inlineLogins.Remove(previous);
+                _inlineLogins[ticket] = new InlineLogin(browserId, code, prepared, _clock.GetUtcNow() + AdminSessions.LoginLifetime);
+            }
+
+            return Task.FromResult<(InlineLoginView?, AdminStart, string?)>((new InlineLoginView(prepared.Start), new AdminStart(null, null), ticket));
+        }
+        catch (ProofUnavailableException error)
+        {
+            Sessions.Forget(ticket, browserId);
+            _p.Authorizer.RecordRefusal(OpLogin, error.Message, code);
+            return Task.FromResult<(InlineLoginView?, AdminStart, string?)>((null, new AdminStart(null, error.Message, 409), null));
+        }
+    }
+
+    internal bool? SubmitInlineLoginProof(string browserId, string? ticket, string proof)
+    {
+        InlineLogin? login;
+        lock (_inlineLoginGate)
+        {
+            if (ticket is null || !_inlineLogins.TryGetValue(ticket, out login) || login.Browser != browserId) return null;
+            if (_checkingInlineLogins.Contains(ticket)) return false;
+            if (_clock.GetUtcNow() > login.Expires)
+            {
+                _inlineLogins.Remove(ticket);
+                Sessions.Forget(ticket, browserId);
+                return false;
+            }
+            _checkingInlineLogins.Add(ticket);
+        }
+
+        AdminAuthorization result = _p.Authorizer.AcceptInline(login.Proof, OpLogin, [("login", login.Code)], proof);
+        lock (_inlineLoginGate)
+        {
+            _checkingInlineLogins.Remove(ticket!);
+            if (!_inlineLogins.Remove(ticket!, out InlineLogin? current) || !ReferenceEquals(login, current)) return false;
+        }
+        Sessions.CompleteLogin(login.Code, result.Ok ? (result.Admin!.Signer.Length > 0 ? result.Admin.Signer : "(unnamed)") : null, result.Ok ? null : result.Detail);
+        return result.Ok;
+    }
+
+    internal bool CancelInlineLogin(string browserId, string? ticket)
+    {
+        if (ticket is null) return false;
+        lock (_inlineLoginGate)
+        {
+            if (!_inlineLogins.TryGetValue(ticket, out InlineLogin? login) || login.Browser != browserId || _checkingInlineLogins.Contains(ticket)) return false;
+            _inlineLogins.Remove(ticket);
+        }
+        Sessions.Forget(ticket, browserId);
+        return true;
+    }
+}

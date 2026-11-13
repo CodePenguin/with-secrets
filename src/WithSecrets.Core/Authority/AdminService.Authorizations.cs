@@ -18,7 +18,7 @@ public enum AuthorizationState
 
 /// <summary>What an authorization looks like to the caller that asked for it (nothing in it authorizes anything by itself: only the verified tap does, and only for the one mutation it names).</summary>
 public sealed record AuthorizationView(string Id, string Operation, AuthorizationState State, string? Detail, string? Link, string Sentence, IReadOnlyList<(string Name, string Value)> Parameters, DateTimeOffset Created, DateTimeOffset Expires,
-    AuthorizationResult? Result = null);
+    AuthorizationResult? Result = null, ProofStart? Proof = null);
 
 /// <summary>
 /// How the change a tap authorized came out: <c>applied</c>, <c>started</c> (the operation's own passkey pages continue at <see cref="Link" />) or <c>failed</c> with a code and one safe line. The bundle of a new
@@ -96,6 +96,10 @@ public sealed partial class AdminService
         public string? Link { get; set; }
 
         public AdminAuthorization? Result { get; set; }
+
+        public InlineAdminProof? InlineProof { get; set; }
+
+        public bool ProofChecking { get; set; }
     }
 
     private readonly Lock _authorizationGate = new();
@@ -179,7 +183,7 @@ public sealed partial class AdminService
     /// Makes an authorization for <paramref name="owner" /> (the caller's <see cref="AdminSession" />, or for the unlock the text of the browser's pre-session cookie) to run <paramref name="op" /> with
     /// <paramref name="args" />: the plan is made and refused here when it does not apply, then a one-use passkey page is made whose signed text names the operation and every parameter.
     /// </summary>
-    internal async Task<(AuthorizationView? View, AdminStart Start)> BeginAuthorizationAsync(object owner, string op, IReadOnlyDictionary<string, string> args, CancellationToken cancel)
+    internal async Task<(AuthorizationView? View, AdminStart Start)> BeginAuthorizationAsync(object owner, string op, IReadOnlyDictionary<string, string> args, CancellationToken cancel, bool inline = false)
     {
         bool isSession = owner is AdminSession;
         string caller = CallerOf(owner);
@@ -246,6 +250,52 @@ public sealed partial class AdminService
             }
 
             _authorizations[id] = record;
+        }
+
+        if (inline)
+        {
+            try
+            {
+                IAdminAsker asker = _p.Askers(_ => { });
+                if (asker.InlineTarget() is not { } target)
+                {
+                    throw new ProofUnavailableException("no enrolled admin passkey can prove at this address");
+                }
+
+                record.InlineProof = _p.Authorizer.PrepareInline(plan.Sentence, plan.Operation, plan.Parameters, target, $"http://localhost:{_p.Port.ToString(CultureInfo.InvariantCulture)}");
+                record.Link = null;
+                lock (_authorizationGate)
+                {
+                    if (record.State != AuthorizationState.Pending || !_authorizations.ContainsKey(id) || Volatile.Read(ref _epoch) != epoch)
+                    {
+                        Release(record);
+                        _authorizations.Remove(id);
+                        return (null, new AdminStart(null, "the authority was locked while this was being started", 423));
+                    }
+                }
+
+                return (View(record) with { Proof = record.InlineProof.Start }, new AdminStart(null, null));
+            }
+            catch (ProofUnavailableException error)
+            {
+                lock (_authorizationGate)
+                {
+                    Release(record);
+                    _authorizations.Remove(id);
+                }
+                _p.Authorizer.RecordRefusal(plan.Operation, error.Message, ArgumentsKey(args));
+                return (null, new AdminStart(null, error.Message, 409));
+            }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            {
+                lock (_authorizationGate)
+                {
+                    Release(record);
+                    _authorizations.Remove(id);
+                }
+                _p.Authorizer.RecordRefusal(plan.Operation, "the proof could not be prepared", ArgumentsKey(args));
+                return (null, new AdminStart(null, "the proof could not be prepared", 503));
+            }
         }
 
         bool Complete(AdminAuthorization result)
@@ -323,7 +373,39 @@ public sealed partial class AdminService
     private AuthorizationView View(AuthorizationRecord record, bool takeBundle = false) => new(record.Id, record.Operation, record.State, record.Detail, record.State == AuthorizationState.Pending ? record.Link : null,
         AdminAuthorizer.PageText(record.Plan.Sentence, record.Plan.Operation, record.Plan.Parameters), record.Plan.Parameters, record.Created,
         record.State == AuthorizationState.Verified && record.VerifiedAt is { } verified ? verified + AuthorizationLifetime : record.Created.AddMinutes(ApprovalSettings.MaxTimeoutMinutes + 5),
-        record.Outcome is { } outcome ? ResultOf(record, outcome, takeBundle) : null);
+        record.Outcome is { } outcome ? ResultOf(record, outcome, takeBundle) : null,
+        record.State == AuthorizationState.Pending ? record.InlineProof?.Start : null);
+
+    internal bool? SubmitInlineProof(object owner, string id, string proof)
+    {
+        AuthorizationRecord? record;
+        lock (_authorizationGate)
+        {
+            SweepAuthorizations();
+            if (!_authorizations.TryGetValue(id, out record) || !SameOwner(record.Owner, owner)) return null;
+            if (record.State != AuthorizationState.Pending || record.InlineProof is null || record.ProofChecking) return false;
+            record.ProofChecking = true;
+        }
+
+        AdminAuthorization judged = _p.Authorizer.AcceptInline(record.InlineProof, record.Plan.Operation, record.Plan.Parameters, proof);
+        lock (_authorizationGate)
+        {
+            record.ProofChecking = false;
+            if (record.State != AuthorizationState.Pending || !_authorizations.ContainsKey(id) || record.Epoch != Volatile.Read(ref _epoch)) return false;
+            record.Result = judged;
+            record.Detail = judged.Ok ? null : ApprovalSummary.Clean(judged.Detail);
+            record.State = judged.Ok ? AuthorizationState.Verified : AuthorizationState.Refused;
+            record.VerifiedAt = judged.Ok ? _clock.GetUtcNow() : null;
+            if (!judged.Ok) Release(record);
+        }
+
+        if (judged.Ok)
+        {
+            ApplyAtTap(record, CallerOf(owner));
+        }
+
+        return judged.Ok;
+    }
 
     private static AuthorizationResult ResultOf(AuthorizationRecord record, MutationResult outcome, bool takeBundle)
     {

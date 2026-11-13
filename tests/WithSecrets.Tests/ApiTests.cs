@@ -22,11 +22,13 @@ internal static class ApiTests
         try
         {
             await PublicAndSignIn(check, root);
+            await InlineSignIn(check, root);
             await SessionTimeouts(check, root);
             await LogoutLockRestart(check, root);
             await ForgeryAndOrigin(check, root);
             await SensitiveMatrix(check, root);
             await Binding(check, root);
+            await InlineAuthorizations(check, root);
             await ApiTapTimeTests.Run(check, root);
             await MachineFunctions(check, root);
             await SettingsAndPasskeys(check, root);
@@ -53,6 +55,78 @@ internal static class ApiTests
                 // A stray temp file is harmless.
             }
         }
+    }
+
+    private static async Task InlineAuthorizations(Action<bool, string> check, string root)
+    {
+        using AdminApp app = new(root);
+        AdminBrowser browser = await app.SignedIn();
+        string fingerprint = app.Fingerprint;
+
+        async Task<(string Id, string Bind, string RpId)> Prepare(string name)
+        {
+            (int status, string body) = await browser.PostAsync("/api/v1/authorizations/inline", AdminBrowser.AuthorizationBody("machine-rename", ("fingerprint", fingerprint[..20]), ("name", name)));
+            using JsonDocument response = JsonDocument.Parse(body);
+            JsonElement item = response.RootElement;
+            string id = item.GetProperty("id").GetString()!;
+            JsonElement payload = JsonDocument.Parse(item.GetProperty("proof").GetProperty("payload").GetString()!).RootElement;
+            check(status == 201 && item.GetProperty("state").GetString() == "pending" && item.GetProperty("link").ValueKind == JsonValueKind.Null,
+                "inline authorization: challenge is prepared without a passkey page or an applied change");
+            return (id, payload.GetProperty("bind").GetString()!, payload.GetProperty("rpId").GetString()!);
+        }
+
+        static byte[] Decode(string text) => Convert.FromBase64String(text.Replace('-', '+').Replace('_', '/') + new string('=', (4 - text.Length % 4) % 4));
+        async Task<(int Status, string Body)> Submit(string id, string assertion) => await browser.SendAsync(HttpMethod.Post, "/api/v1/authorizations/" + id + "/proof", JsonSerializer.Serialize(new { proof = assertion }));
+
+        (string id, string bind, string rpId) = await Prepare("inline-approved");
+        string signed = app.Laptop.Assert(Decode(bind), browser.Origin, rpId, TestState.NextCount());
+        (int accepted, string acceptedBody) = await Submit(id, signed);
+        (_, string stateBody, _) = await browser.GetAsync("/api/v1/authorizations/" + id);
+        string? refusal = JsonDocument.Parse(stateBody).RootElement.GetProperty("detail").GetString();
+        check(accepted == 200 && app.Store.Find(fingerprint)!.FriendlyName == "inline-approved", "inline authorization: full origin, RP id, challenge and user-verification check applies the retained exact plan (" + accepted + ", " + acceptedBody + ", " + refusal + ")");
+        (int replay, _) = await Submit(id, signed);
+        check(replay == 409 && app.Store.Find(fingerprint)!.FriendlyName == "inline-approved", "inline authorization: a verified assertion is single-use and replay changes nothing");
+
+        string beforeCancel = app.Store.Find(fingerprint)!.FriendlyName!;
+        (string cancelId, _, _) = await Prepare("must-not-apply");
+        (int cancelled, _) = await browser.SendAsync(HttpMethod.Delete, "/api/v1/authorizations/" + cancelId, null);
+        check(cancelled == 200 && app.Store.Find(fingerprint)!.FriendlyName == beforeCancel, "inline authorization: cancellation before the tap applies nothing");
+
+        (string badId, string badBind, string badRpId) = await Prepare("bad-assertion");
+        string bad = app.Phone.Assert(Decode(badBind), browser.Origin, badRpId, TestState.NextCount());
+        (int refused, _) = await Submit(badId, bad);
+        check(refused == 409 && app.Store.Find(fingerprint)!.FriendlyName == beforeCancel, "inline authorization: a non-admin assertion is refused without applying the plan");
+
+        (string alteredId, string alteredBind, string alteredRpId) = await Prepare("original-operation");
+        string altered = app.Laptop.Assert(Decode(alteredBind), "https://attacker.invalid", alteredRpId, TestState.NextCount());
+        (int wrongOrigin, _) = await Submit(alteredId, altered);
+        check(wrongOrigin == 409 && app.Store.Find(fingerprint)!.FriendlyName == beforeCancel, "inline authorization: wrong-origin assertions do not apply the prepared operation");
+    }
+
+    private static async Task InlineSignIn(Action<bool, string> check, string root)
+    {
+        using AdminApp app = new(root);
+        AdminBrowser browser = app.Browser();
+        await browser.LoadAsync();
+        (int started, string body) = await browser.PostAsync("/api/v1/session/inline", "{}");
+        using JsonDocument response = JsonDocument.Parse(body);
+        string payloadText = response.RootElement.GetProperty("proof").GetProperty("payload").GetString()!;
+        using JsonDocument payload = JsonDocument.Parse(payloadText);
+        string bind = payload.RootElement.GetProperty("bind").GetString()!;
+        string rpId = payload.RootElement.GetProperty("rpId").GetString()!;
+        bool noLink = !response.RootElement.TryGetProperty("link", out _);
+        byte[] challenge = Convert.FromBase64String(bind.Replace('-', '+').Replace('_', '/') + new string('=', (4 - bind.Length % 4) % 4));
+        string signed = app.Laptop.Assert(challenge, browser.Origin, rpId, TestState.NextCount());
+        (int verified, _) = await browser.PostAsync("/api/v1/session/inline/proof", JsonSerializer.Serialize(new { proof = signed }));
+        (int claimed, _) = await browser.ClaimAsync();
+        check(started == 201 && noLink && verified == 200 && claimed == 201 && await browser.StillSignedIn(), "inline sign-in: service challenge is tapped and claimed in the same SPA without a passkey page");
+
+        AdminBrowser cancelled = app.Browser();
+        await cancelled.LoadAsync();
+        (int pending, _) = await cancelled.PostAsync("/api/v1/session/inline", "{}");
+        (int cancelledStatus, _) = await cancelled.SendAsync(HttpMethod.Delete, "/api/v1/session/inline", null);
+        (int noLogin, string noLoginBody, _) = await cancelled.GetAsync("/api/v1/session");
+        check(pending == 201 && cancelledStatus == 200 && noLogin == 200 && !noLoginBody.Contains("\"waiting\"", StringComparison.Ordinal), "inline sign-in: cancellation discards the pending challenge and starts no session");
     }
 
     /// <summary>What an administrator change could touch.</summary>

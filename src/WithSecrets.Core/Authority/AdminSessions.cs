@@ -65,7 +65,7 @@ public sealed class AdminSessions(TimeProvider clock, Func<(TimeSpan Idle, TimeS
 
     public const int MaxLogins = 32;
 
-    private static readonly TimeSpan LoginLifetime = TimeSpan.FromMinutes(ApprovalSettings.MaxTimeoutMinutes + 5);
+    internal static readonly TimeSpan LoginLifetime = TimeSpan.FromMinutes(ApprovalSettings.MaxTimeoutMinutes + 5);
 
     private sealed class Login(string code, string browserKey, DateTimeOffset created)
     {

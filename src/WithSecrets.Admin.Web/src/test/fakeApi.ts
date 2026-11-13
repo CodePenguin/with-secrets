@@ -120,6 +120,7 @@ export const authorization = (extra: Partial<Authorization> = {}): Authorization
   expires: '2026-11-09T10:10:00Z',
   lifetimeSeconds: 120,
   result: null,
+  proof: null,
   ...extra,
 })
 

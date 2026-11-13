@@ -5,9 +5,7 @@ using Microsoft.Playwright;
 namespace WithSecrets.E2E;
 
 /// <summary>
-/// Task M2 (reshaped by M8): a machine is paired with the authority from start to end, all in the Machines view. The administrator creates the invitation in the admin web application (Add a machine, Continue to
-/// passkey and one passkey tap; the bundle shown once), a second host (its own identity and folder) pairs with it and appears in the same view as a card to check, the administrator approves it with a second
-/// tap, the host pins the authority key and runs a command through the authority (the approval page's own tap).
+/// A machine is paired with the authority from start to end. The administrator creates the invitation in the SPA, confirms its prepared challenge with one passkey tap, and sees the bundle once. A second host pairs with it and appears for review; the administrator approves it with a second in-page assertion.
 /// </summary>
 internal static class ScenariosPairing
 {
@@ -32,14 +30,14 @@ internal static class ScenariosPairing
         ILocator dialog = Spa.Dialog(c);
         await dialog.WaitForAsync();
         IPage invitationPage = await Spa.OpenPasskeyPage(c, s, dialog);
-        await dialog.GetByText("Waiting for your passkey tap").First.WaitForAsync();
+        await dialog.GetByText("Review before confirming").WaitForAsync();
         s.Check(store.Invitations().Count == 0, "nothing is created while the tap is outstanding");
         string page = await Spa.TapAfterBack(c, s, invitationPage, null);
-        s.Check(page.Contains("one-time pairing invitation", StringComparison.OrdinalIgnoreCase) && page.Contains("valid for 10 minutes", StringComparison.Ordinal) && page.Contains("Authority address: https://127.0.0.1:", StringComparison.Ordinal), "the passkey page names the invitation, authority address and ten minutes: " + page);
+        s.Check(page.Contains("Done", StringComparison.Ordinal) && page.Contains("one-time pairing invitation", StringComparison.OrdinalIgnoreCase), "the SPA displays the service-confirmed one-time invitation: " + page);
         ILocator box = dialog.Locator("textarea#pairing-bundle");
         await box.WaitForAsync(new() { Timeout = 20000 });
         string bundleText = await box.InputValueAsync();
-        s.Check(Spa.Clicks == 3, "creating an invitation took exactly 3 clicks before the bundle: Add a machine, Continue to passkey, Approve on the passkey page (" + Spa.Clicks + ")");
+        s.Check(Spa.Clicks == 3, "creating an invitation took three clicks: Add a machine, prepare, and confirm (" + Spa.Clicks + ")");
         PairingBundle? bundle = PairingBundle.TryParse(bundleText);
         s.Check(bundle is not null && store.Invitation(bundle.InvitationId) is { Status: "pending" }, "the bundle is shown once, after the tap, and the invitation is pending");
         await Spa.Axe(c, s, "the invitation dialog");
@@ -80,13 +78,13 @@ internal static class ScenariosPairing
         s.Check(await dialog.GetByLabel("Friendly name").InputValueAsync() == "paired-host", "the friendly name starts as the host name");
         await dialog.GetByLabel("Friendly name").FillAsync("paired box");
         IPage approvePage = await Spa.OpenPasskeyPage(c, s, dialog);
-        await dialog.GetByText("Waiting for your passkey tap").First.WaitForAsync();
+        await dialog.GetByText("Review before confirming").WaitForAsync();
         s.Check(store.Find(fp)!.Status == MachineStatus.Pending, "still Pending until the second tap");
         await Spa.TapAfterBack(c, s, approvePage, null);
         await dialog.GetByText("Done").First.WaitForAsync(new() { Timeout = 20000 });
         s.Check(store.Find(fp) is { Status: MachineStatus.Trusted, FriendlyName: "paired box" }, "the approval makes the host Trusted");
         (_, long signsAfterApprove) = await c.AuthOps();
-        s.Check(Spa.Clicks == 3, "approving the paired machine took exactly 3 clicks: Approve, Continue to passkey, Approve on the passkey page (" + Spa.Clicks + ")");
+        s.Check(Spa.Clicks == 3, "approving the paired machine took three clicks: Approve, prepare, and confirm (" + Spa.Clicks + ")");
         s.Check(signsAfterApprove == signsAfterSignIn + 2, "creating the invitation and approving the machine were two passkey taps, one each");
         await dialog.GetByRole(AriaRole.Button, new() { Name = "Close" }).ClickAsync();
 

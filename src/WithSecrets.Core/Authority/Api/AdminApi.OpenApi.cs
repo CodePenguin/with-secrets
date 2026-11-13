@@ -48,6 +48,7 @@ internal sealed partial class AdminApi
             ["Browser"] = S.Obj([("antiForgery", S.Str(description: "Keep this in the page (not in a cookie) and send it as the X-Admin-Token header with every request. It is given once, here, and never again."))]),
             ["Claim"] = S.Obj([("antiForgery", S.Str(description: "The session's own secret, given once, here. Send it as the X-Admin-Token header with every request: the session cookie alone is not enough.")), ("session", S.Ref("Session"))]),
             ["LoginStarted"] = S.Obj([("link", S.Str(description: "The one-use passkey page to open. The tap there starts the session."))]),
+            ["InlineLoginStarted"] = S.Obj([("proof", S.Ref("ProofStart"))]),
             ["CopyWarning"] = S.Obj(
             [
                 ("count", S.Int(description: "The most supersedes from another address seen within one watch window.")),
@@ -143,6 +144,15 @@ internal sealed partial class AdminApi
                 ("expires", S.Time()),
                 ("lifetimeSeconds", S.Int(description: "How long a verified authorization may wait for its mutation.")),
                 ("result", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("AuthorizationResult"), new JsonObject { ["type"] = "null" }) }),
+                ("proof", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("ProofStart"), new JsonObject { ["type"] = "null" }) }),
+            ]),
+            ["ProofStart"] = S.Obj([("mode", S.Str(values: ["webauthn"])), ("payload", S.Str(description: "Service-generated WebAuthn request data; the service retains the operation, nonce, origin and RP ID context."))]),
+            ["InlineAuthorization"] = S.Obj(
+            [
+                ("id", S.Str()), ("operation", S.Str(values: [.. Operations.Select(item => item.Operation)])), ("state", S.Str(values: ["pending"])),
+                ("detail", S.Str(nullable: true)), ("link", S.Str(nullable: true)), ("sentence", S.Str()), ("parameters", S.Arr(S.Ref("NameValue"))),
+                ("created", S.Time()), ("expires", S.Time()), ("lifetimeSeconds", S.Int()), ("result", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("AuthorizationResult"), new JsonObject { ["type"] = "null" }) }),
+                ("proof", S.Ref("ProofStart")),
             ]),
             ["AuthorizationResult"] = S.Obj(
             [
@@ -223,7 +233,7 @@ internal sealed partial class AdminApi
                 operation["requestBody"] = new JsonObject
                 {
                     ["required"] = true,
-                    ["content"] = new JsonObject { ["application/json"] = new JsonObject { ["schema"] = route.OperationId == "createAuthorization" ? S.Ref("AuthorizationRequest") : route.Request.DeepClone() } },
+                    ["content"] = new JsonObject { ["application/json"] = new JsonObject { ["schema"] = route.OperationId is "createAuthorization" or "createInlineAuthorization" ? S.Ref("AuthorizationRequest") : route.Request.DeepClone() } },
                 };
             }
 

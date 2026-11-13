@@ -205,6 +205,8 @@ internal sealed class Ctx : IAsyncDisposable
             }
 
             string buttons = string.Join(",", await Page.EvaluateAsync<string[]>("() => [...document.querySelectorAll('button')].map(b => b.id + (b.hidden ? '(h)' : '') + (b.disabled ? '(d)' : '') + '=' + b.textContent)"));
+            string alerts = string.Join("; ", await Page.Locator("[role=alert]").AllTextContentsAsync());
+            string credentialCalls = await Page.EvaluateAsync<string>("() => String(window.__credCalls || 0)");
 
             string dialog = "";
             try
@@ -217,7 +219,7 @@ internal sealed class Ctx : IAsyncDisposable
                 // No dialog.
             }
 
-            return "    page: " + await Page.TitleAsync() + " | " + Regex.Replace(Page.Url, "/[A-Za-z0-9_-]{20,}", "/<token>") + " | buttons " + buttons + " | status: " + status + dialog + " | console: " + string.Join(" // ", Console);
+            return "    page: " + await Page.TitleAsync() + " | " + Regex.Replace(Page.Url, "/[A-Za-z0-9_-]{20,}", "/<token>") + " | buttons " + buttons + " | credential calls: " + credentialCalls + " | alerts: " + alerts + " | status: " + status + dialog + " | console: " + string.Join(" // ", Console);
         }
         catch (Exception e)
         {

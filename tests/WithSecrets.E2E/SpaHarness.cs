@@ -19,7 +19,7 @@ internal sealed class SpaApp : IDisposable
     public void Dispose() => Service.Dispose();
 }
 
-/// <summary>Passkey pages replace the application page in this tab. These helpers navigate back and forward to exercise the browser history path.</summary>
+/// <summary>The SPA prepares each challenge, and the final confirmation gesture invokes the browser's virtual authenticator in the same page.</summary>
 internal static class Spa
 {
     private static string? _axe;
@@ -50,30 +50,31 @@ internal static class Spa
         await Heading(c, heading).WaitForAsync();
     }
 
-    /// <summary>Follows the sign-in link in this tab, taps there, then returns with browser Back.</summary>
-    public static async Task<string> Tap(Ctx c, S s, string linkName = "Open the passkey page", Func<IPage, string, Task>? beforeTap = null)
+    /// <summary>Completes the prepared in-page sign-in with a user gesture that directly invokes WebAuthn.</summary>
+    public static async Task Tap(Ctx c, S s, string linkName = "Sign in with passkey", Func<IPage, string, Task>? beforeTap = null)
     {
-        ILocator link = c.Page.GetByRole(AriaRole.Link, new() { Name = linkName });
-        await link.First.WaitForAsync(new() { Timeout = 20000 });
-        s.Check(await link.First.GetAttributeAsync("target") is null, "the passkey page link stays in this tab");
-        await link.First.ClickAsync();
-
-        return await TapCurrent(c, s, beforeTap, returnWithBack: true);
+        string before = c.Page.Url;
+        if (beforeTap is not null) await beforeTap(c.Page, "starts a read-only administrator session");
+        ILocator button = c.Page.GetByRole(AriaRole.Button, new() { Name = linkName, Exact = true });
+        await button.WaitForAsync(new() { Timeout = 20000 });
+        await button.ClickAsync(new() { Timeout = 20000 });
+        Clicks++;
+        await Heading(c, "Overview").WaitForAsync(new() { Timeout = 20000 });
+        s.Check(c.Page.Url == before, "sign-in keeps the SPA loaded in the same tab");
     }
 
-    /// <summary>The one step of an administrative change. It follows Continue into the passkey page, then Back to the waiting dialog.</summary>
+    /// <summary>Prepares the operation-bound challenge while the SPA stays loaded. The next gesture invokes WebAuthn.</summary>
     public static async Task<IPage> OpenPasskeyPage(Ctx c, S s, ILocator dialog)
     {
-        await dialog.GetByRole(AriaRole.Button, new() { Name = "Continue to passkey" }).ClickAsync();
+        string before = c.Page.Url;
+        await dialog.GetByRole(AriaRole.Button, new() { Name = "Prepare confirmation" }).ClickAsync();
         Clicks++;
-        await c.Page.WaitForFunctionAsync("() => !!document.querySelector('#request')?.textContent.trim()", null, new() { Timeout = 20000 });
-        await c.Page.GoBackAsync();
-        await dialog.GetByText("Waiting for your passkey tap").First.WaitForAsync(new() { Timeout = 20000 });
-
+        await dialog.GetByText("Review before confirming").WaitForAsync(new() { Timeout = 20000 });
+        s.Check(c.Page.Url == before, "challenge preparation makes no full-page navigation");
         return c.Page;
     }
 
-    /// <summary>Continue, browser Back, browser Forward, then tap and Back to the result. Returns what the passkey page said.</summary>
+    /// <summary>Prepares the challenge and taps it in the SPA. Returns the result dialog text.</summary>
     public static async Task<string> Continue(Ctx c, S s, ILocator dialog, Func<IPage, string, Task>? beforeTap = null) => await TapAfterBack(c, s, await OpenPasskeyPage(c, s, dialog), beforeTap);
 
     /// <summary>Clicks a control of the application and counts the click.</summary>
@@ -83,44 +84,31 @@ internal static class Spa
         Clicks++;
     }
 
-    /// <summary>The clicks a person made since <see cref="Clicks" /> was last set to zero (the passkey page's own Approve counts).</summary>
+    /// <summary>The clicks a person made since <see cref="Clicks" /> was last set to zero.</summary>
     public static int Clicks { get; set; }
 
     public static async Task<string> TapAfterBack(Ctx c, S s, IPage page, Func<IPage, string, Task>? beforeTap)
     {
-        await page.GoForwardAsync();
-        await page.WaitForFunctionAsync("() => !!document.querySelector('#request')?.textContent.trim()", null, new() { Timeout = 20000 });
-        return await TapCurrent(c, s, beforeTap, returnWithBack: true);
-    }
-
-    private static async Task<string> TapCurrent(Ctx c, S s, Func<IPage, string, Task>? beforeTap, bool returnWithBack)
-    {
-        IPage page = c.Page;
-        await page.WaitForFunctionAsync("() => { var e = document.querySelector('#request'); return !!e && e.textContent.trim().length > 0; }", null, new() { Timeout = 20000 });
-        string request = ((await page.Locator("#request").TextContentAsync()) ?? "").Trim();
-        int before = await page.EvaluateAsync<int>("() => window.__credCalls || 0");
-        s.Check(before == 0, "tap rule: no passkey prompt when the passkey page loads");
-        if (beforeTap is not null)
-        {
-            await beforeTap(page, request);
-        }
-
-        await page.Locator("#approve").ClickAsync(new() { Timeout = 20000 });
+        ILocator dialog = Spa.Dialog(c);
+        string beforeUrl = c.Page.Url;
+        string beforeText = await dialog.TextContentAsync() ?? "";
+        int beforeCalls = await c.PasskeyCalls();
+        if (beforeTap is not null) await beforeTap(page, beforeText);
+        await dialog.GetByRole(AriaRole.Button, new() { Name = "Confirm this change" }).ClickAsync(new() { Timeout = 20000 });
         Clicks++;
-        await page.WaitForFunctionAsync("() => { var e = document.getElementById('status'); return !!e && /^(Approved\\b|Change confirmed\\.)/.test(e.textContent.trim()); }", null, new() { Timeout = 20000 });
-        if (returnWithBack) await page.GoBackAsync();
-
-        return request;
+        await page.WaitForFunctionAsync("() => !!document.querySelector('dialog[open]') && (document.querySelector('dialog[open]')?.textContent.includes('Done') || !!document.querySelector('dialog[open] [role=alert]'))", null, new() { Timeout = 20000 });
+        s.Check(await c.PasskeyCalls() == beforeCalls + 1, "the final confirmation gesture made exactly one WebAuthn call");
+        s.Check(c.Page.Url == beforeUrl, "passkey authentication kept the SPA loaded in the same tab");
+        return await dialog.TextContentAsync() ?? "";
     }
 
-    /// <summary>Signs in: Sign in, the tap on the passkey page, and the Overview appears by itself.</summary>
+    /// <summary>Signs in with a prepared challenge and an in-page WebAuthn gesture.</summary>
     public static async Task SignIn(Ctx c, SpaApp app, S s)
     {
         await Open(c, app);
         await Heading(c, "Sign in").WaitForAsync();
         await Button(c, "Sign in", exact: true).ClickAsync();
-        string request = await Tap(c, s);
-        s.Check(request.Contains("start an administrator session", StringComparison.Ordinal) && request.Contains("login:", StringComparison.Ordinal), "the sign-in passkey page says it starts an administrator session and carries this login's code");
+        await Tap(c, s);
         await Heading(c, "Overview").WaitForAsync(new() { Timeout = 20000 });
     }
 

@@ -471,6 +471,300 @@
         ]
       }
     },
+    "/api/v1/session/inline": {
+      "post": {
+        "operationId": "startInlineSession",
+        "summary": "Prepare a service-owned WebAuthn challenge for sign-in inside the SPA.",
+        "tags": [
+          "session"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-access": "browser",
+        "responses": {
+          "201": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InlineLoginStarted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "browserCookie": [],
+            "antiForgery": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "cancelInlineSession",
+        "summary": "Cancel a prepared sign-in challenge.",
+        "tags": [
+          "session"
+        ],
+        "x-access": "browser",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "browserCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/session/inline/proof": {
+      "post": {
+        "operationId": "submitInlineSessionProof",
+        "summary": "Verify the service-prepared sign-in assertion for this browser.",
+        "tags": [
+          "session"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "proof": {
+                    "type": "string",
+                    "maxLength": 12000
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "proof"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "browser",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "browserCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
     "/api/v1/session/claim": {
       "post": {
         "operationId": "claimSession",
@@ -1896,6 +2190,333 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Authorization"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          },
+          {
+            "browserCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/authorizations/inline": {
+      "post": {
+        "operationId": "createInlineAuthorization",
+        "summary": "Prepare an operation-bound WebAuthn challenge for the SPA. This makes no change; submit its assertion to /authorizations/{id}/proof.",
+        "tags": [
+          "authorizations"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthorizationRequest"
+              }
+            }
+          }
+        },
+        "x-access": "session",
+        "responses": {
+          "201": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InlineAuthorization"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No administrator session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          },
+          {
+            "browserCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/authorizations/{id}/proof": {
+      "post": {
+        "operationId": "submitInlineAuthorizationProof",
+        "summary": "Verify the assertion for this exact pending operation and apply it once when valid.",
+        "tags": [
+          "authorizations"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 4,
+              "maxLength": 80,
+              "description": "The grant\u0027s id, or an unambiguous start of it."
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "proof": {
+                    "type": "string",
+                    "maxLength": 12000
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "proof"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
                 }
               }
             }
@@ -5768,6 +6389,18 @@
           "link"
         ]
       },
+      "InlineLoginStarted": {
+        "type": "object",
+        "properties": {
+          "proof": {
+            "$ref": "#/components/schemas/ProofStart"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "proof"
+        ]
+      },
       "CopyWarning": {
         "type": "object",
         "properties": {
@@ -6433,6 +7066,16 @@
                 "type": "null"
               }
             ]
+          },
+          "proof": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ProofStart"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": false,
@@ -6447,7 +7090,129 @@
           "created",
           "expires",
           "lifetimeSeconds",
-          "result"
+          "result",
+          "proof"
+        ]
+      },
+      "ProofStart": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "webauthn"
+            ]
+          },
+          "payload": {
+            "type": "string",
+            "description": "Service-generated WebAuthn request data; the service retains the operation, nonce, origin and RP ID context."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "mode",
+          "payload"
+        ]
+      },
+      "InlineAuthorization": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "unlock",
+              "lock",
+              "policy-manual",
+              "policy-unattended",
+              "set-audit-retention",
+              "set-session-timeouts",
+              "authority-key-rotate",
+              "authority-key-recover",
+              "machine-approve",
+              "machine-disable",
+              "machine-enable",
+              "machine-untrust",
+              "machine-trust",
+              "machine-rename",
+              "machine-host-change",
+              "grant-extend",
+              "grant-renew",
+              "grant-revoke",
+              "passkey-enroll",
+              "passkey-unenroll",
+              "pairing-create",
+              "pairing-revoke"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending"
+            ]
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "link": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sentence": {
+            "type": "string"
+          },
+          "parameters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NameValue"
+            }
+          },
+          "created": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lifetimeSeconds": {
+            "type": "integer"
+          },
+          "result": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AuthorizationResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "proof": {
+            "$ref": "#/components/schemas/ProofStart"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "operation",
+          "state",
+          "detail",
+          "link",
+          "sentence",
+          "parameters",
+          "created",
+          "expires",
+          "lifetimeSeconds",
+          "result",
+          "proof"
         ]
       },
       "AuthorizationResult": {

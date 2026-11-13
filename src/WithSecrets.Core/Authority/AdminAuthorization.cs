@@ -8,6 +8,9 @@ public interface IAdminAsker
 {
     ApprovalDecision Ask(ApprovalPrompt prompt);
 
+    /// <summary>The target used by the same authority to prepare a passkey challenge inside its SPA, when supported.</summary>
+    EnrollmentTarget? InlineTarget() => null;
+
     /// <summary>As <see cref="Ask(ApprovalPrompt)" />; an asker that waits for a person closes its page and refuses when <paramref name="cancel" /> is set.</summary>
     ApprovalDecision Ask(ApprovalPrompt prompt, CancellationToken cancel) => Ask(prompt);
 }
@@ -15,6 +18,8 @@ public interface IAdminAsker
 /// <summary>An <see cref="IAdminAsker" /> over a page target: the first target where an enrolled admin passkey can prove (as the admin commands do).</summary>
 public sealed class TargetAdminAsker(EnrollmentTarget primary, EnrollmentTarget local) : IAdminAsker
 {
+    public EnrollmentTarget? InlineTarget() => EnrollmentTarget.FirstThatCanProve(primary.Admin(), local.Admin());
+
     public ApprovalDecision Ask(ApprovalPrompt prompt) => Ask(prompt, CancellationToken.None);
 
     public ApprovalDecision Ask(ApprovalPrompt prompt, CancellationToken cancel)
@@ -26,6 +31,9 @@ public sealed class TargetAdminAsker(EnrollmentTarget primary, EnrollmentTarget 
             : target.Approver.Ask(prompt, cancel);
     }
 }
+
+/// <summary>Service-owned input retained until an inline SPA passkey assertion is judged.</summary>
+internal sealed record InlineAdminProof(string Ticket, ApprovalEvidence Evidence, ProofContext Context, IProofMethod Method, ProofStart Start, DateTimeOffset Issued);
 
 /// <summary>
 /// Proof that an administrator's fresh passkey tap authorized exactly one operation with exactly these parameters. Only <see cref="AdminAuthorizer" /> makes one; a store
@@ -96,6 +104,62 @@ public sealed class AdminAuthorizer(AuthorityStore store, IApprovalVerifier veri
         }
 
         return text.ToString();
+    }
+
+    internal InlineAdminProof PrepareInline(string sentence, string operation, IReadOnlyList<(string Name, string Value)> parameters, EnrollmentTarget target, string origin)
+    {
+        string parameterText = Canonical(parameters);
+        if (!Record(operation, "requested", "", parameterText))
+        {
+            throw new ProofUnavailableException("the audit history cannot be written, so nothing was started");
+        }
+
+        string ticket = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(8));
+        DateTimeOffset issued = _clock.GetUtcNow();
+        List<string> lines = [.. (PageText(sentence, operation, parameters) + "\n" + TicketPrefix + ticket).Split('\n').Select(ApprovalSummary.Clean)];
+        if (target.Method.AdminLine() is { } admin) lines.Add(admin);
+        lines.Add(ApprovalSummary.IssuedLine(issued));
+        string text = string.Join('\n', lines);
+        string nonce = Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        byte[] bind = RequestBinding.Compute(nonce, text);
+        ProofContext context = new(ReuseBinding.Challenge(bind, 0), origin);
+        ProofStart start = target.Method.Start(context);
+        if (start.Mode != "webauthn") throw new ProofUnavailableException("this proof method cannot be used inside the administration page");
+
+        return new InlineAdminProof(ticket, new ApprovalEvidence(nonce, text, ""), context, target.Method, start, issued);
+    }
+
+    internal AdminAuthorization AcceptInline(InlineAdminProof prepared, string operation, IReadOnlyList<(string Name, string Value)> parameters, string proof)
+    {
+        string parameterText = Canonical(parameters);
+        ApprovalEvidence evidence = prepared.Evidence with { Proof = proof };
+        DateTimeOffset now = _clock.GetUtcNow();
+        if (GrantEvidence.Line(evidence.Text, TicketPrefix) != prepared.Ticket
+            || Check(evidence, now, operation, parameters) is { } problem)
+        {
+            return Refuse(operation, "the signed page is not the page this call prepared", parameterText);
+        }
+
+        ProofResult full = prepared.Method.Verify(prepared.Context, proof);
+        if (!full.Ok)
+        {
+            return Refuse(operation, full.Detail, parameterText);
+        }
+
+        ApprovalCheck check = verifier.Verify(evidence, 0);
+        if (!check.Ok || !check.Admin)
+        {
+            return Refuse(operation, "the approval was not signed by an enrolled admin key (" + check.Detail + ")", parameterText);
+        }
+
+        bool first;
+        try { first = store.TrySpendAdminNonce(evidence.Nonce, now.AddMinutes(ApprovalSettings.MaxTimeoutMinutes + 5)); }
+        catch (AuthorityDatabaseException) { return Refuse(operation, "the spent-proof record cannot be written, so nothing was applied", parameterText); }
+        if (!first) return Refuse(operation, "this approval was already used", parameterText);
+
+        VerifiedAdmin admin = new(operation, parameterText, check.SignerName);
+        Record(operation, "authorized", admin.Actor, parameterText);
+        return new AdminAuthorization(admin, "authorized", evidence);
     }
 
     public AdminAuthorization Authorize(IAdminAsker asker, string heading, string sentence, string operation, IReadOnlyList<(string Name, string Value)> parameters, CancellationToken cancel = default)

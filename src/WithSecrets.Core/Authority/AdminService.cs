@@ -95,6 +95,7 @@ public sealed partial class AdminService
         {
             Interlocked.Increment(ref _epoch);
             Sessions.DestroyAll();
+            ClearInlineLogins();
             ClearAuthorizations();
             CancelPending();
         });

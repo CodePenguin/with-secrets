@@ -13,7 +13,7 @@ import type { FormValues, OperationDef, Prepared } from './operations'
 import styles from './OperationDialog.module.css'
 
 /** What a waiting dialog knows of its authorization: after a reload only the id (the rest is read from the service). */
-type Waiting = { id: string; operation: string; summary: string; link: string | null; parameters: ReadonlyArray<{ name: string; value: string }> | null }
+type Waiting = { id: string; operation: string; summary: string; link: string | null; parameters: ReadonlyArray<{ name: string; value: string }> | null; proof: { mode: string; payload: string } | null }
 
 type State =
   | { phase: 'form'; errors: Record<string, string> }
@@ -27,6 +27,7 @@ type Action =
   | { type: 'invalid'; errors: Record<string, string> }
   | { type: 'asking'; prepared: Prepared }
   | { type: 'created'; waiting: Waiting }
+  | { type: 'challenge'; proof: { mode: string; payload: string }; parameters: ReadonlyArray<{ name: string; value: string }> }
   | { type: 'done'; summary: string; result: AuthorizationResult }
   | { type: 'failed'; error: unknown }
   | { type: 'again'; hasFields: boolean }
@@ -39,6 +40,8 @@ function reducer(state: State, action: Action): State {
       return { phase: 'asking', prepared: action.prepared }
     case 'created':
       return { phase: 'waiting', waiting: action.waiting, prepared: state.phase === 'asking' ? state.prepared : null }
+    case 'challenge':
+      return state.phase === 'waiting' && state.waiting.proof === null ? { ...state, waiting: { ...state.waiting, proof: action.proof, parameters: action.parameters } } : state
     case 'done':
       return { phase: 'done', summary: action.summary, result: action.result }
     case 'failed':
@@ -79,11 +82,7 @@ const nothing: AuthorizationResult = { outcome: 'applied', code: null, detail: n
 type Props = { def?: OperationDef; resume?: PendingAuthorization; onClose: () => void }
 
 /**
- * One administrative change from start to end, in one modal dialog and one step before the passkey page:
- * 1. the form (when the change takes input), or for a change without input the facts, and ONE button, "Continue to passkey": it asks the service for the authorization (it changes nothing by itself) and navigates
- *    this tab to the service's own one-use passkey page; the facts of the operation are shown once, as the service will have the passkey sign them;
- * 2. the person taps there, then uses browser Back to return. The SERVICE makes the change the tap authorized, when the tap is verified (single use, bound to the operation and its parameters): this page only asks what became of it. A reloaded tab finds the waiting authorization again (its id is kept in this tab's session storage) and shows its result.
- * The page sets no time limit of its own: it waits as long as the person needs. The service's own limits are shown as they come.
+ * One administrative change from start to finish in one modal dialog. First the SPA asks the service to prepare a one-use challenge bound to the reviewed operation. The final confirmation button directly invokes WebAuthn, then submits the assertion. The service verifies it and applies its retained operation; the SPA displays the service's result. Reloading can recover the pending authorization by id.
  */
 export function OperationDialog({ def, resume, onClose }: Props) {
   const queryClient = useQueryClient()
@@ -92,13 +91,14 @@ export function OperationDialog({ def, resume, onClose }: Props) {
   const formId = useId()
   const hasFields = (def?.fields?.length ?? 0) > 0
   const initial: State = resume
-    ? { phase: 'waiting', waiting: { id: resume.id, operation: resume.operation, summary: resume.summary, link: null, parameters: null }, prepared: null }
+    ? { phase: 'waiting', waiting: { id: resume.id, operation: resume.operation, summary: resume.summary, link: null, parameters: null, proof: null }, prepared: null }
     : hasFields
       ? { phase: 'form', errors: {} }
       : { phase: 'review' }
   const [state, dispatch] = useReducer(reducer, initial)
   const [draft, setDraft] = useState<FormValues>(def?.initial ?? {})
   const mounted = useRef(true)
+  const passkeyAbort = useRef<AbortController | null>(null)
 
   useEffect(() => {
     mounted.current = true
@@ -159,6 +159,9 @@ export function OperationDialog({ def, resume, onClose }: Props) {
           } else {
             settle({ type: 'done', summary: waitingSummary, result })
           }
+        } else if (current.state === 'pending' && current.proof) {
+          dispatch({ type: 'challenge', proof: current.proof, parameters: current.parameters })
+          timer = setTimeout(() => void look(), pollMs)
         } else if (current.state === 'pending' || current.state === 'verified' || current.state === 'consumed') {
           timer = setTimeout(() => void look(), pollMs)
         } else {
@@ -195,11 +198,11 @@ export function OperationDialog({ def, resume, onClose }: Props) {
     if (text) announce(text)
   }, [state.phase]) // eslint-disable-line react-hooks/exhaustive-deps -- announced once per phase
 
-  /** One step: ask the service for the authorization and navigate this tab to its passkey page. Nothing changes until the tap there. */
+  /** Prepare the service-owned, operation-bound challenge. No operation is applied yet. */
   async function continueToPasskey(prepared: Prepared) {
     dispatch({ type: 'asking', prepared })
     try {
-      const made = await api.post('/api/v1/authorizations', { body: { operation: prepared.operation, parameters: prepared.parameters } })
+      const made = await api.post('/api/v1/authorizations/inline', { body: { operation: prepared.operation, parameters: prepared.parameters } })
       if (!mounted.current) {
         // The dialog was closed while the service was answering: nothing is left waiting for it.
         cancelAuthorization(made.id)
@@ -212,13 +215,47 @@ export function OperationDialog({ def, resume, onClose }: Props) {
 
         return
       }
+      if (!made.proof || made.proof.mode !== 'webauthn') {
+        cancelAuthorization(made.id)
+        dispatch({ type: 'failed', error: new ApiError(0, 'proof-unavailable', 'Passkey unavailable', 'The service did not prepare a usable passkey challenge. Nothing was changed.') })
+        return
+      }
       setPendingAuthorization({ id: made.id, operation: made.operation, title, summary: prepared.summary })
-      const link = safeLink(made.link)
-      dispatch({ type: 'created', waiting: { id: made.id, operation: made.operation, summary: prepared.summary, link, parameters: made.parameters } })
-      if (link) window.location.assign(link)
+      dispatch({ type: 'created', waiting: { id: made.id, operation: made.operation, summary: prepared.summary, link: null, parameters: made.parameters, proof: made.proof } })
     } catch (error) {
       if (mounted.current) dispatch({ type: 'failed', error })
     }
+  }
+
+  /** The click itself synchronously calls WebAuthn before any network request or await. */
+  async function confirmInline(waiting: Waiting) {
+    if (!waiting.proof) return
+    const controller = new AbortController()
+    passkeyAbort.current = controller
+    try {
+      const payload = JSON.parse(waiting.proof.payload) as { bind: string; rpId: string; timeout: number }
+      const decode = (text: string) => Uint8Array.from(atob(text.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - text.length % 4) % 4)), (char) => char.charCodeAt(0))
+      const challenge = decode(payload.bind)
+      const credentialPromise = navigator.credentials.get({ publicKey: { challenge, rpId: payload.rpId, timeout: payload.timeout, userVerification: 'required' }, signal: controller.signal })
+      const credential = await credentialPromise
+      if (credential === null) throw new ApiError(0, 'passkey-cancelled', 'Passkey not completed', 'The passkey prompt was cancelled. Nothing was changed.')
+      const assertion = credential as PublicKeyCredential
+      const response = assertion.response as AuthenticatorAssertionResponse
+      const encode = (bytes: ArrayBuffer) => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+      const proof = JSON.stringify({ id: encode(assertion.rawId), authenticatorData: encode(response.authenticatorData), clientDataJSON: encode(response.clientDataJSON), signature: encode(response.signature) })
+      await api.post('/api/v1/authorizations/{id}/proof', { path: { id: waiting.id }, body: { proof } })
+    } catch (error) {
+      cancelAuthorization(waiting.id)
+      setPendingAuthorization(null)
+      dispatch({ type: 'failed', error: error instanceof DOMException && error.name === 'AbortError' ? new ApiError(0, 'passkey-cancelled', 'Passkey not completed', 'The passkey prompt was cancelled. Nothing was changed.') : error })
+    } finally {
+      if (passkeyAbort.current === controller) passkeyAbort.current = null
+    }
+  }
+
+  function cancelWaiting() {
+    if (passkeyAbort.current) passkeyAbort.current.abort()
+    else close()
   }
 
   function close() {
@@ -271,7 +308,7 @@ export function OperationDialog({ def, resume, onClose }: Props) {
             }
           </Field>
         ))}
-        <p className={styles.hint}>Continue opens the passkey page in this tab. Nothing changes until you tap your passkey there, and that page shows exactly what you are authorizing. Use Back to return here.</p>
+        <p className={styles.hint}>Prepare the passkey confirmation. You will review this operation again before the passkey prompt. Nothing changes until the service verifies your assertion.</p>
       </form>
     )
     footer = (
@@ -280,7 +317,7 @@ export function OperationDialog({ def, resume, onClose }: Props) {
           Cancel
         </Button>
         <Button key="continue" variant={confirmVariant} type="submit" form={formId}>
-          Continue to passkey
+          Prepare confirmation
         </Button>
       </>
     )
@@ -292,7 +329,7 @@ export function OperationDialog({ def, resume, onClose }: Props) {
         {def.about ? <Facts items={def.about} /> : null}
         {def.warning ? <Notice kind="warning">{def.warning}</Notice> : null}
         <Authorizing prepared={shown} />
-        <p className={styles.hint}>Continue opens the passkey page in this tab. Nothing changes until you tap your passkey there. Use Back to return here.</p>
+        <p className={styles.hint}>Prepare the passkey confirmation. Nothing changes until you confirm here and the service verifies your assertion.</p>
       </>
     )
     footer = (
@@ -301,7 +338,7 @@ export function OperationDialog({ def, resume, onClose }: Props) {
           Cancel
         </Button>
         <Button key="continue" variant={confirmVariant} disabled={state.phase === 'asking'} onClick={() => void continueToPasskey(shown)} autoFocus>
-          {state.phase === 'asking' ? 'Opening the passkey page...' : 'Continue to passkey'}
+          {state.phase === 'asking' ? 'Preparing confirmation...' : 'Prepare confirmation'}
         </Button>
       </>
     )
@@ -311,12 +348,8 @@ export function OperationDialog({ def, resume, onClose }: Props) {
       <>
         {def?.about ? <Facts items={def.about} /> : null}
         {state.prepared ? <Authorizing prepared={state.prepared} signed={state.waiting.parameters ?? undefined} /> : <p className={styles.summary}>{state.waiting.summary}</p>}
-        <Notice kind="info" title="Waiting for your passkey tap">
-          {resume ? (
-            <p>This page was reloaded while a passkey tap was waiting. It is asking the service what became of it. If you have not tapped yet, use browser Forward to return to the passkey page, or cancel this request and start again.</p>
-          ) : (
-            <p>Check that the passkey page names the operation above, then tap your passkey. Use Back to return here; the service makes the change when the tap is verified.</p>
-          )}
+        <Notice kind="info" title={state.waiting.proof ? 'Review before confirming' : 'Checking the authorization'}>
+          {state.waiting.proof ? <p>The service prepared this passkey challenge for the operation shown above. Confirm this change to open the browser passkey prompt. The service applies it only after verification.</p> : <p>This page was reloaded while the passkey request was in progress. The service is checking what became of it. Cancel and start again if it is still pending.</p>}
         </Notice>
         {link ? (
           <p>
@@ -324,17 +357,11 @@ export function OperationDialog({ def, resume, onClose }: Props) {
               Return to the passkey page
             </ButtonLink>
           </p>
-        ) : resume ? null : (
-          <Notice kind="warning" title="No usable passkey page link">
-            The service did not give a link to its own passkey page that this page will open. Cancel and try again.
-          </Notice>
-        )}
+        ) : null}
       </>
     )
     footer = (
-      <Button key="cancel" onClick={close}>
-        Cancel the request
-      </Button>
+      <><Button key="cancel" onClick={cancelWaiting}>Cancel the request</Button>{state.waiting.proof ? <Button key="confirm" variant={confirmVariant} onClick={() => void confirmInline(state.waiting)}>Confirm this change</Button> : null}</>
     )
   } else if (state.phase === 'done') {
     const next = safeLink(state.result.link)

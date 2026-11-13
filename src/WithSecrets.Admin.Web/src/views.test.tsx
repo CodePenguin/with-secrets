@@ -158,7 +158,7 @@ describe('the overview', () => {
 })
 
 describe('sign-in', () => {
-  it('starts a read-only session with one tap on the service page and then shows the views', async () => {
+  it('starts a read-only session with an in-page passkey tap and then shows the views', async () => {
     const user = userEvent.setup()
     let tapped = false
     let started = false
@@ -168,11 +168,12 @@ describe('sign-in', () => {
       'GET /api/v1/status': { body: status() },
       'GET /api/v1/session': () => ({ body: claimed ? session() : tapped ? { ...signedOut(), login: { state: 'ready', problem: null } } : started ? { ...signedOut(), login: { state: 'waiting', problem: null } } : signedOut() }),
       'POST /api/v1/browser': { status: 201, body: { antiForgery: 'browser-secret-1' } },
-      'POST /api/v1/session': () => {
+      'POST /api/v1/session/inline': () => {
         started = true
 
-        return { status: 202, body: { link: 'http://localhost:54321/login-page-token' } }
+        return { status: 201, body: { proof: { mode: 'webauthn', payload: JSON.stringify({ bind: 'AQ', rpId: 'localhost', timeout: 60000 }) } } }
       },
+      'POST /api/v1/session/inline/proof': () => { tapped = true; return { body: { ok: true } } },
       'POST /api/v1/session/claim': () => {
         claimed = true
 
@@ -181,12 +182,12 @@ describe('sign-in', () => {
       'GET /api/v1/machines': { body: { items: [machine({ status: 'trusted', actions: ['rename'] })] } },
       'GET /api/v1/grants': { body: { items: [] } },
     })
+    Object.defineProperty(navigator, 'credentials', { configurable: true, value: { get: vi.fn(async () => ({ rawId: new Uint8Array([1]).buffer, response: { authenticatorData: new Uint8Array([2]).buffer, clientDataJSON: new Uint8Array([3]).buffer, signature: new Uint8Array([4]).buffer } })) } })
     renderApp('/machines')
     await user.click(await screen.findByRole('button', { name: 'Sign in' }))
-    const open = await screen.findByRole('link', { name: /open the passkey page/i })
-    expect(open).toHaveAttribute('href', 'http://localhost:54321/login-page-token')
-    expect(fake.calls.find((call) => call.method === 'POST' && call.path === '/api/v1/session')?.headers['X-Admin-Token']).toBe('browser-secret-1')
-    tapped = true
+    await user.click(await screen.findByRole('button', { name: 'Sign in with passkey' }))
+    expect(vi.mocked(navigator.credentials.get)).toHaveBeenCalledTimes(1)
+    expect(fake.calls.find((call) => call.method === 'POST' && call.path === '/api/v1/session/inline')?.headers['X-Admin-Token']).toBe('browser-secret-1')
 
     expect(await screen.findByRole('heading', { level: 1, name: 'Machines' }, { timeout: 4000 })).toBeInTheDocument()
     expect(await screen.findByRole('heading', { name: 'build-host' })).toBeInTheDocument()
@@ -195,18 +196,18 @@ describe('sign-in', () => {
     expect(fake.calls.filter((call) => call.path === '/api/v1/machines').every((call) => call.headers['X-Admin-Token'] === 'session-secret-1')).toBe(true)
   })
 
-  it('does not accept a link that is not on this machine', async () => {
+  it('shows a service refusal when sign-in cannot be prepared', async () => {
     const user = userEvent.setup()
     installFakeApi({
       'GET /api/v1/status': { body: status() },
       'GET /api/v1/session': { body: signedOut() },
       'POST /api/v1/browser': { status: 201, body: { antiForgery: 'browser-secret-1' } },
-      'POST /api/v1/session': { status: 202, body: { link: 'https://evil.example/login' } },
+      'POST /api/v1/session/inline': problem(409, 'proof-unavailable', 'no admin passkey is available'),
     })
     renderApp('/')
     await user.click(await screen.findByRole('button', { name: /sign in/i }))
 
-    await waitFor(() => expect(screen.queryByRole('link', { name: /open the passkey page/i })).toBeNull())
+    expect(await screen.findByRole('alert')).toHaveTextContent('no admin passkey is available')
   })
 
   it('shows a sign-out that ends the session', async () => {
@@ -250,18 +251,21 @@ describe('the locked authority', () => {
     const fake = installFakeApi({
       'GET /api/v1/status': { body: status({ locked: true }) },
       'GET /api/v1/session': { body: signedOut() },
-      'POST /api/v1/authorizations': { status: 201, body: authorization({ operation: 'unlock', parameters: [], sentence: 'Unlock the authority.' }) },
+      'POST /api/v1/authorizations/inline': { status: 201, body: authorization({ operation: 'unlock', link: null, proof: { mode: 'webauthn', payload: JSON.stringify({ bind: 'AQ', rpId: 'localhost', timeout: 60000 }) }, parameters: [], sentence: 'Unlock the authority.' }) },
+      'POST /api/v1/authorizations/auth-id-0001/proof': { body: { ok: true } },
       'GET /api/v1/authorizations/auth-id-0001': { body: authorization({ operation: 'unlock', state: 'consumed', parameters: [], result: { outcome: 'applied', code: null, detail: null, link: null, invitation: null, invitationGone: false } }) },
     })
     renderApp('/')
     await user.click(await screen.findByRole('button', { name: 'Unlock the authority' }))
     const dialog = await screen.findByRole('dialog')
-    await user.click(within(dialog).getByRole('button', { name: 'Continue to passkey' }))
+    Object.defineProperty(navigator, 'credentials', { configurable: true, value: { get: vi.fn(async () => ({ rawId: new Uint8Array([1]).buffer, response: { authenticatorData: new Uint8Array([2]).buffer, clientDataJSON: new Uint8Array([3]).buffer, signature: new Uint8Array([4]).buffer } })) } })
+    await user.click(within(dialog).getByRole('button', { name: 'Prepare confirmation' }))
+    await user.click(await within(dialog).findByRole('button', { name: 'Confirm this change' }))
 
     // One step; the service makes the change at the tap, and this page only reads the result (no unlock call of its own).
     expect(await within(dialog).findByText('Done')).toBeInTheDocument()
     expect(fake.count('POST /api/v1/unlock')).toBe(0)
-    expect(fake.calls.find((call) => call.path === '/api/v1/authorizations')?.body).toEqual({ operation: 'unlock', parameters: {} })
+    expect(fake.calls.find((call) => call.path === '/api/v1/authorizations/inline')?.body).toEqual({ operation: 'unlock', parameters: {} })
     expect(openSpy).not.toHaveBeenCalled()
   })
 })

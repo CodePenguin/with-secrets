@@ -541,6 +541,32 @@ internal sealed partial class AdminApi
         return start.Link is not null ? new ApiResult(202, new { link = start.Link }) : new ApiResult(start.Status, FromStart(start));
     }
 
+    private async Task<ApiResult> StartInlineSessionAsync(ApiCall call)
+    {
+        (InlineLoginView? view, AdminStart start, string? ticket) = await admin.BeginInlineLoginAsync(call.Browser!, call.Context.RequestAborted);
+        if (ticket is not null) SetCookie(call.Context.Response, AdminSessions.LoginCookie, ticket);
+        return view is not null ? new ApiResult(201, new { proof = view.Proof }) : new ApiResult(start.Status, FromStart(start));
+    }
+
+    private Task<ApiResult> SubmitInlineSessionProofAsync(ApiCall call)
+    {
+        bool? accepted = admin.SubmitInlineLoginProof(call.Browser!, Cookie(call.Context.Request, AdminSessions.LoginCookie), call.Body!.Value.GetProperty("proof").GetString()!);
+        return Task.FromResult(accepted switch
+        {
+            null => new ApiResult(404, new ApiProblem(404, "no-sign-in", "this browser has no sign-in waiting; start one first")),
+            false => new ApiResult(409, new ApiProblem(409, "sign-in-failed", "the passkey assertion was refused, expired or already judged")),
+            _ => new ApiResult(200, new { ok = true }),
+        });
+    }
+
+    private Task<ApiResult> CancelInlineSession(ApiCall call)
+    {
+        string? ticket = Cookie(call.Context.Request, AdminSessions.LoginCookie);
+        _ = admin.CancelInlineLogin(call.Browser!, ticket);
+        DropCookie(call.Context.Response, AdminSessions.LoginCookie);
+        return Task.FromResult(new ApiResult(200, new { ok = true }));
+    }
+
     private Task<ApiResult> EndSessionAsync(ApiCall call)
     {
         admin.Sessions.Destroy(call.Token);
@@ -648,9 +674,13 @@ internal sealed partial class AdminApi
     }
 
     private AuthorizationDto Dto(AuthorizationView view) => new(view.Id, view.Operation, view.State.ToString().ToLowerInvariant(), view.Detail, view.Link, view.Sentence, [.. view.Parameters.Select(item => new NameValueDto(item.Name, item.Value))], view.Created, view.Expires,
-        (int)AdminService.AuthorizationLifetime.TotalSeconds, view.Result is { } result ? new AuthorizationResultDto(result.Outcome, result.Code, result.Detail, result.Link, result.Invitation, result.InvitationGone) : null);
+        (int)AdminService.AuthorizationLifetime.TotalSeconds, view.Result is { } result ? new AuthorizationResultDto(result.Outcome, result.Code, result.Detail, result.Link, result.Invitation, result.InvitationGone) : null, view.Proof);
 
-    private async Task<ApiResult> CreateAuthorizationAsync(ApiCall call)
+    private Task<ApiResult> CreateAuthorizationAsync(ApiCall call) => CreateAuthorizationAsync(call, false);
+
+    private Task<ApiResult> CreateInlineAuthorizationAsync(ApiCall call) => CreateAuthorizationAsync(call, true);
+
+    private async Task<ApiResult> CreateAuthorizationAsync(ApiCall call, bool inline)
     {
         JsonElement body = call.Body!.Value;
         string op = body.GetProperty("operation").GetString()!;
@@ -680,9 +710,24 @@ internal sealed partial class AdminApi
             return new ApiResult(401, new ApiProblem(401, "session-required", "this needs an administrator session"));
         }
 
-        (AuthorizationView? view, AdminStart start) = await admin.BeginAuthorizationAsync(owner, op, args, call.Context.RequestAborted);
+        (AuthorizationView? view, AdminStart start) = await admin.BeginAuthorizationAsync(owner, op, args, call.Context.RequestAborted, inline);
 
         return view is not null ? new ApiResult(201, Dto(view)) : new ApiResult(start.Status, FromStart(start));
+    }
+
+    private Task<ApiResult> SubmitInlineAuthorizationProofAsync(ApiCall call)
+    {
+        if (!call.Context.Request.Headers.ContainsKey("Origin")) return Task.FromResult(new ApiResult(403, new ApiProblem(403, "origin-required", "this request must come from the administration page: it carries no Origin")));
+        object? owner = OwnerOf(call);
+        if (owner is null) return Task.FromResult(new ApiResult(401, new ApiProblem(401, "session-required", "this needs an administrator session")));
+        string proof = call.Body!.Value.GetProperty("proof").GetString()!;
+        bool? accepted = admin.SubmitInlineProof(owner, call.Path["id"], proof);
+        return Task.FromResult(accepted switch
+        {
+            null => new ApiResult(404, new ApiProblem(404, "not-found", "no such authorization for this caller")),
+            false => new ApiResult(409, new ApiProblem(409, "proof-refused", "the passkey assertion was refused or this authorization was already judged")),
+            _ => new ApiResult(200, new { ok = true }),
+        });
     }
 
     private Task<ApiResult> GetAuthorizationAsync(ApiCall call)
@@ -772,7 +817,7 @@ internal sealed record ApiCall(HttpContext Context, Dictionary<string, string> P
 
 internal sealed record NameValueDto(string Name, string Value);
 
-internal sealed record AuthorizationDto(string Id, string Operation, string State, string? Detail, string? Link, string Sentence, IReadOnlyList<NameValueDto> Parameters, DateTimeOffset Created, DateTimeOffset Expires, int LifetimeSeconds, AuthorizationResultDto? Result = null);
+internal sealed record AuthorizationDto(string Id, string Operation, string State, string? Detail, string? Link, string Sentence, IReadOnlyList<NameValueDto> Parameters, DateTimeOffset Created, DateTimeOffset Expires, int LifetimeSeconds, AuthorizationResultDto? Result = null, ProofStart? Proof = null);
 
 internal sealed record AuthorizationResultDto(string Outcome, string? Code, string? Detail, string? Link, InvitationCreatedDto? Invitation, bool InvitationGone);
 

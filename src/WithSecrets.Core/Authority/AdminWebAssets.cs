@@ -148,7 +148,7 @@ internal sealed class AdminWebAssets
         if (file.Value.Path == "index.html")
         {
             response.Headers.ContentSecurityPolicy = ContentSecurityPolicy;
-            response.Headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), publickey-credentials-get=(), publickey-credentials-create=()";
+            response.Headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), publickey-credentials-get=(self), publickey-credentials-create=()";
         }
 
         if (!head)

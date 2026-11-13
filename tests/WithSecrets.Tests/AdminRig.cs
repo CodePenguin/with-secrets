@@ -141,6 +141,8 @@ internal sealed class AdminApp : IDisposable
 
     private sealed class CountingAsker(IAdminAsker inner, Action count) : IAdminAsker
     {
+        public EnrollmentTarget? InlineTarget() => inner.InlineTarget();
+
         public ApprovalDecision Ask(ApprovalPrompt prompt)
         {
             count();
