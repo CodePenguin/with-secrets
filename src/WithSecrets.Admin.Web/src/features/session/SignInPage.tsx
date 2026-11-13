@@ -72,11 +72,11 @@ export function SignInPage() {
         {waiting ? (
           <>
             <Notice kind="info" title="Waiting for your passkey tap">
-              Open the passkey page, check that it says it starts an administrator session, and tap your passkey there. This page carries on by itself afterwards. It waits for as long as you need.
+              Open the passkey page in this tab, check that it says it starts an administrator session, and tap your passkey there. Use Back to return and finish signing in.
             </Notice>
             <p>
-              <ButtonLink href={link} target="_blank" rel="noopener noreferrer" variant="primary" autoFocus>
-                Open the passkey page (new tab)
+              <ButtonLink href={link} variant="primary" autoFocus>
+                Open the passkey page
               </ButtonLink>
             </p>
           </>

@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { pendingAuthorization } from '../../api/client'
@@ -58,7 +58,10 @@ describe('machines: pairing is part of the view', () => {
 
     await user.click(within(list).getByRole('button', { name: /revoke/i }))
     await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Continue to passkey' }))
-    await waitFor(() => expect(opened).toHaveBeenCalledOnce())
+    const dialog = await screen.findByRole('dialog')
+    expect(await within(dialog).findByRole('link', { name: 'Return to the passkey page' })).toHaveAttribute('href', 'http://localhost:54321/passkey-page-token')
+    expect(within(dialog).getByRole('link', { name: 'Return to the passkey page' })).not.toHaveAttribute('target')
+    expect(opened).not.toHaveBeenCalled()
   })
 
   it('creates an invitation in one step and shows the bundle once, never keeping it in storage or the address', async () => {

@@ -69,11 +69,6 @@ function sameOperation(requested: Prepared, got: Authorization): boolean {
   return got.operation === requested.operation
 }
 
-/** The passkey page opens in its own tab, right after the service made the authorization (the click that asked for it is still recent). Without an opener: the page it opens can never reach this one. */
-function openPasskeyPage(link: string): void {
-  window.open(link, '_blank', 'noopener,noreferrer')
-}
-
 /** Best effort: an authorization that this page no longer waits for is cancelled, so a tap on its page afterwards changes nothing. */
 function cancelAuthorization(id: string): void {
   void api.delete('/api/v1/authorizations/{id}', { path: { id } }).catch(() => undefined)
@@ -85,10 +80,9 @@ type Props = { def?: OperationDef; resume?: PendingAuthorization; onClose: () =>
 
 /**
  * One administrative change from start to end, in one modal dialog and one step before the passkey page:
- * 1. the form (when the change takes input), or for a change without input the facts, and ONE button, "Continue to passkey": it asks the service for the authorization (it changes nothing by itself) and opens
- *    the service's own one-use passkey page in its own tab; the facts of the operation are shown once, as the service will have the passkey sign them;
- * 2. the person taps there. The SERVICE makes the change the tap authorized, when the tap is verified (single use, bound to the operation and its parameters): this page only asks what became of it, so a tab that
- *    was backgrounded, discarded, reloaded or idled out meanwhile loses nothing. A reloaded tab finds the waiting authorization again (its id is kept in this tab's session storage) and shows its result.
+ * 1. the form (when the change takes input), or for a change without input the facts, and ONE button, "Continue to passkey": it asks the service for the authorization (it changes nothing by itself) and navigates
+ *    this tab to the service's own one-use passkey page; the facts of the operation are shown once, as the service will have the passkey sign them;
+ * 2. the person taps there, then uses browser Back to return. The SERVICE makes the change the tap authorized, when the tap is verified (single use, bound to the operation and its parameters): this page only asks what became of it. A reloaded tab finds the waiting authorization again (its id is kept in this tab's session storage) and shows its result.
  * The page sets no time limit of its own: it waits as long as the person needs. The service's own limits are shown as they come.
  */
 export function OperationDialog({ def, resume, onClose }: Props) {
@@ -193,7 +187,7 @@ export function OperationDialog({ def, resume, onClose }: Props) {
   useEffect(() => {
     const message: Partial<Record<State['phase'], string>> = {
       asking: 'Asking the service for an authorization.',
-      waiting: 'The passkey page is open in its own tab. Waiting for your passkey tap there.',
+      waiting: 'Waiting for your passkey tap.',
       done: 'Done. ' + (state.phase === 'done' ? state.summary : ''),
       failed: 'The change was not made.',
     }
@@ -201,7 +195,7 @@ export function OperationDialog({ def, resume, onClose }: Props) {
     if (text) announce(text)
   }, [state.phase]) // eslint-disable-line react-hooks/exhaustive-deps -- announced once per phase
 
-  /** One step: ask the service for the authorization and open its passkey page. Nothing changes until the tap there. */
+  /** One step: ask the service for the authorization and navigate this tab to its passkey page. Nothing changes until the tap there. */
   async function continueToPasskey(prepared: Prepared) {
     dispatch({ type: 'asking', prepared })
     try {
@@ -220,8 +214,8 @@ export function OperationDialog({ def, resume, onClose }: Props) {
       }
       setPendingAuthorization({ id: made.id, operation: made.operation, title, summary: prepared.summary })
       const link = safeLink(made.link)
-      if (link) openPasskeyPage(link)
       dispatch({ type: 'created', waiting: { id: made.id, operation: made.operation, summary: prepared.summary, link, parameters: made.parameters } })
+      if (link) window.location.assign(link)
     } catch (error) {
       if (mounted.current) dispatch({ type: 'failed', error })
     }
@@ -277,7 +271,7 @@ export function OperationDialog({ def, resume, onClose }: Props) {
             }
           </Field>
         ))}
-        <p className={styles.hint}>Continue opens your passkey page in a new tab. Nothing changes until you tap your passkey there, and that page shows exactly what you are authorizing.</p>
+        <p className={styles.hint}>Continue opens the passkey page in this tab. Nothing changes until you tap your passkey there, and that page shows exactly what you are authorizing. Use Back to return here.</p>
       </form>
     )
     footer = (
@@ -298,7 +292,7 @@ export function OperationDialog({ def, resume, onClose }: Props) {
         {def.about ? <Facts items={def.about} /> : null}
         {def.warning ? <Notice kind="warning">{def.warning}</Notice> : null}
         <Authorizing prepared={shown} />
-        <p className={styles.hint}>Continue opens your passkey page in a new tab. Nothing changes until you tap your passkey there.</p>
+        <p className={styles.hint}>Continue opens the passkey page in this tab. Nothing changes until you tap your passkey there. Use Back to return here.</p>
       </>
     )
     footer = (
@@ -319,15 +313,15 @@ export function OperationDialog({ def, resume, onClose }: Props) {
         {state.prepared ? <Authorizing prepared={state.prepared} signed={state.waiting.parameters ?? undefined} /> : <p className={styles.summary}>{state.waiting.summary}</p>}
         <Notice kind="info" title="Waiting for your passkey tap">
           {resume ? (
-            <p>This page was reloaded while a passkey tap was waiting. It is asking the service what became of it. If you have not tapped yet, tap on the passkey page that is still open in its own tab.</p>
+            <p>This page was reloaded while a passkey tap was waiting. It is asking the service what became of it. If you have not tapped yet, use browser Forward to return to the passkey page, or cancel this request and start again.</p>
           ) : (
-            <p>The passkey page is open in its own tab. Check that it names the operation above, and tap there. The service makes the change when the tap is verified, so you can leave this tab: it shows the result when you come back.</p>
+            <p>Check that the passkey page names the operation above, then tap your passkey. Use Back to return here; the service makes the change when the tap is verified.</p>
           )}
         </Notice>
         {link ? (
           <p>
-            <ButtonLink href={link} target="_blank" rel="noopener noreferrer" variant="secondary">
-              The passkey page did not open? Open it here
+            <ButtonLink href={link} variant="secondary">
+              Return to the passkey page
             </ButtonLink>
           </p>
         ) : resume ? null : (
@@ -359,8 +353,8 @@ export function OperationDialog({ def, resume, onClose }: Props) {
           next ? (
             <p>
               The operation continues on its own passkey pages.{' '}
-              <ButtonLink href={next} target="_blank" rel="noopener noreferrer" variant="primary">
-                Open the next passkey page (new tab)
+              <ButtonLink href={next} variant="primary">
+                Continue to the next passkey page
               </ButtonLink>
             </p>
           ) : (

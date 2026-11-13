@@ -262,7 +262,7 @@ describe('the locked authority', () => {
     expect(await within(dialog).findByText('Done')).toBeInTheDocument()
     expect(fake.count('POST /api/v1/unlock')).toBe(0)
     expect(fake.calls.find((call) => call.path === '/api/v1/authorizations')?.body).toEqual({ operation: 'unlock', parameters: {} })
-    expect(openSpy).toHaveBeenCalledOnce()
+    expect(openSpy).not.toHaveBeenCalled()
   })
 })
 

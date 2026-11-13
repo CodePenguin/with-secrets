@@ -150,7 +150,7 @@ async function send(method: Method, template: string, init: { path?: unknown; qu
   const headers: Record<string, string> = { Accept: 'application/json, application/problem+json' }
   let body: string | undefined
   if (method !== 'get') {
-    // A change needs an identity: a browser with no secret yet (a new tab) makes its own first.
+    // A change needs an identity: a browser profile with no secret yet makes its own first.
     if (template !== BROWSER_PATH && currentSecret() === null) await ensureBrowser()
     body = JSON.stringify(init.body ?? {})
     headers['Content-Type'] = 'application/json'

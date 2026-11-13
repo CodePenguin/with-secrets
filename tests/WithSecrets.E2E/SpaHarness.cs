@@ -19,10 +19,7 @@ internal sealed class SpaApp : IDisposable
     public void Dispose() => Service.Dispose();
 }
 
-/// <summary>
-/// What a person does in the administration application, as page steps. The passkey tap is never in the application's page: it is on the service's own one-use page, which the application offers as
-/// a page that the dialog's "Continue to passkey" opens in a new tab by itself (the sign-in offers a link). <see cref="Continue" /> and <see cref="Tap" /> tap there, with the same (virtual) passkey as the rest of the scenario.
-/// </summary>
+/// <summary>Passkey pages replace the application page in this tab. These helpers navigate back and forward to exercise the browser history path.</summary>
 internal static class Spa
 {
     private static string? _axe;
@@ -53,56 +50,31 @@ internal static class Spa
         await Heading(c, heading).WaitForAsync();
     }
 
-    private static Dictionary<string, object> AuthenticatorOptions() => new()
-    {
-        ["options"] = new Dictionary<string, object>
-        {
-            ["protocol"] = "ctap2",
-            ["transport"] = "internal",
-            ["hasResidentKey"] = true,
-            ["hasUserVerification"] = true,
-            ["isUserVerified"] = true,
-            ["automaticPresenceSimulation"] = true,
-            ["hasPrf"] = true,
-        },
-    };
-
-    private static async Task<JsonElement> Credentials(ICDPSession cdp, string authenticator)
-    {
-        JsonElement? reply = await cdp.SendAsync("WebAuthn.getCredentials", new Dictionary<string, object> { ["authenticatorId"] = authenticator });
-
-        return reply!.Value.GetProperty("credentials");
-    }
-
-    /// <summary>
-    /// Clicks the passkey-page link the application offers (it opens in a new tab), waits for that page to say what is being authorized, runs <paramref name="beforeTap" />, taps, and closes the tab.
-    /// The new tab gets its own virtual authenticator holding the scenario's passkey (a tab has none of its own); the sign count is copied back so the next tab's tap counts on from it.
-    /// Returns the text the passkey page showed.
-    /// </summary>
+    /// <summary>Follows the sign-in link in this tab, taps there, then returns with browser Back.</summary>
     public static async Task<string> Tap(Ctx c, S s, string linkName = "Open the passkey page", Func<IPage, string, Task>? beforeTap = null)
     {
         ILocator link = c.Page.GetByRole(AriaRole.Link, new() { Name = linkName });
         await link.First.WaitForAsync(new() { Timeout = 20000 });
-        s.Check(await link.First.GetAttributeAsync("target") == "_blank" && (await link.First.GetAttributeAsync("rel") ?? "").Contains("noopener", StringComparison.Ordinal), "the application opens the passkey page in a new tab (target _blank, noopener)");
-        IPage popup = await c.Page.RunAndWaitForPopupAsync(() => link.First.ClickAsync());
+        s.Check(await link.First.GetAttributeAsync("target") is null, "the passkey page link stays in this tab");
+        await link.First.ClickAsync();
 
-        return await TapPopup(c, s, popup, beforeTap);
+        return await TapCurrent(c, s, beforeTap, returnWithBack: true);
     }
 
-    /// <summary>
-    /// The one step of an administrative change: the dialog's "Continue to passkey" asks the service for the authorization and opens its passkey page in a new tab by itself. Returns that tab (not yet tapped).
-    /// The click is counted in <see cref="Clicks" />.
-    /// </summary>
+    /// <summary>The one step of an administrative change. It follows Continue into the passkey page, then Back to the waiting dialog.</summary>
     public static async Task<IPage> OpenPasskeyPage(Ctx c, S s, ILocator dialog)
     {
-        IPage popup = await c.Page.RunAndWaitForPopupAsync(() => dialog.GetByRole(AriaRole.Button, new() { Name = "Continue to passkey" }).ClickAsync());
+        await dialog.GetByRole(AriaRole.Button, new() { Name = "Continue to passkey" }).ClickAsync();
         Clicks++;
+        await c.Page.WaitForFunctionAsync("() => !!document.querySelector('#request')?.textContent.trim()", null, new() { Timeout = 20000 });
+        await c.Page.GoBackAsync();
+        await dialog.GetByText("Waiting for your passkey tap").First.WaitForAsync(new() { Timeout = 20000 });
 
-        return popup;
+        return c.Page;
     }
 
-    /// <summary>Continue to passkey, then the tap on the page it opened (two clicks), the same as a person does. Returns what the passkey page said.</summary>
-    public static async Task<string> Continue(Ctx c, S s, ILocator dialog, Func<IPage, string, Task>? beforeTap = null) => await TapPopup(c, s, await OpenPasskeyPage(c, s, dialog), beforeTap);
+    /// <summary>Continue, browser Back, browser Forward, then tap and Back to the result. Returns what the passkey page said.</summary>
+    public static async Task<string> Continue(Ctx c, S s, ILocator dialog, Func<IPage, string, Task>? beforeTap = null) => await TapAfterBack(c, s, await OpenPasskeyPage(c, s, dialog), beforeTap);
 
     /// <summary>Clicks a control of the application and counts the click.</summary>
     public static async Task Click(ILocator locator)
@@ -114,39 +86,29 @@ internal static class Spa
     /// <summary>The clicks a person made since <see cref="Clicks" /> was last set to zero (the passkey page's own Approve counts).</summary>
     public static int Clicks { get; set; }
 
-    public static async Task<string> TapPopup(Ctx c, S s, IPage popup, Func<IPage, string, Task>? beforeTap)
+    public static async Task<string> TapAfterBack(Ctx c, S s, IPage page, Func<IPage, string, Task>? beforeTap)
     {
-        ICDPSession cdp = await c.Context.NewCDPSessionAsync(popup);
-        await cdp.SendAsync("WebAuthn.enable");
-        JsonElement? added = await cdp.SendAsync("WebAuthn.addVirtualAuthenticator", AuthenticatorOptions());
-        string authenticator = added!.Value.GetProperty("authenticatorId").GetString()!;
-        foreach (JsonElement credential in (await Credentials(c.Cdp, c.AuthId)).EnumerateArray())
-        {
-            await cdp.SendAsync("WebAuthn.addCredential", new Dictionary<string, object> { ["authenticatorId"] = authenticator, ["credential"] = credential });
-        }
+        await page.GoForwardAsync();
+        await page.WaitForFunctionAsync("() => !!document.querySelector('#request')?.textContent.trim()", null, new() { Timeout = 20000 });
+        return await TapCurrent(c, s, beforeTap, returnWithBack: true);
+    }
 
-        await popup.WaitForFunctionAsync("() => { var e = document.querySelector('#request'); return !!e && e.textContent.trim().length > 0; }", null, new() { Timeout = 20000 });
-        string request = ((await popup.Locator("#request").TextContentAsync()) ?? "").Trim();
-        int before = await popup.EvaluateAsync<int>("() => window.__credCalls || 0");
+    private static async Task<string> TapCurrent(Ctx c, S s, Func<IPage, string, Task>? beforeTap, bool returnWithBack)
+    {
+        IPage page = c.Page;
+        await page.WaitForFunctionAsync("() => { var e = document.querySelector('#request'); return !!e && e.textContent.trim().length > 0; }", null, new() { Timeout = 20000 });
+        string request = ((await page.Locator("#request").TextContentAsync()) ?? "").Trim();
+        int before = await page.EvaluateAsync<int>("() => window.__credCalls || 0");
         s.Check(before == 0, "tap rule: no passkey prompt when the passkey page loads");
         if (beforeTap is not null)
         {
-            await beforeTap(popup, request);
+            await beforeTap(page, request);
         }
 
-        await popup.Locator("#approve").ClickAsync(new() { Timeout = 20000 });
+        await page.Locator("#approve").ClickAsync(new() { Timeout = 20000 });
         Clicks++;
-        await popup.WaitForFunctionAsync("() => { var e = document.getElementById('status'); return !!e && /^(Approved\\b|Change confirmed\\.)/.test(e.textContent.trim()); }", null, new() { Timeout = 20000 });
-
-        // Back to the scenario's authenticator: the sign counts the tap moved.
-        foreach (JsonElement credential in (await Credentials(cdp, authenticator)).EnumerateArray())
-        {
-            string id = credential.GetProperty("credentialId").GetString()!;
-            await c.Cdp.SendAsync("WebAuthn.removeCredential", new Dictionary<string, object> { ["authenticatorId"] = c.AuthId, ["credentialId"] = id });
-            await c.Cdp.SendAsync("WebAuthn.addCredential", new Dictionary<string, object> { ["authenticatorId"] = c.AuthId, ["credential"] = credential });
-        }
-
-        await popup.CloseAsync();
+        await page.WaitForFunctionAsync("() => { var e = document.getElementById('status'); return !!e && /^(Approved\\b|Change confirmed\\.)/.test(e.textContent.trim()); }", null, new() { Timeout = 20000 });
+        if (returnWithBack) await page.GoBackAsync();
 
         return request;
     }

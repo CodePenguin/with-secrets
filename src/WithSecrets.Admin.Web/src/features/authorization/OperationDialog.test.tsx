@@ -55,7 +55,7 @@ async function openApprove(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe('an administrative change', () => {
-  it('is one step: Continue opens the passkey page, and the service makes the change at the tap (this page only reads the outcome)', async () => {
+  it('navigates this tab to the passkey page, and the service makes the change at the tap (this page only reads the outcome)', async () => {
     const user = userEvent.setup()
     const fake = setup()
     const dialog = await openApprove(user)
@@ -67,13 +67,14 @@ describe('an administrative change', () => {
 
     await user.click(within(dialog).getByRole('button', { name: 'Continue to passkey' }))
 
-    // Review, ask and open are one click: the passkey page was opened (own tab, no opener) for exactly the operation and parameters asked.
-    await waitFor(() => expect(opened).toHaveBeenCalledWith(LINK, '_blank', 'noopener,noreferrer'))
+    // Review, ask and navigate are one click; the SPA does not open another tab.
+    await waitFor(() => expect(opened).not.toHaveBeenCalled())
     expect(fake.calls.find((call) => call.path === '/api/v1/authorizations')?.body).toEqual({ operation: 'machine-approve', parameters: { fingerprint: machine().fingerprint, name: 'build-host' } })
     expect(await within(dialog).findByText('Waiting for your passkey tap')).toBeInTheDocument()
-    expect(within(dialog).getByRole('link', { name: /did not open/i })).toHaveAttribute('href', LINK)
+    expect(within(dialog).getByRole('link', { name: /return to the passkey page/i })).toHaveAttribute('href', LINK)
+    expect(within(dialog).getByRole('link', { name: /return to the passkey page/i })).not.toHaveAttribute('target')
 
-    // The tap is made on the other page; the service applies it. This page makes no mutation call.
+    // The passkey page applies the change at the tap; the admin SPA makes no mutation call.
     expect(await within(dialog).findByRole('button', { name: 'Close' })).toBeInTheDocument()
     expect(within(dialog).getByText('Done')).toBeInTheDocument()
     expect(fake.count(approvePath)).toBe(0)

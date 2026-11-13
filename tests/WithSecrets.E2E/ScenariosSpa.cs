@@ -5,7 +5,7 @@ namespace WithSecrets.E2E;
 /// <summary>
 /// Phase 6b-2: the administration single-page application driven in a real browser, against the host service that serves it (embedded in the assembly) and the API from one origin. The admin passkey is the
 /// browser's virtual authenticator. A sign-in is one tap and gives a read-only session; every change is the application's own dialog (the exact operation and parameters, then a request for authorization),
-/// the tap on the service's one-use passkey page (Continue to passkey opens it in a new tab), and the change itself, which the service makes when the tap is verified (the application only reads the outcome). These scenarios replace the earlier
+/// the tap on the service's one-use passkey page in the same tab, and the change itself, which the service makes when the tap is verified (the application only reads the outcome). These scenarios replace the earlier
 /// API-driven browser scenarios (i1 to i4); the API itself is still tested directly, without a browser, in the unit suite (Api).
 /// </summary>
 internal static class ScenariosSpa
@@ -98,19 +98,19 @@ internal static class ScenariosSpa
         await dialog.GetByLabel("Friendly name").FillAsync("e2e second");
         s.Check(store.Find(fp)!.Status == MachineStatus.Pending && await c.PasskeyCalls() == 0 && !mutations.Any(), "nothing is changed, nothing was asked of the service and no passkey is asked for before Continue");
         await Spa.Axe(c, s, "the authorization dialog (form)");
-        IPage popup = await Spa.OpenPasskeyPage(c, s, dialog);
+        IPage passkeyPage = await Spa.OpenPasskeyPage(c, s, dialog);
         await dialog.GetByText("Waiting for your passkey tap").First.WaitForAsync();
         string review = await dialog.TextContentAsync() ?? "";
-        s.Check(review.Contains("machine-approve", StringComparison.Ordinal) && review.Contains(fp, StringComparison.Ordinal) && review.Contains("e2e second", StringComparison.Ordinal), "the dialog names the exact operation and every parameter (operation, full fingerprint, name) as the passkey signs them");
+        s.Check(review.Contains("Approve machine " + KeyIdentity.Display(fp), StringComparison.Ordinal) && review.Contains("e2e second", StringComparison.Ordinal), "after browser Back, the dialog identifies the pending change by action and friendly name");
         s.Check(store.Find(fp)!.Status == MachineStatus.Pending, "still Pending while the tap is outstanding (the authorization changes nothing)");
         await Spa.Axe(c, s, "the authorization dialog (waiting for the tap)");
 
-        string page = await Spa.TapPopup(c, s, popup, null);
+        string page = await Spa.TapAfterBack(c, s, passkeyPage, null);
         s.Check(page.Contains("approve this machine", StringComparison.OrdinalIgnoreCase) && page.Contains(KeyIdentity.Display(fp), StringComparison.Ordinal) && page.Contains("e2e second", StringComparison.Ordinal) && page.Contains("Operation: approve-machine", StringComparison.Ordinal), "its own passkey page shows the action, the full fingerprint and the name");
         await dialog.GetByText("Done").First.WaitForAsync(new() { Timeout = 20000 });
         s.Check(store.Find(fp) is { Status: MachineStatus.Trusted, FriendlyName: "e2e second" }, "the tap approves the machine (the service made the change when the tap was verified)");
         s.Check(Spa.Clicks == 3, "approving a machine took exactly 3 clicks: Approve, Continue to passkey, Approve on the passkey page (" + Spa.Clicks + ")");
-        s.Check(mutations.SequenceEqual(["POST /api/v1/authorizations"]), "the application sent one change request, the one that asked for the authorization, and no mutation of its own (" + string.Join(", ", mutations) + ")");
+        s.Check(mutations.Count == 2 && mutations[0] == "POST /api/v1/authorizations" && new Uri(c.Page.Url).AbsolutePath.StartsWith("/admin", StringComparison.Ordinal) && mutations[1].StartsWith("POST /a/", StringComparison.Ordinal) && mutations[1].EndsWith("/proof", StringComparison.Ordinal), "the SPA asked for one authorization and the passkey page sent its one proof; the SPA sent no change endpoint (" + string.Join(", ", mutations) + ")");
         s.Check(store.Audit(100).Any(entry => entry.Event == "machine-approve" && entry.Actor.StartsWith("admin passkey", StringComparison.Ordinal)), "the audit history names the admin passkey that tapped");
         await dialog.GetByRole(AriaRole.Button, new() { Name = "Close" }).ClickAsync();
         await dialog.WaitForAsync(new() { State = WaitForSelectorState.Detached });
@@ -124,15 +124,53 @@ internal static class ScenariosSpa
         Spa.Clicks = 0;
         await Spa.Click(renamed.GetByRole(AriaRole.Button, new() { Name = "Rename" }));
         await dialog.GetByLabel("New name").FillAsync("e2e renamed");
-        IPage renamePopup = await Spa.OpenPasskeyPage(c, s, dialog);
+        IPage renamePageTab = await Spa.OpenPasskeyPage(c, s, dialog);
         await dialog.GetByText("Waiting for your passkey tap").First.WaitForAsync();
         s.Check(store.Find(fp)!.FriendlyName == "e2e second", "the earlier approval does not authorize the rename (it is still the old name before the tap)");
-        string renamePage = await Spa.TapPopup(c, s, renamePopup, null);
+        string renamePage = await Spa.TapAfterBack(c, s, renamePageTab, null);
         await dialog.GetByText("Done").First.WaitForAsync(new() { Timeout = 20000 });
         s.Check(renamePage.Contains("e2e renamed", StringComparison.Ordinal) && store.Find(fp)!.FriendlyName == "e2e renamed", "a second change needed a second tap and a new passkey page");
         s.Check(Spa.Clicks == 3, "an administrative change (a rename) took exactly 3 clicks: the row's button, Continue to passkey, Approve on the passkey page (" + Spa.Clicks + ")");
         (_, long signsAfterRename) = await c.AuthOps();
         s.Check(signsAfterRename == signsAfterApprove + 1, "each change is exactly one more passkey signature");
+        await dialog.GetByRole(AriaRole.Button, new() { Name = "Close" }).ClickAsync();
+        await dialog.WaitForAsync(new() { State = WaitForSelectorState.Detached });
+
+        // Refusing on the passkey page and returning with Back leaves the machine Pending and reports the refusal in the waiting dialog.
+        using SoftwareSigningKey refusedKey = new();
+        byte[] refusedChallenge = await rig.Machine.Deployment.Authority.BeginEnrollmentAsync();
+        await rig.Machine.Deployment.Authority.EnrollAsync(EnrollmentRequest.Create("refused-host", refusedChallenge, refusedKey));
+        string refusedFp = KeyIdentity.Fingerprint(refusedKey.PublicKey);
+        ILocator refusedRow = c.Page.GetByRole(AriaRole.Listitem).Filter(new() { HasText = KeyIdentity.Display(refusedFp) });
+        await refusedRow.GetByRole(AriaRole.Button, new() { Name = "Approve" }).ClickAsync();
+        await dialog.GetByLabel("Friendly name").FillAsync("refused host");
+        IPage refusedPage = await Spa.OpenPasskeyPage(c, s, dialog);
+        await refusedPage.GoForwardAsync();
+        await refusedPage.WaitForFunctionAsync("() => !!document.querySelector('#request')?.textContent.trim()", null, new() { Timeout = 20000 });
+        await c.Click("#deny");
+        await c.StatusContains("Denied");
+        await refusedPage.GoBackAsync();
+        await dialog.GetByRole(AriaRole.Alert).WaitForAsync(new() { Timeout = 20000 });
+        string refusal = await dialog.GetByRole(AriaRole.Alert).TextContentAsync() ?? "";
+        s.Check(store.Find(refusedFp) is { Status: MachineStatus.Pending } && refusal.Contains("denied on the page", StringComparison.Ordinal) && refusal.Contains("authorization-refused", StringComparison.Ordinal), "after passkey refusal and browser Back, the denial is reported and the machine remains Pending (" + refusal.Trim() + ")");
+        await dialog.GetByRole(AriaRole.Button, new() { Name = "Close" }).ClickAsync();
+
+        // A browser-side passkey failure leaves the authorization waiting. Back returns to the dialog so it can be cancelled safely.
+        await refusedRow.GetByRole(AriaRole.Button, new() { Name = "Approve" }).ClickAsync();
+        await dialog.GetByLabel("Friendly name").FillAsync("refused host");
+        IPage failedPage = await Spa.OpenPasskeyPage(c, s, dialog);
+        await failedPage.GoForwardAsync();
+        await failedPage.WaitForFunctionAsync("() => !!document.querySelector('#request')?.textContent.trim()", null, new() { Timeout = 20000 });
+        await c.Verified(false);
+        await c.Click("#approve");
+        await c.StatusContains("No passkey was used");
+        string passkeyFailure = await c.Text("#status");
+        s.Check(passkeyFailure.Contains("NotAllowedError", StringComparison.Ordinal) && store.Find(refusedFp) is { Status: MachineStatus.Pending }, "a browser passkey failure names NotAllowedError and changes nothing");
+        await failedPage.GoBackAsync();
+        await dialog.GetByText("Waiting for your passkey tap").First.WaitForAsync();
+        await dialog.GetByRole(AriaRole.Button, new() { Name = "Cancel the request" }).ClickAsync();
+        await dialog.WaitForAsync(new() { State = WaitForSelectorState.Detached });
+        s.Check(store.Find(refusedFp) is { Status: MachineStatus.Pending }, "Back after a failed tap allows cancellation and leaves the machine Pending");
         s.NoProblems(c);
     }
 
@@ -164,13 +202,13 @@ internal static class ScenariosSpa
         // 1. Reload while the passkey page waits for its tap: the application finds the waiting authorization again, and shows what the tap came to.
         await Spa.Click(c.Page.GetByRole(AriaRole.Listitem).Filter(new() { HasText = KeyIdentity.Display(fp) }).GetByRole(AriaRole.Button, new() { Name = "Approve" }));
         await dialog.GetByLabel("Friendly name").FillAsync("reloaded one");
-        IPage popup = await Spa.OpenPasskeyPage(c, s, dialog);
+        IPage passkeyPage = await Spa.OpenPasskeyPage(c, s, dialog);
         await dialog.GetByText("Waiting for your passkey tap").First.WaitForAsync();
         await c.Page.ReloadAsync();
         await dialog.GetByText("reloaded while a passkey tap was waiting").WaitForAsync(new() { Timeout = 20000 });
         s.Check(store.Find(fp)!.Status == MachineStatus.Pending, "after the reload the machine is still Pending (no tap yet)");
         s.Check(await c.Page.EvaluateAsync<bool>("() => Object.keys(sessionStorage).every((key) => ['ws.session-secret', 'ws.browser-secret', 'ws.pending-authorization'].includes(key)) && !sessionStorage.getItem('ws.pending-authorization').includes('http') && localStorage.length === 0"), "the tab keeps only the id and the title of the waiting authorization (no link, no parameter), and nothing in localStorage");
-        await Spa.TapPopup(c, s, popup, null);
+        await Spa.TapAfterBack(c, s, passkeyPage, null);
         await dialog.GetByText("Done").First.WaitForAsync(new() { Timeout = 20000 });
         s.Check(store.Find(fp) is { Status: MachineStatus.Trusted, FriendlyName: "reloaded one" }, "the tap made after the reload approved the machine: the service made the change, the page only read the outcome");
         s.Check(mutations.Count(item => item == "POST /api/v1/authorizations") == 1 && !mutations.Any(item => item.Contains("/approve", StringComparison.Ordinal)), "the application never sent a mutation of its own, before or after the reload (" + string.Join(", ", mutations) + ")");
@@ -426,12 +464,12 @@ internal static class ScenariosSpa
         s.Check((await error.TextContentAsync() ?? "").Contains("whole number", StringComparison.Ordinal) && await days.GetAttributeAsync("aria-invalid") == "true", "an invalid value is refused on the field, announced as an alert, and the field is marked invalid");
         await Spa.Axe(c, s, "the dialog with a validation error");
         await days.FillAsync("30");
-        IPage popup = await Spa.OpenPasskeyPage(c, s, dialog);
+        IPage passkeyPage = await Spa.OpenPasskeyPage(c, s, dialog);
         await dialog.GetByText("Waiting for your passkey tap").First.WaitForAsync();
         string review = await dialog.TextContentAsync() ?? "";
-        s.Check(review.Contains("set-audit-retention", StringComparison.Ordinal) && review.Contains("days", StringComparison.Ordinal) && review.Contains("30", StringComparison.Ordinal), "the dialog names the operation and the new value as the passkey signs them");
+        s.Check(review.Contains("Keep audit events for 30 days", StringComparison.Ordinal), "after browser Back, the dialog names the pending retention change");
         s.Check(store.AuditRetentionDays() == before, "the setting is unchanged until the tap");
-        string page = await Spa.TapPopup(c, s, popup, null);
+        string page = await Spa.TapAfterBack(c, s, passkeyPage, null);
         await dialog.GetByText("Done").First.WaitForAsync(new() { Timeout = 20000 });
         s.Check(store.AuditRetentionDays() == 30, "the tap changes the setting");
         s.Check(page.Contains("30", StringComparison.Ordinal), "the passkey page shows the new value");
@@ -471,12 +509,11 @@ internal static class ScenariosSpa
         await dialog.GetByRole(AriaRole.Button, new() { Name = "Continue to passkey" }).ClickAsync();
         s.Check((await dialog.GetByRole(AriaRole.Alert).TextContentAsync() ?? "").Contains("Enter a friendly name", StringComparison.Ordinal), "a pending machine cannot be approved without a name: refused on the field before anything is asked");
         await dialog.GetByLabel("Friendly name").FillAsync("e2e untapped");
-        IPage popup = await Spa.OpenPasskeyPage(c, s, dialog);
+        IPage passkeyPage = await Spa.OpenPasskeyPage(c, s, dialog);
         await dialog.GetByText("Waiting for your passkey tap").First.WaitForAsync();
         await Task.Delay(2500);
         s.Check(!mutations.Any(item => item.Contains("/approve", StringComparison.Ordinal)) && store.Find(fp)!.Status == MachineStatus.Pending, "without the tap the application sends no mutation and the machine stays Pending (it waits, with no limit of its own)");
         await dialog.GetByRole(AriaRole.Button, new() { Name = "Cancel the request" }).ClickAsync();
-        await popup.CloseAsync();
         await dialog.WaitForAsync(new() { State = WaitForSelectorState.Detached });
         s.Check(store.Find(fp)!.Status == MachineStatus.Pending && !mutations.Any(item => item.Contains("/approve", StringComparison.Ordinal)), "cancelling changes nothing");
 
