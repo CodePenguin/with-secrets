@@ -406,6 +406,8 @@ internal static class AuthorityTests
         using Fixture fx = new(parent, trusted: false);
         AuthorityStore store = fx.Store;
         string fp = fx.Fingerprint;
+        // A different fingerprint that cannot accidentally equal fp (which a random key would make possible with "00" + fp[2..]).
+        string unknownFp = (fp[0] == '0' ? '1' : '0') + fp[1..];
         fx.Machine.Deployment.EnrollAsync().GetAwaiter().GetResult();
         int Histories() => store.History(fp).Count;
         int Audits() => store.Audit().Count;
@@ -414,7 +416,7 @@ internal static class AuthorityTests
         check(!store.Disable(fp, "a").Ok && !store.Enable(fp, "a").Ok && !store.Trust(fp, fp, "a").Ok && Machine(store, fp).Status == MachineStatus.Pending && Histories() == 1, "table: a Pending machine cannot be disabled, enabled or trusted (only approved)");
         int before = Audits();
         check(!store.Approve(fp, "", "a").Ok && !store.Approve(fp, "bad\nname", "a").Ok && !store.Approve(fp, new string('x', 41), "a").Ok && Machine(store, fp).Status == MachineStatus.Pending && Audits() == before, "table: approval needs a usable friendly name; a refusal records nothing");
-        check(!store.Approve("00" + fp[2..], "name", "a").Ok && store.Approve("00" + fp[2..], "name", "a").Message == "no such machine", "table: an unknown fingerprint is refused");
+        check(!store.Approve(unknownFp, "name", "a").Ok && store.Approve(unknownFp, "name", "a").Message == "no such machine", "table: an unknown fingerprint is refused");
         check(!store.Approve(fp, "name", "a", expectedRevision: 99).Ok && Machine(store, fp).Status == MachineStatus.Pending, "table: a change made against a revision that moved on is refused");
 
         TransitionResult approved = store.Approve(fp, "dev laptop", "admin passkey laptop");
@@ -449,7 +451,7 @@ internal static class AuthorityTests
         check(!store.Untrust(fp, "a").Ok && !store.Disable(fp, "a").Ok && !store.Enable(fp, "a").Ok && !store.Approve(fp, "x", "a").Ok, "table: an Untrusted machine can only be trusted again");
 
         // Untrusted to Trusted needs the full fingerprint.
-        check(!store.Trust(fp, fp[..12], "a").Ok && !store.Trust(fp, "00" + fp[2..], "a").Ok && !store.Trust(fp, "", "a").Ok && Machine(store, fp).Status == MachineStatus.Untrusted, "table: Untrusted to Trusted refuses a prefix, another fingerprint or nothing as the confirmation");
+        check(!store.Trust(fp, fp[..12], "a").Ok && !store.Trust(fp, unknownFp, "a").Ok && !store.Trust(fp, "", "a").Ok && Machine(store, fp).Status == MachineStatus.Untrusted, "table: Untrusted to Trusted refuses a prefix, another fingerprint or nothing as the confirmation");
         TransitionResult trusted = store.Trust(fp, KeyIdentity.Display(fp).ToLowerInvariant(), "admin passkey laptop");
         check(trusted.Ok && trusted.Machine is { Status: MachineStatus.Trusted, SecurityRevision: 3 } && store.ActiveGrants(fp).Count == 0 && trusted.Message.Contains("explicit confirmation", StringComparison.Ordinal), "table: with the full fingerprint confirmed, Untrusted to Trusted keeps revision 3 and starts clean");
 
