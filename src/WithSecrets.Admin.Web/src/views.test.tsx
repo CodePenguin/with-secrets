@@ -149,8 +149,9 @@ describe('the overview', () => {
     })
     renderApp('/')
 
-    expect(await screen.findByText('Machine attention could not be loaded')).toBeInTheDocument()
-    expect(await screen.findByText('Active grants could not be loaded')).toBeInTheDocument()
+    const alerts = await screen.findAllByRole('alert', {}, { timeout: 4000 })
+    expect(alerts.map((alert) => alert.textContent).join(' ')).toContain('Machine attention could not be loaded')
+    expect(alerts.map((alert) => alert.textContent).join(' ')).toContain('Active grants could not be loaded')
     expect(screen.queryByText('Machines: loading')).toBeNull()
     expect(screen.queryByText('Grants: loading')).toBeNull()
   })
@@ -279,7 +280,7 @@ describe('audit search', () => {
       expect(last?.query.get('text')).toBe('deploy.cmd')
       expect(last?.query.get('type')).toBe('launch')
     })
-    expect(await screen.findByText('No events found.')).toBeInTheDocument()
+    expect(await screen.findByText('No events match these filters.')).toBeInTheDocument()
   })
 })
 
@@ -289,7 +290,8 @@ describe('settings and passkey context', () => {
     renderApp('/settings')
 
     expect(await screen.findByRole('heading', { level: 1, name: 'Settings' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Passkeys' })).toHaveAttribute('href', '/passkeys')
+    const context = screen.getByText(/Manage the credentials that can administer this authority/)
+    expect(within(context).getByRole('link', { name: 'Passkeys' })).toHaveAttribute('href', '/passkeys')
     expect(screen.queryByText(/Every change here needs its own fresh passkey tap/)).toBeNull()
   })
 
@@ -299,7 +301,8 @@ describe('settings and passkey context', () => {
 
     expect(await screen.findByText(/Admin passkeys can administer this authority/)).toBeInTheDocument()
     expect(screen.getByText(/The kind describes the credential; the badge shows what it is allowed to do/)).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings')
+    const context = screen.getByText(/For authority behavior and signing-key maintenance/)
+    expect(within(context).getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings')
   })
 })
 
@@ -346,8 +349,9 @@ describe('grant and audit navigation', () => {
       '/audit/changes?machine=' + machine().fingerprint,
     )
     expect(screen.getByRole('link', { name: 'grant-0001' })).toHaveAttribute('href', '/audit?grant=grant-0001')
-    expect(screen.getByText('Received by authority')).toBeInTheDocument()
-    expect(screen.getByText(/10:00:03/)).toBeInTheDocument()
+    const times = Array.from(document.querySelectorAll('time')).map((time) => time.dateTime)
+    expect(times).toContain('2026-11-09T10:00:00Z')
+    expect(times).toContain('2026-11-09T10:00:03Z')
   })
 
   it('can clear URL-backed audit filters', async () => {
@@ -390,6 +394,6 @@ describe('what is shown', () => {
     signedIn({ 'GET /api/v1/status': { body: status({ locked: true }) } })
     renderApp('/')
 
-    expect(await screen.findAllByText('Locked')).not.toHaveLength(0)
+    expect(await screen.findByText('Authority locked')).toBeInTheDocument()
   })
 })

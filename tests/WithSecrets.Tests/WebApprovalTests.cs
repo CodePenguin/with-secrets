@@ -1864,7 +1864,7 @@ internal static partial class WebApprovalTests
 
             OneShotResponse runPrompt = ApprovalPage.Build(
                 new ApprovalPrompt("Run this program", "Program: example"),
-                new ProofStart("webauthn", "{}"), "n", [1], TimeSpan.Zero, "var a = 1;", "p { }");
+                new ProofStart("webauthn", "{}"), "n", [1], TimeSpan.Zero);
             Dictionary<string, string> runData = JsonSerializer.Deserialize<Dictionary<string, string>>(Between(runPrompt.Body, "<script type=" + (char)34 + "application/json" + (char)34 + " id=" + (char)34 + "start" + (char)34 + ">", "</script>"))!;
             check(runPrompt.Body.Contains(">Approve once</button>", StringComparison.Ordinal)
                 && !runData.ContainsKey("confirmedMessage")

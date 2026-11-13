@@ -27,7 +27,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
     private readonly Dictionary<string, SyncedGrant> _synced = new(StringComparer.Ordinal);
     private readonly IMonotonicClock _monotonic = monotonic ?? SystemMonotonicClock.Instance;
     private long _reconcileNotBefore;
-    private int _reconciling;
+    private readonly SemaphoreSlim _reconcileLock = new(1, 1);
 
     private bool _vouched;
 
@@ -538,11 +538,9 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
     /// </summary>
     public async Task<Reconciliation> ReconcileAsync(CancellationToken cancel = default)
     {
-        // One check-in at a time.
-        if (Interlocked.Exchange(ref _reconciling, 1) == 1)
-        {
-            return Vouched ? Reconciliation.Reconciled : Reconciliation.Unverified;
-        }
+        // One check-in at a time. Callers wait for the active check-in rather than treating it as a failed
+        // check-in; otherwise an authorization can fail closed just because the background poll got here first.
+        await _reconcileLock.WaitAsync(cancel);
 
         try
         {
@@ -631,7 +629,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
         }
         finally
         {
-            Volatile.Write(ref _reconciling, 0);
+            _reconcileLock.Release();
         }
     }
 

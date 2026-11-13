@@ -332,7 +332,7 @@ internal static class ScenariosSpa
         await c.Page.GetByLabel("Kind of event").SelectOptionAsync("launch");
         await c.Page.GetByRole(AriaRole.Button, new() { Name = "Search", Exact = true }).ClickAsync();
         await c.Page.WaitForFunctionAsync("() => location.search.includes('type=launch')");
-        await c.Page.GetByRole(AriaRole.Status).Filter(new() { HasText = "found" }).First.WaitForAsync();
+        await c.Page.GetByRole(AriaRole.Status).Filter(new() { HasText = "Showing" }).First.WaitForAsync();
         string narrowed = await results.TextContentAsync() ?? "";
         for (int attempt = 0; attempt < 20 && (narrowed.Contains("authorization:", StringComparison.Ordinal) || !narrowed.Contains("launch:", StringComparison.Ordinal)); attempt++)
         {
@@ -350,14 +350,14 @@ internal static class ScenariosSpa
 
         await c.Page.GetByLabel("Contains text").FillAsync("nothing-like-this");
         await c.Page.GetByRole(AriaRole.Button, new() { Name = "Search", Exact = true }).ClickAsync();
-        await c.Page.GetByText("No events found.").WaitForAsync();
+        await c.Page.GetByText("No events match these filters.").WaitForAsync();
         s.Check(true, "a search with no match says so");
         await c.Page.GetByRole(AriaRole.Link, new() { Name = "Authority changes" }).ClickAsync();
         await c.Page.GetByRole(AriaRole.List, new() { Name = "Authority changes" }).WaitForAsync();
         s.Check(true, "the authority's own change history is a view of its own");
         await Spa.Axe(c, s, "audit changes");
         await c.Page.GetByRole(AriaRole.Link, new() { Name = "Numbering gaps" }).ClickAsync();
-        await c.Page.GetByText("No open gap").WaitForAsync();
+        await c.Page.GetByText("No numbering anomaly matches this filter.").WaitForAsync();
         await Spa.Axe(c, s, "audit gaps");
         s.NoProblems(c);
     }

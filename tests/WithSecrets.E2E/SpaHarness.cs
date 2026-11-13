@@ -41,7 +41,15 @@ internal static class Spa
     /// <summary>Follows a link of the main navigation and waits for the view's heading.</summary>
     public static async Task GoTo(Ctx c, string navName, string heading)
     {
-        await c.Page.GetByRole(AriaRole.Navigation, new() { Name = "Main" }).GetByRole(AriaRole.Link, new() { Name = navName, Exact = true }).ClickAsync();
+        ILocator nav = c.Page.GetByRole(AriaRole.Navigation, new() { Name = "Main" });
+        ILocator link = nav.GetByRole(AriaRole.Link, new() { Name = navName, Exact = true });
+        if (!await link.IsVisibleAsync())
+        {
+            await nav.GetByRole(AriaRole.Button, new() { Name = "Menu" }).ClickAsync();
+            await link.WaitForAsync();
+        }
+
+        await link.ClickAsync();
         await Heading(c, heading).WaitForAsync();
     }
 
@@ -128,7 +136,7 @@ internal static class Spa
 
         await popup.Locator("#approve").ClickAsync(new() { Timeout = 20000 });
         Clicks++;
-        await popup.WaitForFunctionAsync("() => { var e = document.getElementById('status'); return !!e && e.textContent.indexOf('Approved') >= 0; }", null, new() { Timeout = 20000 });
+        await popup.WaitForFunctionAsync("() => { var e = document.getElementById('status'); return !!e && /^(Approved\\b|Change confirmed\\.)/.test(e.textContent.trim()); }", null, new() { Timeout = 20000 });
 
         // Back to the scenario's authenticator: the sign counts the tap moved.
         foreach (JsonElement credential in (await Credentials(cdp, authenticator)).EnumerateArray())
