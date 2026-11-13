@@ -147,7 +147,7 @@ internal static class ScenariosSpa
         await c.Presence(false);
         await dialog.GetByRole(AriaRole.Button, new() { Name = "Confirm this change" }).ClickAsync();
         await Task.Delay(100);
-        await dialog.GetByRole(AriaRole.Button, new() { Name = "Cancel the request" }).ClickAsync();
+        await dialog.GetByRole(AriaRole.Button, new() { Name = "Cancel the passkey prompt" }).ClickAsync();
         await dialog.GetByRole(AriaRole.Alert).WaitForAsync(new() { Timeout = 20000 });
         string passkeyFailure = await dialog.GetByRole(AriaRole.Alert).TextContentAsync() ?? "";
         s.Check(passkeyFailure.Contains("cancel", StringComparison.OrdinalIgnoreCase) && store.Find(refusedFp) is { Status: MachineStatus.Pending }, "cancelling WebAuthn in the same SPA reports cancellation and changes nothing");
@@ -401,8 +401,10 @@ internal static class ScenariosSpa
         c.Ignore("401");
         c.Ignore("404");
         await Spa.Continue(c, s, dialog);
-        await dialog.GetByText("Done").First.WaitForAsync(new() { Timeout = 20000 });
+        // The lock ends the session, so the page can no longer read this request's own outcome: it says so instead of claiming a result.
+        await dialog.GetByText("The outcome could not be confirmed").First.WaitForAsync(new() { Timeout = 20000 });
         s.Check(app.Service.Lock.IsLocked, "the tap locks the authority");
+        s.Check((await dialog.TextContentAsync() ?? "").Contains("Do not repeat this change", StringComparison.Ordinal), "the ended session leaves the outcome unconfirmed, not success");
         await dialog.GetByRole(AriaRole.Button, new() { Name = "Close" }).ClickAsync();
         await Spa.Heading(c, "Sign in").WaitForAsync(new() { Timeout = 20000 });
         s.Check(await c.Page.GetByText("The authority is locked").First.IsVisibleAsync(), "the locked authority is said in words on the sign-in view, which offers the unlock");

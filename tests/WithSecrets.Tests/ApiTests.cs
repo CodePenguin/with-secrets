@@ -87,6 +87,19 @@ internal static class ApiTests
         (int replay, _) = await Submit(id, signed);
         check(replay == 409 && app.Store.Find(fingerprint)!.FriendlyName == "inline-approved", "inline authorization: a verified assertion is single-use and replay changes nothing");
 
+        // A browser that did not see the answer may send the same assertion again: concurrent or repeated submissions must not race into two applications.
+        (string raceId, string raceBind, string raceRpId) = await Prepare("inline-race");
+        string raceSigned = app.Laptop.Assert(Decode(raceBind), browser.Origin, raceRpId, TestState.NextCount());
+        Task<(int Status, string Body)> first = Submit(raceId, raceSigned);
+        Task<(int Status, string Body)> second = Submit(raceId, raceSigned);
+        await Task.WhenAll(first, second);
+        int acceptedCount = (first.Result.Status == 200 ? 1 : 0) + (second.Result.Status == 200 ? 1 : 0);
+        int refusedCount = (first.Result.Status == 409 ? 1 : 0) + (second.Result.Status == 409 ? 1 : 0);
+        (_, string raceStateBody, _) = await browser.GetAsync("/api/v1/authorizations/" + raceId);
+        string raceState = JsonDocument.Parse(raceStateBody).RootElement.GetProperty("state").GetString()!;
+        check(acceptedCount == 1 && refusedCount == 1 && raceState == "consumed" && app.Store.Find(fingerprint)!.FriendlyName == "inline-race",
+            "inline authorization: two simultaneous submissions of one assertion apply the exact plan once (one accepted, one refused)");
+
         string beforeCancel = app.Store.Find(fingerprint)!.FriendlyName!;
         (string cancelId, _, _) = await Prepare("must-not-apply");
         (int cancelled, _) = await browser.SendAsync(HttpMethod.Delete, "/api/v1/authorizations/" + cancelId, null);

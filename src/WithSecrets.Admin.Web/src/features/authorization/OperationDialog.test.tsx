@@ -1,4 +1,4 @@
-import { cleanup, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { pendingAuthorization, setPendingAuthorization } from '../../api/client'
@@ -30,29 +30,51 @@ type Options = {
   settled?: Partial<ReturnType<typeof authorization>>
   created?: Partial<ReturnType<typeof authorization>>
   createReply?: ReturnType<typeof problem>
+  /** How many proof requests are answered with a lost connection (the service may or may not have received them). */
+  lostProofReplies?: number
+  /** False when a proof request whose answer is lost never reached the service. */
+  lostProofReached?: boolean
 }
+
+type ServiceState = { looks: number; proofs: number; accepted: number; applied: number; proved: boolean }
 
 /** The machines view with one pending machine; the service creates an authorization, the tap is made elsewhere, and after `pendingPolls` looks the service reports what the tap came to. */
 function setup(options: Options = {}) {
-  let looks = 0
-  let proved = false
+  const service: ServiceState = { looks: 0, proofs: 0, accepted: 0, applied: 0, proved: false }
+  const failedOperation = options.settled?.result?.outcome === 'failed'
+  const acceptProof = () => {
+    service.accepted++
+    service.proved = true
+    if (!failedOperation) service.applied++
+  }
 
-  return signedIn({
+  const fake = signedIn({
     'GET /api/v1/pairing/invitations': { body: { items: [] } },
     [inlinePath]:
       options.createReply ?? {
         status: 201,
         body: authorization({ link: null, proof: { mode: 'webauthn', payload: JSON.stringify({ bind: 'AQ', rpId: 'localhost', timeout: 60000 }) }, parameters: [{ name: 'fingerprint', value: machine().fingerprint }, { name: 'name', value: 'build-host' }], ...options.created }),
       },
-    [proofPath]: () => { proved = true; return { body: { ok: true } } },
+    [proofPath]: () => {
+      service.proofs++
+      if (service.proofs <= (options.lostProofReplies ?? 0)) {
+        if (options.lostProofReached !== false) acceptProof()
+        throw new TypeError('the answer was lost')
+      }
+      acceptProof()
+
+      return { body: { ok: true } }
+    },
     [getPath]: () => {
-      looks++
-      const settled = proved || looks > (options.pendingPolls ?? 100000)
+      service.looks++
+      const settled = service.proved || service.looks > (options.pendingPolls ?? 100000)
 
       return { body: authorization({ state: settled ? 'consumed' : 'pending', result: settled ? applied : null, ...(settled ? options.settled : {}) }) }
     },
     [deletePath]: { body: { ok: true } },
   })
+
+  return Object.assign(fake, { service })
 }
 
 async function openApprove(user: ReturnType<typeof userEvent.setup>) {
@@ -96,6 +118,132 @@ describe('an administrative change', () => {
     expect(pendingAuthorization()).toBeNull()
   })
 
+  it('shows the service result after the proof answer is lost, and applies the change exactly once', async () => {
+    const user = userEvent.setup()
+    const fake = setup({ lostProofReplies: 1, lostProofReached: true })
+    const dialog = await openApprove(user)
+    await user.click(within(dialog).getByRole('button', { name: 'Prepare confirmation' }))
+    await user.click(await within(dialog).findByRole('button', { name: 'Confirm this change' }))
+
+    // The lost answer is not a failure: the SPA keeps reading the authorization the service applied.
+    expect(await within(dialog).findByText('Done')).toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Close' })).toBeInTheDocument()
+    expect(fake.service.accepted).toBe(1)
+    expect(fake.service.applied).toBe(1)
+    expect(fake.service.proofs).toBe(1)
+    expect(vi.mocked(navigator.credentials.get)).toHaveBeenCalledTimes(1)
+    expect(fake.count(proofPath)).toBe(1)
+  })
+
+  it('does not claim success when the proof never reaches the service, and retries the same assertion safely', async () => {
+    const user = userEvent.setup()
+    const fake = setup({ lostProofReplies: 1, lostProofReached: false })
+    const dialog = await openApprove(user)
+    await user.click(within(dialog).getByRole('button', { name: 'Prepare confirmation' }))
+    await user.click(await within(dialog).findByRole('button', { name: 'Confirm this change' }))
+
+    // Bounded checking hands the person a safe way out instead of waiting forever.
+    expect(await within(dialog).findByText('The result is not confirmed yet')).toBeInTheDocument()
+    expect(within(dialog).queryByText('Done')).toBeNull()
+    expect(within(dialog).getByText(/The outcome could not be confirmed/)).toBeInTheDocument()
+    expect(within(dialog).queryByRole('button', { name: 'Confirm this change' })).toBeNull()
+
+    await user.click(within(dialog).getByRole('button', { name: 'Send the same confirmation again' }))
+
+    expect(await within(dialog).findByText('Done')).toBeInTheDocument()
+    expect(fake.service.proofs).toBe(2)
+    expect(fake.service.accepted).toBe(1)
+    expect(fake.service.applied).toBe(1)
+    // The retry reuses the service-bound assertion: no second passkey ceremony.
+    expect(vi.mocked(navigator.credentials.get)).toHaveBeenCalledTimes(1)
+    expect(fake.count(deletePath)).toBe(0)
+  })
+
+  it('cancels a request whose proof never reached the service without applying anything', async () => {
+    const user = userEvent.setup()
+    const fake = setup({ lostProofReplies: 1, lostProofReached: false })
+    const dialog = await openApprove(user)
+    await user.click(within(dialog).getByRole('button', { name: 'Prepare confirmation' }))
+    await user.click(await within(dialog).findByRole('button', { name: 'Confirm this change' }))
+    await within(dialog).findByText('The result is not confirmed yet')
+
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel the request' }))
+
+    const alert = await within(dialog).findByRole('alert')
+    expect(alert).toHaveTextContent('The request was cancelled before its passkey proof was accepted. Nothing was changed.')
+    expect(alert).toHaveTextContent('authorization-cancelled')
+    expect(fake.service.applied).toBe(0)
+    expect(fake.count(deletePath)).toBe(1)
+    expect(vi.mocked(navigator.credentials.get)).toHaveBeenCalledTimes(1)
+  })
+
+  it("reports the service's recorded failure after a lost proof answer", async () => {
+    const user = userEvent.setup()
+    const fake = setup({
+      lostProofReplies: 1,
+      lostProofReached: true,
+      settled: { result: { outcome: 'failed' as const, code: 'operation-failed', detail: 'the machine changed since the page was opened', link: null, invitation: null, invitationGone: false } },
+    })
+    const dialog = await openApprove(user)
+    await user.click(within(dialog).getByRole('button', { name: 'Prepare confirmation' }))
+    await user.click(await within(dialog).findByRole('button', { name: 'Confirm this change' }))
+
+    const alert = await within(dialog).findByRole('alert')
+    expect(alert).toHaveTextContent('The change was not made')
+    expect(alert).toHaveTextContent('the machine changed since the page was opened')
+    expect(alert).toHaveTextContent('operation-failed')
+    expect(within(dialog).queryByText('Done')).toBeNull()
+    expect(fake.service.accepted).toBe(1)
+    expect(fake.service.applied).toBe(0)
+  })
+
+  it('starts only one passkey ceremony and one proof submission for a rapid double click', async () => {
+    const user = userEvent.setup()
+    const fake = setup()
+    const dialog = await openApprove(user)
+    await user.click(within(dialog).getByRole('button', { name: 'Prepare confirmation' }))
+    const confirm = await within(dialog).findByRole('button', { name: 'Confirm this change' })
+
+    fireEvent.click(confirm)
+    fireEvent.click(confirm)
+
+    expect(await within(dialog).findByText('Done')).toBeInTheDocument()
+    expect(vi.mocked(navigator.credentials.get)).toHaveBeenCalledTimes(1)
+    expect(fake.service.proofs).toBe(1)
+    expect(fake.service.applied).toBe(1)
+  })
+
+  it('communicates uncertainty when the status endpoint cannot be read after a proof', async () => {
+    const user = userEvent.setup()
+    const fake = setup()
+    fake.on(getPath, () => {
+      throw new TypeError('offline')
+    })
+    const dialog = await openApprove(user)
+    await user.click(within(dialog).getByRole('button', { name: 'Prepare confirmation' }))
+    await user.click(await within(dialog).findByRole('button', { name: 'Confirm this change' }))
+
+    expect(await within(dialog).findByText('The result is not confirmed yet')).toBeInTheDocument()
+    expect(within(dialog).getByText(/The outcome could not be confirmed/)).toBeInTheDocument()
+    expect(within(dialog).queryByText('Done')).toBeNull()
+    expect(within(dialog).queryByText('The change was not made')).toBeNull()
+    expect(fake.service.proofs).toBe(1)
+  })
+
+  it('reports an expired authorization as its actual terminal state', async () => {
+    const user = userEvent.setup()
+    const fake = setup()
+    fake.on(getPath, { body: authorization({ state: 'expired', detail: 'The authorization ran out before it was used.' }) })
+    const dialog = await openApprove(user)
+    await user.click(within(dialog).getByRole('button', { name: 'Prepare confirmation' }))
+    await user.click(await within(dialog).findByRole('button', { name: 'Confirm this change' }))
+
+    const alert = await within(dialog).findByRole('alert')
+    expect(alert).toHaveTextContent('authorization-expired')
+    expect(alert).toHaveTextContent('The authorization ran out before it was used.')
+    expect(within(dialog).queryByText('Done')).toBeNull()
+  })
+
   it('cancels the request at the service when it is cancelled before the tap', async () => {
     const user = userEvent.setup()
     const fake = setup({ pendingPolls: 1000 })
@@ -118,7 +266,10 @@ describe('an administrative change', () => {
     await within(dialog).findByRole('button', { name: 'Confirm this change' })
     vi.mocked(navigator.credentials.get).mockRejectedValueOnce(new DOMException('cancelled', 'NotAllowedError'))
     await user.click(within(dialog).getByRole('button', { name: 'Confirm this change' }))
-    expect(await within(dialog).findByRole('alert')).toHaveTextContent('The page could not finish this.')
+    const alert = await within(dialog).findByRole('alert')
+    expect(alert).toHaveTextContent('The passkey prompt was cancelled. Nothing was changed.')
+    expect(alert).toHaveTextContent('passkey-cancelled')
+    expect(within(dialog).queryByText('Done')).toBeNull()
     expect(fake.count(proofPath)).toBe(0)
     expect(fake.count(deletePath)).toBe(1)
   })
@@ -237,7 +388,7 @@ describe('a tap is never lost: the page that comes back reads what the service m
     expect(pendingAuthorization()?.id).toBe('auth-id-0001')
   })
 
-  it('a lock ends the session and the authorization: the page asks the authority, and says it is locked', async () => {
+  it('a lock that ended the session leaves the outcome unconfirmed, not success', async () => {
     const fake = setup()
     fake.on(getPath, problem(401, 'session-required', 'no session'))
     fake.on('GET /api/v1/status', { body: status({ locked: true }) })
@@ -245,7 +396,11 @@ describe('a tap is never lost: the page that comes back reads what the service m
     renderApp('/machines')
 
     const dialog = await screen.findByRole('dialog')
-    expect(await within(dialog).findByText('The authority is locked.')).toBeInTheDocument()
+    const alert = await within(dialog).findByRole('alert')
+    expect(alert).toHaveTextContent('The outcome could not be confirmed')
+    expect(alert).toHaveTextContent(/audit history/)
+    expect(within(dialog).queryByText('Done')).toBeNull()
+    expect(within(dialog).queryByText('The authority is locked.')).toBeNull()
   })
 
   it('a session that ended before the result could be read says so, and where to look', async () => {

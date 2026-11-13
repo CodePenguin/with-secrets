@@ -33,7 +33,7 @@ internal static class ScenariosPairing
         await dialog.GetByText("Review before confirming").WaitForAsync();
         s.Check(store.Invitations().Count == 0, "nothing is created while the tap is outstanding");
         string page = await Spa.TapAfterBack(c, s, invitationPage, null);
-        s.Check(page.Contains("Done", StringComparison.Ordinal) && page.Contains("one-time pairing invitation", StringComparison.OrdinalIgnoreCase), "the SPA displays the service-confirmed one-time invitation: " + page);
+        s.Check(page.Contains("Done", StringComparison.Ordinal) && page.Contains("one-time invitation", StringComparison.OrdinalIgnoreCase), "the SPA displays the service-confirmed one-time invitation: " + page);
         ILocator box = dialog.Locator("textarea#pairing-bundle");
         await box.WaitForAsync(new() { Timeout = 20000 });
         string bundleText = await box.InputValueAsync();
