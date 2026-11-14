@@ -697,6 +697,9 @@ internal sealed partial class AdminApi
         if (!Regex.IsMatch(requestId, "^[A-Za-z0-9_-]{1,64}$") || admin.Approvals is not { } queue)
             return Task.FromResult(new ApiResult(404, new ApiProblem(404, "request-unavailable", "no request is available for that id")));
 
+        if (queue.GetDetail(requestId, admin.ProcessedApproval) is null)
+            return Task.FromResult(new ApiResult(404, new ApiProblem(404, "request-unavailable", "no request is available for that id")));
+
         IProofMethod? method = admin.ApprovalProof;
         if (method is null)
             return Task.FromResult(new ApiResult(503, new ApiProblem(503, "internal-error", "no passkey proof method is available")));
