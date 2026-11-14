@@ -389,11 +389,11 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
                 return;
             }
 
+            _entries.Remove(requestId);
             entry.Expiry?.Cancel();
             entry.Expiry?.Dispose();
             entry.Expiry = null;
             DropFlowsUnlocked(requestId);
-            _entries.Remove(requestId);
             entry.Decision.TrySetResult(ApprovalDecision.Deny("the authority offer ended before a decision was committed", reasonCode: ReasonCodes.Cancelled));
         }
     }
@@ -426,11 +426,13 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
     {
         entry.DecisionInProgress = true;
         entry.Actor = decision.Actor;
-        entry.Expiry?.Cancel();
-        entry.Expiry?.Dispose();
-        entry.Expiry = null;
+        // Leave the expiry callback armed while the authority commits. It retries while DecisionInProgress is true;
+        // MarkCommitted changes Status before cancelling the timer, so cancellation cannot be mistaken for expiry.
         DropFlowsUnlocked(entry.Review.RequestId);
-        entry.Decision.TrySetResult(decision);
+        if (!entry.Decision.TrySetResult(decision))
+        {
+            decision.Unlock?.Dispose();
+        }
     }
 
     private void CompleteUnlocked(Entry entry, ApprovalDecision decision, string status)
@@ -680,7 +682,6 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
                 if (_entries.TryGetValue(requestId, out Entry? current) && ReferenceEquals(current, entry) && current.Status == ApprovalStatuses.Pending)
                 {
                     current.DecisionInProgress = false;
-                    ScheduleExpiryUnlocked(current);
                 }
             }
 
