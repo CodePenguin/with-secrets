@@ -134,6 +134,25 @@ internal static class ApiTests
         (int claimed, _) = await browser.ClaimAsync();
         check(started == 201 && noLink && verified == 200 && claimed == 201 && await browser.StillSignedIn(), "inline sign-in: service challenge is tapped and claimed in the same SPA without a passkey page");
 
+        AdminBrowser approvalBrowser = app.Browser();
+        await approvalBrowser.LoadAsync();
+        (int approvalStarted, string approvalBody) = await approvalBrowser.PostAsync("/api/v1/session/inline", "{}");
+        using JsonDocument approvalResponse = JsonDocument.Parse(approvalBody);
+        string approvalPayloadText = approvalResponse.RootElement.GetProperty("proof").GetProperty("payload").GetString()!;
+        using JsonDocument approvalPayload = JsonDocument.Parse(approvalPayloadText);
+        string approvalBind = approvalPayload.RootElement.GetProperty("bind").GetString()!;
+        string approvalRpId = approvalPayload.RootElement.GetProperty("rpId").GetString()!;
+        byte[] approvalChallenge = Convert.FromBase64String(approvalBind.Replace('-', '+').Replace('_', '/') + new string('=', (4 - approvalBind.Length % 4) % 4));
+        string approvalSigned = app.Phone.Assert(approvalChallenge, approvalBrowser.Origin, approvalRpId, TestState.NextCount());
+        (int approvalVerified, _) = await approvalBrowser.PostAsync("/api/v1/session/inline/proof", JsonSerializer.Serialize(new { proof = approvalSigned }));
+        (int approvalClaimed, _) = await approvalBrowser.ClaimAsync();
+        string approvalSessionBody = (await approvalBrowser.GetAsync("/api/v1/session")).Html;
+        check(approvalStarted == 201 && approvalVerified == 200 && approvalClaimed == 201
+            && Member(approvalSessionBody, "identity") == "phone" && Member(approvalSessionBody, "scope") == "approval",
+            "inline sign-in: a non-admin enrolled passkey receives an approval-only session");
+        (int approvalSignOut, _) = await approvalBrowser.SendAsync(HttpMethod.Delete, "/api/v1/session", null);
+        check(approvalSignOut == 200, "inline sign-in: approval-only session can sign out");
+
         AdminBrowser cancelled = app.Browser();
         await cancelled.LoadAsync();
         (int pending, _) = await cancelled.PostAsync("/api/v1/session/inline", "{}");
