@@ -572,10 +572,15 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
             {
                 start = method.Start(context);
             }
-            catch (ProofUnavailableException error)
+            catch (ProofUnavailableException)
             {
                 if (prfState is not null) CryptographicOperations.ZeroMemory(prfState);
-                return (null, "internal-error", error.Message);
+                return (null, "internal-error", "the passkey challenge could not be prepared");
+            }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            {
+                if (prfState is not null) CryptographicOperations.ZeroMemory(prfState);
+                return (null, "internal-error", "the passkey challenge could not be prepared");
             }
 
             if (start.Mode != "webauthn")
