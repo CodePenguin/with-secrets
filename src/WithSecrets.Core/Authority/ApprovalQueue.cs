@@ -869,22 +869,6 @@ public sealed class ApprovalQueue : IDisposable
         }
     }
 
-    /// <summary>Completes a pending request from the CLI one-shot page (first decision wins).</summary>
-    public bool TryCompleteFromCli(string requestId, ApprovalDecision decision)
-    {
-        lock (_gate)
-        {
-            if (!_entries.TryGetValue(requestId, out Entry? entry) || entry.Status != ApprovalStatuses.Pending)
-            {
-                return false;
-            }
-
-            ReleaseUnlocked(entry, decision);
-
-            return true;
-        }
-    }
-
     public int PendingCount
     {
         get
