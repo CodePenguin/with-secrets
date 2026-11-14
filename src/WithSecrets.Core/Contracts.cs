@@ -142,14 +142,14 @@ public sealed record DecisionActor
     public static DecisionActor ForSession(string identity) => new("session", identity);
 }
 
-public sealed record ApprovalDecision(bool Approved, string Detail, int ReuseMinutes = 0, ApprovalEvidence? Evidence = null, Unlock? Unlock = null, string? Actor = null, string? ReasonCode = null, VerifiedCredential? Credential = null, DecisionActor? DecisionActor = null)
+public sealed record ApprovalDecision(bool Approved, string Detail, int ReuseMinutes = 0, ApprovalEvidence? Evidence = null, Unlock? Unlock = null, string? Actor = null, string? ReasonCode = null, VerifiedCredential? Credential = null, DecisionActor? DecisionPrincipal = null)
 {
     public static ApprovalDecision Allow(string detail = "approved", int reuseMinutes = 0, ApprovalEvidence? evidence = null, Unlock? unlock = null, string? actor = null, VerifiedCredential? credential = null)
         => new(true, detail, reuseMinutes, evidence, unlock, actor ?? credential?.Name, Credential: credential,
-            DecisionActor: credential is null ? null : DecisionActor.ForPasskey(credential));
+            DecisionPrincipal: credential is null ? null : DecisionActor.ForPasskey(credential));
 
     public static ApprovalDecision Deny(string detail, string? actor = null, string? reasonCode = null)
-        => new(false, detail, Actor: actor, ReasonCode: reasonCode, DecisionActor: actor is null ? null : DecisionActor.ForSession(actor));
+        => new(false, detail, Actor: actor, ReasonCode: reasonCode, DecisionPrincipal: actor is null ? null : DecisionActor.ForSession(actor));
 
     /// <summary>The detail of a decision that came from the approval time limit running out (nobody answered).</summary>
     public const string TimeLimitDetail = "no answer before the time limit";
