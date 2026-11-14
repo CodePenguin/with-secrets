@@ -1100,7 +1100,7 @@ internal static class ApiTests
 
         (string Path, string Schema)[] shapes =
         [
-            ("/api/v1/status", "Status"), ("/api/v1/session", "Session"), ("/api/v1/machines", "MachineList"), ("/api/v1/machines/" + app.Fingerprint[..20], "Machine"), ("/api/v1/grants", "GrantList"), ("/api/v1/audit/events", "AuditEventList"),
+            ("/api/v1/status", "Status"), ("/api/v1/session", "Session"), ("/api/v1/approvals", "ApprovalQueue"), ("/api/v1/machines", "MachineList"), ("/api/v1/machines/" + app.Fingerprint[..20], "Machine"), ("/api/v1/grants", "GrantList"), ("/api/v1/audit/events", "AuditEventList"),
             ("/api/v1/audit/changes", "AuditChangeList"), ("/api/v1/audit/gaps", "AuditGapList"), ("/api/v1/settings", "Settings"), ("/api/v1/passkeys", "Passkeys"),
         ];
         foreach ((string path, string schema) in shapes)
@@ -1108,6 +1108,14 @@ internal static class ApiTests
             (int shapeStatus, string answer, _) = await s.GetAsync(path);
             check(shapeStatus == 200 && Conform(schema, answer) is null, "openapi: the answer of " + path + " conforms to " + schema + " (" + Conform(schema, answer) + ")");
         }
+
+        (int missingApprovalStatus, string missingApprovalBody, _) = await s.GetAsync("/api/v1/approvals/req-unknown");
+        (int missingChallengeStatus, string missingChallengeBody, _) = await s.PostAsync("/api/v1/approvals/req-unknown/challenge", "{}");
+        (int malformedApprovalStatus, string malformedApprovalBody, _) = await s.PostAsync("/api/v1/approvals/req-unknown/approve", "{}");
+        check(missingApprovalStatus == 404 && Code(missingApprovalBody) == "request-unavailable"
+            && missingChallengeStatus == 404 && Code(missingChallengeBody) == "request-unavailable"
+            && malformedApprovalStatus == 400 && Code(malformedApprovalBody) == "invalid-request",
+            "approvals: unknown ids are non-enumerating and decision bodies are schema-validated");
 
         (int createStatus, string createBody) = await s.PostAsync("/api/v1/authorizations", AdminBrowser.AuthorizationBody("machine-rename", ("fingerprint", app.Fingerprint[..20]), ("name", "shape")));
         check(createStatus == 201 && Conform("Authorization", createBody) is null, "openapi: the answer of POST /authorizations conforms to Authorization (" + Conform("Authorization", createBody) + ")");
