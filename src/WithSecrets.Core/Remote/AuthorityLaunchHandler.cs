@@ -30,6 +30,7 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
     private readonly Func<Action<string>, IApprover> _approver;
     private readonly AuthorityLock? _lock;
     private readonly TimeProvider _clock;
+    private readonly ApprovalQueue? _approvals;
     private readonly Lock _gate = new();
     private readonly HashSet<CancellationTokenSource> _open = [];
     private readonly Dictionary<string, Held> _held = new(StringComparer.Ordinal);
@@ -39,7 +40,7 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
 
     private sealed record Held(StoreKeyHolder Holder, int SecurityRevision);
 
-    public AuthorityLaunchHandler(LocalAuthority authority, AuthorityKeyRing keys, AuthorityStore store, ISecretSource secrets, Func<Action<string>, IApprover> approver, AuthorityLock? lockState, TimeProvider? clock = null, TimeSpan? sweepInterval = null)
+    public AuthorityLaunchHandler(LocalAuthority authority, AuthorityKeyRing keys, AuthorityStore store, ISecretSource secrets, Func<Action<string>, IApprover> approver, AuthorityLock? lockState, TimeProvider? clock = null, TimeSpan? sweepInterval = null, ApprovalQueue? approvals = null)
     {
         _authority = authority;
         _keys = keys;
@@ -48,6 +49,7 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
         _approver = approver;
         _lock = lockState;
         _clock = clock ?? TimeProvider.System;
+        _approvals = approvals;
         lockState?.OnLock(reason =>
         {
             CancelAll();
@@ -299,14 +301,34 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
         IDisposable offer;
         try
         {
-            offer = _authority.Offer(request.RequestId, request.Digest(), () =>
+            if (_approvals is not null)
             {
-                presented = true;
-                IApprover approver = _approver(Announce(announceLink));
-                decision = approver.Request(page, cancel);
-
-                return decision;
-            });
+                ApprovalReviewProjection review = ApprovalQueue.BuildReview(request.RequestId, request.Digest(), _clock.GetUtcNow(), request.Expires, machine, page);
+                if (!_approvals.TryRegister(review, out _))
+                {
+                    offer = _authority.Offer(request.RequestId, request.Digest(),
+                        () => ApprovalDecision.Deny("the authority approval queue is full", reasonCode: ReasonCodes.ApprovalQueueFull));
+                }
+                else
+                {
+                    offer = _authority.Offer(request.RequestId, request.Digest(), () =>
+                    {
+                        presented = true;
+                        decision = _approvals.Wait(request.RequestId, cancel);
+                        return decision;
+                    }, response => _approvals.MarkCommitted(request.RequestId, response));
+                }
+            }
+            else
+            {
+                offer = _authority.Offer(request.RequestId, request.Digest(), () =>
+                {
+                    presented = true;
+                    IApprover approver = _approver(Announce(announceLink));
+                    decision = approver.Request(page, cancel);
+                    return decision;
+                });
+            }
         }
         catch (InvalidOperationException)
         {
