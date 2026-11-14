@@ -80,7 +80,7 @@ public sealed partial class AdminService
         }
         VerifiedCredential? credential = result.Credential;
         Sessions.CompleteLogin(login.Code, result.Ok ? credential?.Name ?? result.Admin?.Signer ?? "(unnamed)" : null,
-            result.Ok ? null : result.Detail, credential is null ? SessionScope.Admin : SessionScope.FromAdminFlag(credential.Admin));
+            result.Ok ? null : result.Detail, credential is null ? SessionScope.Approval : SessionScope.FromAdminFlag(credential.Admin));
         return result.Ok;
     }
 
