@@ -83,7 +83,7 @@ internal static class ApprovalQueueTests
             StartedBind = [.. context.Bind];
             return new ProofStart("webauthn", JsonSerializer.Serialize(new
             {
-                bind = Base64Url.EncodeToString(context.Bind),
+                bind = Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlEncode(context.Bind),
                 rpId = "localhost",
                 timeout = 120_000,
                 salt = (string?)null,
@@ -116,7 +116,7 @@ internal static class ApprovalQueueTests
         byte[]? opened = null;
         try
         {
-            byte[] serverPoint = Base64Url.DecodeFromChars(serverPublic);
+            byte[] serverPoint = Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlDecode(serverPublic);
             using ECDiffieHellman serverPublicKey = ECDiffieHellman.Create(new ECParameters
             {
                 Curve = ECCurve.NamedCurves.nistP256,
@@ -134,16 +134,16 @@ internal static class ApprovalQueueTests
                 aes.Encrypt(iv, plaintext, sealedBytes.AsSpan(0, plaintext.Length), sealedBytes.AsSpan(plaintext.Length), bind);
             }
 
-            opened = SecretCrypto.DecryptBytes(serverState, bind, Base64Url.EncodeToString(browserPoint),
-                Base64Url.EncodeToString(iv), Base64Url.EncodeToString(sealedBytes), SecretCrypto.PrfInfo);
+            opened = SecretCrypto.DecryptBytes(serverState, bind, Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlEncode(browserPoint),
+                Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlEncode(iv), Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlEncode(sealedBytes), SecretCrypto.PrfInfo);
             check(opened.SequenceEqual(plaintext), "approvals: authority opens the browser-sealed PRF output with the same request binding");
             bool wrongBindingRejected = false;
             try
             {
                 byte[] wrongBind = [.. bind];
                 wrongBind[0] ^= 0x01;
-                byte[] unexpected = SecretCrypto.DecryptBytes(serverState, wrongBind, Base64Url.EncodeToString(browserPoint),
-                    Base64Url.EncodeToString(iv), Base64Url.EncodeToString(sealedBytes), SecretCrypto.PrfInfo);
+                byte[] unexpected = SecretCrypto.DecryptBytes(serverState, wrongBind, Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlEncode(browserPoint),
+                    Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlEncode(iv), Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlEncode(sealedBytes), SecretCrypto.PrfInfo);
                 CryptographicOperations.ZeroMemory(unexpected);
             }
             catch (CryptographicException)
