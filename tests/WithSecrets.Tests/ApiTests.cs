@@ -197,10 +197,9 @@ internal static class ApiTests
             check(readStatus == 401 && ContentType(readResponse) == "application/problem+json" && Code(readBody) == "session-required" && !readBody.Contains(app.Fingerprint, StringComparison.Ordinal), "api read " + route.Template + " is not served without a session (401 session-required)");
         }
 
-        // Only an admin key's fresh tap with user verification, on the page of this login, starts a session.
+        // Any enrolled key may start a session; the trusted credential record determines its scope.
         (string Label, TestAuthenticator Who, bool Uv, Func<byte[], byte[]>? Change)[] bad =
         [
-            ("a key that is not an admin key", app.Phone, true, null),
             ("an assertion without user verification", app.Laptop, false, null),
             ("a signature over another challenge", app.Laptop, true, challenge => SHA256.HashData(challenge)),
         ];
@@ -219,7 +218,7 @@ internal static class ApiTests
         string token = b.Cookies[AdminSessions.SessionCookie];
         check(cookie.Length == 0 || (cookie.Contains("httponly", StringComparison.OrdinalIgnoreCase) && cookie.Contains("samesite=strict", StringComparison.OrdinalIgnoreCase) && cookie.Contains("path=/api/v1", StringComparison.OrdinalIgnoreCase)), "session: the cookie (when set) is HttpOnly, SameSite=Strict and scoped to /api/v1");
         (int whoStatus, string whoami, HttpResponseMessage whoResponse) = await b.GetAsync("/api/v1/session");
-        check(whoStatus == 200 && Member(whoami, "authenticated") == "true" && Member(whoami, "admin") == "laptop" && !whoami.Contains("antiForgery", StringComparison.OrdinalIgnoreCase) && b.SessionToken != browserToken && !whoami.Contains(b.SessionToken!, StringComparison.Ordinal) && Member(whoami, "idleExpires") is { Length: > 10 } && Member(whoami, "absoluteExpires") is { Length: > 10 } && !whoami.Contains(token, StringComparison.Ordinal), "session: whoami names the key that tapped, when it ends, never the token or any secret (the session secret is given once, by the claim)");
+        check(whoStatus == 200 && Member(whoami, "authenticated") == "true" && Member(whoami, "identity") == "laptop" && Member(whoami, "scope") == "admin" && !whoami.Contains("antiForgery", StringComparison.OrdinalIgnoreCase) && b.SessionToken != browserToken && !whoami.Contains(b.SessionToken!, StringComparison.Ordinal) && Member(whoami, "idleExpires") is { Length: > 10 } && Member(whoami, "absoluteExpires") is { Length: > 10 } && !whoami.Contains(token, StringComparison.Ordinal), "session: whoami names the key that tapped, when it ends, never the token or any secret (the session secret is given once, by the claim)");
         _ = whoResponse;
         string seen = string.Join("\n", b.Seen);
         check(!seen.Contains(token, StringComparison.Ordinal) || seen.Split('\n').Where(line => line.Contains(token, StringComparison.Ordinal)).All(line => line.StartsWith("Set-Cookie", StringComparison.OrdinalIgnoreCase)), "session: the token is in the Set-Cookie header only, in no body");
@@ -230,8 +229,30 @@ internal static class ApiTests
         }
 
         string audit = AuditText(app.Store);
-        check(app.Store.Audit(1000).Any(entry => entry.Event == "admin-operation" && entry.Detail.StartsWith("admin-session; started", StringComparison.Ordinal) && entry.Actor == "admin passkey laptop"), "session: the start is in the authority's audit history with the key that tapped");
+        check(app.Store.Audit(1000).Any(entry => entry.Event == "admin-operation" && entry.Detail.StartsWith("admin-session; started", StringComparison.Ordinal) && entry.Actor == "passkey laptop"), "session: the start is in the authority's audit history with the key that tapped");
         check(!audit.Contains(token, StringComparison.Ordinal) && !audit.Contains("authenticatorData", StringComparison.Ordinal), "session: the audit history holds neither the token nor a proof");
+
+        // A non-admin enrolled passkey receives only the Approvals capability set.
+        AdminBrowser approvalOnly = app.Browser();
+        check(await approvalOnly.SignInAsync(app.Phone), "session: a non-admin enrolled passkey can sign in");
+        string approvalWho = (await approvalOnly.GetAsync("/api/v1/session")).Html;
+        using (JsonDocument approvalSession = JsonDocument.Parse(approvalWho))
+        {
+            string[] capabilities = [.. approvalSession.RootElement.GetProperty("capabilities").EnumerateArray().Select(item => item.GetString()!)];
+            check(Member(approvalWho, "identity") == "phone" && Member(approvalWho, "scope") == "approval"
+                && capabilities.SequenceEqual([SessionCapabilities.ApprovalsRead, SessionCapabilities.ApprovalsDecide]),
+                "session: the non-admin passkey receives approval scope and no admin capabilities");
+        }
+        (int approvalQueueStatus, string approvalQueueBody, _) = await approvalOnly.GetAsync("/api/v1/approvals");
+        (int approvalAdminRead, string approvalAdminBody, _) = await approvalOnly.GetAsync("/api/v1/machines");
+        (int approvalAdminWrite, string approvalWriteBody, _) = await approvalOnly.PostAsync("/api/v1/lock", "{\"authorization\":\"AAAAAAAAAAAA\"}");
+        check(approvalQueueStatus == 200 && Member(approvalQueueBody, "items") is not null
+            && approvalAdminRead == 403 && Code(approvalAdminBody) == "scope-required"
+            && approvalAdminWrite == 403 && Code(approvalWriteBody) == "scope-required",
+            "session: approval scope can read Approvals but cannot read machines or perform admin changes");
+        (int approvalSignOut, _) = await approvalOnly.SendAsync(HttpMethod.Delete, "/api/v1/session", null);
+        check(approvalSignOut == 200, "session: approval-only sessions can sign out");
+
         string machines = (await b.GetAsync("/api/v1/machines")).Html;
         using (JsonDocument doc = JsonDocument.Parse(machines))
         {
@@ -656,7 +677,7 @@ internal static class ApiTests
         check(approved.MutationStatus == 200 && store.Find(fp) is { Status: MachineStatus.Trusted, FriendlyName: "dev laptop" }, "machine approve: the admin key's tap approves the machine");
         check(approved.Page.Contains(display, StringComparison.Ordinal) && approved.Page.Contains("approve this machine", StringComparison.Ordinal) && approved.Page.Contains("dev laptop", StringComparison.Ordinal), "machine approve: the page (which the passkey signs) shows the action, the full fingerprint and the name");
         check(hostConfig.Load().Config is { Authority: not null } config && config.MachineFingerprint == fp, "machine approve: the authority key is pinned in host.json");
-        check(store.Audit().Any(entry => entry.Event == "machine-approve" && entry.Actor == "admin passkey laptop"), "machine approve: the audit history names the admin key that tapped");
+        check(store.Audit().Any(entry => entry.Event == "machine-approve" && entry.Actor == "passkey laptop"), "machine approve: the audit history names the admin key that tapped");
 
         (string Op, string? Name, string Phrase, MachineStatus After)[] steps =
         [
