@@ -333,7 +333,7 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
                 return;
             }
 
-            CompleteUnlocked(entry, ApprovalDecision.Deny(ApprovalDecision.TimeLimitDetail), ApprovalStatuses.Expired);
+            ReleaseUnlocked(entry, ApprovalDecision.Deny(ApprovalDecision.TimeLimitDetail, reasonCode: ReasonCodes.ApprovalTimeout));
         }
     }
 
@@ -347,11 +347,11 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
                 return;
             }
 
-            CompleteUnlocked(entry, ApprovalDecision.Deny(detail), ApprovalStatuses.Cancelled);
+            ReleaseUnlocked(entry, ApprovalDecision.Deny(detail, reasonCode: ReasonCodes.Cancelled));
         }
     }
 
-    /// <summary>Removes the registration when the Offer is disposed without a decision (fail closed).</summary>
+    /// <summary>Removes an uncommitted registration when the authority offer is withdrawn or its durable decision failed.</summary>
     public void Withdraw(string requestId)
     {
         lock (_gate)
@@ -361,8 +361,45 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
                 return;
             }
 
-            CompleteUnlocked(entry, ApprovalDecision.Deny("cancelled"), ApprovalStatuses.Cancelled);
+            entry.Expiry?.Cancel();
+            entry.Expiry?.Dispose();
+            entry.Expiry = null;
+            DropFlowsUnlocked(requestId);
+            _entries.Remove(requestId);
+            entry.Decision.TrySetResult(ApprovalDecision.Deny("the authority offer ended before a decision was committed", reasonCode: ReasonCodes.Cancelled));
         }
+    }
+
+    /// <summary>Reconciles the SPA projection after LocalAuthority has committed the signed response.</summary>
+    public void MarkCommitted(string requestId, AuthorityResponse response)
+    {
+        lock (_gate)
+        {
+            if (!_entries.TryGetValue(requestId, out Entry? entry) || entry.Status != ApprovalStatuses.Pending)
+            {
+                return;
+            }
+
+            entry.Status = response.Decision == AuthorityDecision.Approved ? ApprovalStatuses.Approved
+                : response.ReasonCode == ReasonCodes.ApprovalTimeout ? ApprovalStatuses.Expired
+                : response.ReasonCode == ReasonCodes.Cancelled ? ApprovalStatuses.Cancelled
+                : ApprovalStatuses.Denied;
+            entry.DecidedAt = response.Issued;
+            entry.DecisionInProgress = false;
+            entry.TerminalUntil = response.Issued + TerminalRetention;
+            entry.Expiry?.Cancel();
+            entry.Expiry?.Dispose();
+            entry.Expiry = null;
+            DropFlowsUnlocked(requestId);
+        }
+    }
+
+    private void ReleaseUnlocked(Entry entry, ApprovalDecision decision)
+    {
+        entry.DecisionInProgress = true;
+        entry.Actor = decision.Actor;
+        DropFlowsUnlocked(entry.Review.RequestId);
+        entry.Decision.TrySetResult(decision);
     }
 
     private void CompleteUnlocked(Entry entry, ApprovalDecision decision, string status)
@@ -617,7 +654,7 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
                 return ReconcileConflict(requestId, processed, expected: ApprovalStatuses.Approved);
             }
 
-            CompleteUnlocked(current, decision, ApprovalStatuses.Approved);
+            ReleaseUnlocked(current, decision);
         }
 
         return (GetDetail(requestId, processed), null, null);
@@ -646,7 +683,7 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
                 return (null, "decision-already-made", "a different decision was already recorded for this request");
             }
 
-            CompleteUnlocked(entry, ApprovalDecision.Deny("denied on the approvals page", sessionIdentity), ApprovalStatuses.Denied);
+            ReleaseUnlocked(entry, ApprovalDecision.Deny("denied on the approvals page", sessionIdentity));
         }
 
         return (GetDetail(requestId, processed), null, null);
