@@ -278,8 +278,8 @@ public sealed class ApprovalQueue : IDisposable
     }
 
     /// <summary>
-    /// Registers a pending request. Returns false when the authority-wide pending cap is reached (caller must refuse with
-    /// <see cref="ReasonCodes.ApprovalQueueFull" /> without evicting).
+    /// Convenience registration check for callers that only need to know whether this ID is new or already pending.
+    /// Use <see cref="Register" /> when the caller must distinguish duplicates, terminal results, conflicts and capacity.
     /// </summary>
     public bool TryRegister(ApprovalReviewProjection review, out TaskCompletionSource<ApprovalDecision> waiter)
     {
