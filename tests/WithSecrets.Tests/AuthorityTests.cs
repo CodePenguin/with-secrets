@@ -528,13 +528,13 @@ internal static class AuthorityTests
         {
             deniedAsked++;
 
-            return ApprovalDecision.Deny("no thanks", actor: "session identity");
+            return ApprovalDecision.Deny("no thanks", actor: "identity");
         }))
         {
             AuthorityResponse no = await fx.Machine.Deployment.Authority.DecideAsync(deniedEnvelope);
             AuthorityResponse noAgain = await fx.Machine.Deployment.Authority.DecideAsync(deniedEnvelope);
             check(no.ReasonCode == ReasonCodes.UserDenied && noAgain.ToJson() == no.ToJson() && deniedAsked == 1
-                && fx.Store.Audit().Any(entry => entry.Event == "decision-denied" && entry.RequestId == "idem-2" && entry.Actor == "session session identity"),
+                && fx.Store.Audit().Any(entry => entry.Event == "decision-denied" && entry.RequestId == "idem-2" && entry.Actor == "session identity"),
                 "idempotent: a denial is committed once and attributed to the authenticated session identity");
         }
 
