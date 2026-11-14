@@ -310,12 +310,6 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
                 Expiry = new CancellationTokenSource(),
             };
             _entries[review.RequestId] = entry;
-            TimeSpan delay = effective - clock.GetUtcNow();
-            if (delay < TimeSpan.Zero)
-            {
-                delay = TimeSpan.Zero;
-            }
-
             ScheduleExpiryUnlocked(entry);
 
             return true;
