@@ -245,7 +245,7 @@ internal static class ApiTests
         }
         (int approvalQueueStatus, string approvalQueueBody, _) = await approvalOnly.GetAsync("/api/v1/approvals");
         (int approvalAdminRead, string approvalAdminBody, _) = await approvalOnly.GetAsync("/api/v1/machines");
-        (int approvalAdminWrite, string approvalWriteBody, _) = await approvalOnly.PostAsync("/api/v1/lock", "{\"authorization\":\"AAAAAAAAAAAA\"}");
+        (int approvalAdminWrite, string approvalWriteBody) = await approvalOnly.PostAsync("/api/v1/lock", "{\"authorization\":\"AAAAAAAAAAAA\"}");
         using (JsonDocument approvalQueueDocument = JsonDocument.Parse(approvalQueueBody))
         {
             check(approvalQueueStatus == 200 && approvalQueueDocument.RootElement.GetProperty("items").GetArrayLength() == 0
@@ -1111,8 +1111,8 @@ internal static class ApiTests
         }
 
         (int missingApprovalStatus, string missingApprovalBody, _) = await s.GetAsync("/api/v1/approvals/req-unknown");
-        (int missingChallengeStatus, string missingChallengeBody, _) = await s.PostAsync("/api/v1/approvals/req-unknown/challenge", "{}");
-        (int malformedApprovalStatus, string malformedApprovalBody, _) = await s.PostAsync("/api/v1/approvals/req-unknown/approve", "{}");
+        (int missingChallengeStatus, string missingChallengeBody) = await s.PostAsync("/api/v1/approvals/req-unknown/challenge", "{}");
+        (int malformedApprovalStatus, string malformedApprovalBody) = await s.PostAsync("/api/v1/approvals/req-unknown/approve", "{}");
         check(missingApprovalStatus == 404 && Code(missingApprovalBody) == "request-unavailable"
             && missingChallengeStatus == 404 && Code(missingChallengeBody) == "request-unavailable"
             && malformedApprovalStatus == 400 && Code(malformedApprovalBody) == "invalid-request",
@@ -1129,10 +1129,10 @@ internal static class ApiTests
         check(queueListStatus == 200 && Conform("ApprovalQueue", queueListBody) is null
             && detailStatus == 200 && Conform("ApprovalDetail", detailBody) is null,
             "approvals: queue and full detail responses conform to OpenAPI");
-        (int challengeStatus, string challengeBody, _) = await s.PostAsync("/api/v1/approvals/" + approvalId + "/challenge", "{}");
+        (int challengeStatus, string challengeBody) = await s.PostAsync("/api/v1/approvals/" + approvalId + "/challenge", "{}");
         check(challengeStatus == 201 && Conform("ApprovalChallenge", challengeBody) is null,
             "approvals: the request-bound challenge response conforms to OpenAPI");
-        (int denyStatus, string denyBody, _) = await s.PostAsync("/api/v1/approvals/" + approvalId + "/deny", "{}");
+        (int denyStatus, string denyBody) = await s.PostAsync("/api/v1/approvals/" + approvalId + "/deny", "{}");
         check(denyStatus == 200 && Conform("ApprovalDetail", denyBody) is null,
             "approvals: denial is accepted without a WebAuthn assertion");
         ApprovalDecision deniedApproval = app.Service.Approvals.Wait(approvalId, CancellationToken.None);
