@@ -670,7 +670,7 @@ internal sealed partial class AdminApi
         string? cursor = null;
         if (call.Context.Request.Query.TryGetValue("cursor", out Microsoft.Extensions.Primitives.StringValues cursorText))
         {
-            if (cursorText.Count != 1 || cursorText[0] is not { Length: > 0 and <= 128 } value)
+            if (cursorText.Count != 1 || cursorText[0] is not { Length: > 0 and <= 128 } value || !ApprovalQueue.IsCursorValid(value))
                 return Task.FromResult(new ApiResult(400, new ApiProblem(400, "invalid-request", "cursor is not valid")));
             cursor = value;
         }
