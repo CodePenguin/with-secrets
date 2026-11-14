@@ -468,11 +468,12 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
             int start = 0;
             if (!string.IsNullOrEmpty(cursor) && DecodeCursor(cursor) is { } after)
             {
-                start = pending.FindIndex(item => string.CompareOrdinal(item.Review.RequestId, after) > 0);
-                if (start < 0)
+                start = pending.FindIndex(item =>
                 {
-                    start = pending.Count;
-                }
+                    long ticks = item.Review.SubmittedAt.UtcDateTime.Ticks;
+                    return ticks > after.Ticks || (ticks == after.Ticks && string.CompareOrdinal(item.Review.RequestId, after.RequestId) > 0);
+                });
+                if (start < 0) start = pending.Count;
             }
 
             limit = Math.Clamp(limit, 1, MaxPending);
@@ -485,7 +486,7 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
 
             if (start + items.Count < pending.Count && items.Count > 0)
             {
-                nextCursor = EncodeCursor(items[^1].RequestId);
+                nextCursor = EncodeCursor(items[^1]);
             }
 
             return items;
@@ -887,13 +888,34 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
         }
     }
 
-    private static string EncodeCursor(string requestId) => Base64Url.EncodeToString(Encoding.UTF8.GetBytes(requestId));
+    public static bool IsCursorValid(string cursor) => DecodeCursor(cursor) is not null;
 
-    private static string? DecodeCursor(string cursor)
+    private static string EncodeCursor(ApprovalQueueItemDto item)
+    {
+        string text = item.SubmittedAt.UtcDateTime.Ticks.ToString(CultureInfo.InvariantCulture) + "\n" + item.RequestId;
+        return Base64Url.EncodeToString(Encoding.UTF8.GetBytes(text));
+    }
+
+    private static (long Ticks, string RequestId)? DecodeCursor(string cursor)
     {
         try
         {
-            return Encoding.UTF8.GetString(Base64Url.DecodeFromChars(cursor));
+            string text = Encoding.UTF8.GetString(Base64Url.DecodeFromChars(cursor));
+            int separator = text.IndexOf('\n');
+            if (separator <= 0 || separator == text.Length - 1
+                || !long.TryParse(text[..separator], NumberStyles.None, CultureInfo.InvariantCulture, out long ticks)
+                || ticks < 0 || ticks > DateTime.MaxValue.Ticks)
+            {
+                return null;
+            }
+
+            string requestId = text[(separator + 1)..];
+            if (!System.Text.RegularExpressions.Regex.IsMatch(requestId, "^[A-Za-z0-9_-]{1,64}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant))
+            {
+                return null;
+            }
+
+            return (ticks, requestId);
         }
         catch (Exception)
         {
