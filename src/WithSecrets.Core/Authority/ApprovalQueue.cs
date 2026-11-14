@@ -44,7 +44,8 @@ public sealed record ApprovalReviewProjection(
     IReadOnlyList<ApprovalDecryptProjection> Decrypts,
     string? InheritedEnvironmentLine,
     IReadOnlyList<string> ExtraLines,
-    string CanonicalText);
+    string CanonicalText,
+    bool RequiresUnlock);
 
 /// <summary>Queue list item (pending only).</summary>
 public sealed record ApprovalQueueItemDto(
@@ -73,7 +74,7 @@ public sealed record ApprovalDetailDto(
     IReadOnlyList<string> Actions);
 
 /// <summary>Prepared SPA challenge material.</summary>
-public sealed record ApprovalChallengeDto(string FlowId, string Mode, JsonElement Payload, DateTimeOffset ExpiresAt);
+public sealed record ApprovalChallengeDto(string FlowId, string Mode, JsonElement Payload, DateTimeOffset ExpiresAt, string? PrfKey = null);
 
 /// <summary>API statuses for Approvals decision state (not execution).</summary>
 public static class ApprovalStatuses
@@ -123,6 +124,9 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
         public required ProofContext Context { get; init; }
         public required ProofStart Start { get; init; }
         public required DateTimeOffset ExpiresAt { get; init; }
+        public required byte[] ReviewBind { get; init; }
+        public byte[]? PrfState { get; init; }
+        public string? PrfKey { get; init; }
         public int Consumed;
     }
 
@@ -183,7 +187,8 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
             [.. (shown.Decrypts ?? []).Select(item => new ApprovalDecryptProjection(ApprovalSummary.Clean(item.Variable), ApprovalSummary.Clean(item.File), ApprovalSummary.Clean(item.KeySecret), ApprovalSummary.Clean(item.Short)))],
             shown.InheritedEnvironment is { } inherited ? EnvironmentBinding.Line(inherited) : null,
             [.. (shown.ExtraLines ?? []).Select(ApprovalSummary.Clean)],
-            canonical);
+            canonical,
+            shown.Unlock);
     }
 
     private static ApprovalScriptProjection? ScriptProjection(ScriptView? script)
@@ -444,7 +449,7 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
     {
         foreach (string flowId in _flows.Where(item => item.Value.RequestId == requestId).Select(item => item.Key).ToList())
         {
-            _flows.Remove(flowId);
+            if (_flows.Remove(flowId, out ProofFlow? flow) && flow.PrfState is not null) CryptographicOperations.ZeroMemory(flow.PrfState);
         }
     }
 
@@ -566,6 +571,14 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
             byte[] bind = RequestBinding.Compute(nonce, entry.Review.CanonicalText);
             // Bind also covers digest, machine and fixed decision already present in CanonicalText; ReuseBinding minutes 0 = approve once.
             ProofContext context = new(ReuseBinding.Challenge(bind, 0), origin);
+            byte[]? prfState = null;
+            string? prfKey = null;
+            if (entry.Review.RequiresUnlock)
+            {
+                if (method is not PasskeyMethod) return (null, "internal-error", "the selected proof method cannot release the secret-store key");
+                (prfState, prfKey) = SecretCrypto.NewServerKey();
+            }
+
             ProofStart start;
             try
             {
@@ -573,11 +586,13 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
             }
             catch (ProofUnavailableException error)
             {
+                if (prfState is not null) CryptographicOperations.ZeroMemory(prfState);
                 return (null, "internal-error", error.Message);
             }
 
             if (start.Mode != "webauthn")
             {
+                if (prfState is not null) CryptographicOperations.ZeroMemory(prfState);
                 return (null, "internal-error", "this proof method cannot be used inside the administration page");
             }
 
@@ -593,6 +608,9 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
                 Context = context,
                 Start = start,
                 ExpiresAt = expires,
+                ReviewBind = bind,
+                PrfState = prfState,
+                PrfKey = prfKey,
             };
             _flows[flow.FlowId] = flow;
 
@@ -604,7 +622,7 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
     {
         using JsonDocument document = JsonDocument.Parse(flow.Start.Payload);
 
-        return new ApprovalChallengeDto(flow.FlowId, flow.Start.Mode, document.RootElement.Clone(), flow.ExpiresAt);
+        return new ApprovalChallengeDto(flow.FlowId, flow.Start.Mode, document.RootElement.Clone(), flow.ExpiresAt, flow.PrfKey);
     }
 
     public (ApprovalDetailDto? Detail, string? ProblemCode, string? DetailText) Approve(
@@ -613,7 +631,8 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
         string flowId,
         string proof,
         IProofMethod method,
-        Func<string, ProcessedRequest?> processed)
+        Func<string, ProcessedRequest?> processed,
+        string? prfJson = null)
     {
         ProofFlow? flow;
         Entry? entry;
@@ -670,10 +689,31 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
             return ReconcileConflict(requestId, processed, expected: ApprovalStatuses.Approved);
         }
 
-        ApprovalDecision decision = ApprovalDecision.Allow(verified.Detail, actor: verified.Credential.Name);
+        Unlock? unlock = null;
+        if (flow.PrfState is not null)
+        {
+            if (!TryOpenPrf(prfJson, flow, proof, out unlock))
+            {
+                lock (_gate)
+                {
+                    _flows.Remove(flowId);
+                    CryptographicOperations.ZeroMemory(flow.PrfState);
+                    if (_entries.TryGetValue(requestId, out Entry? current) && ReferenceEquals(current, entry) && current.Status == ApprovalStatuses.Pending)
+                        ReleaseUnlocked(current, ApprovalDecision.Deny("the passkey did not release the secret-store key, so nothing was approved"));
+                }
+                return (GetDetail(requestId, processed), null, null);
+            }
+        }
+        else if (prfJson is not null)
+        {
+            return (null, "invalid-request", "unexpected secret-store key release data");
+        }
+
+        ApprovalDecision decision = ApprovalDecision.Allow(verified.Detail, unlock: unlock, actor: verified.Credential.Name);
         lock (_gate)
         {
             _flows.Remove(flowId);
+            if (flow.PrfState is not null) CryptographicOperations.ZeroMemory(flow.PrfState);
             if (!_entries.TryGetValue(requestId, out Entry? current) || !ReferenceEquals(current, entry) || current.Status != ApprovalStatuses.Pending)
             {
                 return ReconcileConflict(requestId, processed, expected: ApprovalStatuses.Approved);
@@ -683,6 +723,37 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
         }
 
         return (GetDetail(requestId, processed), null, null);
+    }
+
+    private static bool TryOpenPrf(string? json, ProofFlow flow, string proof, out Unlock? unlock)
+    {
+        unlock = null;
+        byte[]? output = null;
+        try
+        {
+            if (json is null || flow.PrfState is null || PasskeyMethod.ResponseId(proof) is not { } credentialId) return false;
+            using JsonDocument document = JsonDocument.Parse(json);
+            JsonElement root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return false;
+            string? epk = null, iv = null, ct = null;
+            int count = 0;
+            foreach (JsonProperty property in root.EnumerateObject())
+            {
+                count++;
+                if (property.Name == "epk" && epk is null && property.Value.ValueKind == JsonValueKind.String) epk = property.Value.GetString();
+                else if (property.Name == "iv" && iv is null && property.Value.ValueKind == JsonValueKind.String) iv = property.Value.GetString();
+                else if (property.Name == "ct" && ct is null && property.Value.ValueKind == JsonValueKind.String) ct = property.Value.GetString();
+                else return false;
+            }
+            if (count != 3 || string.IsNullOrEmpty(epk) || string.IsNullOrEmpty(iv) || string.IsNullOrEmpty(ct)) return false;
+            output = SecretCrypto.DecryptBytes(flow.PrfState, flow.ReviewBind, epk, iv, ct, SecretCrypto.PrfInfo);
+            if (output.Length != KeyVault.KeyBytes) return false;
+            unlock = new Unlock(credentialId, output);
+            output = null;
+            return true;
+        }
+        catch (Exception) { return false; }
+        finally { if (output is not null) CryptographicOperations.ZeroMemory(output); }
     }
 
     public (ApprovalDetailDto? Detail, string? ProblemCode, string? DetailText) Deny(
@@ -810,7 +881,7 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
 
         foreach (string flowId in _flows.Where(item => item.Value.ExpiresAt <= now || Volatile.Read(ref item.Value.Consumed) != 0).Select(item => item.Key).ToList())
         {
-            _flows.Remove(flowId);
+            if (_flows.Remove(flowId, out ProofFlow? flow) && flow.PrfState is not null) CryptographicOperations.ZeroMemory(flow.PrfState);
         }
     }
 
