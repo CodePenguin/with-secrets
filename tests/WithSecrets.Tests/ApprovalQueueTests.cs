@@ -183,7 +183,10 @@ internal static class ApprovalQueueTests
         }
 
         check(bounded.TryRegister(Review("req-00", now), out _), "approvals: duplicate request reuses its existing registration at capacity");
-        check(!bounded.TryRegister(Review("req-overflow", now.AddMinutes(1)), out _), "approvals: 65th request is refused");
+        check(bounded.Register(Review("req-overflow", now.AddMinutes(1)), out _) == ApprovalQueueRegistration.Full,
+            "approvals: 65th request is classified as queue full");
+        check(bounded.Register(Review("req-00", now) with { RequestDigest = new('c', 64) }, out _) == ApprovalQueueRegistration.Conflict,
+            "approvals: reusing a request ID with a different digest is a conflict");
         check(bounded.PendingCount == ApprovalQueue.MaxPending, "approvals: full queue retains all existing requests");
 
         IReadOnlyList<ApprovalQueueItemDto> first = bounded.ListPending(50, null, out string? cursor);
