@@ -611,7 +611,7 @@ internal sealed partial class AdminApi
 
     private async Task<ApiResult> StartInlineSessionAsync(ApiCall call)
     {
-        (InlineLoginView? view, AdminStart start, string? ticket) = await admin.BeginInlineLoginAsync(call.Browser!, call.Context.RequestAborted);
+        (InlineLoginView? view, AdminStart start, string? ticket) = await admin.BeginInlineLoginAsync(call.Browser!, call.Context.Request.Headers.Origin.ToString(), call.Context.RequestAborted);
         if (ticket is not null) SetCookie(call.Context.Response, AdminSessions.LoginCookie, ticket);
         return view is not null ? new ApiResult(201, new { proof = view.Proof }) : new ApiResult(start.Status, FromStart(start));
     }
