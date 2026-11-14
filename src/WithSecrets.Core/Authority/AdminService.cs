@@ -109,6 +109,10 @@ public sealed partial class AdminService
 
     internal IProofMethod? ApprovalProof => _p.ApprovalProof?.Invoke();
 
+    internal ProcessedRequest? ProcessedApproval(string requestId) => _p.Store.GetProcessed(requestId);
+
+    internal DateTimeOffset UtcNow => _clock.GetUtcNow();
+
     /// <summary>The HTTP side of the administration: the JSON API under <c>/api/v1/</c> (the service routes <c>/api</c> requests here).</summary>
     internal AdminApi Api => _api ??= new AdminApi(this, _p.Port);
 
