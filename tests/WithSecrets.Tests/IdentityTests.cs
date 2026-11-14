@@ -275,7 +275,7 @@ internal static class IdentityTests
                 await host.AuthorizeAsync(Sample("scan-2", now), () => ApprovalDecision.Allow(), CancellationToken.None);
                 AdminActions.RecoverAuthority(deployment.Keys, deployment.HostConfig, deployment.Fingerprint, "scan");
                 await host.AuthorizeAsync(Sample("scan-3", now), () => ApprovalDecision.Allow(), CancellationToken.None);
-                HostAuthorization broken = new(new ThrowingAuthority(), machine, "scan-host", deployment.HostConfig, gate, deployment.Authority.Offer);
+                HostAuthorization broken = new(new ThrowingAuthority(), machine, "scan-host", deployment.HostConfig, gate, (requestId, digest, present) => deployment.Authority.Offer(requestId, digest, present));
                 await broken.AuthorizeAsync(Sample("scan-4", now), () => ApprovalDecision.Allow(), CancellationToken.None);
                 using HostService service = HostService.Start(new HostServiceOptions { Lock = AuthorityLock.UnlockedForTests(), State = StateDatabase.InFolder(folder), Store = new MemoryStore(new Dictionary<string, string>()), Deployment = deployment, Port = 0 });
                 using HttpClient client = new(new SocketsHttpHandler { UseProxy = false });
