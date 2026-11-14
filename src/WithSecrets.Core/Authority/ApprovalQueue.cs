@@ -100,7 +100,7 @@ public sealed class ApprovalQueue : IDisposable
     {
         this.clock = clock;
         this.approvalTimeout = approvalTimeout;
-        _sweeper = clock.CreateTimer(static state => ((ApprovalQueue)state!).Sweep(), this, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+        _sweeper = clock.CreateTimer(static state => ((ApprovalQueue)state!).Sweep(), this, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
     }
 
     public const int MaxPending = 64;
