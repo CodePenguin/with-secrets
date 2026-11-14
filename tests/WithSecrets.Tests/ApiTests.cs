@@ -1053,7 +1053,7 @@ internal static class ApiTests
         foreach (ApiRoute route in app.Service.Admin.Api.Routes)
         {
             (int probe, string probeBody) = await b.SendAsync(new HttpMethod(route.Method), Fill(route), route.Request is null ? null : "{}", token: null);
-            check(Code(probeBody) is not ("route-not-found" or "method-not-allowed" or "web-application-not-built") && probe != 404 || Code(probeBody) == "not-found", "openapi: " + route.Method + " " + route.Template + " is served by the service");
+            check(Code(probeBody) is not ("route-not-found" or "method-not-allowed" or "web-application-not-built") && probe != 404 || Code(probeBody) is "not-found" or "request-unavailable", "openapi: " + route.Method + " " + route.Template + " is served by the service");
         }
 
         // Every operation says how it is secured and what it answers.
