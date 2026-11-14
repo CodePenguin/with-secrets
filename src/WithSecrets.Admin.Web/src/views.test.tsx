@@ -394,6 +394,65 @@ describe('audit search', () => {
       expect(last?.query.get('type')).toBe('launch')
     })
     expect(await screen.findByText('No events match these filters.')).toBeInTheDocument()
+    expect(screen.getByLabelText(/maximum results/i)).toBeInTheDocument()
+    expect(screen.getByText('Default 100, maximum 1000. A limited result is not the complete history.')).toBeInTheDocument()
+  })
+})
+
+describe('audit result counts', () => {
+  const cases = [
+    {
+      what: 'events',
+      route: '/audit',
+      api: 'GET /api/v1/audit/events',
+      item: (n: number) => ({
+        eventId: 'event-' + n,
+        sequence: n,
+        time: '2026-11-09T10:00:00Z',
+        received: '2026-11-09T10:00:01Z',
+        machine: machine().fingerprint,
+        type: 'launch',
+        outcome: 'started',
+        reason: '',
+        requestId: 'request-' + n,
+        folder: '',
+        program: '',
+        arguments: [],
+        grantId: '',
+        exitCode: null,
+        metadata: {},
+      }),
+      one: '1 event found.',
+      many: 'Showing 2 events.',
+    },
+    {
+      what: 'changes',
+      route: '/audit/changes',
+      api: 'GET /api/v1/audit/changes',
+      item: (n: number) => ({ id: n, time: '2026-11-09T10:00:00Z', event: 'machine-approve', machine: machine().fingerprint, actor: 'admin passkey', detail: 'approved' }),
+      one: '1 change found.',
+      many: 'Showing 2 changes.',
+    },
+    {
+      what: 'gaps',
+      route: '/audit/gaps',
+      api: 'GET /api/v1/audit/gaps',
+      item: (n: number) => ({ id: n, machine: machine().fingerprint, kind: 'missing', from: n, to: n + 1, detected: '2026-11-09T10:00:00Z', resolved: null, epoch: 'e' }),
+      one: '1 gap found.',
+      many: 'Showing 2 gaps.',
+    },
+  ]
+
+  it.each(cases)('uses singular wording for one $what result', async ({ route, api, item, one }) => {
+    signedIn({ [api]: { body: { items: [item(1)] } } })
+    renderApp(route)
+    expect(await screen.findByText(one)).toBeInTheDocument()
+  })
+
+  it.each(cases)('uses plural wording for two $what results', async ({ route, api, item, many }) => {
+    signedIn({ [api]: { body: { items: [item(1), item(2)] } } })
+    renderApp(route)
+    expect(await screen.findByText(many)).toBeInTheDocument()
   })
 })
 
@@ -431,7 +490,7 @@ describe('grant and audit navigation', () => {
     )
   })
 
-  it('links audit records to filtered evidence and shows both event timestamps', async () => {
+  it('links audit records to filtered evidence and labels both event timestamps', async () => {
     signedIn({
       'GET /api/v1/audit/events': {
         body: {
@@ -459,22 +518,54 @@ describe('grant and audit navigation', () => {
 
     expect(await screen.findByRole('link', { name: machine().fingerprint })).toHaveAttribute(
       'href',
-      '/audit/changes?machine=' + machine().fingerprint,
+      '/audit?machine=' + machine().fingerprint,
     )
     expect(screen.getByRole('link', { name: 'grant-0001' })).toHaveAttribute('href', '/audit?grant=grant-0001')
-    const times = Array.from(document.querySelectorAll('time')).map((time) => time.dateTime)
-    expect(times).toContain('2026-11-09T10:00:00Z')
-    expect(times).toContain('2026-11-09T10:00:03Z')
+    const occurred = screen.getByText('Occurred').parentElement as HTMLElement
+    const received = screen.getByText('Received').parentElement as HTMLElement
+    expect(occurred.querySelector('time')).toHaveAttribute('datetime', '2026-11-09T10:00:00Z')
+    expect(received.querySelector('time')).toHaveAttribute('datetime', '2026-11-09T10:00:03Z')
+    expect(screen.queryByText('Received by authority')).toBeNull()
+  })
+
+  it('links an authority change machine to the machine-filtered authority changes view', async () => {
+    signedIn({
+      'GET /api/v1/audit/changes': {
+        body: { items: [{ id: 1, time: '2026-11-09T10:00:00Z', event: 'machine-approve', machine: machine().fingerprint, actor: 'admin passkey', detail: 'approved' }] },
+      },
+    })
+    renderApp('/audit/changes')
+
+    expect(await screen.findByRole('link', { name: machine().fingerprint })).toHaveAttribute(
+      'href',
+      '/audit/changes?machine=' + machine().fingerprint,
+    )
+  })
+
+  it('links a numbering gap machine to the machine-filtered gaps view', async () => {
+    signedIn({
+      'GET /api/v1/audit/gaps': {
+        body: { items: [{ id: 1, machine: machine().fingerprint, kind: 'missing', from: 3, to: 4, detected: '2026-11-09T10:00:00Z', resolved: null, epoch: 'e' }] },
+      },
+    })
+    renderApp('/audit/gaps')
+
+    expect(await screen.findByRole('link', { name: machine().fingerprint })).toHaveAttribute(
+      'href',
+      '/audit/gaps?machine=' + machine().fingerprint,
+    )
   })
 
   it('can clear URL-backed audit filters', async () => {
     const user = userEvent.setup()
     signedIn()
-    renderApp('/audit?text=deploy.cmd')
+    renderApp('/audit?text=deploy.cmd&machine=' + machine().fingerprint)
 
     expect(await screen.findByLabelText(/contains text/i)).toHaveValue('deploy.cmd')
+    expect(screen.getByLabelText(/machine \(fingerprint/i)).toHaveValue(machine().fingerprint)
     await user.click(screen.getByRole('button', { name: 'Clear filters' }))
     expect(screen.getByLabelText(/contains text/i)).toHaveValue('')
+    expect(screen.getByLabelText(/machine \(fingerprint/i)).toHaveValue('')
     expect(screen.queryByRole('button', { name: 'Clear filters' })).toBeNull()
   })
 })

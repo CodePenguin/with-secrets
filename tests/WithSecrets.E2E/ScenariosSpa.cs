@@ -355,7 +355,7 @@ internal static class ScenariosSpa
         await c.Page.GetByLabel("Kind of event").SelectOptionAsync("launch");
         await c.Page.GetByRole(AriaRole.Button, new() { Name = "Search", Exact = true }).ClickAsync();
         await c.Page.WaitForFunctionAsync("() => location.search.includes('type=launch')");
-        await c.Page.GetByRole(AriaRole.Status).Filter(new() { HasText = "Showing" }).First.WaitForAsync();
+        await c.Page.GetByRole(AriaRole.Status).Filter(new() { HasTextRegex = new System.Text.RegularExpressions.Regex(@"^(Showing \d+ events\.|1 event found\.)$") }).First.WaitForAsync();
         string narrowed = await results.TextContentAsync() ?? "";
         for (int attempt = 0; attempt < 20 && (narrowed.Contains("authorization:", StringComparison.Ordinal) || !narrowed.Contains("launch:", StringComparison.Ordinal)); attempt++)
         {

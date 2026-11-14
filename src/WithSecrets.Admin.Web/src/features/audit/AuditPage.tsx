@@ -34,6 +34,7 @@ const hints: Partial<Record<keyof AuditFilters, string>> = {
   since: 'UTC unless a zone is given, for example 2026-11-09T10:00:00Z.',
   until: 'UTC unless a zone is given.',
   outcome: 'For example approved, denied, started or exited.',
+  last: 'Default 100, maximum 1000. A limited result is not the complete history.',
 }
 
 function filtersFrom(params: URLSearchParams, view: View): AuditFilters {
@@ -117,10 +118,10 @@ export function AuditPage({ view }: { view: View }) {
   )
 }
 
-function Count({ n, what }: { n: number; what: string }) {
+function Count({ n, singular, plural }: { n: number; singular: string; plural: string }) {
   return (
     <p role="status" className={styles.count}>
-      {n === 0 ? `No ${what} match these filters.` : `Showing ${n} ${what}.`}
+      {n === 0 ? `No ${plural} match these filters.` : n === 1 ? `1 ${singular} found.` : `Showing ${n} ${plural}.`}
     </p>
   )
 }
@@ -132,7 +133,7 @@ function Events({ filters }: { filters: AuditFilters }) {
 
   return (
     <>
-      <Count n={events.data.length} what="events" />
+      <Count n={events.data.length} singular="event" plural="events" />
       <ul className={[list.list, list.compact].join(' ')} aria-label="Host events">
         {events.data.map((event) => (
           <li key={event.eventId} className={list.item}>
@@ -141,11 +142,12 @@ function Events({ filters }: { filters: AuditFilters }) {
                 {event.type}: {event.outcome}
               </h3>
               <Badge tone={event.outcome === 'denied' || event.outcome === 'failed' ? 'bad' : 'neutral'}>{event.outcome}</Badge>
-              <Time value={event.time} />
             </div>
             <Facts
               items={[
-                ['Machine', event.machine ? <Link key="machine" to={`/audit/changes?${new URLSearchParams({ machine: event.machine }).toString()}`}>{event.machine}</Link> : 'none'],
+                ['Occurred', <Time key="occurred" value={event.time} />],
+                ['Received', <Time key="received" value={event.received} />],
+                ['Machine', event.machine ? <Link key="machine" to={`/audit?${new URLSearchParams({ machine: event.machine }).toString()}`}>{event.machine}</Link> : 'none'],
                 ['Program', event.program || 'none'],
                 ['Arguments', event.arguments.length ? event.arguments.join(' ') : 'none'],
                 ['Working directory', event.folder || 'none'],
@@ -153,7 +155,6 @@ function Events({ filters }: { filters: AuditFilters }) {
                 ['Grant', event.grantId ? <Link key="grant" to={`/audit?${new URLSearchParams({ grant: event.grantId }).toString()}`}>{event.grantId}</Link> : 'none'],
                 ['Exit code', event.exitCode === null ? 'none' : String(event.exitCode)],
                 ['Sequence', String(event.sequence)],
-                ['Received by authority', <Time key="received" value={event.received} />],
                 // The metadata is data the host signed (names and fingerprints): shown as plain text, never as markup.
                 ...Object.entries(event.metadata)
                   .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
@@ -174,7 +175,7 @@ function Changes({ filters }: { filters: AuditFilters }) {
 
   return (
     <>
-      <Count n={changes.data.length} what="changes" />
+      <Count n={changes.data.length} singular="change" plural="changes" />
       <ul className={[list.list, list.compact].join(' ')} aria-label="Authority changes">
         {changes.data.map((change) => (
           <li key={change.id} className={list.item}>
@@ -204,7 +205,7 @@ function Gaps({ machine }: { machine: string }) {
 
   return (
     <>
-      <Count n={gaps.data.length} what="gaps" />
+      <Count n={gaps.data.length} singular="gap" plural="gaps" />
       <ul className={[list.list, list.compact].join(' ')} aria-label="Numbering gaps">
         {gaps.data.map((gap) => (
           <li key={gap.id} className={list.item}>
