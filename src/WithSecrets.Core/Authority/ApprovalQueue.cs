@@ -397,7 +397,7 @@ public sealed class ApprovalQueue : IDisposable
             }
 
             _entries.Remove(requestId);
-                        entry.Expiry?.Dispose();
+            entry.Expiry?.Dispose();
             entry.Expiry = null;
             DropFlowsUnlocked(requestId);
             entry.Decision.TrySetResult(ApprovalDecision.Deny("the authority offer ended before a decision was committed", reasonCode: ReasonCodes.Cancelled));
@@ -421,7 +421,7 @@ public sealed class ApprovalQueue : IDisposable
             entry.DecidedAt = response.Issued;
             entry.DecisionInProgress = false;
             entry.TerminalUntil = response.Issued + TerminalRetention;
-                        entry.Expiry?.Dispose();
+            entry.Expiry?.Dispose();
             entry.Expiry = null;
             DropFlowsUnlocked(requestId);
         }
@@ -432,7 +432,7 @@ public sealed class ApprovalQueue : IDisposable
         entry.DecisionInProgress = true;
         entry.Actor = decision.Actor;
         // Leave the expiry callback armed while the authority commits. It retries while DecisionInProgress is true;
-        // MarkCommitted changes Status before cancelling the timer, so cancellation cannot be mistaken for expiry.
+        // MarkCommitted changes Status before disposing the timer, so a racing expiry callback cannot be mistaken for a new timeout.
         DropFlowsUnlocked(entry.Review.RequestId);
         if (!entry.Decision.TrySetResult(decision))
         {
