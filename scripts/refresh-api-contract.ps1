@@ -16,9 +16,21 @@ Push-Location $repo
 try {
     $env:WS_UPDATE_OPENAPI = '1'
     $env:WS_ONLY = 'Api'
-    dotnet run --project tests\WithSecrets.Tests -p:BuildAdminWeb=false
+    dotnet run --project tests\WithSecrets.Tests --property:BuildAdminWeb=false
     if ($LASTEXITCODE -ne 0) {
         throw "The .NET test harness failed while regenerating docs/api/openapi.json (exit $LASTEXITCODE)."
+    }
+
+    $openApiPath = Join-Path $repo 'docs\api\openapi.json'
+    $openApi = Get-Content $openApiPath -Raw | ConvertFrom-Json
+    $schemas = $openApi.components.schemas
+    $requiredSchemas = @('ApprovalQueue', 'ApprovalQueueItem', 'ApprovalDetail', 'ApprovalChallenge', 'ApprovalReview')
+    $missingSchemas = @($requiredSchemas | Where-Object { $null -eq $schemas.$_ })
+    if ($missingSchemas.Count -gt 0) {
+        throw "The API tests did not regenerate the approval schemas in docs/api/openapi.json: $($missingSchemas -join ', ')."
+    }
+    if ($null -eq $openApi.paths.'/api/v1/approvals' -or $null -eq $openApi.paths.'/api/v1/approvals/{requestId}') {
+        throw 'The API tests did not regenerate the approval routes in docs/api/openapi.json.'
     }
 
     if ($null -eq $previousOnly) {
