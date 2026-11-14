@@ -33,8 +33,8 @@ public sealed class AdminSession
     /// <summary>The trusted enrolled credential identity that signed in (a name, no key material).</summary>
     public string Identity { get; }
 
-    /// <summary>Compatibility alias for existing admin-only display/audit code; authorization uses <see cref="Scope" />.</summary>
-    public string Admin => Identity;
+    /// <summary>Deprecated compatibility alias; null for approval-only sessions. Never use this display field for authorization.</summary>
+    public string? Admin => Scope == SessionScope.Admin ? Identity : null;
 
     /// <summary>The server-derived capabilities of the credential that signed in.</summary>
     public SessionScope Scope { get; }
