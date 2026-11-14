@@ -228,8 +228,8 @@ public sealed class AdminSessions(TimeProvider clock, Func<(TimeSpan Idle, TimeS
         }
     }
 
-    /// <summary>The tap for a login was verified (<paramref name="admin" /> is the key's name) or refused (<paramref name="problem" />).</summary>
-    public void CompleteLogin(string code, string? identity, string? problem, SessionScope scope = SessionScope.Admin)
+    /// <summary>The passkey tap was verified (the trusted credential identity and scope are supplied) or refused (<paramref name="problem" />).</summary>
+    public void CompleteLogin(string code, string? identity, string? problem, SessionScope scope = SessionScope.Approval)
     {
         lock (_lock)
         {
