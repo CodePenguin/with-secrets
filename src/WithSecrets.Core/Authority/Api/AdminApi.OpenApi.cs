@@ -38,6 +38,7 @@ internal sealed partial class AdminApi
             ["Session"] = S.Obj(
             [
                 ("authenticated", S.Bool()),
+                ("admin", S.Str(nullable: true, description: "Deprecated display alias for admin-scope sessions; use identity and scope.")),
                 ("identity", S.Str(nullable: true, description: "The trusted enrolled passkey identity that signed in.")),
                 ("scope", S.Str(values: ["admin", "approval"], nullable: true)),
                 ("capabilities", S.Arr(S.Str(values: [SessionCapabilities.ApprovalsRead, SessionCapabilities.ApprovalsDecide, SessionCapabilities.AdminRead, SessionCapabilities.AdminDecide]))),
