@@ -151,7 +151,7 @@ public sealed class ApprovalQueue : IDisposable
         ApprovalRequest page)
     {
         ApprovalRequest shown = page with { Reuse = ReuseOffer.Off };
-        string canonical = BuildCanonicalText(launchRequestId, requestDigest, shown, submittedAt);
+        string canonical = BuildCanonicalText(launchRequestId, requestDigest, machine.Fingerprint, shown, submittedAt);
         string? inline = Policy.InlineCode(shown.Program, shown.Arguments);
         Dictionary<string, string> sources = shown.Sources is null
             ? shown.SecretNames.ToDictionary(name => name, _ => "", StringComparer.Ordinal)
@@ -254,13 +254,14 @@ public sealed class ApprovalQueue : IDisposable
     }
 
     /// <summary>Exact canonical review content bound into the approve-once proof (server-owned).</summary>
-    public static string BuildCanonicalText(string launchRequestId, string requestDigest, ApprovalRequest page, DateTimeOffset issued)
+    public static string BuildCanonicalText(string launchRequestId, string requestDigest, string machineFingerprint, ApprovalRequest page, DateTimeOffset issued)
     {
         ApprovalRequest once = page with { Reuse = ReuseOffer.Off };
         StringBuilder text = new();
         text.Append("Decision: ").Append(ApproveOnceDecision).Append('\n');
         text.Append("Launch request id: ").Append(ApprovalSummary.Clean(launchRequestId)).Append('\n');
         text.Append("Request digest: ").Append(requestDigest).Append('\n');
+        text.Append("Machine fingerprint: ").Append(ApprovalSummary.Clean(machineFingerprint)).Append('\n');
         text.Append(ApprovalSummary.BuildMessage(once));
         text.Append('\n').Append(ApprovalSummary.IssuedLine(issued));
 
