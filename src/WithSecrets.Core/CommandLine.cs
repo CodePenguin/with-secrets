@@ -82,6 +82,8 @@ public static class CliArgs
     private const string Description = """
         Run a program with stored secrets, without showing the values to an agent.
 
+        Approve once, or allow reuse for a limited time. The reuseMinutes setting selects the starting duration; reuseMaxMinutes sets the maximum duration.
+
         To run a program: with-secrets [--secrets NAME[,NAME...]] --reason "why" [-f .env] -- PROGRAM [ARGS...]
         A run goes through the host service, which must be running (with-secrets service, in a terminal of its own); it listens on
         127.0.0.1 and [::1] only, port 8765 or WITH_SECRETS_PORT or --service-port N (service: --port N). Without it a run exits 6.
