@@ -198,7 +198,7 @@ internal static class ApprovalQueueTests
 
         // A challenge is bound to the unique launch ID, digest, machine identity and canonical review; its WebAuthn assertion uses reuse=0.
         ApprovalReviewProjection proofReview = Review("req-proof", now);
-        check(proofReview.RequestId == "req-proof" && proofReview.FingerprintKey == page.RequestId
+        check(proofReview.RequestId == "req-proof" && proofReview.FingerprintKey == RequestFingerprint.Compute(page).Key
             && proofReview.CanonicalText.Contains(machine.Fingerprint, StringComparison.Ordinal),
             "approvals: route identity is the unique launch request ID, distinct from the content fingerprint, and the canonical review binds the machine");
         using ApprovalQueue queue = new(TimeProvider.System, () => TimeSpan.FromMinutes(5));
