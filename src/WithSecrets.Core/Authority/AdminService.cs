@@ -518,7 +518,7 @@ public sealed partial class AdminService
         (string ticket, string code) = begun;
         AfterPlanForTests?.Invoke();
         (int idle, int absolute) = _p.Store.SessionTimeouts();
-        AdminPlan plan = new("admin-session", "start an administrator session on the admin web app. Only tap if you just chose to sign in there yourself. The session lets this browser READ (status, machines, grants, audit, settings) for up to "
+        AdminPlan plan = new(OpLogin, "start a read-only browser session on the administration app. Its capabilities are determined by the enrolled passkey that signs in; it changes nothing, and every administrative change requires its own passkey tap. Session access lasts up to "
             + absolute.ToString(CultureInfo.InvariantCulture) + " minutes, ending after " + idle.ToString(CultureInfo.InvariantCulture) + " minutes without use; it changes nothing and every change still needs its own passkey tap",
             [("login", code)],
             authorization =>
