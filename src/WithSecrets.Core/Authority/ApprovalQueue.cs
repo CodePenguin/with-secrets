@@ -90,8 +90,19 @@ public static class ApprovalStatuses
 /// Authority-owned in-memory pending Approvals queue and short-lived proof flows. Pending review data is never persisted.
 /// Decisions still complete through <see cref="LocalAuthority.Offer" /> / <see cref="LocalAuthority.DecideAsync" />.
 /// </summary>
-public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTimeout)
+public sealed class ApprovalQueue : IDisposable
 {
+    private readonly TimeProvider clock;
+    private readonly Func<TimeSpan> approvalTimeout;
+    private readonly ITimer _sweeper;
+
+    public ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTimeout)
+    {
+        this.clock = clock;
+        this.approvalTimeout = approvalTimeout;
+        _sweeper = clock.CreateTimer(static state => ((ApprovalQueue)state!).Sweep(), this, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+    }
+
     public const int MaxPending = 64;
     public static readonly TimeSpan TerminalRetention = TimeSpan.FromMinutes(10);
     public static readonly TimeSpan ChallengeLifetime = TimeSpan.FromMinutes(2);
@@ -882,6 +893,36 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
 
                 return _entries.Values.Count(item => item.Status == ApprovalStatuses.Pending);
             }
+        }
+    }
+
+    private void Sweep()
+    {
+        lock (_gate)
+        {
+            SweepUnlocked();
+        }
+    }
+
+    public void Dispose()
+    {
+        _sweeper.Dispose();
+        lock (_gate)
+        {
+            foreach (Entry entry in _entries.Values)
+            {
+                entry.Expiry?.Cancel();
+                entry.Expiry?.Dispose();
+                entry.Decision.TrySetResult(ApprovalDecision.Deny("the authority service stopped", reasonCode: ReasonCodes.Cancelled));
+            }
+
+            foreach (ProofFlow flow in _flows.Values)
+            {
+                if (flow.PrfState is not null) CryptographicOperations.ZeroMemory(flow.PrfState);
+            }
+
+            _flows.Clear();
+            _entries.Clear();
         }
     }
 
