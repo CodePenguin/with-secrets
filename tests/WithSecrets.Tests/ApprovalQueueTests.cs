@@ -193,7 +193,11 @@ internal static class ApprovalQueueTests
         check(first.Select(item => item.RequestId).Intersect(second.Select(item => item.RequestId), StringComparer.Ordinal).Any() == false,
             "approvals: pages do not overlap");
 
-        // A challenge is bound to the unique launch ID, digest and canonical review; its WebAuthn assertion uses reuse=0.
+        // A challenge is bound to the unique launch ID, digest, machine identity and canonical review; its WebAuthn assertion uses reuse=0.
+        ApprovalReviewProjection proofReview = Review("req-proof", now);
+        check(proofReview.RequestId == "req-proof" && proofReview.FingerprintKey == page.RequestId
+            && proofReview.CanonicalText.Contains(machine.Fingerprint, StringComparison.Ordinal),
+            "approvals: route identity is the unique launch request ID, distinct from the content fingerprint, and the canonical review binds the machine");
         using ApprovalQueue queue = new(TimeProvider.System, () => TimeSpan.FromMinutes(5));
         check(queue.TryRegister(Review("req-proof", now), out _), "approvals: register proof request");
         FakeProofMethod proof = new();
