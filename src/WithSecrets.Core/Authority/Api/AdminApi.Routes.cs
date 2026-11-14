@@ -14,8 +14,14 @@ internal enum ApiAccess
     /// </summary>
     Open,
 
-    /// <summary>A read: needs a session (its cookie and its own secret).</summary>
+    /// <summary>A read: needs a session (its cookie and its own secret) with admin.read.</summary>
     Read,
+
+    /// <summary>A read limited to the Approvals capability.</summary>
+    ApprovalsRead,
+
+    /// <summary>A decision limited to the Approvals capability, with same-origin and anti-forgery checks.</summary>
+    ApprovalsDecide,
 
     /// <summary>Only for the caller a thing was made for (its session, or for the unlock its browser, each with its secret): an authorization's state, or the session's own state. Needs no session itself, because the unlock is asked for without one, and never changes anything.</summary>
     Owner,
