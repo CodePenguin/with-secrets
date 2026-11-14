@@ -306,6 +306,11 @@ internal static class Program
             ApprovalSummaryTests.Run(Check).GetAwaiter().GetResult();
         }
 
+        if (Wants("ApprovalQueue"))
+        {
+            ApprovalQueueTests.Run(Check);
+        }
+
         if (Wants("ProofReply"))
         {
             ProofReplyTests.Run(Check).GetAwaiter().GetResult();
