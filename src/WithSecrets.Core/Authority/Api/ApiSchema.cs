@@ -147,6 +147,24 @@ internal static class ApiValidator
 {
     public static string? Validate(JsonElement value, JsonObject schema, JsonObject components, string path = "body")
     {
+        // OpenAPI 3.1 uses oneOf for nullable references and other mutually exclusive shapes.
+        // Validate the value against each branch rather than treating oneOf as an empty object schema.
+        if (schema["oneOf"] is JsonArray alternatives)
+        {
+            int matches = 0;
+            foreach (JsonNode? alternative in alternatives)
+            {
+                if (alternative is JsonObject candidate && Validate(value, candidate, components, path) is null)
+                {
+                    matches++;
+                }
+            }
+
+            return matches == 1 ? null
+                : matches == 0 ? path + " does not match any allowed shape"
+                : path + " matches more than one allowed shape";
+        }
+
         if (schema["$ref"] is JsonValue reference)
         {
             string name = reference.GetValue<string>()["#/components/schemas/".Length..];
