@@ -378,7 +378,7 @@ internal sealed partial class AdminApi
             responses["403"] = ProblemResponse(route.Access == ApiAccess.ApprovalsRead
                 ? "This browser session does not have approvals.read (scope-required)."
                 : route.Access == ApiAccess.ApprovalsDecide
-                    ? "This browser session does not have approvals.decide, or the request origin/anti-forgery check failed (scope-required, origin-not-allowed, origin-required, anti-forgery)."
+                    ? "This browser session does not have approvals.decide, the request origin/anti-forgery check failed, or the passkey assertion was not accepted (scope-required, origin-not-allowed, origin-required, anti-forgery, proof-invalid)."
                     : "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).");
             if (route.Access is not (ApiAccess.Public or ApiAccess.Owner or ApiAccess.Open or ApiAccess.Login or ApiAccess.Claim))
             {
