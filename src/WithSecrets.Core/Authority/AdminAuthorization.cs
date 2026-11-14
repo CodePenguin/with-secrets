@@ -3,7 +3,7 @@ using System.Text;
 
 namespace WithSecrets;
 
-/// <summary>Shows the person one operation-bound passkey page and returns their answer. The production implementation is a <see cref="WebApprover" /> that accepts admin keys only.</summary>
+/// <summary>Shows one operation-bound passkey page. <see cref="Ask(ApprovalPrompt)" /> is the admin-only mutation path; <see cref="ApprovalTarget" /> exposes the authority's enrolled credentials for sign-in and run approval.</summary>
 public interface IAdminAsker
 {
     ApprovalDecision Ask(ApprovalPrompt prompt);
@@ -18,7 +18,7 @@ public interface IAdminAsker
     ApprovalDecision Ask(ApprovalPrompt prompt, CancellationToken cancel) => Ask(prompt);
 }
 
-/// <summary>An <see cref="IAdminAsker" /> over a page target: the first target where an enrolled admin passkey can prove (as the admin commands do).</summary>
+/// <summary>An <see cref="IAdminAsker" /> over page targets. Administrative changes use admin credentials; sign-in and run approval may use any enrolled credential.</summary>
 public sealed class TargetAdminAsker(EnrollmentTarget primary, EnrollmentTarget local) : IAdminAsker
 {
     public EnrollmentTarget? InlineTarget() => EnrollmentTarget.FirstThatCanProve(primary.Admin(), local.Admin());
