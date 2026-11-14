@@ -11,6 +11,9 @@ public interface IAdminAsker
     /// <summary>The target used by the same authority to prepare a passkey challenge inside its SPA, when supported.</summary>
     EnrollmentTarget? InlineTarget() => null;
 
+    /// <summary>The first target that can verify any enrolled passkey, for sign-in and run approval rather than admin-only changes.</summary>
+    EnrollmentTarget? ApprovalTarget() => InlineTarget();
+
     /// <summary>As <see cref="Ask(ApprovalPrompt)" />; an asker that waits for a person closes its page and refuses when <paramref name="cancel" /> is set.</summary>
     ApprovalDecision Ask(ApprovalPrompt prompt, CancellationToken cancel) => Ask(prompt);
 }
@@ -19,6 +22,8 @@ public interface IAdminAsker
 public sealed class TargetAdminAsker(EnrollmentTarget primary, EnrollmentTarget local) : IAdminAsker
 {
     public EnrollmentTarget? InlineTarget() => EnrollmentTarget.FirstThatCanProve(primary.Admin(), local.Admin());
+
+    public EnrollmentTarget? ApprovalTarget() => EnrollmentTarget.FirstThatCanProve(primary, local);
 
     public ApprovalDecision Ask(ApprovalPrompt prompt) => Ask(prompt, CancellationToken.None);
 
@@ -70,9 +75,9 @@ public sealed class VerifiedAdmin
 }
 
 /// <summary>What <see cref="AdminAuthorizer.Authorize" /> came to. <see cref="Evidence" /> is the verified signed page, for an operation whose own authority re-checks it (a grant change).</summary>
-public sealed record AdminAuthorization(VerifiedAdmin? Admin, string Detail, ApprovalEvidence? Evidence = null)
+public sealed record AdminAuthorization(VerifiedAdmin? Admin, string Detail, ApprovalEvidence? Evidence = null, VerifiedCredential? Credential = null)
 {
-    public bool Ok => Admin is not null;
+    public bool Ok => Admin is not null || Credential is not null;
 }
 
 /// <summary>
@@ -146,6 +151,22 @@ public sealed class AdminAuthorizer(AuthorityStore store, IApprovalVerifier veri
             return Refuse(operation, full.Detail, parameterText);
         }
 
+        if (operation == AdminService.OpLogin)
+        {
+            if (full.Credential is null)
+            {
+                return Refuse(operation, "the passkey did not identify an enrolled credential", parameterText);
+            }
+
+            bool firstLogin;
+            try { firstLogin = store.TrySpendAdminNonce(evidence.Nonce, now.AddMinutes(ApprovalSettings.MaxTimeoutMinutes + 5)); }
+            catch (AuthorityDatabaseException) { return Refuse(operation, "the spent-proof record cannot be written, so no session was started", parameterText); }
+            if (!firstLogin) return Refuse(operation, "this sign-in proof was already used", parameterText);
+
+            Record(operation, "authorized", "passkey " + full.Credential.Name, parameterText);
+            return new AdminAuthorization(null, "authorized", evidence, full.Credential);
+        }
+
         ApprovalCheck check = verifier.Verify(evidence, 0);
         if (!check.Ok || !check.Admin)
         {
@@ -159,7 +180,7 @@ public sealed class AdminAuthorizer(AuthorityStore store, IApprovalVerifier veri
 
         VerifiedAdmin admin = new(operation, parameterText, check.SignerName);
         Record(operation, "authorized", admin.Actor, parameterText);
-        return new AdminAuthorization(admin, "authorized", evidence);
+        return new AdminAuthorization(admin, "authorized", evidence, full.Credential);
     }
 
     public AdminAuthorization Authorize(IAdminAsker asker, string heading, string sentence, string operation, IReadOnlyList<(string Name, string Value)> parameters, CancellationToken cancel = default)
