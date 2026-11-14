@@ -121,7 +121,7 @@ public sealed class ApprovalQueue : IDisposable
         public string? Actor { get; set; }
         public bool DecisionInProgress { get; set; }
         public DateTimeOffset? TerminalUntil { get; set; }
-        public CancellationTokenSource? Expiry { get; set; }
+        public ITimer? Expiry { get; set; }
     }
 
     private sealed class ProofFlow
@@ -317,7 +317,7 @@ public sealed class ApprovalQueue : IDisposable
             {
                 Review = review,
                 Decision = waiter,
-                Expiry = new CancellationTokenSource(),
+                Expiry = null,
             };
             _entries[review.RequestId] = entry;
             ScheduleExpiryUnlocked(entry);
@@ -328,11 +328,8 @@ public sealed class ApprovalQueue : IDisposable
 
     private void ScheduleExpiryUnlocked(Entry entry)
     {
-        entry.Expiry?.Cancel();
         entry.Expiry?.Dispose();
-        entry.Expiry = new CancellationTokenSource();
-        string requestId = entry.Review.RequestId;
-        entry.Expiry.Token.Register(() => Expire(requestId));
+        entry.Expiry = null;
         TimeSpan delay = entry.Review.ExpiresAt - clock.GetUtcNow();
         if (delay <= TimeSpan.Zero)
         {
@@ -340,7 +337,12 @@ public sealed class ApprovalQueue : IDisposable
         }
         else
         {
-            entry.Expiry.CancelAfter(delay);
+            string requestId = entry.Review.RequestId;
+            entry.Expiry = clock.CreateTimer(static state =>
+            {
+                (ApprovalQueue queue, string id) = ((ApprovalQueue, string))state!;
+                queue.Expire(id);
+            }, (this, requestId), delay, Timeout.InfiniteTimeSpan);
         }
     }
 
@@ -358,9 +360,11 @@ public sealed class ApprovalQueue : IDisposable
             if (entry.DecisionInProgress)
             {
                 entry.Expiry?.Dispose();
-                entry.Expiry = new CancellationTokenSource();
-                entry.Expiry.Token.Register(() => Expire(requestId));
-                entry.Expiry.CancelAfter(TimeSpan.FromMilliseconds(100));
+                entry.Expiry = clock.CreateTimer(static state =>
+                {
+                    (ApprovalQueue queue, string id) = ((ApprovalQueue, string))state!;
+                    queue.Expire(id);
+                }, (this, requestId), TimeSpan.FromMilliseconds(100), Timeout.InfiniteTimeSpan);
                 return;
             }
 
@@ -393,8 +397,7 @@ public sealed class ApprovalQueue : IDisposable
             }
 
             _entries.Remove(requestId);
-            entry.Expiry?.Cancel();
-            entry.Expiry?.Dispose();
+                        entry.Expiry?.Dispose();
             entry.Expiry = null;
             DropFlowsUnlocked(requestId);
             entry.Decision.TrySetResult(ApprovalDecision.Deny("the authority offer ended before a decision was committed", reasonCode: ReasonCodes.Cancelled));
@@ -418,8 +421,7 @@ public sealed class ApprovalQueue : IDisposable
             entry.DecidedAt = response.Issued;
             entry.DecisionInProgress = false;
             entry.TerminalUntil = response.Issued + TerminalRetention;
-            entry.Expiry?.Cancel();
-            entry.Expiry?.Dispose();
+                        entry.Expiry?.Dispose();
             entry.Expiry = null;
             DropFlowsUnlocked(requestId);
         }
@@ -904,8 +906,7 @@ public sealed class ApprovalQueue : IDisposable
             {
                 entry.Status = ApprovalStatuses.Cancelled;
                 entry.DecisionInProgress = false;
-                entry.Expiry?.Cancel();
-                entry.Expiry?.Dispose();
+                                entry.Expiry?.Dispose();
                 entry.Decision.TrySetResult(ApprovalDecision.Deny("the authority service stopped", reasonCode: ReasonCodes.Cancelled));
             }
 
