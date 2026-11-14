@@ -123,8 +123,6 @@ internal sealed partial class AdminApi
         new("cursor", S.Str(max: 128, min: 1), "An opaque cursor from the previous page."),
     ];
 
-    private static JsonObject EmptyBody() => S.Obj([]);
-
     private static JsonObject ApprovalAssertionSchema() => S.Obj(
     [
         ("id", S.Str(max: 2048)),
