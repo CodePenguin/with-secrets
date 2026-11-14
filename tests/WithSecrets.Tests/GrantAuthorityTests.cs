@@ -189,7 +189,7 @@ internal static class GrantAuthorityTests
             Machine.Deployment.Authority.Verifier = new ManifestApprovalVerifier(Db);
             Link = new FlakyAuthority(Machine.Deployment.Authority);
             Gate = new LaunchGate();
-            Host = new HostAuthorization(Link, Machine.Deployment.MachineKey, Machine.HostName, Machine.Deployment.HostConfig, Gate, Machine.Deployment.Authority.Offer, Clock, null, Mono);
+            Host = new HostAuthorization(Link, Machine.Deployment.MachineKey, Machine.HostName, Machine.Deployment.HostConfig, Gate, (requestId, digest, present) => Machine.Deployment.Authority.Offer(requestId, digest, present), Clock, null, Mono);
         }
 
         /// <summary>A service restart: the same files and keys, a new authority object, a new host with nothing in memory.</summary>
