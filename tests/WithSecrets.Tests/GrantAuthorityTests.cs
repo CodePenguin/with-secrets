@@ -891,7 +891,7 @@ internal static class GrantAuthorityTests
         {
             await fx.Start();
             await fx.Approve(S1, 60);
-            HostAuthorization direct = new(fx.Authority, fx.Machine.Deployment.MachineKey, fx.Machine.HostName, fx.Machine.Deployment.HostConfig, new LaunchGate(), fx.Authority.Offer, fx.Clock, null, fx.Mono);
+            HostAuthorization direct = new(fx.Authority, fx.Machine.Deployment.MachineKey, fx.Machine.HostName, fx.Machine.Deployment.HostConfig, new LaunchGate(), (requestId, digest, present) => fx.Authority.Offer(requestId, digest, present), fx.Clock, null, fx.Mono);
             await direct.ReconcileAsync();
             check((await direct.TryUseGrantAsync(fx.Req(), S1, CancellationToken.None)).Kind == GrantUseKind.Granted, "local errors: against the local authority a synchronized grant is used online");
             fx.Store.Fault = name =>
