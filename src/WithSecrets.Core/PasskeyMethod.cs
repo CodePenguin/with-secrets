@@ -80,7 +80,7 @@ public sealed class PasskeyMethod(PasskeyStore store, ApprovalSettings settings,
             // The assertion was valid, so the approval stands even if the new count could not be saved.
             store.UpdateSignCount(key.Id, result.NewSignCount);
 
-            return new ProofResult(true, Verified(key));
+            return new ProofResult(true, Verified(key), new VerifiedCredential(key.Name, key.Admin));
         }
         catch (Exception)
         {

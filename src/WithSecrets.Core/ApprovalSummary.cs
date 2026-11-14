@@ -377,7 +377,7 @@ public static class ApprovalSummary
     }
 
     /// <summary>Tabs become 4 spaces; line breaks (LF, CRLF, CR) split lines; one final line break does not add an empty line.</summary>
-    private static List<string> Lines(string value)
+    internal static List<string> Lines(string value)
     {
         List<string> lines = [.. value.Replace("\t", "    ", StringComparison.Ordinal).Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n').Split('\n')];
         if (lines.Count > 0 && lines[^1].Length == 0)
@@ -444,7 +444,7 @@ public static class ApprovalSummary
         };
     }
 
-    private static string Truncate(string value, int length)
+    internal static string Truncate(string value, int length)
     {
         return value.Length <= length ? value : value[..length] + "…";
     }

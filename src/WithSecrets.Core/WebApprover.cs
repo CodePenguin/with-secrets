@@ -344,7 +344,7 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
                             // A step that a page follows (the PRF release before a new key or a rotation) makes its next page now, after the
                             // proof verified and before the command goes on; a signature of a new state makes none.
                             string? next = manifest is null ? takeNext?.Invoke() : null;
-                            if (_decision.TrySetResult(ApprovalDecision.Allow(result.Detail, minutes, evidence, unlock)))
+                            if (_decision.TrySetResult(ApprovalDecision.Allow(result.Detail, minutes, evidence, unlock, result.Credential?.Name)))
                             {
                                 OneShotResponse reply = rows?.Recovery is { } recovery ? new OneShotResponse(200, "application/json", JsonSerializer.Serialize(new { ok = true, recovery }))
                                     : finalCode is not null && manifest is not null ? new OneShotResponse(200, "application/json", JsonSerializer.Serialize(new { ok = true, code = finalCode }))

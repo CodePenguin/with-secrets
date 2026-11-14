@@ -31,6 +31,7 @@ public static class ReasonCodes
     public const string AuthorizationChanged = "authorization-changed";
     public const string Internal = "internal-error";
     public const string UnknownSecret = "unknown-secret";
+    public const string ApprovalQueueFull = "approval-queue-full";
 }
 
 /// <summary>Shared text rules of the authority messages.</summary>

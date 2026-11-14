@@ -36,8 +36,8 @@ public sealed record AuditEntry(long Id, DateTimeOffset Time, string Event, stri
 
 public sealed record HistoryEntry(long Id, string Fingerprint, DateTimeOffset Time, string Kind, string? FromStatus, string? ToStatus, int SecurityRevision, string Actor, string Detail);
 
-/// <summary>What <see cref="AuthorityStore.RecordDecision" /> stores: the signed answer, a host name to record as pending review, and the audit text.</summary>
-public sealed record DecisionPlan(AuthorityResponse Response, string? HostMismatch, string AuditDetail, bool Store = true);
+/// <summary>What <see cref="AuthorityStore.RecordDecision" /> stores: the signed answer, a host name to record as pending review, the audit text, and the server-derived actor (null keeps the legacy literal <c>authority</c> for non-human system refusals).</summary>
+public sealed record DecisionPlan(AuthorityResponse Response, string? HostMismatch, string AuditDetail, bool Store = true, string? Actor = null);
 
 /// <summary>
 /// <c>authority.db</c> in the store folder: the authority's durable state in SQLite (WAL, schema version 4): machines and their
@@ -421,7 +421,8 @@ public sealed partial class AuthorityStore
                 StateDatabase.Execute(connection, transaction, "INSERT INTO processed_requests (request_id, fingerprint, request_digest, response, created) VALUES ($id, $fp, $digest, $response, $now)",
                     ("$id", requestId), ("$fp", fingerprint), ("$digest", requestDigest), ("$response", plan.Response.ToJson()), ("$now", Time(Now)));
                 Fault?.Invoke("after-result");
-                Audit(connection, transaction, "decision-" + plan.Response.Decision.ToString().ToLowerInvariant(), fingerprint, requestId, "authority", plan.Response.ReasonCode + (plan.AuditDetail.Length > 0 ? "; " + plan.AuditDetail : "") + "; request " + requestDigest[..12]);
+                string actor = string.IsNullOrWhiteSpace(plan.Actor) ? "authority" : ApprovalSummary.Clean(plan.Actor);
+                Audit(connection, transaction, "decision-" + plan.Response.Decision.ToString().ToLowerInvariant(), fingerprint, requestId, actor, plan.Response.ReasonCode + (plan.AuditDetail.Length > 0 ? "; " + plan.AuditDetail : "") + "; request " + requestDigest[..12]);
             }
 
             Fault?.Invoke("before-commit");
