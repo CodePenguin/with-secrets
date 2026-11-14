@@ -123,7 +123,7 @@ public sealed class LocalDeployment(AuthorityStore store, AuthorityKeyRing keys,
         return await Link.EnrollAsync(EnrollmentRequest.Create(hostName, challenge, machineKey, IdentityCertificate), cancel);
     }
 
-    public HostAuthorization CreateAuthorization(LaunchGate gate, Action? clearSaved = null, IMonotonicClock? monotonic = null) => new(Link, machineKey, hostName, hostConfig, gate, authority.Offer, clock, clearSaved, monotonic);
+    public HostAuthorization CreateAuthorization(LaunchGate gate, Action? clearSaved = null, IMonotonicClock? monotonic = null) => new(Link, machineKey, hostName, hostConfig, gate, (requestId, digest, present) => authority.Offer(requestId, digest, present), clock, clearSaved, monotonic);
 
     private TemporaryCertificate? _tls;
 
