@@ -281,14 +281,38 @@ internal sealed partial class AdminApi
             return await Respond(response, route, new ApiCall(context, values, null, session, browser, token));
         }
 
-        if (route.Access == ApiAccess.Read)
+        if (route.Access is ApiAccess.Read or ApiAccess.ApprovalsRead)
         {
             if (session is null)
             {
-                return new ApiProblem(401, "session-required", "this needs an administrator session; sign in with a passkey (POST " + Prefix + "/session)");
+                return new ApiProblem(401, "session-required", "this needs a browser session; sign in with a passkey (POST " + Prefix + "/session)");
+            }
+
+            bool allowed = route.Access == ApiAccess.ApprovalsRead
+                ? SessionCapabilities.For(session.Scope).Contains(SessionCapabilities.ApprovalsRead, StringComparer.Ordinal)
+                : SessionCapabilities.For(session.Scope).Contains(SessionCapabilities.AdminRead, StringComparer.Ordinal);
+            if (!allowed)
+            {
+                return new ApiProblem(403, "scope-required", "this session does not have permission to read this resource");
             }
 
             return await Respond(response, route, new ApiCall(context, values, null, session, browser, token));
+        }
+
+        if (route.Access is ApiAccess.Authorize or ApiAccess.Mutation or ApiAccess.ApprovalsDecide)
+        {
+            if (session is null)
+            {
+                return new ApiProblem(401, "session-required", "this needs a browser session; sign in with a passkey (POST " + Prefix + "/session)");
+            }
+
+            bool allowed = route.Access == ApiAccess.ApprovalsDecide
+                ? SessionCapabilities.For(session.Scope).Contains(SessionCapabilities.ApprovalsDecide, StringComparer.Ordinal)
+                : SessionCapabilities.For(session.Scope).Contains(SessionCapabilities.AdminDecide, StringComparer.Ordinal);
+            if (!allowed)
+            {
+                return new ApiProblem(403, "scope-required", "this session does not have permission to perform this operation");
+            }
         }
 
         // Everything below changes (or starts) something: it needs a same-origin request that a page of this browser made.
@@ -306,7 +330,7 @@ internal sealed partial class AdminApi
             return new ApiProblem(403, "anti-forgery", "this request did not come from a page served to this browser; reload the page and try again");
         }
 
-        bool needsSession = route.Access is ApiAccess.Logout or ApiAccess.Authorize or ApiAccess.Mutation;
+        bool needsSession = route.Access is ApiAccess.Logout or ApiAccess.Authorize or ApiAccess.Mutation or ApiAccess.ApprovalsDecide;
         bool noSessionOperation = route.Operation is AdminService.OpUnlock or AdminService.OpLock;
         if (needsSession && session is null && !noSessionOperation && route.Access != ApiAccess.Authorize)
         {
