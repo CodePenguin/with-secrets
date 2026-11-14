@@ -1197,6 +1197,8 @@ public sealed class HostService : IDisposable
             }
         }
 
+        Approvals.Dispose();
+
         try
         {
             using CancellationTokenSource stop = new(TimeSpan.FromSeconds(2));
