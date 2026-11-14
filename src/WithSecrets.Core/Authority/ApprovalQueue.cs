@@ -158,7 +158,7 @@ public sealed class ApprovalQueue : IDisposable
         MachineRecord machine,
         ApprovalRequest page)
     {
-        ApprovalRequest shown = page with { Reuse = ReuseOffer.Off };
+        ApprovalRequest shown = page with { Reuse = ReuseOffer.Off, RequestId = page.RequestId ?? RequestFingerprint.Compute(page).Key };
         string canonical = BuildCanonicalText(launchRequestId, requestDigest, machine.Fingerprint, shown, submittedAt);
         string? inline = Policy.InlineCode(shown.Program, shown.Arguments);
         Dictionary<string, string> sources = shown.Sources is null
