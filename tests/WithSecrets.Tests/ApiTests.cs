@@ -246,10 +246,13 @@ internal static class ApiTests
         (int approvalQueueStatus, string approvalQueueBody, _) = await approvalOnly.GetAsync("/api/v1/approvals");
         (int approvalAdminRead, string approvalAdminBody, _) = await approvalOnly.GetAsync("/api/v1/machines");
         (int approvalAdminWrite, string approvalWriteBody, _) = await approvalOnly.PostAsync("/api/v1/lock", "{\"authorization\":\"AAAAAAAAAAAA\"}");
-        check(approvalQueueStatus == 200 && Member(approvalQueueBody, "items") is not null
-            && approvalAdminRead == 403 && Code(approvalAdminBody) == "scope-required"
-            && approvalAdminWrite == 403 && Code(approvalWriteBody) == "scope-required",
-            "session: approval scope can read Approvals but cannot read machines or perform admin changes");
+        using (JsonDocument approvalQueueDocument = JsonDocument.Parse(approvalQueueBody))
+        {
+            check(approvalQueueStatus == 200 && approvalQueueDocument.RootElement.GetProperty("items").GetArrayLength() == 0
+                && approvalAdminRead == 403 && Code(approvalAdminBody) == "scope-required"
+                && approvalAdminWrite == 403 && Code(approvalWriteBody) == "scope-required",
+                "session: approval scope can read Approvals but cannot read machines or perform admin changes");
+        }
         (int approvalSignOut, _) = await approvalOnly.SendAsync(HttpMethod.Delete, "/api/v1/session", null);
         check(approvalSignOut == 200, "session: approval-only sessions can sign out");
 
