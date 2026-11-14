@@ -208,6 +208,9 @@ internal static class ApprovalQueueTests
         FakeProofMethod proof = new();
         (ApprovalChallengeDto? challenge, string? challengeCode, _) = queue.CreateOrReuseChallenge("req-proof", "session-one", "http://localhost", proof);
         check(challenge is not null && challengeCode is null && challenge.PrfKey is null, "approvals: create WebAuthn challenge without an unnecessary PRF release");
+        (ApprovalDetailDto? wrongSessionDetail, string? wrongSessionCode, _) = queue.Approve("req-proof", "session-two", challenge!.FlowId, "\"valid\"", proof, _ => null);
+        check(wrongSessionDetail is null && wrongSessionCode == "approval-in-progress",
+            "approvals: a challenge cannot be submitted from a different authenticated session");
         (ApprovalChallengeDto? reused, _, _) = queue.CreateOrReuseChallenge("req-proof", "session-one", "http://localhost", proof);
         check(reused?.FlowId == challenge?.FlowId, "approvals: same session reuses its live challenge");
         (ApprovalChallengeDto? other, string? otherCode, _) = queue.CreateOrReuseChallenge("req-proof", "session-two", "http://localhost", proof);
@@ -228,6 +231,9 @@ internal static class ApprovalQueueTests
         check(queue.GetDetail("req-proof", _ => null)?.Status == ApprovalStatuses.Approved
             && queue.Register(Review("req-proof", now), out _) == ApprovalQueueRegistration.ExistingTerminal,
             "approvals: terminal state appears only after authority commit and duplicate retries do not reopen it");
+        (ApprovalDetailDto? replayDetail, string? replayCode, _) = queue.Approve("req-proof", "session-one", challenge!.FlowId, "\"valid\"", proof, _ => null);
+        check(replayCode is null && replayDetail?.Status == ApprovalStatuses.Approved,
+            "approvals: replayed proof reconciles to the committed result without making a second decision");
 
         using ApprovalQueue raceQueue = new(TimeProvider.System, () => TimeSpan.FromMinutes(5));
         check(raceQueue.TryRegister(Review("req-race", now), out _), "approvals: register a request for the approve/deny race");
