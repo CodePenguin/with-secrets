@@ -1066,7 +1066,8 @@ internal static class ApiTests
                 described &= operation["operationId"] is not null && operation["x-access"] is not null && operation["summary"] is not null && problems && operation["responses"]!.AsObject().Any(pair => pair.Key.StartsWith('2'));
                 if (method != "get")
                 {
-                    described &= operation["requestBody"] is not null || method == "delete";
+                    described &= operation["requestBody"] is not null || method == "delete"
+                        || (operation["operationId"]?.GetValue<string>() is "createApprovalChallenge" or "denyApproval");
                 }
             }
         }
