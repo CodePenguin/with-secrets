@@ -189,6 +189,8 @@ internal sealed partial class AdminApi
     {
         HttpRequest request = context.Request;
         HttpResponse response = context.Response;
+        response.Headers.CacheControl = "no-store, max-age=0";
+        response.Headers.Pragma = "no-cache";
         string path = request.Path.Value ?? "";
 
         // The version: /api/v1/... only. Another version number is a documented error (not a 404, so a client can tell); anything else under /api is not an API route.
@@ -311,7 +313,7 @@ internal sealed partial class AdminApi
                 return new ApiProblem(403, "scope-required", "this session does not have permission to perform this operation");
             }
         }
-        else if (route.Access is ApiAccess.Authorize or ApiAccess.Mutation && session is not null
+        else if ((route.Access is ApiAccess.Authorize or ApiAccess.Mutation) && session is not null
             && !SessionCapabilities.For(session.Scope).Contains(SessionCapabilities.AdminDecide, StringComparer.Ordinal))
         {
             return new ApiProblem(403, "scope-required", "this session does not have permission to perform this operation");
