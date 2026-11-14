@@ -648,6 +648,7 @@ internal sealed partial class AdminApi
             "request-unavailable" => 404,
             "approval-in-progress" or "request-not-pending" or "decision-already-made" => 409,
             "authority-locked" => 423,
+            "proof-invalid" => 403,
             "too-many-requests" => 429,
             "internal-error" => 500,
             _ => 409,
