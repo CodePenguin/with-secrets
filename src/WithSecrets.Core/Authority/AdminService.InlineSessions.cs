@@ -38,7 +38,7 @@ public sealed partial class AdminService
         try
         {
             IAdminAsker asker = _p.Askers(_ => { });
-            if (asker.InlineTarget() is not { } target) throw new ProofUnavailableException("no enrolled admin passkey can prove at this address");
+            if (asker.ApprovalTarget() is not { } target) throw new ProofUnavailableException("no enrolled passkey can prove at this address");
             InlineAdminProof prepared = _p.Authorizer.PrepareInline(sentence, OpLogin, [("login", code)], target, $"http://localhost:{_p.Port.ToString(CultureInfo.InvariantCulture)}");
             lock (_inlineLoginGate)
             {
@@ -78,7 +78,9 @@ public sealed partial class AdminService
             _checkingInlineLogins.Remove(ticket!);
             if (!_inlineLogins.Remove(ticket!, out InlineLogin? current) || !ReferenceEquals(login, current)) return false;
         }
-        Sessions.CompleteLogin(login.Code, result.Ok ? (result.Admin!.Signer.Length > 0 ? result.Admin.Signer : "(unnamed)") : null, result.Ok ? null : result.Detail);
+        VerifiedCredential? credential = result.Credential;
+        Sessions.CompleteLogin(login.Code, result.Ok ? credential?.Name ?? result.Admin?.Signer ?? "(unnamed)" : null,
+            result.Ok ? null : result.Detail, credential is null ? SessionScope.Admin : SessionScope.FromAdminFlag(credential.Admin));
         return result.Ok;
     }
 
