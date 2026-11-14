@@ -275,9 +275,10 @@ internal static class ApprovalQueueTests
             "approvals: terminal review projection is discarded after its ten-minute retention");
 
         ApprovalQueue restartQueue = new(TimeProvider.System, () => TimeSpan.FromMinutes(5));
-        check(restartQueue.TryRegister(Review("req-restart", now), out _), "approvals: register a request before service shutdown");
+        check(restartQueue.TryRegister(Review("req-restart", now), out TaskCompletionSource<ApprovalDecision> restartWaiter),
+            "approvals: register a request before service shutdown");
         restartQueue.Dispose();
-        ApprovalDecision restartDecision = restartQueue.Wait("req-restart", CancellationToken.None);
+        ApprovalDecision restartDecision = restartWaiter.Task.GetAwaiter().GetResult();
         check(!restartDecision.Approved && restartDecision.ReasonCode == ReasonCodes.Cancelled
             && restartQueue.GetDetail("req-restart", _ => null) is null,
             "approvals: shutdown drops undecided in-memory requests and wakes the host with a fail-closed denial");
