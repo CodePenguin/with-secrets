@@ -126,9 +126,9 @@ public sealed record ApprovalEvidence(string Nonce, string Text, string Proof);
 /// <see cref="Unlock" /> is what the approving passkey released by WebAuthn PRF when the page asked for it (a run, or the approval
 /// that precedes an enrollment): the caller uses it once and disposes it, which zeroes it.
 /// </summary>
-public sealed record ApprovalDecision(bool Approved, string Detail, int ReuseMinutes = 0, ApprovalEvidence? Evidence = null, Unlock? Unlock = null, string? Actor = null, string? ReasonCode = null)
+public sealed record ApprovalDecision(bool Approved, string Detail, int ReuseMinutes = 0, ApprovalEvidence? Evidence = null, Unlock? Unlock = null, string? Actor = null, string? ReasonCode = null, VerifiedCredential? Credential = null)
 {
-    public static ApprovalDecision Allow(string detail = "approved", int reuseMinutes = 0, ApprovalEvidence? evidence = null, Unlock? unlock = null, string? actor = null) => new(true, detail, reuseMinutes, evidence, unlock, actor);
+    public static ApprovalDecision Allow(string detail = "approved", int reuseMinutes = 0, ApprovalEvidence? evidence = null, Unlock? unlock = null, string? actor = null, VerifiedCredential? credential = null) => new(true, detail, reuseMinutes, evidence, unlock, actor ?? credential?.Name, Credential: credential);
 
     public static ApprovalDecision Deny(string detail, string? actor = null, string? reasonCode = null) => new(false, detail, Actor: actor, ReasonCode: reasonCode);
 
