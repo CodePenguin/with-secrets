@@ -38,7 +38,9 @@ internal sealed partial class AdminApi
             ["Session"] = S.Obj(
             [
                 ("authenticated", S.Bool()),
-                ("admin", S.Str(nullable: true, description: "The name of the admin passkey that tapped.")),
+                ("identity", S.Str(nullable: true, description: "The trusted enrolled passkey identity that signed in.")),
+                ("scope", S.Str(values: ["admin", "approval"], nullable: true)),
+                ("capabilities", S.Arr(S.Str(values: [SessionCapabilities.ApprovalsRead, SessionCapabilities.ApprovalsDecide, SessionCapabilities.AdminRead, SessionCapabilities.AdminDecide]))),
                 ("started", S.Time(nullable: true)),
                 ("idleExpires", S.Time(nullable: true)),
                 ("absoluteExpires", S.Time(nullable: true)),
@@ -49,6 +51,98 @@ internal sealed partial class AdminApi
             ["Claim"] = S.Obj([("antiForgery", S.Str(description: "The session's own secret, given once, here. Send it as the X-Admin-Token header with every request: the session cookie alone is not enough.")), ("session", S.Ref("Session"))]),
             ["LoginStarted"] = S.Obj([("link", S.Str(description: "The one-use passkey page to open. The tap there starts the session."))]),
             ["InlineLoginStarted"] = S.Obj([("proof", S.Ref("ProofStart"))]),
+            ["ApprovalMachine"] = S.Obj(
+            [
+                ("fingerprint", S.Str()),
+                ("friendlyName", S.Str(nullable: true)),
+                ("hostName", S.Str()),
+            ]),
+            ["ApprovalQueueItem"] = S.Obj(
+            [
+                ("requestId", S.Str()),
+                ("status", S.Str(values: ["pending"])),
+                ("submittedAt", S.Time()),
+                ("expiresAt", S.Time()),
+                ("machine", S.Ref("ApprovalMachine")),
+                ("program", S.Str()),
+                ("reason", S.Str()),
+                ("secretNames", S.Arr(S.Str())),
+            ]),
+            ["ApprovalQueue"] = S.Obj(
+            [
+                ("items", S.Arr(S.Ref("ApprovalQueueItem"))),
+                ("nextCursor", S.Str(nullable: true)),
+                ("serverTime", S.Time()),
+            ]),
+            ["ApprovalScript"] = S.Obj(
+            [
+                ("path", S.Str(nullable: true)),
+                ("sha256", S.Str()),
+                ("length", S.Int()),
+                ("text", S.Str(nullable: true)),
+                ("guessed", S.Bool()),
+                ("binary", S.Bool()),
+            ]),
+            ["ApprovalDecrypt"] = S.Obj(
+            [
+                ("variable", S.Str()),
+                ("file", S.Str()),
+                ("keySecret", S.Str()),
+                ("cipherShort", S.Str()),
+            ]),
+            ["ApprovalNameValue"] = S.Obj([("name", S.Str()), ("value", S.Str())]),
+            ["ApprovalCodeWarning"] = S.Obj([("name", S.Str()), ("why", S.Str())]),
+            ["ApprovalReview"] = S.Obj(
+            [
+                ("requestId", S.Str()),
+                ("fingerprintKey", S.Str()),
+                ("requestDigest", S.Str()),
+                ("submittedAt", S.Time()),
+                ("expiresAt", S.Time()),
+                ("machine", S.Ref("ApprovalMachine")),
+                ("program", S.Str()),
+                ("resolvedProgram", S.Str()),
+                ("arguments", S.Arr(S.Str())),
+                ("workingDirectory", S.Str()),
+                ("reason", S.Str()),
+                ("secretNames", S.Arr(S.Str())),
+                ("secretSources", new JsonObject { ["type"] = "object", ["additionalProperties"] = S.Str() }),
+                ("inlineCode", S.Str(nullable: true)),
+                ("script", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("ApprovalScript"), new JsonObject { ["type"] = "null" }) }),
+                ("programFile", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("ApprovalScript"), new JsonObject { ["type"] = "null" }) }),
+                ("envFiles", S.Arr(S.Str())),
+                ("envPairs", S.Arr(S.Str())),
+                ("shownEnvValues", S.Arr(S.Ref("ApprovalNameValue"))),
+                ("codeChangeWarnings", S.Arr(S.Ref("ApprovalCodeWarning"))),
+                ("decrypts", S.Arr(S.Ref("ApprovalDecrypt"))),
+                ("inheritedEnvironmentLine", S.Str(nullable: true)),
+                ("extraLines", S.Arr(S.Str())),
+                ("canonicalText", S.Str()),
+                ("requiresUnlock", S.Bool()),
+            ]),
+            ["ApprovalDetail"] = S.Obj(
+            [
+                ("requestId", S.Str()),
+                ("status", S.Str(values: ["pending", "approved", "denied", "expired", "cancelled"])),
+                ("submittedAt", S.Time()),
+                ("expiresAt", S.Time()),
+                ("decidedAt", S.Time(nullable: true)),
+                ("machine", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("ApprovalMachine"), new JsonObject { ["type"] = "null" }) }),
+                ("program", S.Str(nullable: true)),
+                ("reason", S.Str(nullable: true)),
+                ("secretNames", S.Arr(S.Str(), nullable: true)),
+                ("review", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("ApprovalReview"), new JsonObject { ["type"] = "null" }) }),
+                ("decisionInProgress", S.Bool()),
+                ("actions", S.Arr(S.Str())),
+            ]),
+            ["ApprovalChallenge"] = S.Obj(
+            [
+                ("flowId", S.Str()),
+                ("mode", S.Str(values: ["webauthn"])),
+                ("payload", new JsonObject { ["type"] = "object", ["additionalProperties"] = true }),
+                ("expiresAt", S.Time()),
+                ("prfKey", S.Str(nullable: true)),
+            ]),
             ["CopyWarning"] = S.Obj(
             [
                 ("count", S.Int(description: "The most supersedes from another address seen within one watch window.")),
