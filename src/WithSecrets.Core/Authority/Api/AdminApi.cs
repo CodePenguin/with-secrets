@@ -290,10 +290,10 @@ internal sealed partial class AdminApi
                 return new ApiProblem(401, "session-required", "this needs a browser session; sign in with a passkey (POST " + Prefix + "/session)");
             }
 
-            bool allowed = route.Access == ApiAccess.ApprovalsRead
+            bool hasRequiredScope = route.Access == ApiAccess.ApprovalsRead
                 ? SessionCapabilities.For(session.Scope).Contains(SessionCapabilities.ApprovalsRead, StringComparer.Ordinal)
                 : SessionCapabilities.For(session.Scope).Contains(SessionCapabilities.AdminRead, StringComparer.Ordinal);
-            if (!allowed)
+            if (!hasRequiredScope)
             {
                 return new ApiProblem(403, "scope-required", "this session does not have permission to read this resource");
             }
