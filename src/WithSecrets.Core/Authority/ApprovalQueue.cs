@@ -555,7 +555,8 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
             string nonce = Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(16));
             byte[] bind = RequestBinding.Compute(nonce, entry.Review.CanonicalText);
             // Bind also covers digest, machine and fixed decision already present in CanonicalText; ReuseBinding minutes 0 = approve once.
-            ProofContext context = new(ReuseBinding.Challenge(bind, 0), origin);
+            // Pass the base request bind to Start; the SPA derives the fixed reuse=0 challenge just as the one-shot page does.
+            ProofContext context = new(bind, origin);
             byte[]? prfState = null;
             string? prfKey = null;
             if (entry.Review.RequiresUnlock)
@@ -672,7 +673,7 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
         ProofResult verified;
         try
         {
-            verified = method.Verify(flow.Context, proof);
+            verified = method.Verify(flow.Context with { Bind = ReuseBinding.Challenge(flow.Context.Bind, 0) }, proof);
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
