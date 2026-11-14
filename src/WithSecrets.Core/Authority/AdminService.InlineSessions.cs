@@ -32,14 +32,14 @@ public sealed partial class AdminService
         (string ticket, string code) = begun;
         AfterPlanForTests?.Invoke();
         (int idle, int absolute) = _p.Store.SessionTimeouts();
-        string sentence = "start an administrator session on the admin web app. Only tap if you just chose to sign in there yourself. The session lets this browser READ (status, machines, grants, audit, settings) for up to "
+        string sentence = "start a read-only browser session on the administration app. Its capabilities are determined by the enrolled passkey that signs in; it changes nothing, and every administrative change requires its own passkey tap. Session access lasts up to "
             + absolute.ToString(CultureInfo.InvariantCulture) + " minutes, ending after " + idle.ToString(CultureInfo.InvariantCulture) + " minutes without use; it changes nothing and every change still needs its own passkey tap";
 
         try
         {
             IAdminAsker asker = _p.Askers(_ => { });
             if (asker.ApprovalTarget() is not { } target) throw new ProofUnavailableException("no enrolled passkey can prove at this address");
-            InlineAdminProof prepared = _p.Authorizer.PrepareInline(sentence, OpLogin, [("login", code)], target, $"http://localhost:{_p.Port.ToString(CultureInfo.InvariantCulture)}");
+            InlineAdminProof prepared = _p.Authorizer.PrepareInline(sentence, OpLogin, [("login", code)], target, target.Approver.Origin);
             lock (_inlineLoginGate)
             {
                 foreach (string previous in _inlineLogins.Where(item => item.Value.Browser == browserId).Select(item => item.Key).ToArray()) _inlineLogins.Remove(previous);
