@@ -699,7 +699,7 @@ internal static class ApiTests
         check(approved.MutationStatus == 200 && store.Find(fp) is { Status: MachineStatus.Trusted, FriendlyName: "dev laptop" }, "machine approve: the admin key's tap approves the machine");
         check(approved.Page.Contains(display, StringComparison.Ordinal) && approved.Page.Contains("approve this machine", StringComparison.Ordinal) && approved.Page.Contains("dev laptop", StringComparison.Ordinal), "machine approve: the page (which the passkey signs) shows the action, the full fingerprint and the name");
         check(hostConfig.Load().Config is { Authority: not null } config && config.MachineFingerprint == fp, "machine approve: the authority key is pinned in host.json");
-        check(store.Audit().Any(entry => entry.Event == "machine-approve" && entry.Actor == "passkey laptop"), "machine approve: the audit history names the admin key that tapped");
+        check(store.Audit().Any(entry => entry.Event == "machine-approve" && entry.Actor == "admin passkey laptop"), "machine approve: the audit history names the admin key that tapped");
 
         (string Op, string? Name, string Phrase, MachineStatus After)[] steps =
         [
@@ -1145,23 +1145,26 @@ internal static class ApiTests
             "approvals: test fixture registers a pending request");
         (int queueListStatus, string queueListBody, _) = await s.GetAsync("/api/v1/approvals");
         (int detailStatus, string detailBody, _) = await s.GetAsync("/api/v1/approvals/" + approvalId);
-        check(queueListStatus == 200 && Conform("ApprovalQueue", queueListBody) is null
-            && detailStatus == 200 && Conform("ApprovalDetail", detailBody) is null,
-            "approvals: queue and full detail responses conform to OpenAPI");
+        string? queueShape = Conform("ApprovalQueue", queueListBody);
+        string? detailShape = Conform("ApprovalDetail", detailBody);
+        check(queueListStatus == 200 && queueShape is null && detailStatus == 200 && detailShape is null,
+            "approvals: queue and full detail responses conform to OpenAPI (queue " + queueListStatus + ": " + (queueShape ?? "valid") + "; detail " + detailStatus + ": " + (detailShape ?? "valid") + ")");
         (int challengeStatus, string challengeBody) = await s.PostAsync("/api/v1/approvals/" + approvalId + "/challenge", "{}");
         check(challengeStatus == 201 && Conform("ApprovalChallenge", challengeBody) is null,
             "approvals: the request-bound challenge response conforms to OpenAPI");
         (int denyStatus, string denyBody) = await s.PostAsync("/api/v1/approvals/" + approvalId + "/deny", "{}");
-        check(denyStatus == 200 && Conform("ApprovalDetail", denyBody) is null,
-            "approvals: denial is accepted without a WebAuthn assertion");
+        string? denialShape = denyStatus == 200 ? Conform("ApprovalDetail", denyBody) : null;
+        check(denyStatus == 200 && denialShape is null,
+            "approvals: denial is accepted without a WebAuthn assertion (" + denyStatus + ": " + (denialShape ?? Code(denyBody) ?? "valid") + ")");
         ApprovalDecision deniedApproval = app.Service.Approvals.Wait(approvalId, CancellationToken.None);
         AuthorityResponse denialResult = new(1, approvalId, approvalDigest, app.Machine.Fingerprint, AuthorityDecision.Denied, ReasonCodes.UserDenied,
             0, submitted.AddSeconds(1), submitted.AddMinutes(1), "authority-key", []);
         app.Service.Approvals.MarkCommitted(approvalId, denialResult);
         (int terminalStatus, string terminalBody, _) = await s.GetAsync("/api/v1/approvals/" + approvalId);
-        check(!deniedApproval.Approved && terminalStatus == 200 && Conform("ApprovalDetail", terminalBody) is null
+        string? terminalShape = terminalStatus == 200 ? Conform("ApprovalDetail", terminalBody) : null;
+        check(!deniedApproval.Approved && terminalStatus == 200 && terminalShape is null
             && Member(terminalBody, "status") == ApprovalStatuses.Denied,
-            "approvals: terminal detail is published after the authority decision is committed");
+            "approvals: terminal detail is published after the authority decision is committed (" + terminalStatus + ": " + (terminalShape ?? Member(terminalBody, "status") ?? Code(terminalBody) ?? "valid") + ")");
 
         (int createStatus, string createBody) = await s.PostAsync("/api/v1/authorizations", AdminBrowser.AuthorizationBody("machine-rename", ("fingerprint", app.Fingerprint[..20]), ("name", "shape")));
         check(createStatus == 201 && Conform("Authorization", createBody) is null, "openapi: the answer of POST /authorizations conforms to Authorization (" + Conform("Authorization", createBody) + ")");
