@@ -717,7 +717,7 @@ public sealed class ApprovalQueue : IDisposable
                 }
             }
 
-            return (null, "request-not-pending", "the passkey proof was not accepted");
+            return (null, "proof-invalid", "the passkey proof was not accepted");
         }
 
         if (Interlocked.Exchange(ref flow.Consumed, 1) != 0)
