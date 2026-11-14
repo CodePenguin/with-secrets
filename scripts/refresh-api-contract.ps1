@@ -4,8 +4,8 @@
 
 .DESCRIPTION
     Runs the .NET test harness with WS_UPDATE_OPENAPI=1 so ApiTests writes docs/api/openapi.json,
-    then runs the frontend API generator to refresh src/WithSecrets.Admin.Web/src/api/schema.ts,
-    and finishes with the full repository verification script.
+    then runs the frontend API generator to refresh src/WithSecrets.Admin.Web/src/api/schema.ts.
+    Run scripts/verify-all.ps1 after this script succeeds.
 #>
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -46,12 +46,7 @@ try {
         Pop-Location
     }
 
-    & (Join-Path $PSScriptRoot 'verify-all.ps1')
-    if ($LASTEXITCODE -ne 0) {
-        throw "Full repository verification failed (exit $LASTEXITCODE)."
-    }
-
-    Write-Host 'OpenAPI document and TypeScript API types regenerated; full verification passed.'
+    Write-Host 'OpenAPI document and TypeScript API types regenerated. Run scripts/verify-all.ps1 next.'
 }
 finally {
     if ($null -eq $previousOnly) {
