@@ -487,17 +487,25 @@ internal static class AuthorityTests
         LaunchRequest request = IdentityTests.Sample("idem-1", now);
         MachineRequestEnvelope envelope = MachineRequestEnvelope.Create(request, fx.Machine.HostName, fx.Machine.MachineKey);
         int asked = 0;
+        AuthorityResponse? committedNotice = null;
+        bool noticeAfterCommit = false;
         using (authority.Offer(request.RequestId, request.Digest(), () =>
         {
             Interlocked.Increment(ref asked);
-
-            return ApprovalDecision.Allow();
+            return ApprovalDecision.Allow(credential: new VerifiedCredential("approver", false));
+        }, response =>
+        {
+            committedNotice = response;
+            noticeAfterCommit = fx.Store.GetProcessed("idem-1") is not null;
         }))
         {
             AuthorityResponse first = await authority.DecideAsync(envelope);
             AuthorityResponse retry = await authority.DecideAsync(envelope);
             check(first.Decision == AuthorityDecision.Approved && retry.ToJson() == first.ToJson() && asked == 1, "idempotent: a retry of the request id returns the committed answer (same bytes, same signature), no second page");
-            check(fx.Store.GetProcessed("idem-1") is { Response: { } stored } && stored.ToJson() == first.ToJson() && fx.Store.Audit().Count(entry => entry.Event == "decision-approved" && entry.RequestId == "idem-1") == 1, "idempotent: the result is in processed_requests and audited once");
+            check(committedNotice?.ToJson() == first.ToJson() && noticeAfterCommit, "approvals: the queue completion callback runs only after the durable processed result commits");
+            check(fx.Store.GetProcessed("idem-1") is { Response: { } stored } && stored.ToJson() == first.ToJson()
+                && fx.Store.Audit().Count(entry => entry.Event == "decision-approved" && entry.RequestId == "idem-1" && entry.Actor == "passkey approver") == 1,
+                "idempotent: the result is in processed_requests and the audit actor is the verified passkey identity");
 
             // A simulated restart: new objects over the same files. The answer comes from the database; nobody is asked.
             LocalDeployment restarted = fx.Machine.Restart();
@@ -520,12 +528,14 @@ internal static class AuthorityTests
         {
             deniedAsked++;
 
-            return ApprovalDecision.Deny("no thanks");
+            return ApprovalDecision.Deny("no thanks", actor: "session identity");
         }))
         {
             AuthorityResponse no = await fx.Machine.Deployment.Authority.DecideAsync(deniedEnvelope);
             AuthorityResponse noAgain = await fx.Machine.Deployment.Authority.DecideAsync(deniedEnvelope);
-            check(no.ReasonCode == ReasonCodes.UserDenied && noAgain.ToJson() == no.ToJson() && deniedAsked == 1, "idempotent: a denial is committed and returned again, not asked again");
+            check(no.ReasonCode == ReasonCodes.UserDenied && noAgain.ToJson() == no.ToJson() && deniedAsked == 1
+                && fx.Store.Audit().Any(entry => entry.Event == "decision-denied" && entry.RequestId == "idem-2" && entry.Actor == "session session identity"),
+                "idempotent: a denial is committed once and attributed to the authenticated session identity");
         }
 
         // Two callers at once with the same id share one decision.
