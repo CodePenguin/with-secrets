@@ -877,6 +877,11 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
     private void SweepUnlocked()
     {
         DateTimeOffset now = clock.GetUtcNow();
+        foreach (Entry entry in _entries.Values.Where(item => item.Status == ApprovalStatuses.Pending && !item.DecisionInProgress && item.Review.ExpiresAt <= now).ToList())
+        {
+            ReleaseUnlocked(entry, ApprovalDecision.Deny(ApprovalDecision.TimeLimitDetail, reasonCode: ReasonCodes.ApprovalTimeout));
+        }
+
         foreach (string id in _entries.Where(item => item.Value.TerminalUntil is { } until && until <= now).Select(item => item.Key).ToList())
         {
             if (_entries.TryGetValue(id, out Entry? entry))
