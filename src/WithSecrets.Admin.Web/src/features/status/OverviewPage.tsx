@@ -60,7 +60,17 @@ export function OverviewPage() {
       </Card>
 
       <Card title="Needs your attention">
-        {machines.isError ? <ProblemAlert error={machines.error} title="Machine attention could not be loaded" /> : null}
+        {machines.isError ? (
+          <>
+            <ProblemAlert error={machines.error} title="Machine attention could not be loaded" />
+            <p>
+              <Button onClick={() => void machines.refetch()}>
+                Try again{' '}
+                <span className="visually-hidden">loading machine attention</span>
+              </Button>
+            </p>
+          </>
+        ) : null}
         {machines.data ? (
           <ul>
             <li>
@@ -76,7 +86,17 @@ export function OverviewPage() {
       </Card>
 
       <Card title="At a glance">
-        {grants.isError ? <ProblemAlert error={grants.error} title="Active grants could not be loaded" /> : null}
+        {grants.isError ? (
+          <>
+            <ProblemAlert error={grants.error} title="Active grants could not be loaded" />
+            <p>
+              <Button onClick={() => void grants.refetch()}>
+                Try again{' '}
+                <span className="visually-hidden">loading active grants</span>
+              </Button>
+            </p>
+          </>
+        ) : null}
         {grants.data ? (
           active === 0 ? (
             <p>No active grants.</p>

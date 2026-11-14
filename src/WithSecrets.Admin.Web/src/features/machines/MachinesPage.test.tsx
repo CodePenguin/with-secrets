@@ -2,7 +2,7 @@ import { screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { pendingAuthorization } from '../../api/client'
-import { authorization, signedIn, violations } from '../../test/fakeApi'
+import { authorization, machine, problem, signedIn, violations } from '../../test/fakeApi'
 import { renderApp } from '../../test/render'
 
 let opened: ReturnType<typeof vi.spyOn>
@@ -12,6 +12,7 @@ beforeEach(() => {
 })
 afterEach(() => {
   opened.mockRestore()
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined })
 })
 
 const BUNDLE = 'ws-invite-SECRETBUNDLE'
@@ -49,13 +50,14 @@ describe('machines: pairing is part of the view', () => {
     const user = userEvent.setup()
     signedIn({
       'GET /api/v1/machines': { body: { items: [] } },
-      'GET /api/v1/pairing/invitations': { body: { items: [{ id: 'inv-0001', status: 'pending', created: '2026-11-09T10:00:00Z', expires: '2026-11-09T10:10:00Z', ended: null, machine: null, canRevoke: true }] } },
+      'GET /api/v1/pairing/invitations': { body: { items: [{ id: 'inv-0001', status: 'pending', created: '2026-11-09T10:00:00Z', expires: '2026-11-09T10:10:00Z', ended: null, machine: null, canRevoke: true, bundle: BUNDLE }] } },
       'POST /api/v1/authorizations/inline': { status: 201, body: authorization({ operation: 'pairing-revoke', link: null, proof: { mode: 'webauthn', payload: JSON.stringify({ bind: 'AQ', rpId: 'localhost', timeout: 60000 }) }, parameters: [{ name: 'id', value: 'inv-0001' }] }) },
     })
     renderApp('/machines')
     const list = await screen.findByRole('list', { name: 'Invitations' })
     expect(within(list).getByText('pending')).toBeInTheDocument()
-    expect(document.body.textContent).not.toContain('ws-invite')
+    expect(document.body.textContent).not.toContain(BUNDLE)
+    expect(JSON.stringify({ ...sessionStorage, ...localStorage })).not.toContain(BUNDLE)
 
     await user.click(within(list).getByRole('button', { name: /revoke/i }))
     await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Prepare confirmation' }))
@@ -102,5 +104,81 @@ describe('machines: pairing is part of the view', () => {
     await user.click(await within(dialog).findByRole('button', { name: 'Confirm this change' }))
 
     expect(await within(dialog).findByText(/cannot be shown again/)).toBeInTheDocument()
+  })
+})
+
+describe('machines: recoverable errors', () => {
+  it('shows a machine-list error with a retry instead of an empty list', async () => {
+    const user = userEvent.setup()
+    let fail = true
+    signedIn({
+      'GET /api/v1/machines': () => {
+        if (!fail) return { body: { items: [machine()] } }
+        fail = false
+
+        return problem(400, 'machines-unavailable', 'machines are unavailable')
+      },
+    })
+    renderApp('/machines')
+
+    expect(await screen.findByText(/The machines could not be listed/)).toBeInTheDocument()
+    expect(screen.queryByText('No machine has enrolled yet.')).toBeNull()
+    await user.click(screen.getByRole('button', { name: /try again loading machines/i }))
+    expect(await screen.findByRole('heading', { name: 'build-host' })).toBeInTheDocument()
+  })
+
+  it('shows an invitation-list error with a retry instead of an empty list', async () => {
+    const user = userEvent.setup()
+    let fail = true
+    signedIn({
+      'GET /api/v1/machines': { body: { items: [] } },
+      'GET /api/v1/pairing/invitations': () => {
+        if (!fail) return { body: { items: [] } }
+        fail = false
+
+        return problem(400, 'invitations-unavailable', 'invitations are unavailable')
+      },
+    })
+    renderApp('/machines')
+
+    expect(await screen.findByText(/The invitations could not be listed/)).toBeInTheDocument()
+    expect(screen.queryByText('No invitation has been created.')).toBeNull()
+    await user.click(screen.getByRole('button', { name: /try again loading invitations/i }))
+    expect(await screen.findByText('No invitation has been created.')).toBeInTheDocument()
+  })
+})
+
+describe('machines: fingerprint inspection and copy', () => {
+  it('copies the complete fingerprint, not the abbreviated display', async () => {
+    const user = userEvent.setup()
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    signedIn()
+    renderApp('/machines')
+    await screen.findByRole('heading', { name: 'build-host' })
+
+    await user.click(screen.getByRole('button', { name: /copy full fingerprint for build-host/i }))
+
+    expect(machine().fingerprint).toHaveLength(64)
+    expect(writeText).toHaveBeenCalledWith(machine().fingerprint)
+    expect(screen.getByText('Copied.')).toBeInTheDocument()
+  })
+
+  it('keeps the complete fingerprint readable when copying is not possible', async () => {
+    const user = userEvent.setup()
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn(async () => { throw new Error('copy refused') }) },
+    })
+    signedIn()
+    renderApp('/machines')
+    const card = (await screen.findByRole('heading', { name: 'build-host' })).closest('li') as HTMLElement
+
+    await user.click(within(card).getByText('Show full fingerprint'))
+    expect(within(card).getByText(machine().fingerprint)).toBeInTheDocument()
+    await user.click(within(card).getByRole('button', { name: /copy full fingerprint/i }))
+
+    expect(await within(card).findByText(/select the fingerprint and copy it/i)).toBeInTheDocument()
+    expect(within(card).getByText(machine().fingerprint)).toBeInTheDocument()
   })
 })

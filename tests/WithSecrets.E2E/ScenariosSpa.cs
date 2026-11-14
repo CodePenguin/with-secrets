@@ -547,12 +547,18 @@ internal static class ScenariosSpa
         await Flows.Configure(rig, c);
         using SpaApp app = new(rig);
         using SoftwareSigningKey other = new();
+        string longHost = "a-very-long-reporting-host-name-that-keeps-going-for-layout-checks.example.internal";
         byte[] challenge = await rig.Machine.Deployment.Authority.BeginEnrollmentAsync();
-        await rig.Machine.Deployment.Authority.EnrollAsync(EnrollmentRequest.Create("other-host", challenge, other));
+        await rig.Machine.Deployment.Authority.EnrollAsync(EnrollmentRequest.Create(longHost, challenge, other));
         await Spa.SignIn(c, app, s);
 
         string[] views = ["Overview", "Machines", "Grants", "Audit", "Settings", "Passkeys"];
-        foreach ((string width, int w, int h) in new[] { ("desktop", 1280, 800), ("tablet", 768, 1024), ("phone", 375, 667), ("200% zoom on a phone (320 CSS px wide)", 320, 568), ("400% zoom on a desktop (320 CSS px wide)", 320, 256) })
+        foreach ((string width, int w, int h) in new[]
+                 {
+                     ("desktop", 1280, 800), ("large desktop", 1440, 900), ("small laptop", 1024, 768), ("tablet", 768, 1024), ("wide phone", 430, 932),
+                     ("phone", 375, 667), ("200% zoom on a phone (320 CSS px wide)", 320, 568), ("200% zoom on a desktop (640 CSS px wide)", 640, 512),
+                     ("400% zoom on a desktop (320 CSS px wide)", 320, 256),
+                 })
         {
             await c.Page.SetViewportSizeAsync(w, h);
             foreach (string view in views)
@@ -567,6 +573,17 @@ internal static class ScenariosSpa
                 }
             }
         }
+
+        // Long identifiers and a revealed full fingerprint stay inside the narrowest page.
+        await c.Page.SetViewportSizeAsync(320, 568);
+        await Spa.GoTo(c, "Machines", "Machines");
+        await c.Page.Locator("main summary").First.ClickAsync();
+        string fullFingerprint = await c.Page.Locator("main code").First.TextContentAsync() ?? "";
+        bool revealedOverflow = await c.Page.EvaluateAsync<bool>("() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1");
+        s.Check(fullFingerprint.Length == 64, "the complete machine fingerprint is revealed, not a shortened value (" + fullFingerprint.Length + " characters)");
+        s.Check(!revealedOverflow, "no horizontal scrolling with a long host name and a full fingerprint revealed at 320 px");
+        ILocator copyFull = c.Page.GetByRole(AriaRole.Button, new() { Name = "Copy full fingerprint for " + longHost });
+        s.Check(await copyFull.CountAsync() == 1 && await copyFull.First.IsVisibleAsync(), "the revealed complete fingerprint has a copy control for the machine it belongs to");
 
         // Touch targets: every button and link of a view is at least 24 CSS px (WCAG 2.2) in both directions; ours are 44.
         await c.Page.SetViewportSizeAsync(375, 667);

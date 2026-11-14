@@ -131,15 +131,73 @@ describe('machine identity details', () => {
     await user.click(screen.getByText('Show full fingerprint'))
     expect(screen.getByText(machine().fingerprint)).toBeInTheDocument()
   })
+
+  it('keeps a long friendly name, reported host name and complete fingerprint readable together', async () => {
+    const user = userEvent.setup()
+    const friendlyName = 'analytics-render-farm-' + 'x'.repeat(80)
+    const hostName = 'render-farm-' + 'y'.repeat(80)
+    const reported = 'new-' + 'z'.repeat(80)
+    signedIn({
+      'GET /api/v1/machines': {
+        body: { items: [machine({ status: 'trusted', friendlyName, hostName, pendingHostName: reported, actions: ['approve-host-change', 'rename'] })] },
+      },
+    })
+    renderApp('/machines')
+    const card = (await screen.findByRole('heading', { name: friendlyName })).closest('li') as HTMLElement
+
+    expect(within(card).getByText(hostName)).toBeInTheDocument()
+    expect(within(card).getByText(reported)).toBeInTheDocument()
+    await user.click(within(card).getByText('Show full fingerprint'))
+    expect(within(card).getByText(machine().fingerprint)).toBeInTheDocument()
+  })
 })
 
 describe('the overview', () => {
+  it('shows the consequence of a locked authority without repeating the shell status or session identity', async () => {
+    signedIn({ 'GET /api/v1/status': { body: status({ locked: true }) } })
+    renderApp('/')
+
+    expect(await screen.findByRole('button', { name: 'Unlock the authority' })).toBeInTheDocument()
+    expect(screen.getByText(/The authority is locked/)).toBeInTheDocument()
+    expect(screen.getAllByText('Authority locked')).toHaveLength(1)
+    const authority = screen.getByRole('heading', { name: 'Authority' }).closest('section') as HTMLElement
+    expect(within(authority).queryByText('State')).toBeNull()
+    expect(within(authority).queryByText('Authority locked')).toBeNull()
+    expect(screen.getAllByText(/Signed in/)).toHaveLength(1)
+  })
+
   it('keeps active grants as a neutral summary rather than an attention condition', async () => {
     signedIn()
     renderApp('/')
 
-    const activeGrant = await screen.findByRole('link', { name: '1 active grant' })
-    expect(activeGrant.closest('li')).toBeNull()
+    const active = await screen.findByRole('link', { name: '1 active grant' })
+    const attention = screen.getByRole('heading', { name: 'Needs your attention' }).closest('section') as HTMLElement
+    expect(within(attention).queryByRole('link', { name: /active grant/ })).toBeNull()
+    const glance = screen.getByRole('heading', { name: 'At a glance' }).closest('section') as HTMLElement
+    expect(within(glance).getByRole('link', { name: '1 active grant' })).toBe(active)
+    expect(active).toHaveAttribute('href', '/grants')
+  })
+
+  it('links pending machines and host-name changes to Machines as actionable attention', async () => {
+    signedIn({
+      'GET /api/v1/machines': {
+        body: {
+          items: [
+            machine(),
+            machine({ fingerprint: 'ff'.repeat(32), display: 'ffff', status: 'trusted', hostName: 'old-host', pendingHostName: 'new-host', actions: ['approve-host-change'] }),
+          ],
+        },
+      },
+    })
+    renderApp('/')
+
+    const pending = await screen.findByRole('link', { name: '1 machine is waiting for approval' })
+    const changed = await screen.findByRole('link', { name: '1 machine reported a new host name' })
+    const attention = screen.getByRole('heading', { name: 'Needs your attention' }).closest('section') as HTMLElement
+    expect(within(attention).getByRole('link', { name: '1 machine is waiting for approval' })).toBe(pending)
+    expect(within(attention).getByRole('link', { name: '1 machine reported a new host name' })).toBe(changed)
+    expect(pending).toHaveAttribute('href', '/machines')
+    expect(changed).toHaveAttribute('href', '/machines')
   })
 
   it('shows recoverable errors instead of leaving optional data in a loading state', async () => {
@@ -154,6 +212,57 @@ describe('the overview', () => {
     expect(alerts.map((alert) => alert.textContent).join(' ')).toContain('Active grants could not be loaded')
     expect(screen.queryByText('Machines: loading')).toBeNull()
     expect(screen.queryByText('Grants: loading')).toBeNull()
+  })
+
+  it('retries each optional query locally and shows its data once it succeeds', async () => {
+    const user = userEvent.setup()
+    let machinesFail = true
+    let grantsFail = true
+    signedIn({
+      'GET /api/v1/machines': () => {
+        if (!machinesFail) return { body: { items: [machine()] } }
+        machinesFail = false
+
+        return problem(400, 'machines-unavailable', 'machines are unavailable')
+      },
+      'GET /api/v1/grants': () => {
+        if (!grantsFail) return { body: { items: [grant()] } }
+        grantsFail = false
+
+        return problem(400, 'grants-unavailable', 'grants are unavailable')
+      },
+    })
+    renderApp('/')
+
+    await screen.findByText(/Machine attention could not be loaded/)
+    await screen.findByText(/Active grants could not be loaded/)
+    await user.click(screen.getByRole('button', { name: /try again loading machine attention/i }))
+    expect(await screen.findByRole('link', { name: '1 machine is waiting for approval' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /try again loading active grants/i }))
+    expect(await screen.findByRole('link', { name: '1 active grant' })).toBeInTheDocument()
+  })
+})
+
+describe('machine polling', () => {
+  it('announces a newly paired machine without taking focus from the current task', async () => {
+    let paired = false
+    signedIn({
+      'GET /api/v1/machines': () => ({
+        body: {
+          items: [
+            machine({ status: 'trusted', actions: ['rename'] }),
+            ...(paired ? [machine({ fingerprint: 'ff'.repeat(32), display: 'ffff', hostName: 'late-host' })] : []),
+          ],
+        },
+      }),
+    })
+    renderApp('/machines')
+    const add = await screen.findByRole('button', { name: 'Add a machine' })
+    add.focus()
+    paired = true
+
+    expect(await screen.findByText(/A machine paired: late-host/, {}, { timeout: 4000 })).toBeInTheDocument()
+    expect(add).toHaveFocus()
   })
 })
 
@@ -374,8 +483,11 @@ describe('what is shown', () => {
   it('lists machines with the actions each one offers', async () => {
     signedIn({ 'GET /api/v1/machines': { body: { items: [machine(), machine({ fingerprint: 'ff'.repeat(32), display: 'ffff', status: 'trusted', friendlyName: 'ci box', actions: ['disable', 'untrust', 'rename'] })] } } })
     renderApp('/machines')
-    await screen.findByRole('heading', { name: 'ci box' })
+    const heading = await screen.findByRole('heading', { name: 'ci box' })
+    const card = heading.closest('li') as HTMLElement
 
+    expect(within(card).getByText('build-host')).toBeInTheDocument()
+    expect(within(card).getByText('ffff')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^approve/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^disable/i })).toBeInTheDocument()
   })

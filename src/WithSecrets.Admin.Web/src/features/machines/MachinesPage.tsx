@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useInvitations, useMachines } from '../../api/queries'
 import type { Invitation, Machine } from '../../api/types'
 import { Badge, Empty, Facts, PageHeader } from '../../components/Card'
@@ -46,6 +46,16 @@ type Start = (def: OperationDef) => void
 function MachineItem({ machine, start, level }: { machine: Machine; start: Start; level: 'h2' | 'h3' }) {
   const name = machine.friendlyName ?? machine.hostName
   const Heading = level
+  const [copied, setCopied] = useState<'no' | 'yes' | 'failed'>('no')
+
+  async function copyFingerprint() {
+    try {
+      await navigator.clipboard.writeText(machine.fingerprint)
+      setCopied('yes')
+    } catch {
+      setCopied('failed')
+    }
+  }
 
   return (
     <li className={[list.item, machine.status === 'pending' ? styles.pairedItem : ''].join(' ')}>
@@ -66,7 +76,22 @@ function MachineItem({ machine, start, level }: { machine: Machine; start: Start
       <Facts
         items={[
           ['Fingerprint', <span key="f" className={styles.mono}>{machine.display}</span>],
-          ['Full fingerprint', <details key="ff"><summary>Show full fingerprint</summary><code className={styles.mono}>{machine.fingerprint}</code></details>],
+          [
+            'Full fingerprint',
+            <div key="ff" className={styles.fingerprint}>
+              <details>
+                <summary>Show full fingerprint</summary>
+                <code className={styles.mono}>{machine.fingerprint}</code>
+              </details>
+              <Button variant="quiet" onClick={() => void copyFingerprint()}>
+                Copy full fingerprint{' '}
+                <span className="visually-hidden">for {name}</span>
+              </Button>
+              <span role="status" className={styles.copyStatus}>
+                {copied === 'yes' ? 'Copied.' : copied === 'failed' ? 'Copying was not possible here; select the fingerprint and copy it.' : ''}
+              </span>
+            </div>,
+          ],
           ['Host name', machine.hostName],
           ...(machine.pendingHostName ? ([['Reported host name', machine.pendingHostName]] as const) : []),
           ['Revision', String(machine.revision)],
@@ -124,7 +149,17 @@ export function MachinesPage() {
       </PageHeader>
       <p>Each machine that asks for secrets has its own identity, and is served only once you approve it here. To add one, choose Add a machine and give the invitation to the new machine.</p>
       {machines.isPending ? <Loading what="machines" /> : null}
-      {machines.isError ? <ProblemAlert error={machines.error} title="The machines could not be listed" /> : null}
+      {machines.isError ? (
+        <>
+          <ProblemAlert error={machines.error} title="The machines could not be listed" />
+          <p>
+            <Button onClick={() => void machines.refetch()}>
+              Try again{' '}
+              <span className="visually-hidden">loading machines</span>
+            </Button>
+          </p>
+        </>
+      ) : null}
 
       {waiting.length > 0 ? (
         <section className={styles.paired} aria-labelledby="paired-heading">
@@ -152,7 +187,17 @@ export function MachinesPage() {
         <p>
           An invitation lets one new machine ask to be added. It is valid for 10 minutes and works once. It is shown only when you make it; this list shows status only. After the machine pairs it appears above, waiting for your approval.
         </p>
-        {invitations.isError ? <ProblemAlert error={invitations.error} title="The invitations could not be listed" /> : null}
+        {invitations.isError ? (
+          <>
+            <ProblemAlert error={invitations.error} title="The invitations could not be listed" />
+            <p>
+              <Button onClick={() => void invitations.refetch()}>
+                Try again{' '}
+                <span className="visually-hidden">loading invitations</span>
+              </Button>
+            </p>
+          </>
+        ) : null}
         {invitations.data?.length === 0 ? <Empty>No invitation has been created.</Empty> : null}
         {invitations.data && invitations.data.length > 0 ? (
           <ul className={[list.list, list.compact].join(' ')} aria-label="Invitations">

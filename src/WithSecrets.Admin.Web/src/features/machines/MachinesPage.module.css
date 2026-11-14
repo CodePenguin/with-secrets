@@ -7,8 +7,8 @@
 }
 
 .pairedItem {
-  border: 3px solid var(--accent);
-  background: var(--accent-soft);
+  border-color: var(--warn);
+  background: var(--warn-soft);
 }
 
 .what {
@@ -19,6 +19,22 @@
 .mono {
   font-family: var(--font-mono);
   overflow-wrap: anywhere;
+}
+
+.fingerprint {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.fingerprint code {
+  overflow-wrap: anywhere;
+}
+
+.copyStatus {
+  font-weight: 400;
+  color: var(--muted);
 }
 
 .section {
