@@ -656,6 +656,7 @@ public sealed class ApprovalQueue : IDisposable
             if (flow.ExpiresAt <= clock.GetUtcNow() || Volatile.Read(ref flow.Consumed) != 0)
             {
                 _flows.Remove(flowId);
+                if (flow.PrfState is not null) CryptographicOperations.ZeroMemory(flow.PrfState);
 
                 return (null, "request-not-pending", "this proof is no longer valid");
             }
