@@ -1,5 +1,3 @@
-using System.Buffers.Text;
-using System.Collections.Concurrent;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -426,20 +424,6 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
         {
             decision.Unlock?.Dispose();
         }
-    }
-
-    private void CompleteUnlocked(Entry entry, ApprovalDecision decision, string status)
-    {
-        entry.Status = status;
-        entry.DecidedAt = clock.GetUtcNow();
-        entry.Actor = decision.Actor;
-        entry.DecisionInProgress = false;
-        entry.TerminalUntil = entry.DecidedAt + TerminalRetention;
-        entry.Expiry?.Cancel();
-        entry.Expiry?.Dispose();
-        entry.Expiry = null;
-        DropFlowsUnlocked(entry.Review.RequestId);
-        entry.Decision.TrySetResult(decision);
     }
 
     private void DropFlowsUnlocked(string requestId)
