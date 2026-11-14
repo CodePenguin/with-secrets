@@ -127,7 +127,6 @@ public sealed class ApprovalQueue : IDisposable
         public required TaskCompletionSource<ApprovalDecision> Decision { get; init; }
         public string Status { get; set; } = ApprovalStatuses.Pending;
         public DateTimeOffset? DecidedAt { get; set; }
-        public string? Actor { get; set; }
         public bool DecisionInProgress { get; set; }
         public DateTimeOffset? TerminalUntil { get; set; }
         public ITimer? Expiry { get; set; }
@@ -436,7 +435,6 @@ public sealed class ApprovalQueue : IDisposable
     private void ReleaseUnlocked(Entry entry, ApprovalDecision decision)
     {
         entry.DecisionInProgress = true;
-        entry.Actor = decision.Actor;
         // Leave the expiry callback armed while the authority commits. It retries while DecisionInProgress is true;
         // MarkCommitted changes Status before disposing the timer, so a racing expiry callback cannot be mistaken for a new timeout.
         DropFlowsUnlocked(entry.Review.RequestId);
