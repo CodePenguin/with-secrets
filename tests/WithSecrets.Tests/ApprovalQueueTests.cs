@@ -219,6 +219,30 @@ internal static class ApprovalQueueTests
         check(queue.GetDetail("req-proof", _ => null)?.Status == ApprovalStatuses.Approved,
             "approvals: terminal state appears only after authority commit");
 
+        using ApprovalQueue raceQueue = new(TimeProvider.System, () => TimeSpan.FromMinutes(5));
+        check(raceQueue.TryRegister(Review("req-race", now), out _), "approvals: register a request for the approve/deny race");
+        FakeProofMethod raceProof = new();
+        (ApprovalChallengeDto? raceChallenge, _, _) = raceQueue.CreateOrReuseChallenge("req-race", "race-session", "http://localhost", raceProof);
+        using ManualResetEventSlim raceStart = new(false);
+        Task<(ApprovalDetailDto? Detail, string? ProblemCode, string? DetailText)> approveRace = Task.Run(() =>
+        {
+            raceStart.Wait();
+            return raceQueue.Approve("req-race", "race-session", raceChallenge!.FlowId, "\\"valid\\"", raceProof, _ => null);
+        });
+        Task<(ApprovalDetailDto? Detail, string? ProblemCode, string? DetailText)> denyRace = Task.Run(() =>
+        {
+            raceStart.Wait();
+            return raceQueue.Deny("req-race", "race-session", _ => null);
+        });
+        raceStart.Set();
+        Task.WaitAll(approveRace, denyRace);
+        bool approveWon = approveRace.Result.ProblemCode is null;
+        bool denyWon = denyRace.Result.ProblemCode is null;
+        ApprovalDecision raceDecision = raceQueue.Wait("req-race", CancellationToken.None);
+        check(approveWon != denyWon && raceDecision.Approved == approveWon
+            && raceDecision.DecisionPrincipal?.Kind == (approveWon ? "passkey" : "session"),
+            "approvals: concurrent approve and deny produce exactly one server-attributed winner");
+
         // Request expiry and terminal-review retention use the injected clock and are deterministic.
         ManualTimeProvider manualClock = new(now);
         using ApprovalQueue expiringQueue = new(manualClock, () => TimeSpan.FromMinutes(5));
