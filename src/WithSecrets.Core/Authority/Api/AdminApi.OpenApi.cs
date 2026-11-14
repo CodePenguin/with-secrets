@@ -130,7 +130,7 @@ internal sealed partial class AdminApi
                 ("machine", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("ApprovalMachine"), new JsonObject { ["type"] = "null" }) }),
                 ("program", S.Str(nullable: true)),
                 ("reason", S.Str(nullable: true)),
-                ("secretNames", S.Arr(S.Str(), nullable: true)),
+                ("secretNames", new JsonObject { ["oneOf"] = new JsonArray(S.Arr(S.Str()), new JsonObject { ["type"] = "null" }) }),
                 ("review", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("ApprovalReview"), new JsonObject { ["type"] = "null" }) }),
                 ("decisionInProgress", S.Bool()),
                 ("actions", S.Arr(S.Str())),
@@ -383,13 +383,18 @@ internal sealed partial class AdminApi
 
             if (route.Template.Contains('{', StringComparison.Ordinal) || route.Access == ApiAccess.Authorize)
             {
-                responses["404"] = ProblemResponse("No such resource (not-found).");
+                responses["404"] = ProblemResponse(route.Access is ApiAccess.ApprovalsRead or ApiAccess.ApprovalsDecide
+                    ? "No request is available for that id (request-unavailable; unknown and unauthorized ids are indistinguishable)."
+                    : "No such resource (not-found).");
             }
 
-            if (route.Access is ApiAccess.Authorize or ApiAccess.Mutation)
+            if (route.Access is ApiAccess.Authorize or ApiAccess.Mutation or ApiAccess.ApprovalsDecide)
             {
-                responses["409"] = ProblemResponse("The operation does not apply, or the change failed (operation-refused, operation-failed).");
+                responses["409"] = ProblemResponse(route.Access == ApiAccess.ApprovalsDecide
+                    ? "The request is no longer pending, another proof flow is active, or a conflicting decision won (request-not-pending, approval-in-progress, decision-already-made)."
+                    : "The operation does not apply, or the change failed (operation-refused, operation-failed).");
                 responses["423"] = ProblemResponse("The authority is locked (authority-locked).");
+                if (route.Access == ApiAccess.ApprovalsDecide) responses["429"] = ProblemResponse("The bounded approval queue or rate limit was reached (too-many-requests).");
             }
 
             if (route.Request is not null)
