@@ -366,6 +366,7 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
         }
         finally
         {
+            unlock ??= decision?.Unlock;
             unlock?.Dispose();
         }
     }
