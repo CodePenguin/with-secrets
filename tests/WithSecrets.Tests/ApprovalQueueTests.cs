@@ -7,6 +7,70 @@ namespace WithSecrets.Tests;
 /// <summary>Approvals queue invariants: bounded pagination, proof binding, one-winner decisions and commit reconciliation.</summary>
 internal static class ApprovalQueueTests
 {
+    private sealed class ManualTimeProvider(DateTimeOffset start) : TimeProvider
+    {
+        private readonly List<ManualTimer> _timers = [];
+        private DateTimeOffset _now = start;
+
+        public override DateTimeOffset GetUtcNow() => _now;
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            ManualTimer timer = new(this, callback, state);
+            timer.Change(dueTime, period);
+            _timers.Add(timer);
+            return timer;
+        }
+
+        public void Advance(TimeSpan amount)
+        {
+            _now += amount;
+            while (true)
+            {
+                ManualTimer? next = _timers.Where(timer => timer.IsDue(_now)).OrderBy(timer => timer.Due).FirstOrDefault();
+                if (next is null) return;
+                next.Fire();
+            }
+        }
+
+        private sealed class ManualTimer(ManualTimeProvider owner, TimerCallback callback, object? state) : ITimer
+        {
+            private DateTimeOffset? _due;
+            private TimeSpan _period;
+            private bool _disposed;
+
+            public DateTimeOffset Due => _due ?? DateTimeOffset.MaxValue;
+            public bool IsDue(DateTimeOffset now) => !_disposed && _due is { } due && due <= now;
+
+            public bool Change(TimeSpan dueTime, TimeSpan period)
+            {
+                if (_disposed) return false;
+                _period = period;
+                _due = dueTime == Timeout.InfiniteTimeSpan ? null : owner._now + (dueTime < TimeSpan.Zero ? TimeSpan.Zero : dueTime);
+                return true;
+            }
+
+            public void Fire()
+            {
+                if (_disposed || _due is null) return;
+                _due = _period == Timeout.InfiniteTimeSpan ? null : owner._now + _period;
+                callback(state);
+            }
+
+            public void Dispose()
+            {
+                _disposed = true;
+                _due = null;
+            }
+
+            public ValueTask DisposeAsync()
+            {
+                Dispose();
+                return ValueTask.CompletedTask;
+            }
+        }
+    }
+
     private sealed class FakeProofMethod : IProofMethod
     {
         public byte[]? StartedBind { get; private set; }
@@ -154,6 +218,21 @@ internal static class ApprovalQueueTests
         queue.MarkCommitted("req-proof", committed);
         check(queue.GetDetail("req-proof", _ => null)?.Status == ApprovalStatuses.Approved,
             "approvals: terminal state appears only after authority commit");
+
+        // Request expiry and terminal-review retention use the injected clock and are deterministic.
+        ManualTimeProvider manualClock = new(now);
+        using ApprovalQueue expiringQueue = new(manualClock, () => TimeSpan.FromMinutes(5));
+        check(expiringQueue.TryRegister(Review("req-expire", now), out _), "approvals: register an expiring request");
+        manualClock.Advance(TimeSpan.FromMinutes(5) + TimeSpan.FromSeconds(1));
+        ApprovalDecision timedOut = expiringQueue.Wait("req-expire", CancellationToken.None);
+        check(!timedOut.Approved && timedOut.ReasonCode == ReasonCodes.ApprovalTimeout,
+            "approvals: effective approval deadline releases a timeout denial");
+        AuthorityResponse timeoutCommitted = new(1, "req-expire", digest, machine.Fingerprint, AuthorityDecision.Denied, ReasonCodes.ApprovalTimeout,
+            0, manualClock.GetUtcNow(), manualClock.GetUtcNow().AddMinutes(1), "authority-key", []);
+        expiringQueue.MarkCommitted("req-expire", timeoutCommitted);
+        manualClock.Advance(TimeSpan.FromMinutes(10) + TimeSpan.FromSeconds(6));
+        check(expiringQueue.GetDetail("req-expire", _ => null) is null,
+            "approvals: terminal review projection is discarded after its ten-minute retention");
 
         // Denial does not need a proof flow, but still waits for the authority's durable result.
         using ApprovalQueue deniedQueue = new(TimeProvider.System, () => TimeSpan.FromMinutes(5));
