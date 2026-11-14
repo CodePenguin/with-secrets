@@ -15,7 +15,8 @@ public sealed record AdminCaller(AdminSession? Session);
 
 /// <summary>What the service needs to run the administration of the authority.</summary>
 public sealed record AdminServiceParts(AuthorityStore Store, AuthorityLock Lock, AdminAuthorizer Authorizer, Func<Action<string>, IAdminAsker> Askers, IUnlockProtection Protection, Action OnUnlocked, int Port,
-    AuthorityKeyRing Keys, LocalAuthority Authority, HostConfigFile HostConfig, string? LocalFingerprint, IPasskeyAdmin? Passkeys, TimeProvider? Clock = null, PairingService? Pairing = null);
+    AuthorityKeyRing Keys, LocalAuthority Authority, HostConfigFile HostConfig, string? LocalFingerprint, IPasskeyAdmin? Passkeys, TimeProvider? Clock = null, PairingService? Pairing = null,
+    ApprovalQueue? Approvals = null, Func<IProofMethod?>? ApprovalProof = null);
 
 /// <summary>
 /// The authority's administration, served by the service on its own loopback port as a small server-rendered web app (<see cref="AdminWeb" />). Everything an administrator does lives here;
@@ -103,6 +104,10 @@ public sealed partial class AdminService
 
     /// <summary>The sessions (service memory only).</summary>
     public AdminSessions Sessions { get; }
+
+    internal ApprovalQueue? Approvals => _p.Approvals;
+
+    internal IProofMethod? ApprovalProof => _p.ApprovalProof?.Invoke();
 
     /// <summary>The HTTP side of the administration: the JSON API under <c>/api/v1/</c> (the service routes <c>/api</c> requests here).</summary>
     internal AdminApi Api => _api ??= new AdminApi(this, _p.Port);
