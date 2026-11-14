@@ -227,7 +227,7 @@ internal static class ApprovalQueueTests
         Task<(ApprovalDetailDto? Detail, string? ProblemCode, string? DetailText)> approveRace = Task.Run(() =>
         {
             raceStart.Wait();
-            return raceQueue.Approve("req-race", "race-session", raceChallenge!.FlowId, "\\"valid\\"", raceProof, _ => null);
+            return raceQueue.Approve("req-race", "race-session", raceChallenge!.FlowId, "\"valid\"", raceProof, _ => null);
         });
         Task<(ApprovalDetailDto? Detail, string? ProblemCode, string? DetailText)> denyRace = Task.Run(() =>
         {
