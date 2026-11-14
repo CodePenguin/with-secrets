@@ -51,7 +51,7 @@ internal static class ApprovalQueueTests
             => ApprovalQueue.BuildReview(id, digest, submitted, submitted.AddMinutes(10), machine, page);
 
         // Queue capacity is authority-wide, duplicates do not consume another slot, and a full queue never evicts.
-        ApprovalQueue bounded = new(TimeProvider.System, () => TimeSpan.FromMinutes(5));
+        using ApprovalQueue bounded = new(TimeProvider.System, () => TimeSpan.FromMinutes(5));
         for (int i = 0; i < ApprovalQueue.MaxPending; i++)
         {
             check(bounded.TryRegister(Review($"req-{i:D2}", now.AddSeconds(i)), out _), $"approvals: register pending request {i}");
@@ -69,7 +69,7 @@ internal static class ApprovalQueueTests
             "approvals: pages do not overlap");
 
         // A challenge is bound to the unique launch ID, digest and canonical review; its WebAuthn assertion uses reuse=0.
-        ApprovalQueue queue = new(TimeProvider.System, () => TimeSpan.FromMinutes(5));
+        using ApprovalQueue queue = new(TimeProvider.System, () => TimeSpan.FromMinutes(5));
         check(queue.TryRegister(Review("req-proof", now), out _), "approvals: register proof request");
         FakeProofMethod proof = new();
         (ApprovalChallengeDto? challenge, string? challengeCode, _) = queue.CreateOrReuseChallenge("req-proof", "session-one", "http://localhost", proof);
@@ -95,7 +95,7 @@ internal static class ApprovalQueueTests
             "approvals: terminal state appears only after authority commit");
 
         // Denial does not need a proof flow, but still waits for the authority's durable result.
-        ApprovalQueue deniedQueue = new(TimeProvider.System, () => TimeSpan.FromMinutes(5));
+        using ApprovalQueue deniedQueue = new(TimeProvider.System, () => TimeSpan.FromMinutes(5));
         check(deniedQueue.TryRegister(Review("req-deny", now), out _), "approvals: register denial request");
         (ApprovalDetailDto? denying, string? denyCode, _) = deniedQueue.Deny("req-deny", "session-identity", _ => null);
         check(denying is { DecisionInProgress: true, Status: ApprovalStatuses.Pending } && denyCode is null,
