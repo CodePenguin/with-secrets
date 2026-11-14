@@ -7,12 +7,13 @@ namespace WithSecrets;
 /// <summary>An administrator's session on the admin web app. It authorizes read-only views and nothing else: every change still needs its own fresh passkey tap.</summary>
 public sealed class AdminSession
 {
-    internal AdminSession(string token, string admin, DateTimeOffset started, string csrf)
+    internal AdminSession(string token, string identity, SessionScope scope, DateTimeOffset started, string csrf)
     {
         Token = token;
         Csrf = csrf;
         Id = Convert.ToHexString(RandomNumberGenerator.GetBytes(8));
-        Admin = admin;
+        Identity = identity;
+        Scope = scope;
         Started = started;
         LastSeen = started;
     }
@@ -29,8 +30,14 @@ public sealed class AdminSession
     /// <summary>A short random name for this session (rate limits and waiting pages are kept per caller). Not secret and not the token.</summary>
     internal string Id { get; }
 
-    /// <summary>The admin key that tapped to start it (a name, no key material).</summary>
-    public string Admin { get; }
+    /// <summary>The trusted enrolled credential identity that signed in (a name, no key material).</summary>
+    public string Identity { get; }
+
+    /// <summary>Compatibility alias for existing admin-only display/audit code; authorization uses <see cref="Scope" />.</summary>
+    public string Admin => Identity;
+
+    /// <summary>The server-derived capabilities of the credential that signed in.</summary>
+    public SessionScope Scope { get; }
 
     public DateTimeOffset Started { get; }
 
@@ -78,7 +85,9 @@ public sealed class AdminSessions(TimeProvider clock, Func<(TimeSpan Idle, TimeS
 
         public LoginState State { get; set; } = LoginState.Waiting;
 
-        public string? Admin { get; set; }
+        public string? Identity { get; set; }
+
+        public SessionScope Scope { get; set; } = SessionScope.Admin;
 
         public string? Problem { get; set; }
     }
@@ -220,7 +229,7 @@ public sealed class AdminSessions(TimeProvider clock, Func<(TimeSpan Idle, TimeS
     }
 
     /// <summary>The tap for a login was verified (<paramref name="admin" /> is the key's name) or refused (<paramref name="problem" />).</summary>
-    public void CompleteLogin(string code, string? admin, string? problem)
+    public void CompleteLogin(string code, string? identity, string? problem, SessionScope scope = SessionScope.Admin)
     {
         lock (_lock)
         {
@@ -230,9 +239,10 @@ public sealed class AdminSessions(TimeProvider clock, Func<(TimeSpan Idle, TimeS
                 return;
             }
 
-            login.Admin = admin;
+            login.Identity = identity;
+            login.Scope = scope;
             login.Problem = problem;
-            login.State = admin is null ? LoginState.Failed : LoginState.Ready;
+            login.State = identity is null ? LoginState.Failed : LoginState.Ready;
         }
     }
 
@@ -266,7 +276,7 @@ public sealed class AdminSessions(TimeProvider clock, Func<(TimeSpan Idle, TimeS
         {
             Sweep();
             string key = KeyOf(ticket);
-            if (!_logins.TryGetValue(key, out Login? login) || login.BrowserKey != KeyOf(browserId) || login.State != LoginState.Ready || login.Admin is null)
+            if (!_logins.TryGetValue(key, out Login? login) || login.BrowserKey != KeyOf(browserId) || login.State != LoginState.Ready || login.Identity is null)
             {
                 return null;
             }
@@ -279,7 +289,7 @@ public sealed class AdminSessions(TimeProvider clock, Func<(TimeSpan Idle, TimeS
             }
 
             string token = NewToken();
-            AdminSession session = new(token, login.Admin, clock.GetUtcNow(), NewToken());
+            AdminSession session = new(token, login.Identity, login.Scope, clock.GetUtcNow(), NewToken());
             _sessions[KeyOf(token)] = session;
 
             return session;
