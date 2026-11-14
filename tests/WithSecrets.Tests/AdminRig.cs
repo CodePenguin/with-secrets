@@ -143,6 +143,8 @@ internal sealed class AdminApp : IDisposable
     {
         public EnrollmentTarget? InlineTarget() => inner.InlineTarget();
 
+        public EnrollmentTarget? ApprovalTarget() => inner.ApprovalTarget();
+
         public ApprovalDecision Ask(ApprovalPrompt prompt)
         {
             count();
