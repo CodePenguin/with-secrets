@@ -614,7 +614,8 @@ public sealed class ApprovalQueue : IDisposable
                 return (null, "internal-error", "this proof method cannot be used inside the administration page");
             }
 
-            DateTimeOffset expires = Min(clock.GetUtcNow() + ChallengeLifetime, entry.Review.ExpiresAt);
+            DateTimeOffset challengeDeadline = clock.GetUtcNow() + ChallengeLifetime;
+            DateTimeOffset expires = challengeDeadline < entry.Review.ExpiresAt ? challengeDeadline : entry.Review.ExpiresAt;
             ProofFlow flow = new()
             {
                 FlowId = Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(16)),
