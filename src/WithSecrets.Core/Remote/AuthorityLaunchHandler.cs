@@ -332,6 +332,7 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
         }
         catch (InvalidOperationException)
         {
+            _approvals?.Withdraw(request.RequestId);
             return deny(ReasonCodes.RequestIdReused, machine.SecurityRevision);
         }
 
@@ -368,6 +369,9 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
         {
             unlock ??= decision?.Unlock;
             unlock?.Dispose();
+            // If the durable authority decision failed or the offer was withdrawn, do not leave a phantom queue item.
+            // A committed entry is terminal, so Withdraw is a no-op in the successful case.
+            _approvals?.Withdraw(request.RequestId);
         }
     }
 
