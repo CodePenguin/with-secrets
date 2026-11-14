@@ -334,31 +334,31 @@ internal static class AuthorityLockTests
 
         // The change needs a fresh tap of an admin key for exactly this policy.
         Tapped outsider = await TapOn(first, http, AdminService.OpPolicyUnattended, phone);
-        check(outsider.ApproveStatus == 403 && store.GetUnlockPolicy() == UnlockPolicy.Manual && store.UnattendedMaterial() is null, "policy: a non-admin key cannot allow unattended unlock");
+        check(outsider.ApproveStatus == 403 && store.GetUnlockPolicy() == UnlockPolicy.Manual && store.UnattendedMaterial() is null, "policy: a non-admin key cannot allow unattended unlock (" + outsider.PostStatus + " " + outsider.ApproveStatus + " " + outsider.MutationStatus + " " + outsider.Error + " " + outsider.MutationBody + ")");
         Tapped noUv = await TapOn(first, http, AdminService.OpPolicyUnattended, laptop, userVerified: false);
-        check(noUv.ApproveStatus == 403 && store.GetUnlockPolicy() == UnlockPolicy.Manual, "policy: an assertion without user verification does not change it");
+        check(noUv.ApproveStatus == 403 && store.GetUnlockPolicy() == UnlockPolicy.Manual, "policy: an assertion without user verification does not change it (" + noUv.PostStatus + " " + noUv.ApproveStatus + " " + noUv.MutationStatus + " " + noUv.Error + " " + noUv.MutationBody + ")");
         Tapped otherOperation = await TapOn(first, http, AdminService.OpPolicyUnattended, laptop, change: challenge => SHA256.HashData(challenge));
-        check(otherOperation.ApproveStatus is 403 or 400 && store.GetUnlockPolicy() == UnlockPolicy.Manual, "policy: a signature for other parameters does not change it");
+        check(otherOperation.ApproveStatus is 403 or 400 && store.GetUnlockPolicy() == UnlockPolicy.Manual, "policy: a signature for other parameters does not change it (" + otherOperation.PostStatus + " " + otherOperation.ApproveStatus + " " + otherOperation.MutationStatus + " " + otherOperation.Error + " " + otherOperation.MutationBody + ")");
 
         await Login(first, http);
         int asked = asks.Count;
         Tapped silent = await TapOn(first, http, AdminService.OpPolicyUnattended, null);
         await Task.Delay(300);
-        check(unlock.ApproveStatus == 200 && silent.Link is not null && asks.Count == asked + 1 && store.GetUnlockPolicy() == UnlockPolicy.Manual, "policy: an unlocked authority still needs a fresh tap to change the policy");
+        check(unlock.ApproveStatus == 200 && silent.Link is not null && asks.Count == asked + 1 && store.GetUnlockPolicy() == UnlockPolicy.Manual, "policy: an unlocked authority still needs a fresh tap to change the policy (" + unlock.ApproveStatus + "; silent=" + silent.PostStatus + "/" + silent.Link + "; asks=" + asks.Count + "/" + asked + "; policy=" + store.GetUnlockPolicy() + ")");
 
         Tapped allow = await TapOn(first, http, AdminService.OpPolicyUnattended, laptop);
-        check(allow.ApproveStatus == 200 && await HostServiceTests.WaitFor(() => store.GetUnlockPolicy() == UnlockPolicy.Unattended) && store.UnattendedMaterial() is { Sealed.Length: > 0 }, "policy: the admin key's tap allows unattended unlock");
-        check(store.Audit(1000).Any(entry => entry.Event == "unlock-policy-changed" && entry.Detail.Contains("manual to unattended", StringComparison.Ordinal) && entry.Actor.Contains("laptop", StringComparison.Ordinal)), "policy: the change is in the audit history with the key that tapped");
+        check(allow.ApproveStatus == 200 && await HostServiceTests.WaitFor(() => store.GetUnlockPolicy() == UnlockPolicy.Unattended) && store.UnattendedMaterial() is { Sealed.Length: > 0 }, "policy: the admin key's tap allows unattended unlock (" + allow.PostStatus + " " + allow.ApproveStatus + " mutation=" + allow.MutationStatus + " " + allow.MutationBody + "; policy=" + store.GetUnlockPolicy() + ")");
+        check(store.Audit(1000).Any(entry => entry.Event == "unlock-policy-changed" && entry.Detail.Contains("manual to unattended", StringComparison.Ordinal) && entry.Actor.Contains("laptop", StringComparison.Ordinal)), "policy: the change is in the audit history with the key that tapped (" + string.Join(" | ", store.Audit(1000).Where(entry => entry.Event.Contains("unlock", StringComparison.Ordinal) || entry.Event == "admin-operation").Select(entry => entry.Event + ":" + entry.Detail + ":" + entry.Actor)) + ")");
         string rootStatus = await http.GetStringAsync("http://127.0.0.1:" + first.Port + "/api/v1/status");
         string rootSettings = (await (await Login(first, http)).GetAsync("/api/v1/settings")).Html;
-        check(rootStatus.Contains("\"unlockMode\":\"unattended\"", StringComparison.Ordinal) && rootSettings.Contains("WEAKER", StringComparison.Ordinal) && rootSettings.Contains("unattended", StringComparison.Ordinal), "policy: the API shows the weaker mode (the status names it, the settings describe it as WEAKER)");
+        check(rootStatus.Contains("\"unlockMode\":\"unattended\"", StringComparison.Ordinal) && rootSettings.Contains("WEAKER", StringComparison.Ordinal) && rootSettings.Contains("unattended", StringComparison.Ordinal), "policy: the API shows the weaker mode (status=" + rootStatus + "; settings contains WEAKER=" + rootSettings.Contains("WEAKER", StringComparison.Ordinal) + ")");
         check(ServiceStartup.LockLines(true, UnlockPolicy.Unattended, null, first.Admin.PageUrl).Any(line => line.Contains("WEAKER", StringComparison.Ordinal)) && ServiceStartup.LockLines(true, UnlockPolicy.Manual, null, first.Admin.PageUrl).Any(line => line.Contains("manual", StringComparison.Ordinal) && line.Contains("unlock mode", StringComparison.Ordinal)), "policy: the service startup lines report the unlock mode, the weaker one by name");
 
         // A restart unlocks itself; nothing else changes.
         first.Dispose();
         int grantsBefore = store.Grants().Count;
         using HostService second = Start(protection);
-        check(!second.Lock.IsLocked && second.Lock.How == UnlockMethod.Unattended && second.StartupUnlockNote is { } note && note.Contains("unattended", StringComparison.Ordinal) && await HostServiceTests.WaitFor(() => second.Ready), "unattended: a restart under the policy unlocks and checks in (" + second.StartupUnlockNote + ")");
+        check(!second.Lock.IsLocked && second.Lock.How == UnlockMethod.Unattended && second.StartupUnlockNote is { } note && note.Contains("unattended", StringComparison.Ordinal) && await HostServiceTests.WaitFor(() => second.Ready), "unattended: a restart under the policy unlocks and checks in (locked=" + second.Lock.IsLocked + "; how=" + second.Lock.How + "; note=" + second.StartupUnlockNote + "; ready=" + second.Ready + ")");
         check(store.Grants().Count == grantsBefore && second.Authorization.SyncedGrants.Count == 0 && !second.Authorization.Keys.IsHeld, "unattended: unlocking creates no grant, widens none and holds no key");
         string status = await http.GetStringAsync("http://127.0.0.1:" + second.Port + "/v1/status");
         check(status == "{\"protocolVersion\":1,\"running\":true,\"locked\":false}", "unattended: status reports unlocked and nothing else");
