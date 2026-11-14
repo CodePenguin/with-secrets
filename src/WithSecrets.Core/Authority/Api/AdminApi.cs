@@ -502,6 +502,7 @@ internal sealed partial class AdminApi
             return new ApiResult(200, new
             {
                 authenticated = false,
+                admin = (string?)null,
                 identity = (string?)null,
                 scope = (string?)null,
                 capabilities = Array.Empty<string>(),
@@ -518,6 +519,7 @@ internal sealed partial class AdminApi
         return new ApiResult(200, new
         {
             authenticated = true,
+            admin = session.Scope == SessionScope.Admin ? ApprovalSummary.Clean(session.Identity) : null,
             identity = ApprovalSummary.Clean(session.Identity),
             scope = SessionCapabilities.WireName(session.Scope),
             capabilities = SessionCapabilities.For(session.Scope),
@@ -583,6 +585,7 @@ internal sealed partial class AdminApi
             session = new
             {
                 authenticated = true,
+                admin = claimed.Scope == SessionScope.Admin ? ApprovalSummary.Clean(claimed.Identity) : null,
                 identity = ApprovalSummary.Clean(claimed.Identity),
                 scope = SessionCapabilities.WireName(claimed.Scope),
                 capabilities = SessionCapabilities.For(claimed.Scope),
