@@ -4,19 +4,28 @@
 
 .DESCRIPTION
     Runs the .NET test harness with WS_UPDATE_OPENAPI=1 so ApiTests writes docs/api/openapi.json,
-    then runs the frontend API generator to refresh src/WithSecrets.Admin.Web/src/api/schema.ts.
-    Run this after changing AdminApi routes or schemas, then run scripts/verify-all.ps1.
+    then runs the frontend API generator to refresh src/WithSecrets.Admin.Web/src/api/schema.ts,
+    and finishes with the full repository verification script.
 #>
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $previousOpenApi = $env:WS_UPDATE_OPENAPI
+$previousOnly = $env:WS_ONLY
 
 Push-Location $repo
 try {
     $env:WS_UPDATE_OPENAPI = '1'
+    $env:WS_ONLY = 'Api'
     dotnet run --project tests\WithSecrets.Tests
     if ($LASTEXITCODE -ne 0) {
         throw "The .NET test harness failed while regenerating docs/api/openapi.json (exit $LASTEXITCODE)."
+    }
+
+    if ($null -eq $previousOnly) {
+        Remove-Item Env:\WS_ONLY -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:WS_ONLY = $previousOnly
     }
 
     if ($null -eq $previousOpenApi) {
@@ -37,9 +46,20 @@ try {
         Pop-Location
     }
 
-    Write-Host 'OpenAPI document and TypeScript API types regenerated.'
+    & (Join-Path $PSScriptRoot 'verify-all.ps1')
+    if ($LASTEXITCODE -ne 0) {
+        throw "Full repository verification failed (exit $LASTEXITCODE)."
+    }
+
+    Write-Host 'OpenAPI document and TypeScript API types regenerated; full verification passed.'
 }
 finally {
+    if ($null -eq $previousOnly) {
+        Remove-Item Env:\WS_ONLY -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:WS_ONLY = $previousOnly
+    }
     if ($null -eq $previousOpenApi) {
         Remove-Item Env:\WS_UPDATE_OPENAPI -ErrorAction SilentlyContinue
     }
