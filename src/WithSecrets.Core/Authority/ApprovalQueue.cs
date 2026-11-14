@@ -682,6 +682,16 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
             entry.DecisionInProgress = true;
         }
 
+        if (flow.PrfState is null && prfJson is not null)
+        {
+            lock (_gate)
+            {
+                if (_entries.TryGetValue(requestId, out Entry? current) && ReferenceEquals(current, entry) && current.Status == ApprovalStatuses.Pending)
+                    current.DecisionInProgress = false;
+            }
+            return (null, "invalid-request", "unexpected secret-store key release data");
+        }
+
         ProofResult verified;
         try
         {
@@ -730,12 +740,6 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
                 return (GetDetail(requestId, processed), null, null);
             }
         }
-        else if (prfJson is not null)
-        {
-            unlock?.Dispose();
-            return (null, "invalid-request", "unexpected secret-store key release data");
-        }
-
         ApprovalDecision decision = ApprovalDecision.Allow(verified.Detail, unlock: unlock, actor: verified.Credential.Name, credential: verified.Credential);
         lock (_gate)
         {
