@@ -525,7 +525,7 @@ public sealed partial class AdminService
             {
                 VerifiedCredential? credential = authorization.Credential;
                 string identity = credential?.Name ?? (authorization.Admin!.Signer.Length > 0 ? authorization.Admin.Signer : "(unnamed)");
-                Sessions.CompleteLogin(code, identity, null, credential is null ? SessionScope.Admin : SessionScope.FromAdminFlag(credential.Admin));
+                Sessions.CompleteLogin(code, identity, null, credential is null ? SessionScope.Approval : SessionScope.FromAdminFlag(credential.Admin));
 
                 return null;
             },
