@@ -200,6 +200,8 @@ internal static class ApprovalQueueTests
             "approvals: route identity is the unique launch request ID, distinct from the content fingerprint, and the canonical review binds the machine");
         using ApprovalQueue queue = new(TimeProvider.System, () => TimeSpan.FromMinutes(5));
         check(queue.TryRegister(Review("req-proof", now), out _), "approvals: register proof request");
+        check(queue.Register(Review("req-proof", now), out _) == ApprovalQueueRegistration.ExistingPending,
+            "approvals: a duplicate in-flight request cannot acquire ownership of the queue entry");
         FakeProofMethod proof = new();
         (ApprovalChallengeDto? challenge, string? challengeCode, _) = queue.CreateOrReuseChallenge("req-proof", "session-one", "http://localhost", proof);
         check(challenge is not null && challengeCode is null && challenge.PrfKey is null, "approvals: create WebAuthn challenge without an unnecessary PRF release");
@@ -220,8 +222,9 @@ internal static class ApprovalQueueTests
         AuthorityResponse committed = new(1, "req-proof", digest, machine.Fingerprint, AuthorityDecision.Approved, ReasonCodes.Approved,
             0, now.AddSeconds(1), now.AddMinutes(1), "authority-key", []);
         queue.MarkCommitted("req-proof", committed);
-        check(queue.GetDetail("req-proof", _ => null)?.Status == ApprovalStatuses.Approved,
-            "approvals: terminal state appears only after authority commit");
+        check(queue.GetDetail("req-proof", _ => null)?.Status == ApprovalStatuses.Approved
+            && queue.Register(Review("req-proof", now), out _) == ApprovalQueueRegistration.ExistingTerminal,
+            "approvals: terminal state appears only after authority commit and duplicate retries do not reopen it");
 
         using ApprovalQueue raceQueue = new(TimeProvider.System, () => TimeSpan.FromMinutes(5));
         check(raceQueue.TryRegister(Review("req-race", now), out _), "approvals: register a request for the approve/deny race");
