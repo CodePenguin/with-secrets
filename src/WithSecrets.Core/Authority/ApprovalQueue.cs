@@ -579,7 +579,7 @@ public sealed class ApprovalQueue : IDisposable
                 return (ToChallenge(live), null, null);
             }
 
-            string nonce = Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(16));
+            string nonce = Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlEncode(RandomNumberGenerator.GetBytes(16));
             byte[] bind = RequestBinding.Compute(nonce, entry.Review.CanonicalText);
             // Bind also covers digest, machine and fixed decision already present in CanonicalText; ReuseBinding minutes 0 = approve once.
             // Pass the base request bind to Start; the SPA derives the fixed reuse=0 challenge just as the one-shot page does.
@@ -618,7 +618,7 @@ public sealed class ApprovalQueue : IDisposable
             DateTimeOffset expires = challengeDeadline < entry.Review.ExpiresAt ? challengeDeadline : entry.Review.ExpiresAt;
             ProofFlow flow = new()
             {
-                FlowId = Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(16)),
+                FlowId = Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlEncode(RandomNumberGenerator.GetBytes(16)),
                 RequestId = requestId,
                 SessionId = sessionId,
                 RequestDigest = entry.Review.RequestDigest,
@@ -959,14 +959,14 @@ public sealed class ApprovalQueue : IDisposable
     private static string EncodeCursor(ApprovalQueueItemDto item)
     {
         string text = item.SubmittedAt.UtcDateTime.Ticks.ToString(CultureInfo.InvariantCulture) + "\n" + item.RequestId;
-        return Base64Url.EncodeToString(Encoding.UTF8.GetBytes(text));
+        return Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlEncode(Encoding.UTF8.GetBytes(text));
     }
 
     private static (long Ticks, string RequestId)? DecodeCursor(string cursor)
     {
         try
         {
-            string text = Encoding.UTF8.GetString(Base64Url.DecodeFromChars(cursor));
+            string text = Encoding.UTF8.GetString(Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlDecode(cursor));
             int separator = text.IndexOf('\n');
             if (separator <= 0 || separator == text.Length - 1
                 || !long.TryParse(text[..separator], NumberStyles.None, CultureInfo.InvariantCulture, out long ticks)
