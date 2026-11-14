@@ -542,13 +542,13 @@ public sealed partial class AdminService
     /// <summary>Called once a browser's session starts: the start is audited durably (no secret in it).</summary>
     public void RecordSessionStart(AdminSession session)
     {
-        _p.Authorizer.Record("admin-session", "started", "passkey " + session.Identity, "");
+        _p.Authorizer.Record("admin-session", "started", "passkey " + ApprovalSummary.Clean(session.Identity), "");
         Note("admin session started");
     }
 
     public void RecordSessionEnd(AdminSession session, string how)
     {
-        _p.Authorizer.Record("admin-session", how, "passkey " + session.Identity, "");
+        _p.Authorizer.Record("admin-session", how, "passkey " + ApprovalSummary.Clean(session.Identity), "");
     }
 }
 
