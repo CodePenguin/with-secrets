@@ -49,6 +49,10 @@ internal static class AuthorityLockTests
 
     private sealed class CountingAsker(IAdminAsker inner, Action count) : IAdminAsker
     {
+        public EnrollmentTarget? InlineTarget() => inner.InlineTarget();
+
+        public EnrollmentTarget? ApprovalTarget() => inner.ApprovalTarget();
+
         public ApprovalDecision Ask(ApprovalPrompt prompt)
         {
             count();
