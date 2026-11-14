@@ -126,11 +126,30 @@ public sealed record ApprovalEvidence(string Nonce, string Text, string Proof);
 /// <see cref="Unlock" /> is what the approving passkey released by WebAuthn PRF when the page asked for it (a run, or the approval
 /// that precedes an enrollment): the caller uses it once and disposes it, which zeroes it.
 /// </summary>
-public sealed record ApprovalDecision(bool Approved, string Detail, int ReuseMinutes = 0, ApprovalEvidence? Evidence = null, Unlock? Unlock = null, string? Actor = null, string? ReasonCode = null, VerifiedCredential? Credential = null)
+public sealed record DecisionActor
 {
-    public static ApprovalDecision Allow(string detail = "approved", int reuseMinutes = 0, ApprovalEvidence? evidence = null, Unlock? unlock = null, string? actor = null, VerifiedCredential? credential = null) => new(true, detail, reuseMinutes, evidence, unlock, actor ?? credential?.Name, Credential: credential);
+    private DecisionActor(string kind, string identity)
+    {
+        Kind = kind;
+        Identity = identity;
+    }
 
-    public static ApprovalDecision Deny(string detail, string? actor = null, string? reasonCode = null) => new(false, detail, Actor: actor, ReasonCode: reasonCode);
+    public string Kind { get; }
+    public string Identity { get; }
+    public string AuditLabel => Kind + " " + ApprovalSummary.Clean(Identity);
+
+    public static DecisionActor ForPasskey(VerifiedCredential credential) => new("passkey", credential.Name);
+    public static DecisionActor ForSession(string identity) => new("session", identity);
+}
+
+public sealed record ApprovalDecision(bool Approved, string Detail, int ReuseMinutes = 0, ApprovalEvidence? Evidence = null, Unlock? Unlock = null, string? Actor = null, string? ReasonCode = null, VerifiedCredential? Credential = null, DecisionActor? DecisionActor = null)
+{
+    public static ApprovalDecision Allow(string detail = "approved", int reuseMinutes = 0, ApprovalEvidence? evidence = null, Unlock? unlock = null, string? actor = null, VerifiedCredential? credential = null)
+        => new(true, detail, reuseMinutes, evidence, unlock, actor ?? credential?.Name, Credential: credential,
+            DecisionActor: credential is null ? null : DecisionActor.ForPasskey(credential));
+
+    public static ApprovalDecision Deny(string detail, string? actor = null, string? reasonCode = null)
+        => new(false, detail, Actor: actor, ReasonCode: reasonCode, DecisionActor: actor is null ? null : DecisionActor.ForSession(actor));
 
     /// <summary>The detail of a decision that came from the approval time limit running out (nobody answered).</summary>
     public const string TimeLimitDetail = "no answer before the time limit";
