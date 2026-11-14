@@ -40,6 +40,13 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
 
     private sealed record Held(StoreKeyHolder Holder, int SecurityRevision);
 
+    private sealed class NoopDisposable : IDisposable
+    {
+        public static readonly NoopDisposable Instance = new();
+        private NoopDisposable() { }
+        public void Dispose() { }
+    }
+
     public AuthorityLaunchHandler(LocalAuthority authority, AuthorityKeyRing keys, AuthorityStore store, ISecretSource secrets, Func<Action<string>, IApprover> approver, AuthorityLock? lockState, TimeProvider? clock = null, TimeSpan? sweepInterval = null, ApprovalQueue? approvals = null)
     {
         _authority = authority;
@@ -298,25 +305,38 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
         LaunchRequest request = message.Decide.Request;
         ApprovalDecision? decision = null;
         bool presented = false;
+        bool ownsQueueRegistration = false;
         IDisposable offer;
         try
         {
             if (_approvals is not null)
             {
                 ApprovalReviewProjection review = ApprovalQueue.BuildReview(request.RequestId, request.Digest(), _clock.GetUtcNow(), request.Expires, machine, page);
-                if (!_approvals.TryRegister(review, out _))
+                ApprovalQueueRegistration registration = _approvals.Register(review, out _);
+                switch (registration)
                 {
-                    offer = _authority.Offer(request.RequestId, request.Digest(),
-                        () => ApprovalDecision.Deny("the authority approval queue is full", reasonCode: ReasonCodes.ApprovalQueueFull));
-                }
-                else
-                {
-                    offer = _authority.Offer(request.RequestId, request.Digest(), () =>
-                    {
-                        presented = true;
-                        decision = _approvals.Wait(request.RequestId, cancel);
-                        return decision;
-                    }, response => _approvals.MarkCommitted(request.RequestId, response));
+                    case ApprovalQueueRegistration.Created:
+                        ownsQueueRegistration = true;
+                        offer = _authority.Offer(request.RequestId, request.Digest(), () =>
+                        {
+                            presented = true;
+                            decision = _approvals.Wait(request.RequestId, cancel);
+                            return decision;
+                        }, response => _approvals.MarkCommitted(request.RequestId, response));
+                        break;
+                    case ApprovalQueueRegistration.ExistingTerminal:
+                        // The durable result already exists. Let LocalAuthority return its exact stored response without opening another page.
+                        offer = NoopDisposable.Instance;
+                        break;
+                    case ApprovalQueueRegistration.Full:
+                        offer = _authority.Offer(request.RequestId, request.Digest(),
+                            () => ApprovalDecision.Deny("the authority approval queue is full", reasonCode: ReasonCodes.ApprovalQueueFull));
+                        break;
+                    case ApprovalQueueRegistration.ExistingPending:
+                    case ApprovalQueueRegistration.Conflict:
+                        return deny(ReasonCodes.RequestIdReused, machine.SecurityRevision);
+                    default:
+                        throw new InvalidOperationException("unknown approval queue registration result");
                 }
             }
             else
@@ -332,7 +352,7 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
         }
         catch (InvalidOperationException)
         {
-            _approvals?.Withdraw(request.RequestId);
+            if (ownsQueueRegistration) _approvals?.Withdraw(request.RequestId);
             return deny(ReasonCodes.RequestIdReused, machine.SecurityRevision);
         }
 
@@ -369,9 +389,8 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
         {
             unlock ??= decision?.Unlock;
             unlock?.Dispose();
-            // If the durable authority decision failed or the offer was withdrawn, do not leave a phantom queue item.
-            // A committed entry is terminal, so Withdraw is a no-op in the successful case.
-            _approvals?.Withdraw(request.RequestId);
+            // Remove only the entry this handler created if the durable authority decision failed or the offer was withdrawn.
+            if (ownsQueueRegistration) _approvals?.Withdraw(request.RequestId);
         }
     }
 
