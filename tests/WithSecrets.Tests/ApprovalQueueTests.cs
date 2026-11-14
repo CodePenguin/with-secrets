@@ -234,6 +234,14 @@ internal static class ApprovalQueueTests
         check(expiringQueue.GetDetail("req-expire", _ => null) is null,
             "approvals: terminal review projection is discarded after its ten-minute retention");
 
+        ApprovalQueue restartQueue = new(TimeProvider.System, () => TimeSpan.FromMinutes(5));
+        check(restartQueue.TryRegister(Review("req-restart", now), out _), "approvals: register a request before service shutdown");
+        restartQueue.Dispose();
+        ApprovalDecision restartDecision = restartQueue.Wait("req-restart", CancellationToken.None);
+        check(!restartDecision.Approved && restartDecision.ReasonCode == ReasonCodes.Cancelled
+            && restartQueue.GetDetail("req-restart", _ => null) is null,
+            "approvals: shutdown drops undecided in-memory requests and wakes the host with a fail-closed denial");
+
         // Denial does not need a proof flow, but still waits for the authority's durable result.
         using ApprovalQueue deniedQueue = new(TimeProvider.System, () => TimeSpan.FromMinutes(5));
         check(deniedQueue.TryRegister(Review("req-deny", now), out _), "approvals: register denial request");
