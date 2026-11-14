@@ -270,7 +270,7 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
 
             string detail = ApprovalSummary.Clean(answered.Detail);
             detail = detail.Length > 200 ? detail[..200] : detail;
-            string? actor = answered.DecisionActor?.AuditLabel
+            string? actor = answered.DecisionPrincipal?.AuditLabel
                 ?? (answered.Credential is { } verifiedCredential
                     ? "passkey " + ApprovalSummary.Clean(verifiedCredential.Name)
                     : string.IsNullOrWhiteSpace(answered.Actor) ? null : ApprovalSummary.Clean(answered.Actor));
