@@ -270,7 +270,9 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
 
             string detail = ApprovalSummary.Clean(answered.Detail);
             detail = detail.Length > 200 ? detail[..200] : detail;
-            string? actor = string.IsNullOrWhiteSpace(answered.Actor) ? null : ApprovalSummary.Clean(answered.Actor);
+            string? actor = answered.Credential is { } verifiedCredential
+                ? "passkey " + ApprovalSummary.Clean(verifiedCredential.Name)
+                : string.IsNullOrWhiteSpace(answered.Actor) ? null : "session " + ApprovalSummary.Clean(answered.Actor);
             if (!answered.Approved)
             {
                 return new DecisionPlan(Answer(AuthorityDecision.Denied, answered.ReasonCode ?? (cancelled ? ReasonCodes.Cancelled : answered.TimedOut ? ReasonCodes.ApprovalTimeout : ReasonCodes.UserDenied), current.SecurityRevision), null, detail, Actor: actor);
