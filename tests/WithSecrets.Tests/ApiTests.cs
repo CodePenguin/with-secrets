@@ -1117,6 +1117,32 @@ internal static class ApiTests
             && malformedApprovalStatus == 400 && Code(malformedApprovalBody) == "invalid-request",
             "approvals: unknown ids are non-enumerating and decision bodies are schema-validated");
 
+        DateTimeOffset submitted = DateTimeOffset.UtcNow;
+        const string approvalId = "req-openapi";
+        string approvalDigest = new('b', 64);
+        ApprovalRequest reviewPage = new("dotnet", "/usr/bin/dotnet", ["test"], Directory.GetCurrentDirectory(), "test the API review projection", ["DB_URL"]);
+        check(app.Service.Approvals.TryRegister(ApprovalQueue.BuildReview(approvalId, approvalDigest, submitted, submitted.AddMinutes(5), app.Machine, reviewPage), out _),
+            "approvals: test fixture registers a pending request");
+        (int queueListStatus, string queueListBody, _) = await s.GetAsync("/api/v1/approvals");
+        (int detailStatus, string detailBody, _) = await s.GetAsync("/api/v1/approvals/" + approvalId);
+        check(queueListStatus == 200 && Conform("ApprovalQueue", queueListBody) is null
+            && detailStatus == 200 && Conform("ApprovalDetail", detailBody) is null,
+            "approvals: queue and full detail responses conform to OpenAPI");
+        (int challengeStatus, string challengeBody, _) = await s.PostAsync("/api/v1/approvals/" + approvalId + "/challenge", "{}");
+        check(challengeStatus == 201 && Conform("ApprovalChallenge", challengeBody) is null,
+            "approvals: the request-bound challenge response conforms to OpenAPI");
+        (int denyStatus, string denyBody, _) = await s.PostAsync("/api/v1/approvals/" + approvalId + "/deny", "{}");
+        check(denyStatus == 200 && Conform("ApprovalDetail", denyBody) is null,
+            "approvals: denial is accepted without a WebAuthn assertion");
+        ApprovalDecision deniedApproval = app.Service.Approvals.Wait(approvalId, CancellationToken.None);
+        AuthorityResponse denialResult = new(1, approvalId, approvalDigest, app.Machine.Fingerprint, AuthorityDecision.Denied, ReasonCodes.UserDenied,
+            0, submitted.AddSeconds(1), submitted.AddMinutes(1), "authority-key", []);
+        app.Service.Approvals.MarkCommitted(approvalId, denialResult);
+        (int terminalStatus, string terminalBody, _) = await s.GetAsync("/api/v1/approvals/" + approvalId);
+        check(!deniedApproval.Approved && terminalStatus == 200 && Conform("ApprovalDetail", terminalBody) is null
+            && Member(terminalBody, "status") == ApprovalStatuses.Denied,
+            "approvals: terminal detail is published after the authority decision is committed");
+
         (int createStatus, string createBody) = await s.PostAsync("/api/v1/authorizations", AdminBrowser.AuthorizationBody("machine-rename", ("fingerprint", app.Fingerprint[..20]), ("name", "shape")));
         check(createStatus == 201 && Conform("Authorization", createBody) is null, "openapi: the answer of POST /authorizations conforms to Authorization (" + Conform("Authorization", createBody) + ")");
         Tapped done = await s.OpAsync("machine-rename", app.Laptop, true, null, true, ("fingerprint", app.Fingerprint[..20]), ("name", "shape"));
