@@ -602,6 +602,107 @@ internal sealed partial class AdminApi
         return Task.FromResult(new ApiResult(200, new { ok = true }));
     }
 
+    private static ApiProblem ApprovalProblem(string? code, string? detail)
+    {
+        int status = code switch
+        {
+            "request-unavailable" => 404,
+            "approval-in-progress" or "request-not-pending" or "decision-already-made" => 409,
+            "authority-locked" => 423,
+            "too-many-requests" => 429,
+            "internal-error" => 500,
+            _ => 409,
+        };
+        return new ApiProblem(status, code ?? "request-not-pending", ApprovalSummary.Clean(detail ?? "the request is not available"));
+    }
+
+    private Task<ApiResult> ListApprovalsAsync(ApiCall call)
+    {
+        if (admin.Approvals is not { } queue)
+            return Task.FromResult(new ApiResult(503, new ApiProblem(503, "internal-error", "the approvals queue is unavailable")));
+
+        int limit = 50;
+        if (call.Context.Request.Query.TryGetValue("limit", out Microsoft.Extensions.Primitives.StringValues limitText))
+        {
+            if (limitText.Count != 1 || !int.TryParse(limitText[0], NumberStyles.None, CultureInfo.InvariantCulture, out limit) || limit is < 1 or > ApprovalQueue.MaxPending)
+                return Task.FromResult(new ApiResult(400, new ApiProblem(400, "invalid-request", "limit must be a whole number from 1 to 64")));
+        }
+
+        string? cursor = null;
+        if (call.Context.Request.Query.TryGetValue("cursor", out Microsoft.Extensions.Primitives.StringValues cursorText))
+        {
+            if (cursorText.Count != 1 || cursorText[0] is not { Length: > 0 and <= 128 } value)
+                return Task.FromResult(new ApiResult(400, new ApiProblem(400, "invalid-request", "cursor is not valid")));
+            cursor = value;
+        }
+
+        IReadOnlyList<ApprovalQueueItemDto> items = queue.ListPending(limit, cursor, out string? nextCursor);
+        return Task.FromResult(new ApiResult(200, new { items, nextCursor, serverTime = admin.UtcNow }));
+    }
+
+    private Task<ApiResult> GetApprovalAsync(ApiCall call)
+    {
+        string requestId = call.Path["requestId"];
+        if (!Regex.IsMatch(requestId, "^[A-Za-z0-9_-]{1,64}$", RegexOptions.CultureInvariant) || admin.Approvals is not { } queue)
+            return Task.FromResult(new ApiResult(404, new ApiProblem(404, "request-unavailable", "no request is available for that id")));
+
+        ApprovalDetailDto? detail = queue.GetDetail(requestId, admin.ProcessedApproval);
+        return Task.FromResult(detail is null
+            ? new ApiResult(404, new ApiProblem(404, "request-unavailable", "no request is available for that id"))
+            : new ApiResult(200, detail));
+    }
+
+    private Task<ApiResult> CreateApprovalChallengeAsync(ApiCall call)
+    {
+        string requestId = call.Path["requestId"];
+        if (!Regex.IsMatch(requestId, "^[A-Za-z0-9_-]{1,64}$") || admin.Approvals is not { } queue)
+            return Task.FromResult(new ApiResult(404, new ApiProblem(404, "request-unavailable", "no request is available for that id")));
+
+        IProofMethod? method = admin.ApprovalProof;
+        if (method is null)
+            return Task.FromResult(new ApiResult(503, new ApiProblem(503, "internal-error", "no passkey proof method is available")));
+
+        string origin = call.Context.Request.Headers.Origin.ToString();
+        (ApprovalChallengeDto? challenge, string? code, string? detail) = queue.CreateOrReuseChallenge(requestId, call.Session!.Id, origin, method);
+        return Task.FromResult(challenge is not null
+            ? new ApiResult(201, challenge)
+            : new ApiResult(ApprovalProblem(code, detail).Status, ApprovalProblem(code, detail)));
+    }
+
+    private Task<ApiResult> ApproveOnceAsync(ApiCall call)
+    {
+        string requestId = call.Path["requestId"];
+        if (!Regex.IsMatch(requestId, "^[A-Za-z0-9_-]{1,64}$") || admin.Approvals is not { } queue)
+            return Task.FromResult(new ApiResult(404, new ApiProblem(404, "request-unavailable", "no request is available for that id")));
+
+        IProofMethod? method = admin.ApprovalProof;
+        if (method is null)
+            return Task.FromResult(new ApiResult(503, new ApiProblem(503, "internal-error", "no passkey proof method is available")));
+
+        JsonElement body = call.Body!.Value;
+        string flowId = body.GetProperty("flowId").GetString()!;
+        string proof = body.GetProperty("proof").GetRawText();
+        string? prf = body.TryGetProperty("prf", out JsonElement sealedPrf) ? sealedPrf.GetRawText() : null;
+        (ApprovalDetailDto? detail, string? code, string? problem) = queue.Approve(requestId, call.Session!.Id, flowId, proof, method, admin.ProcessedApproval, prf);
+        if (detail is not null)
+            return Task.FromResult(new ApiResult(200, detail));
+        ApiProblem refused = ApprovalProblem(code, problem);
+        return Task.FromResult(new ApiResult(refused.Status, refused));
+    }
+
+    private Task<ApiResult> DenyApprovalAsync(ApiCall call)
+    {
+        string requestId = call.Path["requestId"];
+        if (!Regex.IsMatch(requestId, "^[A-Za-z0-9_-]{1,64}$") || admin.Approvals is not { } queue)
+            return Task.FromResult(new ApiResult(404, new ApiProblem(404, "request-unavailable", "no request is available for that id")));
+
+        (ApprovalDetailDto? detail, string? code, string? problem) = queue.Deny(requestId, call.Session!.Identity, admin.ProcessedApproval);
+        if (detail is not null)
+            return Task.FromResult(new ApiResult(200, detail));
+        ApiProblem refused = ApprovalProblem(code, problem);
+        return Task.FromResult(new ApiResult(refused.Status, refused));
+    }
+
     private Task<ApiResult> GetMachineAsync(ApiCall call)
     {
         (MachineDto? machine, string? problem, int status) = admin.FindMachineView(call.Path["fingerprint"]);
