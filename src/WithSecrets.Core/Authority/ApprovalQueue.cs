@@ -561,6 +561,9 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
                 return (null, "request-not-pending", "this request is no longer pending");
             }
 
+            if (entry.DecisionInProgress)
+                return (null, "approval-in-progress", "a decision is already being verified or committed for this request");
+
             ProofFlow? live = _flows.Values.FirstOrDefault(item => item.RequestId == requestId && item.ExpiresAt > clock.GetUtcNow() && Volatile.Read(ref item.Consumed) == 0);
             if (live is not null)
             {
@@ -666,15 +669,34 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
                 return ReconcileConflict(requestId, processed, expected: ApprovalStatuses.Approved);
             }
 
-            if (entry.Review.RequestDigest != flow.RequestDigest)
+            if (entry.Review.RequestDigest != flow.RequestDigest
+                || entry.Review.Machine.Fingerprint != flow.MachineFingerprint
+                || entry.Review.CanonicalText != flow.CanonicalText)
             {
                 return (null, "request-not-pending", "this proof is not for the current request");
             }
 
+            if (entry.DecisionInProgress)
+                return (null, "approval-in-progress", "a decision is already being verified or committed for this request");
+
             entry.DecisionInProgress = true;
         }
 
-        ProofResult verified = method.Verify(flow.Context, proof);
+        ProofResult verified;
+        try
+        {
+            verified = method.Verify(flow.Context, proof);
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            lock (_gate)
+            {
+                if (_entries.TryGetValue(requestId, out Entry? current) && ReferenceEquals(current, entry) && current.Status == ApprovalStatuses.Pending)
+                    current.DecisionInProgress = false;
+            }
+            return (null, "internal-error", "the passkey proof could not be checked");
+        }
+
         if (!verified.Ok || verified.Credential is null)
         {
             lock (_gate)
@@ -710,6 +732,7 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
         }
         else if (prfJson is not null)
         {
+            unlock?.Dispose();
             return (null, "invalid-request", "unexpected secret-store key release data");
         }
 
@@ -720,6 +743,7 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
             if (flow.PrfState is not null) CryptographicOperations.ZeroMemory(flow.PrfState);
             if (!_entries.TryGetValue(requestId, out Entry? current) || !ReferenceEquals(current, entry) || current.Status != ApprovalStatuses.Pending)
             {
+                unlock?.Dispose();
                 return ReconcileConflict(requestId, processed, expected: ApprovalStatuses.Approved);
             }
 
