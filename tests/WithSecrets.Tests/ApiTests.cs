@@ -1141,7 +1141,7 @@ internal static class ApiTests
         const string approvalId = "req-openapi";
         string approvalDigest = new('b', 64);
         ApprovalRequest reviewPage = new("dotnet", "/usr/bin/dotnet", ["test"], Directory.GetCurrentDirectory(), "test the API review projection", ["DB_URL"]);
-        check(app.Service.Approvals.TryRegister(ApprovalQueue.BuildReview(approvalId, approvalDigest, submitted, submitted.AddMinutes(5), app.Machine, reviewPage), out _),
+        check(app.Service.Approvals.TryRegister(ApprovalQueue.BuildReview(approvalId, approvalDigest, submitted, submitted.AddMinutes(5), app.Store.Find(app.Machine.Fingerprint)!, reviewPage), out _),
             "approvals: test fixture registers a pending request");
         (int queueListStatus, string queueListBody, _) = await s.GetAsync("/api/v1/approvals");
         (int detailStatus, string detailBody, _) = await s.GetAsync("/api/v1/approvals/" + approvalId);
