@@ -345,7 +345,7 @@ internal static class ApiTests
         check(lockTap.ApproveStatus == 200 && await HostServiceTests.WaitFor(() => app.Service.Lock.IsLocked), "lock: the admin key's fresh tap locks");
         check(app.Service.Admin.Sessions.Count == 0 && (await one.GetAsync("/api/v1/machines")).Status == 401 && (await two.GetAsync("/api/v1/grants")).Status == 401, "lock: it destroys every session at once");
         // M4: with the authority locked the key operations (and every other change) are refused before any page, and the refusal is audited.
-        AdminSession forged = new("t", "laptop", app.Clock.GetUtcNow(), "c");
+        AdminSession forged = new("t", "laptop", SessionScope.Admin, app.Clock.GetUtcNow(), "c");
         string keyBefore = app.Store.ActiveKey()?.Fingerprint ?? "";
         int askedLocked = app.Asked;
         List<AdminStart> lockedAnswers = [];
