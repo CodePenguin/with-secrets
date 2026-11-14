@@ -497,12 +497,34 @@ internal sealed partial class AdminApi
 
         if (session is null)
         {
-            return new ApiResult(200, new SessionDto(false, null, null, null, null, login, []));
+            return new ApiResult(200, new
+            {
+                authenticated = false,
+                identity = (string?)null,
+                scope = (string?)null,
+                capabilities = Array.Empty<string>(),
+                started = (DateTimeOffset?)null,
+                idleExpires = (DateTimeOffset?)null,
+                absoluteExpires = (DateTimeOffset?)null,
+                login,
+                recent = Array.Empty<string>(),
+            });
         }
 
         (DateTimeOffset idle, DateTimeOffset absolute) = admin.SessionEnds(session);
 
-        return new ApiResult(200, new SessionDto(true, ApprovalSummary.Clean(session.Admin), session.Started, idle, absolute, null, admin.Recent));
+        return new ApiResult(200, new
+        {
+            authenticated = true,
+            identity = ApprovalSummary.Clean(session.Identity),
+            scope = SessionCapabilities.WireName(session.Scope),
+            capabilities = SessionCapabilities.For(session.Scope),
+            started = session.Started,
+            idleExpires = idle,
+            absoluteExpires = absolute,
+            login = (LoginDto?)null,
+            recent = admin.Recent,
+        });
     }
 
     /// <summary>
@@ -553,7 +575,22 @@ internal sealed partial class AdminApi
         admin.RecordSessionStart(claimed);
         (DateTimeOffset idle, DateTimeOffset absolute) = admin.SessionEnds(claimed);
 
-        return new ApiResult(201, new ClaimDto(claimed.Csrf, new SessionDto(true, ApprovalSummary.Clean(claimed.Admin), claimed.Started, idle, absolute, null, admin.Recent)));
+        return new ApiResult(201, new
+        {
+            antiForgery = claimed.Csrf,
+            session = new
+            {
+                authenticated = true,
+                identity = ApprovalSummary.Clean(claimed.Identity),
+                scope = SessionCapabilities.WireName(claimed.Scope),
+                capabilities = SessionCapabilities.For(claimed.Scope),
+                started = claimed.Started,
+                idleExpires = idle,
+                absoluteExpires = absolute,
+                login = (LoginDto?)null,
+                recent = admin.Recent,
+            },
+        });
     }
 
     private async Task<ApiResult> StartSessionAsync(ApiCall call)
