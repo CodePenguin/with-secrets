@@ -487,8 +487,8 @@ public sealed partial class AdminService
     // ---- signing in ----
 
     /// <summary>
-    /// Starts a login for a browser: the tap (one fresh passkey page whose signed text names this login) proves an administrator is here, and the browser that began the login then claims its
-    /// session (<see cref="AdminSessions.Claim" />). Refused while the authority is locked (it can only be unlocked).
+    /// Starts a browser login. Any enrolled passkey may sign in; the trusted credential record determines whether the claimed session has admin or approval scope.
+    /// The browser that began the login claims the session (<see cref="AdminSessions.Claim" />). Refused while the authority is locked.
     /// </summary>
     public async Task<(AdminStart Start, string? Ticket)> BeginLoginAsync(string browserId, CancellationToken cancel)
     {
@@ -539,7 +539,7 @@ public sealed partial class AdminService
         return (started, started.Link is not null ? ticket : null);
     }
 
-    /// <summary>Called once a browser's session starts: the start is audited durably (no secret in it).</summary>
+    /// <summary>Called once a browser's scoped session starts: the start is audited durably (no secret in it).</summary>
     public void RecordSessionStart(AdminSession session)
     {
         _p.Authorizer.Record("admin-session", "started", "passkey " + ApprovalSummary.Clean(session.Identity), "");
