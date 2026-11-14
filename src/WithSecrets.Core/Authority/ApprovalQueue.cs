@@ -15,6 +15,8 @@ public sealed record ApprovalScriptProjection(string? Path, string Sha256, long 
 
 /// <summary>One decrypted-env metadata row: names and cipher fingerprint only.</summary>
 public sealed record ApprovalDecryptProjection(string Variable, string File, string KeySecret, string CipherShort);
+public sealed record ApprovalNameValue(string Name, string Value);
+public sealed record ApprovalCodeWarning(string Name, string Why);
 
 /// <summary>
 /// Dedicated bounded review projection for the Approvals SPA. Built from trusted signed context; never a serialization of
@@ -39,8 +41,8 @@ public sealed record ApprovalReviewProjection(
     ApprovalScriptProjection? ProgramFile,
     IReadOnlyList<string> EnvFiles,
     IReadOnlyList<string> EnvPairs,
-    IReadOnlyList<(string Name, string Value)> ShownEnvValues,
-    IReadOnlyList<(string Name, string Why)> CodeChangeWarnings,
+    IReadOnlyList<ApprovalNameValue> ShownEnvValues,
+    IReadOnlyList<ApprovalCodeWarning> CodeChangeWarnings,
     IReadOnlyList<ApprovalDecryptProjection> Decrypts,
     string? InheritedEnvironmentLine,
     IReadOnlyList<string> ExtraLines,
@@ -146,17 +148,17 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
             ? shown.SecretNames.ToDictionary(name => name, _ => "", StringComparer.Ordinal)
             : shown.SecretNames.ToDictionary(name => name, name => shown.Sources.TryGetValue(name, out string? source) ? ApprovalSummary.Clean(source) : "", StringComparer.Ordinal);
 
-        List<(string Name, string Value)> shownEnv = [];
+        List<ApprovalNameValue> shownEnv = [];
         HashSet<string> warned = [.. ApprovalSummary.CodeChanges(shown).Select(item => item.Name)];
         if (shown.EnvValues is { } values)
         {
             foreach ((string name, string value) in values.Where(item => !warned.Contains(item.Key)).OrderBy(item => item.Key, StringComparer.Ordinal))
             {
-                shownEnv.Add((ApprovalSummary.Clean(name), ApprovalSummary.Clean(value)));
+                shownEnv.Add(new ApprovalNameValue(ApprovalSummary.Clean(name), ApprovalSummary.Clean(value)));
             }
         }
 
-        List<(string Name, string Why)> warnings = [.. ApprovalSummary.CodeChanges(shown).Select(item => (ApprovalSummary.Clean(item.Name), item.Reason))];
+        List<ApprovalCodeWarning> warnings = [.. ApprovalSummary.CodeChanges(shown).Select(item => new ApprovalCodeWarning(ApprovalSummary.Clean(item.Name), item.Reason))];
         List<string> pairs = [];
         foreach (SecretMapping pair in shown.Mappings ?? [])
         {
