@@ -709,7 +709,7 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
             return (null, "invalid-request", "unexpected secret-store key release data");
         }
 
-        ApprovalDecision decision = ApprovalDecision.Allow(verified.Detail, unlock: unlock, actor: verified.Credential.Name);
+        ApprovalDecision decision = ApprovalDecision.Allow(verified.Detail, unlock: unlock, actor: verified.Credential.Name, credential: verified.Credential);
         lock (_gate)
         {
             _flows.Remove(flowId);
