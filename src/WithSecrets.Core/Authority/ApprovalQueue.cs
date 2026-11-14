@@ -77,6 +77,15 @@ public sealed record ApprovalDetailDto(
 public sealed record ApprovalChallengeDto(string FlowId, string Mode, JsonElement Payload, DateTimeOffset ExpiresAt, string? PrfKey = null);
 
 /// <summary>API statuses for Approvals decision state (not execution).</summary>
+public enum ApprovalQueueRegistration
+{
+    Created,
+    ExistingPending,
+    ExistingTerminal,
+    Full,
+    Conflict,
+}
+
 public static class ApprovalStatuses
 {
     public const string Pending = "pending";
@@ -274,24 +283,32 @@ public sealed class ApprovalQueue : IDisposable
     /// </summary>
     public bool TryRegister(ApprovalReviewProjection review, out TaskCompletionSource<ApprovalDecision> waiter)
     {
+        ApprovalQueueRegistration result = Register(review, out waiter);
+        return result is ApprovalQueueRegistration.Created or ApprovalQueueRegistration.ExistingPending;
+    }
+
+    public ApprovalQueueRegistration Register(ApprovalReviewProjection review, out TaskCompletionSource<ApprovalDecision> waiter)
+    {
         waiter = new TaskCompletionSource<ApprovalDecision>(TaskCreationOptions.RunContinuationsAsynchronously);
         lock (_gate)
         {
             SweepUnlocked();
             if (_entries.TryGetValue(review.RequestId, out Entry? existing))
             {
-                if (existing.Status == ApprovalStatuses.Pending && existing.Review.RequestDigest == review.RequestDigest)
+                if (existing.Review.RequestDigest != review.RequestDigest)
                 {
-                    waiter = existing.Decision;
-                    return true;
+                    return ApprovalQueueRegistration.Conflict;
                 }
 
-                return false;
+                waiter = existing.Decision;
+                return existing.Status == ApprovalStatuses.Pending
+                    ? ApprovalQueueRegistration.ExistingPending
+                    : ApprovalQueueRegistration.ExistingTerminal;
             }
 
             if (_entries.Values.Count(item => item.Status == ApprovalStatuses.Pending) >= MaxPending)
             {
-                return false;
+                return ApprovalQueueRegistration.Full;
             }
 
             TimeSpan timeout = approvalTimeout();
@@ -299,30 +316,19 @@ public sealed class ApprovalQueue : IDisposable
             {
                 timeout = TimeSpan.FromMinutes(ApprovalSettings.MaxTimeoutMinutes);
             }
-
-            if (timeout < TimeSpan.FromSeconds(1))
+            if (timeout <= TimeSpan.Zero)
             {
-                timeout = TimeSpan.FromSeconds(1);
+                timeout = TimeSpan.FromMinutes(ApprovalSettings.DefaultTimeoutMinutes);
             }
 
-            DateTimeOffset effective = review.ExpiresAt;
             DateTimeOffset byTimeout = clock.GetUtcNow() + timeout;
-            if (byTimeout < effective)
-            {
-                effective = byTimeout;
-                review = review with { ExpiresAt = effective };
-            }
-
-            Entry entry = new()
-            {
-                Review = review,
-                Decision = waiter,
-                Expiry = null,
-            };
-            _entries[review.RequestId] = entry;
+            DateTimeOffset expires = review.ExpiresAt < byTimeout ? review.ExpiresAt : byTimeout;
+            ApprovalReviewProjection bounded = review with { ExpiresAt = expires };
+            Entry entry = new(bounded, new(TaskCreationOptions.RunContinuationsAsynchronously), null);
+            _entries.Add(review.RequestId, entry);
+            waiter = entry.Decision;
             ScheduleExpiryUnlocked(entry);
-
-            return true;
+            return ApprovalQueueRegistration.Created;
         }
     }
 
