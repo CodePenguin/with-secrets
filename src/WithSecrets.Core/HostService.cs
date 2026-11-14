@@ -198,12 +198,11 @@ public sealed class HostService : IDisposable
         IPasskeyAdmin? passkeys = options.PasskeyAdminFactory?.Invoke() ?? (options.State is { } passkeyState ? new StatePasskeyAdmin(passkeyState) : null);
         IUnlockProtection protection = options.UnlockProtection ?? UnlockProtections.ForThisPlatform();
         Pairing = new PairingService(options.Deployment.Store, protection, options.Deployment.IdentityCertificate, () => MachineUrl, options.Deployment.Clock);
-        Func<IProofMethod?> approvalProof = () =>
-        {
-            ApprovalSettings settings = ApprovalSettings.Load(options.State, out _).WithPort(options.PagePort);
-            (EnrollmentTarget primary, EnrollmentTarget local) = CommandWiring.Targets(options.State, settings, _ => { }, null);
-            return EnrollmentTarget.FirstThatCanProve(primary, local)?.Method;
-        };
+        ApprovalSettings proofSettings = ApprovalSettings.Load(options.State, out _).WithPort(options.PagePort);
+        if (options.TimeLimit is { } proofTimeout) proofSettings = proofSettings with { Timeout = proofTimeout };
+        (EnrollmentTarget proofPrimary, EnrollmentTarget proofLocal) = CommandWiring.Targets(options.State, proofSettings, _ => { }, null);
+        IProofMethod? approvalProofMethod = EnrollmentTarget.FirstThatCanProve(proofPrimary, proofLocal)?.Method;
+        Func<IProofMethod?> approvalProof = () => approvalProofMethod;
         Admin = new AdminService(new AdminServiceParts(options.Deployment.Store, Lock, new AdminAuthorizer(options.Deployment.Store, verifier, options.Deployment.Clock), askers, protection, AfterUnlock, port,
             options.Deployment.Keys, options.Deployment.Authority, options.Deployment.HostConfig, options.Deployment.Fingerprint, passkeys, options.Deployment.Clock, Pairing, Approvals, approvalProof));
 
