@@ -268,20 +268,19 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
         lock (_gate)
         {
             SweepUnlocked();
-            if (_entries.Values.Count(item => item.Status == ApprovalStatuses.Pending) >= MaxPending)
-            {
-                return false;
-            }
-
             if (_entries.TryGetValue(review.RequestId, out Entry? existing))
             {
                 if (existing.Status == ApprovalStatuses.Pending && existing.Review.RequestDigest == review.RequestDigest)
                 {
                     waiter = existing.Decision;
-
                     return true;
                 }
 
+                return false;
+            }
+
+            if (_entries.Values.Count(item => item.Status == ApprovalStatuses.Pending) >= MaxPending)
+            {
                 return false;
             }
 
@@ -877,10 +876,7 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
                 return false;
             }
 
-            string status = decision.Approved ? ApprovalStatuses.Approved
-                : decision.TimedOut ? ApprovalStatuses.Expired
-                : ApprovalStatuses.Denied;
-            CompleteUnlocked(entry, decision, status);
+            ReleaseUnlocked(entry, decision);
 
             return true;
         }
