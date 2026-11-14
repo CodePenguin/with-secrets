@@ -117,6 +117,34 @@ internal sealed partial class AdminApi
             call => MutateAsync(call, operation, pathParams), operation is "passkey-enroll" or "passkey-unenroll" ? ["202"] : null);
     }
 
+    private static IReadOnlyList<ApiQuery> ApprovalQueries() =>
+    [
+        new("limit", S.Int(1, ApprovalQueue.MaxPending), "The maximum number of pending requests to return (default 50)."),
+        new("cursor", S.Str(max: 128, min: 1), "An opaque cursor from the previous page."),
+    ];
+
+    private static JsonObject ApprovalAssertionSchema() => S.Obj(
+    [
+        ("id", S.Str(max: 2048)),
+        ("authenticatorData", S.Str(max: 4096)),
+        ("clientDataJSON", S.Str(max: 4096)),
+        ("signature", S.Str(max: 4096)),
+    ]);
+
+    private static JsonObject ApprovalPrfSchema() => S.Obj(
+    [
+        ("epk", S.Str(max: 256)),
+        ("iv", S.Str(max: 128)),
+        ("ct", S.Str(max: 256)),
+    ]);
+
+    private static JsonObject ApprovalDecisionBody() => S.Obj(
+    [
+        ("flowId", S.Str(max: 64, min: 8)),
+        ("proof", ApprovalAssertionSchema()),
+        ("prf", ApprovalPrfSchema()),
+    ], ["prf"]);
+
     private IReadOnlyList<ApiRoute> BuildRoutes()
     {
         List<ApiRoute> routes =
@@ -131,6 +159,11 @@ internal sealed partial class AdminApi
             new("DELETE", Prefix + "/session/inline", "cancelInlineSession", "Cancel a prepared sign-in challenge.", "session", ApiAccess.Login, 200, "Done", null, [], null, CancelInlineSession),
             new("POST", Prefix + "/session/claim", "claimSession", "Claim the session of the sign-in this browser began, once its tap was verified. The answer carries the session's own secret (antiForgery), once: keep it in the page and send it as X-Admin-Token with every request.", "session", ApiAccess.Claim, 201, "Claim", S.Obj([]), [], null, ClaimSessionAsync),
             new("DELETE", Prefix + "/session", "endSession", "Sign out: ends the session now.", "session", ApiAccess.Logout, 200, "Done", null, [], null, EndSessionAsync),
+            new("GET", Prefix + "/approvals", "listApprovals", "List pending run requests for an Approvals-capable session.", "approvals", ApiAccess.ApprovalsRead, 200, "ApprovalQueue", null, ApprovalQueries(), null, ListApprovalsAsync),
+            new("GET", Prefix + "/approvals/{requestId}", "getApproval", "Read the current decision state and bounded review projection for one run request.", "approvals", ApiAccess.ApprovalsRead, 200, "ApprovalDetail", null, [], null, GetApprovalAsync),
+            new("POST", Prefix + "/approvals/{requestId}/challenge", "createApprovalChallenge", "Prepare a short-lived passkey challenge for Approve once. The SPA remains on the request route.", "approvals", ApiAccess.ApprovalsDecide, 201, "ApprovalChallenge", null, [], null, CreateApprovalChallengeAsync),
+            new("POST", Prefix + "/approvals/{requestId}/approve", "approveOnce", "Verify the prepared passkey assertion and approve this request once.", "approvals", ApiAccess.ApprovalsDecide, 200, "ApprovalDetail", ApprovalDecisionBody(), [], null, ApproveOnceAsync),
+            new("POST", Prefix + "/approvals/{requestId}/deny", "denyApproval", "Refuse this pending run request without a passkey; no secrets are released.", "approvals", ApiAccess.ApprovalsDecide, 200, "ApprovalDetail", null, [], null, DenyApprovalAsync),
             new("GET", Prefix + "/machines", "listMachines", "The machines and where each stands (read-only session).", "machines", ApiAccess.Read, 200, "MachineList", null, [], null, _ => Task.FromResult(new ApiResult(200, new { items = admin.MachinesView() }))),
             new("GET", Prefix + "/machines/{fingerprint}", "getMachine", "One machine, by its fingerprint or an unambiguous start of it (read-only session).", "machines", ApiAccess.Read, 200, "Machine", null, [], null, GetMachineAsync),
             new("GET", Prefix + "/grants", "listGrants", "The grants and what can be done to each (read-only session).", "grants", ApiAccess.Read, 200, "GrantList", null, [], null, _ => Task.FromResult(new ApiResult(200, new { items = admin.GrantsView() }))),
