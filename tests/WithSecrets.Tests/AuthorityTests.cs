@@ -64,7 +64,7 @@ internal static class AuthorityTests
             Machine = new TestMachine(Path.Combine(parent, "fx-" + Guid.NewGuid().ToString("N")[..8]), trusted, clock: clock);
             Gate = new LaunchGate();
             Scripted = new ScriptedAuthority(Machine.Deployment.Authority);
-            Host = new HostAuthorization(Scripted, Machine.Deployment.MachineKey, Machine.HostName, Machine.Deployment.HostConfig, Gate, Machine.Deployment.Authority.Offer, clock);
+            Host = new HostAuthorization(Scripted, Machine.Deployment.MachineKey, Machine.HostName, Machine.Deployment.HostConfig, Gate, (requestId, digest, present) => Machine.Deployment.Authority.Offer(requestId, digest, present), clock);
         }
 
         public TestClock? Clock { get; }
