@@ -310,17 +310,27 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
                 delay = TimeSpan.Zero;
             }
 
-            entry.Expiry.Token.Register(() => Expire(review.RequestId));
-            if (delay == TimeSpan.Zero)
-            {
-                Expire(review.RequestId);
-            }
-            else
-            {
-                entry.Expiry.CancelAfter(delay);
-            }
+            ScheduleExpiryUnlocked(entry);
 
             return true;
+        }
+    }
+
+    private void ScheduleExpiryUnlocked(Entry entry)
+    {
+        entry.Expiry?.Cancel();
+        entry.Expiry?.Dispose();
+        entry.Expiry = new CancellationTokenSource();
+        string requestId = entry.Review.RequestId;
+        entry.Expiry.Token.Register(() => Expire(requestId));
+        TimeSpan delay = entry.Review.ExpiresAt - clock.GetUtcNow();
+        if (delay <= TimeSpan.Zero)
+        {
+            ReleaseUnlocked(entry, ApprovalDecision.Deny(ApprovalDecision.TimeLimitDetail, reasonCode: ReasonCodes.ApprovalTimeout));
+        }
+        else
+        {
+            entry.Expiry.CancelAfter(delay);
         }
     }
 
@@ -330,6 +340,17 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
         {
             if (!_entries.TryGetValue(requestId, out Entry? entry) || entry.Status != ApprovalStatuses.Pending)
             {
+                return;
+            }
+
+            // Proof verification and the authority's commit are short critical phases. Do not let the deadline race
+            // an already-reserved decision; retry until that decision commits or is released.
+            if (entry.DecisionInProgress)
+            {
+                entry.Expiry?.Dispose();
+                entry.Expiry = new CancellationTokenSource();
+                entry.Expiry.Token.Register(() => Expire(requestId));
+                entry.Expiry.CancelAfter(TimeSpan.FromMilliseconds(100));
                 return;
             }
 
@@ -398,6 +419,9 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
     {
         entry.DecisionInProgress = true;
         entry.Actor = decision.Actor;
+        entry.Expiry?.Cancel();
+        entry.Expiry?.Dispose();
+        entry.Expiry = null;
         DropFlowsUnlocked(entry.Review.RequestId);
         entry.Decision.TrySetResult(decision);
     }
@@ -631,9 +655,10 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
         {
             lock (_gate)
             {
-                if (_entries.TryGetValue(requestId, out Entry? current) && ReferenceEquals(current, entry))
+                if (_entries.TryGetValue(requestId, out Entry? current) && ReferenceEquals(current, entry) && current.Status == ApprovalStatuses.Pending)
                 {
                     current.DecisionInProgress = false;
+                    ScheduleExpiryUnlocked(current);
                 }
             }
 
@@ -678,9 +703,9 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
                 return (GetDetail(requestId, processed), null, null);
             }
 
-            if (entry.Status != ApprovalStatuses.Pending)
+            if (entry.Status != ApprovalStatuses.Pending || entry.DecisionInProgress)
             {
-                return (null, "decision-already-made", "a different decision was already recorded for this request");
+                return (null, "decision-already-made", "a different decision is already being committed for this request");
             }
 
             ReleaseUnlocked(entry, ApprovalDecision.Deny("denied on the approvals page", sessionIdentity));
