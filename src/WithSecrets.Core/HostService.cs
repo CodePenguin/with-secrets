@@ -165,6 +165,8 @@ public sealed class HostService : IDisposable
         // The authority believes a grant only when a person's passkey assertion backs it: it checks those against the keys of the signed manifest.
         options.Deployment.Authority.Verifier ??= options.State is { } verifierState ? new ManifestApprovalVerifier(verifierState) : null;
         Authorization = options.Deployment.CreateAuthorization(options.Gate, () => options.Grants?.TryClear(), options.Monotonic);
+        TimeProvider authorityClock = options.Deployment.Clock ?? TimeProvider.System;
+        Approvals = new ApprovalQueue(authorityClock, () => options.TimeLimit ?? ApprovalSettings.Load(options.State, out _).Timeout);
 
         // The authority starts LOCKED. The lock gates the authority signing key, the authority's decisions and grants, this host's runs and the memory it holds for a grant.
         // A host whose authority is remote has no authority lock of its own: the lock that matters is the authority's, enforced at its endpoint (a locked authority delivers nothing).
@@ -196,8 +198,14 @@ public sealed class HostService : IDisposable
         IPasskeyAdmin? passkeys = options.PasskeyAdminFactory?.Invoke() ?? (options.State is { } passkeyState ? new StatePasskeyAdmin(passkeyState) : null);
         IUnlockProtection protection = options.UnlockProtection ?? UnlockProtections.ForThisPlatform();
         Pairing = new PairingService(options.Deployment.Store, protection, options.Deployment.IdentityCertificate, () => MachineUrl, options.Deployment.Clock);
+        Func<IProofMethod?> approvalProof = () =>
+        {
+            ApprovalSettings settings = ApprovalSettings.Load(options.State, out _).WithPort(options.PagePort);
+            (EnrollmentTarget primary, EnrollmentTarget local) = CommandWiring.Targets(options.State, settings, _ => { }, null);
+            return EnrollmentTarget.FirstThatCanProve(primary, local)?.Method;
+        };
         Admin = new AdminService(new AdminServiceParts(options.Deployment.Store, Lock, new AdminAuthorizer(options.Deployment.Store, verifier, options.Deployment.Clock), askers, protection, AfterUnlock, port,
-            options.Deployment.Keys, options.Deployment.Authority, options.Deployment.HostConfig, options.Deployment.Fingerprint, passkeys, options.Deployment.Clock, Pairing));
+            options.Deployment.Keys, options.Deployment.Authority, options.Deployment.HostConfig, options.Deployment.Fingerprint, passkeys, options.Deployment.Clock, Pairing, Approvals, approvalProof));
 
         // The host's audit: events are signed with the machine key and committed to the outbox (beside authority.db) before a run decrypts anything; the uploader sends them on its own.
         HostAuditOutbox outbox = HostAuditOutbox.InFolder(Path.GetDirectoryName(options.Deployment.Store.FilePath)!, options.Deployment.MachineKey, options.Deployment.Clock);
@@ -232,6 +240,9 @@ public sealed class HostService : IDisposable
 
     /// <summary>The authority's lock. The service starts locked.</summary>
     public AuthorityLock Lock { get; }
+
+    /// <summary>The authority's in-memory pending run-approval queue (never persisted).</summary>
+    public ApprovalQueue Approvals { get; }
 
     /// <summary>The authority's admin page and its operations (status, unlock, lock, unlock policy).</summary>
     public AdminService Admin { get; }
@@ -381,7 +392,7 @@ public sealed class HostService : IDisposable
                     return;
                 }
 
-                _launches = new AuthorityLaunchHandler(_options.Deployment.Authority, _options.Deployment.Keys, _options.Deployment.Store, _options.Store, MachineApprover, Lock, _options.Deployment.Clock);
+                _launches = new AuthorityLaunchHandler(_options.Deployment.Authority, _options.Deployment.Keys, _options.Deployment.Store, _options.Store, MachineApprover, Lock, _options.Deployment.Clock, approvals: Approvals);
                 endpoint.Pairing ??= new PairingHandler(Pairing);
                 endpoint.Audit ??= Audit;
                 _machineListener = MachineListener.Start(_options.Deployment.Authority, _options.Deployment.Keys, _options.Deployment.Store, _options.Deployment.Tls, endpoint, _launches);
