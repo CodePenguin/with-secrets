@@ -399,7 +399,11 @@ internal sealed partial class AdminApi
                     ? "The request is no longer pending, another proof flow is active, or a conflicting decision won (request-not-pending, approval-in-progress, decision-already-made)."
                     : "The operation does not apply, or the change failed (operation-refused, operation-failed).");
                 responses["423"] = ProblemResponse("The authority is locked (authority-locked).");
-                if (route.Access == ApiAccess.ApprovalsDecide) responses["429"] = ProblemResponse("The bounded approval queue or rate limit was reached (too-many-requests).");
+                if (route.Access == ApiAccess.ApprovalsDecide)
+                {
+                    responses["429"] = ProblemResponse("The bounded approval queue or rate limit was reached (too-many-requests).");
+                    responses["503"] = ProblemResponse("No enrolled passkey proof method is currently available (internal-error).");
+                }
             }
 
             if (route.Request is not null)
