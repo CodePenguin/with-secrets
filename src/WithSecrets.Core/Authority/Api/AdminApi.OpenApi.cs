@@ -375,7 +375,11 @@ internal sealed partial class AdminApi
                 responses["400"] = ProblemResponse("The request is not valid (invalid-request, invalid-json).");
             }
 
-            responses["403"] = ProblemResponse("Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).");
+            responses["403"] = ProblemResponse(route.Access == ApiAccess.ApprovalsRead
+                ? "This browser session does not have approvals.read (scope-required)."
+                : route.Access == ApiAccess.ApprovalsDecide
+                    ? "This browser session does not have approvals.decide, or the request origin/anti-forgery check failed (scope-required, origin-not-allowed, origin-required, anti-forgery)."
+                    : "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).");
             if (route.Access is not (ApiAccess.Public or ApiAccess.Owner or ApiAccess.Open or ApiAccess.Login or ApiAccess.Claim))
             {
                 responses["401"] = ProblemResponse("No browser session (session-required).");
@@ -415,7 +419,7 @@ internal sealed partial class AdminApi
             {
                 JsonObject session = new() { ["sessionCookie"] = new JsonArray(), ["antiForgery"] = new JsonArray() };
                 JsonObject browser = new() { ["browserCookie"] = new JsonArray(), ["antiForgery"] = new JsonArray() };
-                operation["security"] = route.Access is ApiAccess.Read or ApiAccess.Logout ? new JsonArray(session)
+                operation["security"] = route.Access is ApiAccess.Read or ApiAccess.ApprovalsRead or ApiAccess.ApprovalsDecide or ApiAccess.Logout ? new JsonArray(session)
                     : route.Access is ApiAccess.Login or ApiAccess.Claim ? new JsonArray(browser)
                     : new JsonArray(session, browser);
             }
@@ -438,7 +442,7 @@ internal sealed partial class AdminApi
                 ["title"] = "with-secrets authority administration API",
                 ["version"] = "1.0.0",
                 ["description"] = "The administration API of the with-secrets authority on the Windows host service's loopback port (same origin as the administration web application). JSON only. "
-                    + "A browser session is READ-ONLY (an HttpOnly, SameSite=Strict cookie plus a secret given once, in service memory only). Every administrative change needs its own fresh passkey authorization; the narrow exception is Deny request in Approvals, which releases no secrets. Approve once requires a fresh request-bound passkey assertion (POST /api/v1/authorizations, then the tap, then the mutation carrying the authorization id), "
+                    + "A browser session is READ-ONLY (an HttpOnly, SameSite=Strict cookie plus a secret given once, in service memory only). Every administrative change needs its own fresh passkey authorization; the narrow exception is Deny request in Approvals, which releases no secrets. Approve once uses its own fresh request-bound WebAuthn challenge and assertion; it does not create a grant or an administrative authorization, "
                     + "bound to the operation and its parameters, single use and time limited. There is no CORS. Changes within v1 are additive; a breaking change is a new major version. Another version number (/api/v2/...) is answered with 400 and the problem code "
                     + "unsupported-api-version listing supportedVersions; an unknown path under /api is 404 route-not-found; /api never falls through to the web application. Every response carries X-Api-Version; a request may carry it too (X-Api-Version: 1) and another value is refused with unsupported-api-version. No answer contains a secret value, a credential, a private key or recovery material.",
             },
