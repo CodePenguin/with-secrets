@@ -537,6 +537,8 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
             {
                 return (null, "request-not-pending", "this request is no longer pending");
             }
+            if (entry.Review.ExpiresAt <= clock.GetUtcNow())
+                return (null, "request-not-pending", "this request has expired");
 
             if (entry.DecisionInProgress)
                 return (null, "approval-in-progress", "a decision is already being verified or committed for this request");
@@ -646,6 +648,8 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
             {
                 return ReconcileConflict(requestId, processed, expected: ApprovalStatuses.Approved);
             }
+            if (entry.Review.ExpiresAt <= clock.GetUtcNow())
+                return (null, "request-not-pending", "this request has expired");
 
             if (entry.Review.RequestDigest != flow.RequestDigest
                 || entry.Review.Machine.Fingerprint != flow.MachineFingerprint
@@ -783,6 +787,8 @@ public sealed class ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTim
             {
                 return (GetDetail(requestId, processed), null, null);
             }
+            if (entry.Review.ExpiresAt <= clock.GetUtcNow())
+                return (null, "request-not-pending", "this request has expired");
 
             if (entry.Status != ApprovalStatuses.Pending || entry.DecisionInProgress)
             {
