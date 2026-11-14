@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 namespace WithSecrets.Tests;
@@ -40,8 +42,67 @@ internal static class ApprovalQueueTests
             => ApprovalDecision.Deny("not supported");
     }
 
+    private static void PrfRoundTrip(Action<bool, string> check)
+    {
+        (byte[] serverState, string serverPublic) = SecretCrypto.NewServerKey();
+        byte[] bind = RandomNumberGenerator.GetBytes(32);
+        byte[] plaintext = RandomNumberGenerator.GetBytes(32);
+        byte[]? secret = null;
+        byte[]? key = null;
+        byte[]? opened = null;
+        try
+        {
+            byte[] serverPoint = Base64Url.DecodeFromChars(serverPublic);
+            using ECDiffieHellman serverPublicKey = ECDiffieHellman.Create(new ECParameters
+            {
+                Curve = ECCurve.NamedCurves.nistP256,
+                Q = new ECPoint { X = serverPoint[1..33], Y = serverPoint[33..65] },
+            });
+            using ECDiffieHellman browser = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
+            ECParameters browserPublic = browser.ExportParameters(false);
+            byte[] browserPoint = [0x04, .. browserPublic.Q.X!, .. browserPublic.Q.Y!];
+            secret = browser.DeriveRawSecretAgreement(serverPublicKey.PublicKey);
+            key = HKDF.DeriveKey(HashAlgorithmName.SHA256, secret, 32, bind, Encoding.UTF8.GetBytes(SecretCrypto.PrfInfo));
+            byte[] iv = RandomNumberGenerator.GetBytes(12);
+            byte[] sealedBytes = new byte[plaintext.Length + 16];
+            using (AesGcm aes = new(key, 16))
+            {
+                aes.Encrypt(iv, plaintext, sealedBytes.AsSpan(0, plaintext.Length), sealedBytes.AsSpan(plaintext.Length), bind);
+            }
+
+            opened = SecretCrypto.DecryptBytes(serverState, bind, Base64Url.EncodeToString(browserPoint),
+                Base64Url.EncodeToString(iv), Base64Url.EncodeToString(sealedBytes), SecretCrypto.PrfInfo);
+            check(opened.SequenceEqual(plaintext), "approvals: authority opens the browser-sealed PRF output with the same request binding");
+            bool wrongBindingRejected = false;
+            try
+            {
+                byte[] wrongBind = [.. bind];
+                wrongBind[0] ^= 0x01;
+                byte[] unexpected = SecretCrypto.DecryptBytes(serverState, wrongBind, Base64Url.EncodeToString(browserPoint),
+                    Base64Url.EncodeToString(iv), Base64Url.EncodeToString(sealedBytes), SecretCrypto.PrfInfo);
+                CryptographicOperations.ZeroMemory(unexpected);
+            }
+            catch (CryptographicException)
+            {
+                wrongBindingRejected = true;
+            }
+
+            check(wrongBindingRejected, "approvals: PRF ciphertext cannot be opened under a different canonical request binding");
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(serverState);
+            CryptographicOperations.ZeroMemory(bind);
+            CryptographicOperations.ZeroMemory(plaintext);
+            if (secret is not null) CryptographicOperations.ZeroMemory(secret);
+            if (key is not null) CryptographicOperations.ZeroMemory(key);
+            if (opened is not null) CryptographicOperations.ZeroMemory(opened);
+        }
+    }
+
     public static void Run(Action<bool, string> check)
     {
+        PrfRoundTrip(check);
         DateTimeOffset now = DateTimeOffset.UtcNow;
         MachineRecord machine = new("machine-fingerprint", [], "devbox", "Developer machine", MachineStatus.Trusted, 0, null, now, now);
         ApprovalRequest page = new("dotnet", "/usr/bin/dotnet", ["test"], "/work", "run the test suite", ["DB_URL"]);
