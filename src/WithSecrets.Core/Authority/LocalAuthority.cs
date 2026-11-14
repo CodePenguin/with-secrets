@@ -159,16 +159,16 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
     private readonly ConcurrentDictionary<string, Lazy<Task<GrantResponse>>> _grantInflight = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DateTimeOffset> _challenges = new(StringComparer.Ordinal);
 
-    private sealed record Offered(string RequestDigest, Func<ApprovalDecision> Present);
+    private sealed record Offered(string RequestDigest, Func<ApprovalDecision> Present, Action<AuthorityResponse>? Committed);
 
     /// <summary>
     /// How the host hands over the approval for a request: the authority calls <paramref name="present" /> (which shows the page and
     /// returns what the person answered) when, and only when, the machine may ask. Local mode only: the answer's unlock material
     /// goes from the page to the host, not through the response. Dispose to withdraw.
     /// </summary>
-    public IDisposable Offer(string requestId, string requestDigest, Func<ApprovalDecision> present)
+    public IDisposable Offer(string requestId, string requestDigest, Func<ApprovalDecision> present, Action<AuthorityResponse>? committed = null)
     {
-        if (!_offers.TryAdd(requestId, new Offered(requestDigest, present)))
+        if (!_offers.TryAdd(requestId, new Offered(requestDigest, present, committed)))
         {
             throw new InvalidOperationException("an approval is already offered for this request id");
         }
@@ -254,7 +254,7 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
 
         bool cancelled = cancel.IsCancellationRequested;
 
-        return store.RecordDecision(request.RequestId, digest, machine.Fingerprint, current =>
+        AuthorityResponse committedResponse = store.RecordDecision(request.RequestId, digest, machine.Fingerprint, current =>
         {
             // The approval may have taken minutes: a lock in that time stops the decision here, before anything is signed or stored.
             keys.LockState?.EnsureUnlocked();
@@ -273,11 +273,16 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
             string? actor = string.IsNullOrWhiteSpace(answered.Actor) ? null : ApprovalSummary.Clean(answered.Actor);
             if (!answered.Approved)
             {
-                return new DecisionPlan(Answer(AuthorityDecision.Denied, cancelled ? ReasonCodes.Cancelled : answered.TimedOut ? ReasonCodes.ApprovalTimeout : ReasonCodes.UserDenied, current.SecurityRevision), null, detail, Actor: actor);
+                return new DecisionPlan(Answer(AuthorityDecision.Denied, answered.ReasonCode ?? (cancelled ? ReasonCodes.Cancelled : answered.TimedOut ? ReasonCodes.ApprovalTimeout : ReasonCodes.UserDenied), current.SecurityRevision), null, detail, Actor: actor);
             }
 
             return new DecisionPlan(Answer(AuthorityDecision.Approved, ReasonCodes.Approved, current.SecurityRevision), null, detail, Actor: actor);
         });
+
+        // Notify the in-memory read model only after RecordDecision has committed its transaction.
+        offered.Committed?.Invoke(committedResponse);
+
+        return committedResponse;
     }
 
     /// <summary>The reason code that stops a machine from asking, or null when it may: its host name must be the bound one and its status Trusted.</summary>
