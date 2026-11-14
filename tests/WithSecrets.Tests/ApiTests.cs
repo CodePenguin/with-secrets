@@ -764,7 +764,7 @@ internal static class ApiTests
         (_, string staleView) = await b.SendAsync(HttpMethod.Get, "/api/v1/authorizations/" + staleTapped.AuthorizationId, null);
         (HttpMethod sm, string sp, string sj) = b.MutationRequest("machine-disable", staleTapped.AuthorizationId, ("fingerprint", fp[..20]));
         (int staleStatus, string staleBody) = await b.SendAsync(sm, sp, sj);
-        check(store.Find(fp) is { Status: MachineStatus.Disabled } stillDisabled && stillDisabled.SecurityRevision == revision && staleState == "failed" && staleView.Contains("\"outcome\":\"failed\"", StringComparison.Ordinal) && staleStatus == 409 && Code(staleBody) == "operation-failed", "machine functions: a machine that changed between the authorization and the tap is not changed again by the tap (failed, 409)");
+        check(store.Find(fp) is { Status: MachineStatus.Disabled } stillDisabled && stillDisabled.SecurityRevision == revision && staleState == "consumed" && staleView.Contains("\"outcome\":\"failed\"", StringComparison.Ordinal) && staleStatus == 409 && Code(staleBody) == "operation-failed", "machine functions: a machine that changed between the authorization and the tap is not changed again by the tap (failed, 409)");
         store.Enable(fp, "test");
 
         // A different host name arriving after the tap is not applied.
