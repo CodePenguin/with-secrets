@@ -22,7 +22,7 @@ public sealed partial class AdminService
         }
     }
 
-    internal Task<(InlineLoginView? View, AdminStart Start, string? Ticket)> BeginInlineLoginAsync(string browserId, CancellationToken cancel)
+    internal Task<(InlineLoginView? View, AdminStart Start, string? Ticket)> BeginInlineLoginAsync(string browserId, string origin, CancellationToken cancel)
     {
         string caller = AdminSessions.BrowserCaller(browserId);
         if (!TakeStart(caller)) return Task.FromResult<(InlineLoginView?, AdminStart, string?)>((null, new AdminStart(null, "too many requests; wait a minute", 429), null));
@@ -39,7 +39,7 @@ public sealed partial class AdminService
         {
             IAdminAsker asker = _p.Askers(_ => { });
             if (asker.ApprovalTarget() is not { } target) throw new ProofUnavailableException("no enrolled passkey can prove at this address");
-            InlineAdminProof prepared = _p.Authorizer.PrepareInline(sentence, OpLogin, [("login", code)], target, target.Approver.Origin);
+            InlineAdminProof prepared = _p.Authorizer.PrepareInline(sentence, OpLogin, [("login", code)], target, origin);
             lock (_inlineLoginGate)
             {
                 foreach (string previous in _inlineLogins.Where(item => item.Value.Browser == browserId).Select(item => item.Key).ToArray()) _inlineLogins.Remove(previous);
