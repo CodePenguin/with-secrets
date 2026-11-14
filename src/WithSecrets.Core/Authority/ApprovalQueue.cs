@@ -323,7 +323,12 @@ public sealed class ApprovalQueue : IDisposable
             DateTimeOffset byTimeout = clock.GetUtcNow() + timeout;
             DateTimeOffset expires = review.ExpiresAt < byTimeout ? review.ExpiresAt : byTimeout;
             ApprovalReviewProjection bounded = review with { ExpiresAt = expires };
-            Entry entry = new(bounded, new(TaskCreationOptions.RunContinuationsAsynchronously), null);
+            Entry entry = new()
+            {
+                Review = bounded,
+                Decision = new(TaskCreationOptions.RunContinuationsAsynchronously),
+                Expiry = null,
+            };
             _entries.Add(review.RequestId, entry);
             waiter = entry.Decision;
             ScheduleExpiryUnlocked(entry);
