@@ -782,7 +782,7 @@ public sealed class ApprovalQueue : IDisposable
             output = null;
             return true;
         }
-        catch (Exception) { return false; }
+        catch (Exception error) when (error is not OutOfMemoryException) { return false; }
         finally { if (output is not null) CryptographicOperations.ZeroMemory(output); }
     }
 
@@ -909,20 +909,24 @@ public sealed class ApprovalQueue : IDisposable
         _sweeper.Dispose();
         lock (_gate)
         {
-            foreach (Entry entry in _entries.Values)
+            Entry[] entries = [.. _entries.Values];
+            ProofFlow[] flows = [.. _flows.Values];
+            _entries.Clear();
+            _flows.Clear();
+
+            foreach (Entry entry in entries)
             {
+                entry.Status = ApprovalStatuses.Cancelled;
+                entry.DecisionInProgress = false;
                 entry.Expiry?.Cancel();
                 entry.Expiry?.Dispose();
                 entry.Decision.TrySetResult(ApprovalDecision.Deny("the authority service stopped", reasonCode: ReasonCodes.Cancelled));
             }
 
-            foreach (ProofFlow flow in _flows.Values)
+            foreach (ProofFlow flow in flows)
             {
                 if (flow.PrfState is not null) CryptographicOperations.ZeroMemory(flow.PrfState);
             }
-
-            _flows.Clear();
-            _entries.Clear();
         }
     }
 
