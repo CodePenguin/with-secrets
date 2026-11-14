@@ -124,7 +124,7 @@ public sealed class ApprovalQueue : IDisposable
     private sealed class Entry
     {
         public required ApprovalReviewProjection Review { get; init; }
-        public required TaskCompletionSource<ApprovalDecision> Decision { get; init; }
+        public required TaskCompletionSource<ApprovalDecision> Decision { get; set; }
         public string Status { get; set; } = ApprovalStatuses.Pending;
         public DateTimeOffset? DecidedAt { get; set; }
         public bool DecisionInProgress { get; set; }
@@ -429,6 +429,8 @@ public sealed class ApprovalQueue : IDisposable
             entry.Expiry?.Dispose();
             entry.Expiry = null;
             DropFlowsUnlocked(requestId);
+            // Do not retain the completed decision/proof result for the ten-minute terminal projection window.
+            entry.Decision = new(TaskCreationOptions.RunContinuationsAsynchronously);
         }
     }
 
@@ -855,7 +857,9 @@ public sealed class ApprovalQueue : IDisposable
         TaskCompletionSource<ApprovalDecision>? waiter;
         lock (_gate)
         {
-            waiter = _entries.TryGetValue(requestId, out Entry? entry) ? entry.Decision : null;
+            waiter = _entries.TryGetValue(requestId, out Entry? entry) && entry.Status == ApprovalStatuses.Pending
+                ? entry.Decision
+                : null;
         }
 
         if (waiter is null)
