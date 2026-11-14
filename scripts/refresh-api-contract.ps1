@@ -16,7 +16,7 @@ Push-Location $repo
 try {
     $env:WS_UPDATE_OPENAPI = '1'
     $env:WS_ONLY = 'Api'
-    dotnet run --project tests\WithSecrets.Tests
+    dotnet run --project tests\WithSecrets.Tests -p:BuildAdminWeb=false
     if ($LASTEXITCODE -ne 0) {
         throw "The .NET test harness failed while regenerating docs/api/openapi.json (exit $LASTEXITCODE)."
     }
