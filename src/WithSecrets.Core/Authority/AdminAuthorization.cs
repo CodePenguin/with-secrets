@@ -62,7 +62,7 @@ public sealed class VerifiedAdmin
 
     public string Signer { get; }
 
-    public string Actor => "admin passkey " + (Signer.Length > 0 ? Signer : "(unnamed)");
+    public string Actor => (Operation == AdminService.OpLogin ? "passkey " : "admin passkey ") + (Signer.Length > 0 ? Signer : "(unnamed)");
 
     /// <summary>True once, and only for the operation and parameters that were authorized.</summary>
     public bool Consume(string operation, string parameters)
@@ -163,8 +163,9 @@ public sealed class AdminAuthorizer(AuthorityStore store, IApprovalVerifier veri
             catch (AuthorityDatabaseException) { return Refuse(operation, "the spent-proof record cannot be written, so no session was started", parameterText); }
             if (!firstLogin) return Refuse(operation, "this sign-in proof was already used", parameterText);
 
-            Record(operation, "authorized", "passkey " + full.Credential.Name, parameterText);
-            return new AdminAuthorization(null, "authorized", evidence, full.Credential);
+            VerifiedAdmin login = new(operation, parameterText, full.Credential.Name);
+            Record(operation, "authorized", login.Actor, parameterText);
+            return new AdminAuthorization(login, "authorized", evidence, full.Credential);
         }
 
         ApprovalCheck check = verifier.Verify(evidence, 0);
@@ -197,7 +198,10 @@ public sealed class AdminAuthorizer(AuthorityStore store, IApprovalVerifier veri
         ApprovalDecision asked;
         try
         {
-            asked = asker.Ask(new ApprovalPrompt(heading, PageText(sentence, operation, parameters) + "\n" + TicketPrefix + ticket, "Confirm this change", "Change confirmed. The change was made."), cancel);
+            ApprovalPrompt prompt = new(heading, PageText(sentence, operation, parameters) + "\n" + TicketPrefix + ticket, "Confirm this change", "Change confirmed. The change was made.");
+            asked = operation == AdminService.OpLogin
+                ? asker.ApprovalTarget()?.Approver.Ask(prompt, cancel) ?? ApprovalDecision.Deny("no enrolled passkey can prove at this address")
+                : asker.Ask(prompt, cancel);
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
@@ -224,6 +228,21 @@ public sealed class AdminAuthorizer(AuthorityStore store, IApprovalVerifier veri
         if (Check(evidence, now, operation, parameters) is { } problem)
         {
             return Refuse(operation, problem, parameterText);
+        }
+
+        if (operation == AdminService.OpLogin)
+        {
+            if (asked.Credential is null)
+                return Refuse(operation, "the passkey did not identify an enrolled credential", parameterText);
+
+            bool firstLogin;
+            try { firstLogin = store.TrySpendAdminNonce(evidence.Nonce, now.AddMinutes(ApprovalSettings.MaxTimeoutMinutes + 5)); }
+            catch (AuthorityDatabaseException) { return Refuse(operation, "the spent-proof record cannot be written, so no session was started", parameterText); }
+            if (!firstLogin) return Refuse(operation, "this sign-in proof was already used", parameterText);
+
+            VerifiedAdmin login = new(operation, parameterText, asked.Credential.Name);
+            Record(operation, "authorized", login.Actor, parameterText);
+            return new AdminAuthorization(login, "authorized", evidence, asked.Credential);
         }
 
         ApprovalCheck check = verifier.Verify(evidence, 0);
