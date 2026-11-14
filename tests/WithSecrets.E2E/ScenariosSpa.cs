@@ -585,6 +585,14 @@ internal static class ScenariosSpa
         ILocator copyFull = c.Page.GetByRole(AriaRole.Button, new() { Name = "Copy full fingerprint for " + longHost });
         s.Check(await copyFull.CountAsync() == 1 && await copyFull.First.IsVisibleAsync(), "the revealed complete fingerprint has a copy control for the machine it belongs to");
 
+        // The complete public authority fingerprint also stays readable and copyable inside Settings at the same width.
+        await Spa.GoTo(c, "Settings", "Settings");
+        string authorityFingerprint = await c.Page.Locator("main code").First.TextContentAsync() ?? "";
+        bool settingsOverflow = await c.Page.EvaluateAsync<bool>("() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1");
+        s.Check(authorityFingerprint.Replace(" ", "").Length == 64, "Settings shows the complete public authority fingerprint (" + authorityFingerprint.Replace(" ", "").Length + " characters)");
+        s.Check(!settingsOverflow, "no horizontal scrolling with the full authority fingerprint at 320 px");
+        s.Check(await c.Page.GetByRole(AriaRole.Button, new() { Name = "Copy public fingerprint" }).IsVisibleAsync(), "the full authority fingerprint has a copy control");
+
         // Touch targets: every button and link of a view is at least 24 CSS px (WCAG 2.2) in both directions; ours are 44.
         await c.Page.SetViewportSizeAsync(375, 667);
         await Spa.GoTo(c, "Machines", "Machines");

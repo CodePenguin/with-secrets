@@ -1,8 +1,8 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { setBrowserSecret } from './api/client'
-import { authorization, grant, installFakeApi, machine, problem, session, signedIn, status, violations } from './test/fakeApi'
+import { authorization, grant, installFakeApi, machine, problem, session, settings, signedIn, status, violations } from './test/fakeApi'
 import { renderApp } from './test/render'
 
 const signedOut = () => session({ authenticated: false, admin: null, started: null, idleExpires: null, absoluteExpires: null })
@@ -457,6 +457,10 @@ describe('audit result counts', () => {
 })
 
 describe('settings and passkey context', () => {
+  afterEach(() => {
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined })
+  })
+
   it('keeps passkey administration context on the settings task that uses it', async () => {
     signedIn()
     renderApp('/settings')
@@ -467,14 +471,176 @@ describe('settings and passkey context', () => {
     expect(screen.queryByText(/Every change here needs its own fresh passkey tap/)).toBeNull()
   })
 
+  it('summarizes authority behavior in the four settings groups', async () => {
+    signedIn()
+    renderApp('/settings')
+
+    expect(await screen.findByText('How this authority behaves and how its signing key is maintained.')).toBeInTheDocument()
+    for (const name of ['Unlock mode', 'Audit retention', 'Administrator sessions', 'Authority signing key']) {
+      expect(screen.getByRole('heading', { level: 2, name })).toBeInTheDocument()
+    }
+    expect(screen.getByText('Manual')).toBeInTheDocument()
+    expect(screen.getByText('15 minutes')).toBeInTheDocument()
+    expect(screen.getByText('480 minutes')).toBeInTheDocument()
+    expect(screen.getByText('An idle timeout ends a session after that long without use. An absolute timeout ends it after that long however busy it is.')).toBeInTheDocument()
+    expect(screen.getByText(/Rotate the key: the current key signs a transition that hosts can follow/)).toBeInTheDocument()
+    expect(screen.getByText(/Recover the key: use only if the key is lost/)).toBeInTheDocument()
+  })
+
+  it('keeps zero audit retention visible as no limit in the page and the edit form', async () => {
+    const user = userEvent.setup()
+    signedIn({ 'GET /api/v1/settings': { body: settings({ auditRetentionDays: 0 }) } })
+    renderApp('/settings')
+
+    expect(await screen.findByText('ever (no limit)')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Change audit retention...' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByRole('textbox', { name: /Days to keep audit events/ })).toHaveValue('0')
+    expect(within(dialog).getByText('0 keeps everything.')).toBeInTheDocument()
+  })
+
+  it('keeps the unattended-unlock warning at the decision point', async () => {
+    const user = userEvent.setup()
+    signedIn()
+    renderApp('/settings')
+
+    await user.click(await screen.findByRole('button', { name: 'Allow unattended unlock...' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText(/Set the unlock mode to unattended/)).toBeInTheDocument()
+    expect(within(dialog).getByText('This is the weaker mode: anyone who can start this service as you gets an unlocked authority.')).toBeInTheDocument()
+  })
+
+  it('copies the complete public authority fingerprint and announces the result', async () => {
+    const user = userEvent.setup()
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const full = 'AB12 '.repeat(15) + 'CD34'
+    signedIn({ 'GET /api/v1/settings': { body: settings({ authorityKey: full }) } })
+    renderApp('/settings')
+
+    expect(await screen.findByText(full)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Copy public fingerprint' }))
+
+    expect(writeText).toHaveBeenCalledWith(full)
+    expect(screen.getByText('Copied.')).toHaveAttribute('role', 'status')
+  })
+
+  it('keeps the complete authority fingerprint readable when copying is not possible', async () => {
+    const user = userEvent.setup()
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn(async () => { throw new Error('copy refused') }) },
+    })
+    const full = 'AB12 '.repeat(15) + 'CD34'
+    signedIn({ 'GET /api/v1/settings': { body: settings({ authorityKey: full }) } })
+    renderApp('/settings')
+
+    expect(await screen.findByText(full)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Copy public fingerprint' }))
+
+    expect(await screen.findByText('Copying was not possible here; select the fingerprint and copy it.')).toBeInTheDocument()
+    expect(screen.getByText(full)).toBeInTheDocument()
+  })
+
   it('explains credential role separately from credential kind on the passkeys page', async () => {
     signedIn()
     renderApp('/passkeys')
 
-    expect(await screen.findByText(/Admin passkeys can administer this authority/)).toBeInTheDocument()
+    expect(await screen.findByText(/Credentials that approve requests and administer this authority/)).toBeInTheDocument()
+    expect(screen.getByText('Admin')).toBeInTheDocument()
+    expect(screen.getByText('May administer authority state, including settings and passkey management.')).toBeInTheDocument()
+    expect(screen.getByText('Approval only')).toBeInTheDocument()
+    expect(screen.getByText('May approve eligible secret-use requests but cannot administer authority state.')).toBeInTheDocument()
     expect(screen.getByText(/The kind describes the credential; the badge shows what it is allowed to do/)).toBeInTheDocument()
     const context = screen.getByText(/For authority behavior and signing-key maintenance/)
     expect(within(context).getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings')
+  })
+
+  it('keeps each passkey name, role, kind and creation time readable', async () => {
+    const longName = 'workstation-admin-' + 'x'.repeat(70)
+    const created = '2026-11-01T10:00:00Z'
+    signedIn({
+      'GET /api/v1/passkeys': {
+        body: {
+          available: true,
+          problem: null,
+          items: [
+            { name: longName, detail: 'security key', created, admin: true },
+            { name: 'deploy approval', detail: 'platform passkey', created, admin: false },
+          ],
+        },
+      },
+    })
+    renderApp('/passkeys')
+
+    const admin = (await screen.findByRole('heading', { level: 3, name: longName })).closest('li') as HTMLElement
+    expect(within(admin).getByText('admin')).toBeInTheDocument()
+    expect(within(admin).getByText('security key')).toBeInTheDocument()
+    expect(admin.querySelector('time')).toHaveAttribute('datetime', created)
+
+    const approval = (await screen.findByRole('heading', { level: 3, name: 'deploy approval' })).closest('li') as HTMLElement
+    expect(within(approval).getByText('approval only')).toBeInTheDocument()
+    expect(within(approval).getByText('platform passkey')).toBeInTheDocument()
+    expect(screen.getByText('The last admin passkey cannot be removed.')).toBeInTheDocument()
+  })
+
+  it('explains the delegated enrollment sequence before Add and in its review', async () => {
+    const user = userEvent.setup()
+    signedIn()
+    renderApp('/passkeys')
+
+    expect(await screen.findByText(/Adding a passkey starts a delegated enrollment sequence/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Add a passkey...' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText('After this authorization the enrollment pages open one after another. Each asks for its own passkey tap.')).toBeInTheDocument()
+    expect(within(dialog).getByText('Add a passkey: the enrollment pages follow, each with its own passkey tap.')).toBeInTheDocument()
+  })
+
+  it('keeps Remove attached to the exact passkey and reviews its name and kind', async () => {
+    const user = userEvent.setup()
+    signedIn({
+      'GET /api/v1/passkeys': {
+        body: { available: true, problem: null, items: [{ name: 'old key', detail: 'security key', created: '2026-11-01T10:00:00Z', admin: false }] },
+      },
+    })
+    renderApp('/passkeys')
+
+    const card = (await screen.findByRole('heading', { level: 3, name: 'old key' })).closest('li') as HTMLElement
+    await user.click(within(card).getByRole('button', { name: 'Remove passkey old key' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText('Passkey').parentElement).toHaveTextContent('old key')
+    expect(within(dialog).getByText('Kind').parentElement).toHaveTextContent('security key')
+    expect(within(dialog).getByText('The last admin passkey cannot be removed.')).toBeInTheDocument()
+    expect(within(dialog).getByText('Remove the passkey "old key".')).toBeInTheDocument()
+  })
+
+  it('never presents unavailable passkey storage as an empty list', async () => {
+    signedIn({
+      'GET /api/v1/passkeys': { body: { available: false, problem: 'The passkey store could not be read.', items: [] } },
+    })
+    renderApp('/passkeys')
+
+    expect(await screen.findByText('Passkeys are not available')).toBeInTheDocument()
+    expect(screen.getByText('The passkey store could not be read.')).toBeInTheDocument()
+    expect(screen.queryByText('No passkey is enrolled.')).toBeNull()
+    expect(screen.queryByRole('list', { name: 'Enrolled passkeys' })).toBeNull()
+  })
+
+  it('shows an empty store only when passkey storage is available', async () => {
+    signedIn({ 'GET /api/v1/passkeys': { body: { available: true, problem: null, items: [] } } })
+    renderApp('/passkeys')
+
+    expect(await screen.findByText('No passkey is enrolled.')).toBeInTheDocument()
+    expect(screen.queryByText('Passkeys are not available')).toBeNull()
+  })
+
+  it('keeps a failure to list passkeys separate from an empty store', async () => {
+    signedIn({ 'GET /api/v1/passkeys': problem(503, 'passkeys-unavailable', 'the passkey store is unavailable') })
+    renderApp('/passkeys')
+
+    expect(await screen.findByText('The passkeys could not be listed', {}, { timeout: 4000 })).toBeInTheDocument()
+    expect(screen.queryByText('No passkey is enrolled.')).toBeNull()
+    expect(screen.queryByText('Passkeys are not available')).toBeNull()
   })
 })
 

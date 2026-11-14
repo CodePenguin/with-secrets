@@ -1,0 +1,12 @@
+.roles {
+  margin: 0 0 var(--space-4);
+}
+
+.roles h2 {
+  margin-top: 0;
+}
+
+.note {
+  margin: var(--space-3) 0 0;
+  color: var(--muted);
+}

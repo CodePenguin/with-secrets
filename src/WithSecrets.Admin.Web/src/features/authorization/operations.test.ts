@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { grant, machine } from '../../test/fakeApi'
-import { approveMachine, changeGrantEnd, removePasskey, renameMachine, revokeGrant, setAuditRetention, setSessionTimeouts, setUnlockPolicy, trustMachine, unlock, type OperationDef, type Prepared } from './operations'
+import { addPasskey, approveMachine, changeGrantEnd, recoverAuthorityKey, removePasskey, renameMachine, revokeGrant, rotateAuthorityKey, setAuditRetention, setSessionTimeouts, setUnlockPolicy, trustMachine, unlock, type OperationDef, type Prepared } from './operations'
 
 function prepared(def: OperationDef, values: Record<string, string | boolean> = {}): Prepared {
   const result = def.prepare(values)
@@ -59,5 +59,27 @@ describe('operations: what is authorized is exactly what is performed', () => {
   it('passkey removal names the passkey', () => {
     const p = prepared(removePasskey({ name: 'old key', detail: 'x', created: '2026-01-01T00:00:00Z', admin: false }))
     expect(p.parameters).toEqual({ name: 'old key' })
+  })
+
+  it('settings reviews state the exact effect before the passkey tap', () => {
+    expect(prepared(setAuditRetention(90, 36500), { days: '0' }).summary).toBe('Keep audit events for ever.')
+    expect(prepared(setSessionTimeouts(15, 480, 120, 1440), { idle: '15', absolute: '480' }).summary).toBe('End a session after 15 minutes without use, or 480 minutes at most.')
+    expect(prepared(setUnlockPolicy('unattended')).summary).toContain('unlocks itself at start')
+    expect(setUnlockPolicy('unattended').warning).toBe('This is the weaker mode: anyone who can start this service as you gets an unlocked authority.')
+  })
+
+  it('rotation follows a transition while recovery has no transition and enrolls every other host again', () => {
+    expect(rotateAuthorityKey().danger).toBeFalsy()
+    expect(rotateAuthorityKey().intro).toBe('Hosts follow the transition the current key signs.')
+    expect(rotateAuthorityKey().warning).toBeUndefined()
+    expect(recoverAuthorityKey().danger).toBe(true)
+    expect(recoverAuthorityKey().warning).toBe('There is no transition: every other host has to enroll again.')
+  })
+
+  it('adding a passkey starts its own delegated enrollment sequence', () => {
+    const p = prepared(addPasskey())
+    expect(p.operation).toBe('passkey-enroll')
+    expect(p.summary).toBe('Add a passkey: the enrollment pages follow, each with its own passkey tap.')
+    expect(addPasskey().intro).toBe('After this authorization the enrollment pages open one after another. Each asks for its own passkey tap.')
   })
 })
