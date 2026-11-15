@@ -89,7 +89,11 @@ internal static class ScenariosPairing
         await dialog.GetByRole(AriaRole.Button, new() { Name = "Close" }).ClickAsync();
 
         // 4. The host pins the authority key (M1) and asks the authority to run a command.
+        // Seeding the secret used the shared page's one-shot link, whose command has since stopped. The Approvals queue
+        // belongs to the live authority SPA and to the session this tab kept there, so return to it before the launch.
         await Scenarios3.SeedSecret(rig, c);
+        await Spa.Open(c, app);
+        await Spa.Heading(c, "Overview").WaitForAsync(new() { Timeout = 20000 });
         RemoteAuthorityConfig config = hostDeployment.HostConfig.Load().Config!.Remote!;
         using RemoteAuthority remote = new(config, hostDeployment.Tls, hostDeployment.HostConfig);
         hostDeployment.UseRemote(remote);
@@ -113,7 +117,7 @@ internal static class ScenariosPairing
 
         // The authority now exposes run approvals through its authenticated queue API, not a per-request browser page link.
         // Denial needs an approval-capable session but deliberately does not need a passkey assertion.
-        Task<string> denyTask = DenyQueuedRequest(c.Page, fp);
+        Task<string> denyTask = DenyQueuedRequest(c, app, fp);
         while (await reader.ReadLineAsync() is { } line)
         {
             all.AppendLine(line);
@@ -133,7 +137,7 @@ internal static class ScenariosPairing
         }
 
         string requestId = await denyTask;
-        string terminalStatus = await ReadQueuedStatus(c.Page, requestId);
+        string terminalStatus = await ReadQueuedStatus(c, app, requestId);
         s.Check(result is { Outcome: LaunchOutcome.Denied, ExitCode: RunCommand.Denied }
             && terminalStatus == ApprovalStatuses.Denied
             && !output.ToString().Contains(SecretValue, StringComparison.Ordinal)
@@ -162,8 +166,16 @@ internal static class ScenariosPairing
         s.NoProblems(c);
     }
  
-    private static async Task<string> DenyQueuedRequest(IPage page, string fingerprint)
+    private static void RequireAuthorityOrigin(IPage page, SpaApp app)
     {
+        if (new Uri(page.Url).GetLeftPart(UriPartial.Authority) != new Uri(app.Url).GetLeftPart(UriPartial.Authority))
+            throw new InvalidOperationException("The Approvals queue belongs to the live authority SPA at " + app.Url + ", but the page is at " + page.Url);
+    }
+
+    private static async Task<string> DenyQueuedRequest(Ctx c, SpaApp app, string fingerprint)
+    {
+        IPage page = c.Page;
+        RequireAuthorityOrigin(page, app);
         for (int attempt = 0; attempt < 240; attempt++)
         {
             string response = await page.EvaluateAsync<string>(@"async () => {
@@ -210,8 +222,10 @@ internal static class ScenariosPairing
         throw new TimeoutException("The paired host's request did not appear in the authority's Approvals queue.");
     }
 
-    private static async Task<string> ReadQueuedStatus(IPage page, string requestId)
+    private static async Task<string> ReadQueuedStatus(Ctx c, SpaApp app, string requestId)
     {
+        IPage page = c.Page;
+        RequireAuthorityOrigin(page, app);
         for (int attempt = 0; attempt < 40; attempt++)
         {
             string response = await page.EvaluateAsync<string>(@"async (id) => {
