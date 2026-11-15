@@ -134,6 +134,7 @@ internal static class RemoteLaunchTests
                     return made;
                 },
                 MachineEndpoint = new MachineListenerOptions { Port = 0 },
+                UseApprovalQueueForMachineLaunches = false,
                 AuditUploadInterval = TimeSpan.FromMilliseconds(300),
             });
 
