@@ -110,7 +110,10 @@ internal static class ScenariosPairing
         StringBuilder output = new();
         StringBuilder all = new();
         LaunchEvent? result = null;
-        string? approvalLink = null;
+
+        // The authority now exposes run approvals through its authenticated queue API, not a per-request browser page link.
+        // Denial needs an approval-capable session but deliberately does not need a passkey assertion.
+        Task<string> denyTask = DenyQueuedRequest(c.Page, fp);
         while (await reader.ReadLineAsync() is { } line)
         {
             all.AppendLine(line);
@@ -119,15 +122,7 @@ internal static class ScenariosPairing
                 continue;
             }
 
-            if (launchEvent.Kind == LaunchEvent.ApprovalKind && approvalLink is null)
-            {
-                approvalLink = launchEvent.Link;
-                await c.Page.GotoAsync(approvalLink!);
-                string approval = await c.TextAppears("#request");
-                s.Check(approval.Contains("E2E_SECRET", StringComparison.Ordinal), "the authority's approval page names the secret");
-                await c.Click("#deny");
-            }
-            else if (launchEvent.Kind == LaunchEvent.OutputKind)
+            if (launchEvent.Kind == LaunchEvent.OutputKind)
             {
                 output.Append(launchEvent.Text);
             }
@@ -137,8 +132,13 @@ internal static class ScenariosPairing
             }
         }
 
-        // The authority served the paired host: its request reached the approval page (a Pending host is refused before any page). The person denies it here: the test authenticator of the SPA taps is cloned for every passkey page and the clone does not carry the PRF secret that opening a secret needs, so an approval that opens the secret is covered by the unit suite (RemoteLaunchTests, with a really paired host) instead.
-        s.Check(approvalLink is not null && result is { Outcome: LaunchOutcome.Denied, ExitCode: RunCommand.Denied } && !output.ToString().Contains(SecretValue, StringComparison.Ordinal) && all.ToString().Contains("user-denied", StringComparison.Ordinal), "the authority served the paired host: its request reached the authority's approval page, and the person's denial there ends it (nothing ran)");
+        string requestId = await denyTask;
+        string terminalStatus = await ReadQueuedStatus(c.Page, requestId);
+        s.Check(result is { Outcome: LaunchOutcome.Denied, ExitCode: RunCommand.Denied }
+            && terminalStatus == ApprovalStatuses.Denied
+            && !output.ToString().Contains(SecretValue, StringComparison.Ordinal)
+            && all.ToString().Contains("user-denied", StringComparison.Ordinal),
+            "the paired host's request reached the authority's authenticated Approvals queue and a session denial ended it (nothing ran)");
 
         // 5. Nothing of the pairing code is anywhere on disk or in the audit.
         bool leaked = Directory.EnumerateFiles(rig.Folder, "*", SearchOption.AllDirectories).ToList().Any(file =>
@@ -160,5 +160,71 @@ internal static class ScenariosPairing
         s.Check(!leaked && !string.Join('\n', audit.Select(entry => entry.Detail)).Contains(code, StringComparison.Ordinal), "the pairing code is in no file of the authority or the host and not in the audit");
         s.Check(audit.Any(entry => entry.Event == "pairing-invitation-created") && audit.Any(entry => entry.Event == "pairing-invitation-consumed") && audit.Any(entry => entry.Event == "machine-approve"), "the audit holds the creation, the consumption and the approval");
         s.NoProblems(c);
+    }
+ 
+    private static async Task<string> DenyQueuedRequest(IPage page, string fingerprint)
+    {
+        for (int attempt = 0; attempt < 240; attempt++)
+        {
+            string response = await page.EvaluateAsync<string>(@"async () => {
+                const token = sessionStorage.getItem('ws.session-secret');
+                const result = await fetch('/api/v1/approvals', {
+                    headers: { 'X-Admin-Token': token ?? '' },
+                    credentials: 'same-origin',
+                    cache: 'no-store'
+                });
+                return JSON.stringify({ status: result.status, body: await result.json() });
+            }");
+            using System.Text.Json.JsonDocument document = System.Text.Json.JsonDocument.Parse(response);
+            int status = document.RootElement.GetProperty("status").GetInt32();
+            if (status != 200)
+                throw new InvalidOperationException("Could not read the authenticated Approvals queue: HTTP " + status + " " + document.RootElement.GetProperty("body"));
+
+            System.Text.Json.JsonElement items = document.RootElement.GetProperty("body").GetProperty("items");
+            foreach (System.Text.Json.JsonElement item in items.EnumerateArray())
+            {
+                if (!string.Equals(item.GetProperty("machine").GetProperty("fingerprint").GetString(), fingerprint, StringComparison.Ordinal))
+                    continue;
+
+                string requestId = item.GetProperty("requestId").GetString()!;
+                string denied = await page.EvaluateAsync<string>(@"async (id) => {
+                    const token = sessionStorage.getItem('ws.session-secret');
+                    const result = await fetch('/api/v1/approvals/' + encodeURIComponent(id) + '/deny', {
+                        method: 'POST',
+                        headers: { 'X-Admin-Token': token ?? '' },
+                        credentials: 'same-origin',
+                        cache: 'no-store'
+                    });
+                    return JSON.stringify({ status: result.status, body: await result.json() });
+                }", requestId);
+                using System.Text.Json.JsonDocument denial = System.Text.Json.JsonDocument.Parse(denied);
+                int denialStatus = denial.RootElement.GetProperty("status").GetInt32();
+                if (denialStatus != 200)
+                    throw new InvalidOperationException("Could not deny the paired host's queued request: HTTP " + denialStatus + " " + denial.RootElement.GetProperty("body"));
+                return requestId;
+            }
+
+            await Task.Delay(250);
+        }
+
+        throw new TimeoutException("The paired host's request did not appear in the authority's Approvals queue.");
+    }
+
+    private static async Task<string> ReadQueuedStatus(IPage page, string requestId)
+    {
+        string response = await page.EvaluateAsync<string>(@"async (id) => {
+            const token = sessionStorage.getItem('ws.session-secret');
+            const result = await fetch('/api/v1/approvals/' + encodeURIComponent(id), {
+                headers: { 'X-Admin-Token': token ?? '' },
+                credentials: 'same-origin',
+                cache: 'no-store'
+            });
+            return JSON.stringify({ status: result.status, body: await result.json() });
+        }", requestId);
+        using System.Text.Json.JsonDocument document = System.Text.Json.JsonDocument.Parse(response);
+        int status = document.RootElement.GetProperty("status").GetInt32();
+        if (status != 200)
+            throw new InvalidOperationException("Could not read the terminal approval result: HTTP " + status + " " + document.RootElement.GetProperty("body"));
+        return document.RootElement.GetProperty("body").GetProperty("status").GetString()!;
     }
 }
