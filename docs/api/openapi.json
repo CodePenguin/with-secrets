@@ -3,7 +3,7 @@
   "info": {
     "title": "with-secrets authority administration API",
     "version": "1.0.0",
-    "description": "The administration API of the with-secrets authority on the Windows host service\u0027s loopback port (same origin as the administration web application). JSON only. A browser session is READ-ONLY (an HttpOnly, SameSite=Strict cookie plus a secret given once, in service memory only). Every change needs its own fresh passkey authorization (POST /api/v1/authorizations, then the tap, then the mutation carrying the authorization id), bound to the operation and its parameters, single use and time limited. There is no CORS. Changes within v1 are additive; a breaking change is a new major version. Another version number (/api/v2/...) is answered with 400 and the problem code unsupported-api-version listing supportedVersions; an unknown path under /api is 404 route-not-found; /api never falls through to the web application. Every response carries X-Api-Version; a request may carry it too (X-Api-Version: 1) and another value is refused with unsupported-api-version. No answer contains a secret value, a credential, a private key or recovery material."
+    "description": "The administration API of the with-secrets authority on the Windows host service\u0027s loopback port (same origin as the administration web application). JSON only. A browser session is READ-ONLY (an HttpOnly, SameSite=Strict cookie plus a secret given once, in service memory only). Every administrative change needs its own fresh passkey authorization; the narrow exception is Deny request in Approvals, which releases no secrets. Approve once uses its own fresh request-bound WebAuthn challenge and assertion; it does not create a grant or an administrative authorization, bound to the operation and its parameters, single use and time limited. There is no CORS. Changes within v1 are additive; a breaking change is a new major version. Another version number (/api/v2/...) is answered with 400 and the problem code unsupported-api-version listing supportedVersions; an unknown path under /api is 404 route-not-found; /api never falls through to the web application. Every response carries X-Api-Version; a request may carry it too (X-Api-Version: 1) and another value is refused with unsupported-api-version. No answer contains a secret value, a credential, a private key or recovery material."
   },
   "servers": [
     {
@@ -20,6 +20,9 @@
     },
     {
       "name": "session"
+    },
+    {
+      "name": "approvals"
     },
     {
       "name": "machines"
@@ -433,7 +436,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -865,6 +868,720 @@
         ]
       }
     },
+    "/api/v1/approvals": {
+      "get": {
+        "operationId": "listApprovals",
+        "summary": "List pending run requests for an Approvals-capable session.",
+        "tags": [
+          "approvals"
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "The maximum number of pending requests to return (default 50).",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 64
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "An opaque cursor from the previous page.",
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        ],
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalQueue"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "This browser session does not have approvals.read (scope-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/approvals/{requestId}": {
+      "get": {
+        "operationId": "getApproval",
+        "summary": "Read the current decision state and bounded review projection for one run request.",
+        "tags": [
+          "approvals"
+        ],
+        "parameters": [
+          {
+            "name": "requestId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 80
+            }
+          }
+        ],
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "This browser session does not have approvals.read (scope-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No request is available for that id (request-unavailable; unknown and unauthorized ids are indistinguishable).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/approvals/{requestId}/challenge": {
+      "post": {
+        "operationId": "createApprovalChallenge",
+        "summary": "Prepare a short-lived passkey challenge for Approve once. The SPA remains on the request route.",
+        "tags": [
+          "approvals"
+        ],
+        "parameters": [
+          {
+            "name": "requestId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 80
+            }
+          }
+        ],
+        "x-access": "session",
+        "description": "Prepare a short-lived passkey challenge for Approve once. The SPA remains on the request route. Requires a session with approvals.decide, the anti-forgery header and a same-origin request. Denial releases no secrets and does not require WebAuthn; approval requires a fresh request-bound, user-verified WebAuthn assertion.",
+        "responses": {
+          "201": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalChallenge"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "This browser session does not have approvals.decide, the request origin/anti-forgery check failed, or the passkey assertion was not accepted (scope-required, origin-not-allowed, origin-required, anti-forgery, proof-invalid).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No request is available for that id (request-unavailable; unknown and unauthorized ids are indistinguishable).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request is no longer pending, another proof flow is active, or a conflicting decision won (request-not-pending, approval-in-progress, decision-already-made).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The bounded approval queue or rate limit was reached (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No enrolled passkey proof method is currently available (internal-error).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/approvals/{requestId}/approve": {
+      "post": {
+        "operationId": "approveOnce",
+        "summary": "Verify the prepared passkey assertion and approve this request once.",
+        "tags": [
+          "approvals"
+        ],
+        "parameters": [
+          {
+            "name": "requestId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 80
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "flowId": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64
+                  },
+                  "proof": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "maxLength": 2048
+                      },
+                      "authenticatorData": {
+                        "type": "string",
+                        "maxLength": 4096
+                      },
+                      "clientDataJSON": {
+                        "type": "string",
+                        "maxLength": 4096
+                      },
+                      "signature": {
+                        "type": "string",
+                        "maxLength": 4096
+                      }
+                    },
+                    "additionalProperties": false,
+                    "required": [
+                      "id",
+                      "authenticatorData",
+                      "clientDataJSON",
+                      "signature"
+                    ]
+                  },
+                  "prf": {
+                    "type": "object",
+                    "properties": {
+                      "epk": {
+                        "type": "string",
+                        "maxLength": 256
+                      },
+                      "iv": {
+                        "type": "string",
+                        "maxLength": 128
+                      },
+                      "ct": {
+                        "type": "string",
+                        "maxLength": 256
+                      }
+                    },
+                    "additionalProperties": false,
+                    "required": [
+                      "epk",
+                      "iv",
+                      "ct"
+                    ]
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "flowId",
+                  "proof"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "session",
+        "description": "Verify the prepared passkey assertion and approve this request once. Requires a session with approvals.decide, the anti-forgery header and a same-origin request. Denial releases no secrets and does not require WebAuthn; approval requires a fresh request-bound, user-verified WebAuthn assertion.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "This browser session does not have approvals.decide, the request origin/anti-forgery check failed, or the passkey assertion was not accepted (scope-required, origin-not-allowed, origin-required, anti-forgery, proof-invalid).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No request is available for that id (request-unavailable; unknown and unauthorized ids are indistinguishable).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request is no longer pending, another proof flow is active, or a conflicting decision won (request-not-pending, approval-in-progress, decision-already-made).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The bounded approval queue or rate limit was reached (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No enrolled passkey proof method is currently available (internal-error).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/approvals/{requestId}/deny": {
+      "post": {
+        "operationId": "denyApproval",
+        "summary": "Refuse this pending run request without a passkey; no secrets are released.",
+        "tags": [
+          "approvals"
+        ],
+        "parameters": [
+          {
+            "name": "requestId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 80
+            }
+          }
+        ],
+        "x-access": "session",
+        "description": "Refuse this pending run request without a passkey; no secrets are released. Requires a session with approvals.decide, the anti-forgery header and a same-origin request. Denial releases no secrets and does not require WebAuthn; approval requires a fresh request-bound, user-verified WebAuthn assertion.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "This browser session does not have approvals.decide, the request origin/anti-forgery check failed, or the passkey assertion was not accepted (scope-required, origin-not-allowed, origin-required, anti-forgery, proof-invalid).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No request is available for that id (request-unavailable; unknown and unauthorized ids are indistinguishable).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request is no longer pending, another proof flow is active, or a conflicting decision won (request-not-pending, approval-in-progress, decision-already-made).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The bounded approval queue or rate limit was reached (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No enrolled passkey proof method is currently available (internal-error).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
     "/api/v1/machines": {
       "get": {
         "operationId": "listMachines",
@@ -895,7 +1612,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -986,7 +1703,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -1064,7 +1781,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -1155,7 +1872,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -1340,7 +2057,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -1515,7 +2232,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -1605,7 +2322,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -1673,7 +2390,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -1741,7 +2458,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -1841,7 +2558,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -1963,7 +2680,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -2073,7 +2790,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -2215,7 +2932,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -2367,7 +3084,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -2542,7 +3259,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -2888,7 +3605,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -3044,7 +3761,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -3209,7 +3926,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -3372,7 +4089,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -3542,7 +4259,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -3698,7 +4415,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -3854,7 +4571,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -4029,7 +4746,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -4208,7 +4925,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -4387,7 +5104,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -4566,7 +5283,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -4751,7 +5468,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -4937,7 +5654,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -5116,7 +5833,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -5305,7 +6022,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -5494,7 +6211,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -5673,7 +6390,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -5852,7 +6569,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -6041,7 +6758,7 @@
             }
           },
           "401": {
-            "description": "No administrator session (session-required).",
+            "description": "No browser session (session-required).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -6150,7 +6867,7 @@
         "type": "apiKey",
         "in": "cookie",
         "name": "ws_session",
-        "description": "A read-only administrator session (HttpOnly, SameSite=Strict, path /api/v1). The value is bound to the service port. Alone it is not enough: the request must also carry the session\u0027s own secret (antiForgery)."
+        "description": "A read-only browser session (admin or approval scope; HttpOnly, SameSite=Strict, path /api/v1). The value is bound to the service port. Alone it is not enough: the request must also carry the session\u0027s own secret (antiForgery)."
       },
       "browserCookie": {
         "type": "apiKey",
@@ -6295,7 +7012,37 @@
               "string",
               "null"
             ],
-            "description": "The name of the admin passkey that tapped."
+            "description": "Deprecated display alias for admin-scope sessions; use identity and scope."
+          },
+          "identity": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The trusted enrolled passkey identity that signed in."
+          },
+          "scope": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "admin",
+              "approval",
+              null
+            ]
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "approvals.read",
+                "approvals.decide",
+                "admin.read",
+                "admin.decide"
+              ]
+            }
           },
           "started": {
             "type": [
@@ -6339,6 +7086,9 @@
         "required": [
           "authenticated",
           "admin",
+          "identity",
+          "scope",
+          "capabilities",
           "started",
           "idleExpires",
           "absoluteExpires",
@@ -6399,6 +7149,493 @@
         "additionalProperties": false,
         "required": [
           "proof"
+        ]
+      },
+      "ApprovalMachine": {
+        "type": "object",
+        "properties": {
+          "fingerprint": {
+            "type": "string"
+          },
+          "friendlyName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "hostName": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "fingerprint",
+          "friendlyName",
+          "hostName"
+        ]
+      },
+      "ApprovalQueueItem": {
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending"
+            ]
+          },
+          "submittedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "machine": {
+            "$ref": "#/components/schemas/ApprovalMachine"
+          },
+          "program": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "secretNames": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "requestId",
+          "status",
+          "submittedAt",
+          "expiresAt",
+          "machine",
+          "program",
+          "reason",
+          "secretNames"
+        ]
+      },
+      "ApprovalQueue": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApprovalQueueItem"
+            }
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "serverTime": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "items",
+          "nextCursor",
+          "serverTime"
+        ]
+      },
+      "ApprovalScript": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "length": {
+            "type": "integer"
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "guessed": {
+            "type": "boolean"
+          },
+          "binary": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "sha256",
+          "length",
+          "text",
+          "guessed",
+          "binary"
+        ]
+      },
+      "ApprovalDecrypt": {
+        "type": "object",
+        "properties": {
+          "variable": {
+            "type": "string"
+          },
+          "file": {
+            "type": "string"
+          },
+          "keySecret": {
+            "type": "string"
+          },
+          "cipherShort": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "variable",
+          "file",
+          "keySecret",
+          "cipherShort"
+        ]
+      },
+      "ApprovalNameValue": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "value"
+        ]
+      },
+      "ApprovalCodeWarning": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "why": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "why"
+        ]
+      },
+      "ApprovalReview": {
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string"
+          },
+          "fingerprintKey": {
+            "type": "string"
+          },
+          "requestDigest": {
+            "type": "string"
+          },
+          "submittedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "machine": {
+            "$ref": "#/components/schemas/ApprovalMachine"
+          },
+          "program": {
+            "type": "string"
+          },
+          "resolvedProgram": {
+            "type": "string"
+          },
+          "arguments": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "workingDirectory": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "secretNames": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "secretSources": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "inlineCode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "script": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ApprovalScript"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "programFile": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ApprovalScript"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "envFiles": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "envPairs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "shownEnvValues": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApprovalNameValue"
+            }
+          },
+          "codeChangeWarnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApprovalCodeWarning"
+            }
+          },
+          "decrypts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ApprovalDecrypt"
+            }
+          },
+          "inheritedEnvironmentLine": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "extraLines": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "canonicalText": {
+            "type": "string"
+          },
+          "requiresUnlock": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "requestId",
+          "fingerprintKey",
+          "requestDigest",
+          "submittedAt",
+          "expiresAt",
+          "machine",
+          "program",
+          "resolvedProgram",
+          "arguments",
+          "workingDirectory",
+          "reason",
+          "secretNames",
+          "secretSources",
+          "inlineCode",
+          "script",
+          "programFile",
+          "envFiles",
+          "envPairs",
+          "shownEnvValues",
+          "codeChangeWarnings",
+          "decrypts",
+          "inheritedEnvironmentLine",
+          "extraLines",
+          "canonicalText",
+          "requiresUnlock"
+        ]
+      },
+      "ApprovalDetail": {
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "approved",
+              "denied",
+              "expired",
+              "cancelled"
+            ]
+          },
+          "submittedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "decidedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "machine": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ApprovalMachine"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "program": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "secretNames": {
+            "oneOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "review": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ApprovalReview"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "decisionInProgress": {
+            "type": "boolean"
+          },
+          "actions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "requestId",
+          "status",
+          "submittedAt",
+          "expiresAt",
+          "decidedAt",
+          "machine",
+          "program",
+          "reason",
+          "secretNames",
+          "review",
+          "decisionInProgress",
+          "actions"
+        ]
+      },
+      "ApprovalChallenge": {
+        "type": "object",
+        "properties": {
+          "flowId": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "webauthn"
+            ]
+          },
+          "payload": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "prfKey": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "flowId",
+          "mode",
+          "payload",
+          "expiresAt",
+          "prfKey"
         ]
       },
       "CopyWarning": {

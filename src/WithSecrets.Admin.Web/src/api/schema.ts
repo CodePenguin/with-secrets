@@ -122,6 +122,100 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/approvals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List pending run requests for an Approvals-capable session. */
+        get: operations["listApprovals"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/approvals/{requestId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read the current decision state and bounded review projection for one run request. */
+        get: operations["getApproval"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/approvals/{requestId}/challenge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Prepare a short-lived passkey challenge for Approve once. The SPA remains on the request route.
+         * @description Prepare a short-lived passkey challenge for Approve once. The SPA remains on the request route. Requires a session with approvals.decide, the anti-forgery header and a same-origin request. Denial releases no secrets and does not require WebAuthn; approval requires a fresh request-bound, user-verified WebAuthn assertion.
+         */
+        post: operations["createApprovalChallenge"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/approvals/{requestId}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Verify the prepared passkey assertion and approve this request once.
+         * @description Verify the prepared passkey assertion and approve this request once. Requires a session with approvals.decide, the anti-forgery header and a same-origin request. Denial releases no secrets and does not require WebAuthn; approval requires a fresh request-bound, user-verified WebAuthn assertion.
+         */
+        post: operations["approveOnce"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/approvals/{requestId}/deny": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Refuse this pending run request without a passkey; no secrets are released.
+         * @description Refuse this pending run request without a passkey; no secrets are released. Requires a session with approvals.decide, the anti-forgery header and a same-origin request. Denial releases no secrets and does not require WebAuthn; approval requires a fresh request-bound, user-verified WebAuthn assertion.
+         */
+        post: operations["denyApproval"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/machines": {
         parameters: {
             query?: never;
@@ -786,8 +880,13 @@ export interface components {
         };
         Session: {
             authenticated: boolean;
-            /** @description The name of the admin passkey that tapped. */
+            /** @description Deprecated display alias for admin-scope sessions; use identity and scope. */
             admin: string | null;
+            /** @description The trusted enrolled passkey identity that signed in. */
+            identity: string | null;
+            /** @enum {string|null} */
+            scope: "admin" | "approval" | null;
+            capabilities: ("approvals.read" | "approvals.decide" | "admin.read" | "admin.decide")[];
             /** Format: date-time */
             started: string | null;
             /** Format: date-time */
@@ -812,6 +911,112 @@ export interface components {
         };
         InlineLoginStarted: {
             proof: components["schemas"]["ProofStart"];
+        };
+        ApprovalMachine: {
+            fingerprint: string;
+            friendlyName: string | null;
+            hostName: string;
+        };
+        ApprovalQueueItem: {
+            requestId: string;
+            /** @enum {string} */
+            status: "pending";
+            /** Format: date-time */
+            submittedAt: string;
+            /** Format: date-time */
+            expiresAt: string;
+            machine: components["schemas"]["ApprovalMachine"];
+            program: string;
+            reason: string;
+            secretNames: string[];
+        };
+        ApprovalQueue: {
+            items: components["schemas"]["ApprovalQueueItem"][];
+            nextCursor: string | null;
+            /** Format: date-time */
+            serverTime: string;
+        };
+        ApprovalScript: {
+            path: string | null;
+            sha256: string;
+            length: number;
+            text: string | null;
+            guessed: boolean;
+            binary: boolean;
+        };
+        ApprovalDecrypt: {
+            variable: string;
+            file: string;
+            keySecret: string;
+            cipherShort: string;
+        };
+        ApprovalNameValue: {
+            name: string;
+            value: string;
+        };
+        ApprovalCodeWarning: {
+            name: string;
+            why: string;
+        };
+        ApprovalReview: {
+            requestId: string;
+            fingerprintKey: string;
+            requestDigest: string;
+            /** Format: date-time */
+            submittedAt: string;
+            /** Format: date-time */
+            expiresAt: string;
+            machine: components["schemas"]["ApprovalMachine"];
+            program: string;
+            resolvedProgram: string;
+            arguments: string[];
+            workingDirectory: string;
+            reason: string;
+            secretNames: string[];
+            secretSources: {
+                [key: string]: string;
+            };
+            inlineCode: string | null;
+            script: components["schemas"]["ApprovalScript"] | null;
+            programFile: components["schemas"]["ApprovalScript"] | null;
+            envFiles: string[];
+            envPairs: string[];
+            shownEnvValues: components["schemas"]["ApprovalNameValue"][];
+            codeChangeWarnings: components["schemas"]["ApprovalCodeWarning"][];
+            decrypts: components["schemas"]["ApprovalDecrypt"][];
+            inheritedEnvironmentLine: string | null;
+            extraLines: string[];
+            canonicalText: string;
+            requiresUnlock: boolean;
+        };
+        ApprovalDetail: {
+            requestId: string;
+            /** @enum {string} */
+            status: "pending" | "approved" | "denied" | "expired" | "cancelled";
+            /** Format: date-time */
+            submittedAt: string;
+            /** Format: date-time */
+            expiresAt: string;
+            /** Format: date-time */
+            decidedAt: string | null;
+            machine: components["schemas"]["ApprovalMachine"] | null;
+            program: string | null;
+            reason: string | null;
+            secretNames: string[] | null;
+            review: components["schemas"]["ApprovalReview"] | null;
+            decisionInProgress: boolean;
+            actions: string[];
+        };
+        ApprovalChallenge: {
+            flowId: string;
+            /** @enum {string} */
+            mode: "webauthn";
+            payload: {
+                [key: string]: unknown;
+            };
+            /** Format: date-time */
+            expiresAt: string;
+            prfKey: string | null;
         };
         /** @description A warning (never a decision) that this machine's identity may have been copied: its connection was repeatedly superseded by a connection from a different address. */
         CopyWarning: {
@@ -1392,7 +1597,7 @@ export interface operations {
                     "application/json": components["schemas"]["Done"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -1740,6 +1945,523 @@ export interface operations {
             };
         };
     };
+    listApprovals: {
+        parameters: {
+            query?: {
+                /** @description The maximum number of pending requests to return (default 50). */
+                limit?: number;
+                /** @description An opaque cursor from the previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Success. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalQueue"];
+                };
+            };
+            /** @description The request is not valid (invalid-request, invalid-json). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No browser session (session-required). */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description This browser session does not have approvals.read (scope-required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The Host is not a loopback name (host-not-allowed). */
+            421: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request failed (internal-error). Nothing the response does not say was changed. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    getApproval: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                requestId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Success. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalDetail"];
+                };
+            };
+            /** @description The request is not valid (invalid-request, invalid-json). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No browser session (session-required). */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description This browser session does not have approvals.read (scope-required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No request is available for that id (request-unavailable; unknown and unauthorized ids are indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The Host is not a loopback name (host-not-allowed). */
+            421: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request failed (internal-error). Nothing the response does not say was changed. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    createApprovalChallenge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                requestId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Success. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalChallenge"];
+                };
+            };
+            /** @description The request is not valid (invalid-request, invalid-json). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No browser session (session-required). */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description This browser session does not have approvals.decide, the request origin/anti-forgery check failed, or the passkey assertion was not accepted (scope-required, origin-not-allowed, origin-required, anti-forgery, proof-invalid). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No request is available for that id (request-unavailable; unknown and unauthorized ids are indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request is no longer pending, another proof flow is active, or a conflicting decision won (request-not-pending, approval-in-progress, decision-already-made). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The Host is not a loopback name (host-not-allowed). */
+            421: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The authority is locked (authority-locked). */
+            423: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The bounded approval queue or rate limit was reached (too-many-requests). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request failed (internal-error). Nothing the response does not say was changed. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No enrolled passkey proof method is currently available (internal-error). */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    approveOnce: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                requestId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    flowId: string;
+                    proof: {
+                        id: string;
+                        authenticatorData: string;
+                        clientDataJSON: string;
+                        signature: string;
+                    };
+                    prf?: {
+                        epk: string;
+                        iv: string;
+                        ct: string;
+                    };
+                };
+            };
+        };
+        responses: {
+            /** @description Success. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalDetail"];
+                };
+            };
+            /** @description The request is not valid (invalid-request, invalid-json). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No browser session (session-required). */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description This browser session does not have approvals.decide, the request origin/anti-forgery check failed, or the passkey assertion was not accepted (scope-required, origin-not-allowed, origin-required, anti-forgery, proof-invalid). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No request is available for that id (request-unavailable; unknown and unauthorized ids are indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request is no longer pending, another proof flow is active, or a conflicting decision won (request-not-pending, approval-in-progress, decision-already-made). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is too large (payload-too-large). */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is not application/json (unsupported-media-type). */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The Host is not a loopback name (host-not-allowed). */
+            421: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The authority is locked (authority-locked). */
+            423: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The bounded approval queue or rate limit was reached (too-many-requests). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request failed (internal-error). Nothing the response does not say was changed. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No enrolled passkey proof method is currently available (internal-error). */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    denyApproval: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                requestId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Success. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalDetail"];
+                };
+            };
+            /** @description The request is not valid (invalid-request, invalid-json). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No browser session (session-required). */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description This browser session does not have approvals.decide, the request origin/anti-forgery check failed, or the passkey assertion was not accepted (scope-required, origin-not-allowed, origin-required, anti-forgery, proof-invalid). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No request is available for that id (request-unavailable; unknown and unauthorized ids are indistinguishable). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request is no longer pending, another proof flow is active, or a conflicting decision won (request-not-pending, approval-in-progress, decision-already-made). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The Host is not a loopback name (host-not-allowed). */
+            421: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The authority is locked (authority-locked). */
+            423: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The bounded approval queue or rate limit was reached (too-many-requests). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request failed (internal-error). Nothing the response does not say was changed. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No enrolled passkey proof method is currently available (internal-error). */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     listMachines: {
         parameters: {
             query?: never;
@@ -1758,7 +2480,7 @@ export interface operations {
                     "application/json": components["schemas"]["MachineList"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -1825,7 +2547,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -1890,7 +2612,7 @@ export interface operations {
                     "application/json": components["schemas"]["GrantList"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -1957,7 +2679,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -2050,7 +2772,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -2134,7 +2856,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -2202,7 +2924,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -2258,7 +2980,7 @@ export interface operations {
                     "application/json": components["schemas"]["Settings"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -2314,7 +3036,7 @@ export interface operations {
                     "application/json": components["schemas"]["InvitationList"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -2386,7 +3108,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -2487,7 +3209,7 @@ export interface operations {
                     "application/json": components["schemas"]["Passkeys"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -2568,7 +3290,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -2682,7 +3404,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -2805,7 +3527,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -2932,7 +3654,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -3195,7 +3917,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -3312,7 +4034,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -3434,7 +4156,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -3553,7 +4275,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -3674,7 +4396,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -3791,7 +4513,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -3908,7 +4630,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -4029,7 +4751,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -4157,7 +4879,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -4285,7 +5007,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -4413,7 +5135,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -4543,7 +5265,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -4673,7 +5395,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -4801,7 +5523,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -4933,7 +5655,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -5065,7 +5787,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -5193,7 +5915,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -5321,7 +6043,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
@@ -5458,7 +6180,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No administrator session (session-required). */
+            /** @description No browser session (session-required). */
             401: {
                 headers: {
                     [name: string]: unknown;
