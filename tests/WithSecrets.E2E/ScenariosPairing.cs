@@ -212,19 +212,27 @@ internal static class ScenariosPairing
 
     private static async Task<string> ReadQueuedStatus(IPage page, string requestId)
     {
-        string response = await page.EvaluateAsync<string>(@"async (id) => {
-            const token = sessionStorage.getItem('ws.session-secret');
-            const result = await fetch('/api/v1/approvals/' + encodeURIComponent(id), {
-                headers: { 'X-Admin-Token': token ?? '' },
-                credentials: 'same-origin',
-                cache: 'no-store'
-            });
-            return JSON.stringify({ status: result.status, body: await result.json() });
-        }", requestId);
-        using System.Text.Json.JsonDocument document = System.Text.Json.JsonDocument.Parse(response);
-        int status = document.RootElement.GetProperty("status").GetInt32();
-        if (status != 200)
-            throw new InvalidOperationException("Could not read the terminal approval result: HTTP " + status + " " + document.RootElement.GetProperty("body"));
-        return document.RootElement.GetProperty("body").GetProperty("status").GetString()!;
+        for (int attempt = 0; attempt < 40; attempt++)
+        {
+            string response = await page.EvaluateAsync<string>(@"async (id) => {
+                const token = sessionStorage.getItem('ws.session-secret');
+                const result = await fetch('/api/v1/approvals/' + encodeURIComponent(id), {
+                    headers: { 'X-Admin-Token': token ?? '' },
+                    credentials: 'same-origin',
+                    cache: 'no-store'
+                });
+                return JSON.stringify({ status: result.status, body: await result.json() });
+            }", requestId);
+            using System.Text.Json.JsonDocument document = System.Text.Json.JsonDocument.Parse(response);
+            int status = document.RootElement.GetProperty("status").GetInt32();
+            if (status != 200)
+                throw new InvalidOperationException("Could not read the terminal approval result: HTTP " + status + " " + document.RootElement.GetProperty("body"));
+            string approvalStatus = document.RootElement.GetProperty("body").GetProperty("status").GetString()!;
+            if (approvalStatus != ApprovalStatuses.Pending)
+                return approvalStatus;
+            await Task.Delay(100);
+        }
+
+        throw new TimeoutException("The authority did not commit the paired host's denial in the Approvals queue.");
     }
 }
