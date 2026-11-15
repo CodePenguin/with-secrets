@@ -440,7 +440,7 @@ internal static class RemoteLaunchTests
         string? value = Read(valueFile);
         int approvalEvents = raw.Events.Count(item => item.Kind == LaunchEvent.ApprovalKind);
 
-        check(approvalEvents == 1 && ApprovalLinkNotice.IsSafe(link), "page at the authority: the authority's page link reaches the client as the usual approval event, once (events " + approvalEvents + ", link length " + link.Length + ", raw events " + string.Join(" | ", raw.Events.Select(item => item.ToJson())) + ")");
+        check(approvalEvents == 1 && ApprovalLinkNotice.IsSafe(link), "page at the authority: the authority's page link reaches the client as the usual approval event, once (events " + approvalEvents + ", link length " + link.Length + ", raw events " + string.Join(" | ", raw.Events.Select(item => System.Text.Json.JsonSerializer.Serialize(item))) + ")");
         if (ApprovalLinkNotice.IsSafe(link))
         {
             Uri uri = new(link);
