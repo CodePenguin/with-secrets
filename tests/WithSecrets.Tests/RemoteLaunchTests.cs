@@ -426,17 +426,30 @@ internal static class RemoteLaunchTests
         {
             if (item.Kind == LaunchEvent.ApprovalKind)
             {
-                link = item.Link!;
-                Uri uri = new(item.Link!);
+                link = item.Link ?? "";
+                if (!Uri.TryCreate(link, UriKind.Absolute, out Uri? uri) || uri.Scheme is not ("http" or "https"))
+                {
+                    return;
+                }
+
                 string baseUrl = "http://127.0.0.1:" + uri.Port + uri.AbsolutePath;
                 page = WebUtility.HtmlDecode(TestState.Get(browser, baseUrl).Body);
                 (status, _) = TestState.Approve(browser, baseUrl, uri.GetLeftPart(UriPartial.Authority), uri.IdnHost, auth.Laptop);
             }
         });
         string? value = Read(valueFile);
+        int approvalEvents = raw.Events.Count(item => item.Kind == LaunchEvent.ApprovalKind);
 
-        check(raw.Events.Count(item => item.Kind == LaunchEvent.ApprovalKind) == 1 && link.Length > 0, "page at the authority: the authority's page link reaches the client as the usual approval event, once");
-        check(new Uri(link).Port != host.Rig.Service.Port && new Uri(link).Port != auth.Service.MachinePort, "page at the authority: the link is the authority's own page, not the host's API or the machine endpoint");
+        check(approvalEvents == 1 && ApprovalLinkNotice.IsSafe(link), "page at the authority: the authority's page link reaches the client as the usual approval event, once (events " + approvalEvents + ", link length " + link.Length + ", raw events " + string.Join(" | ", raw.Events.Select(item => item.ToJson())) + ")");
+        if (ApprovalLinkNotice.IsSafe(link))
+        {
+            Uri uri = new(link);
+            check(uri.Port != host.Rig.Service.Port && uri.Port != auth.Service.MachinePort, "page at the authority: the link is the authority's own page, not the host's API or the machine endpoint");
+        }
+        else
+        {
+            check(false, "page at the authority: the link is the authority's own page, not the host's API or the machine endpoint (no valid link was delivered)");
+        }
         check(page.Contains("service test", StringComparison.Ordinal) && page.Contains("TOKEN", StringComparison.Ordinal) && page.Contains("wsl-one", StringComparison.Ordinal) && !Leaks(page, Real) && !Leaks(page, Decoy), "page at the authority: the page shows the request (names) and which machine asks, never a value (page status " + status + ")");
         check(page.Contains(Path.GetFileName(program).TrimStart('.', '/'), StringComparison.Ordinal) && page.Contains("echo", StringComparison.Ordinal), "page at the authority: the script the host read is shown, so the person approves what will run");
         check(raw.Result is { Outcome: LaunchOutcome.Exited, ExitCode: 4 } && raw.Stdout.Contains("t=[REDACTED]", StringComparison.Ordinal), "page at the authority: the passkey tap there releases the values, the program runs on the host and its exit code passes through (" + raw.Result + " " + raw.Stderr.Trim() + ")");
