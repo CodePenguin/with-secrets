@@ -117,6 +117,9 @@ public sealed class HostServiceOptions
     /// </summary>
     public MachineListenerOptions? MachineEndpoint { get; init; }
 
+    /// <summary>For transport tests only: exercises the authority approver directly, independently of the admin queue API tests.</summary>
+    internal bool UseApprovalQueueForMachineLaunches { get; init; } = true;
+
     /// <summary>Called (with the port) when the machine listener starts after the service did: at the first approval that makes the authority signing key. Null: nothing is told.</summary>
     public Action<int>? MachineListenerStarted { get; init; }
 }
@@ -393,7 +396,7 @@ public sealed class HostService : IDisposable
                     return;
                 }
 
-                _launches = new AuthorityLaunchHandler(_options.Deployment.Authority, _options.Deployment.Keys, _options.Deployment.Store, _options.Store, MachineApprover, Lock, _options.Deployment.Clock, approvals: Approvals);
+                _launches = new AuthorityLaunchHandler(_options.Deployment.Authority, _options.Deployment.Keys, _options.Deployment.Store, _options.Store, MachineApprover, Lock, _options.Deployment.Clock, approvals: _options.UseApprovalQueueForMachineLaunches ? Approvals : null);
                 endpoint.Pairing ??= new PairingHandler(Pairing);
                 endpoint.Audit ??= Audit;
                 _machineListener = MachineListener.Start(_options.Deployment.Authority, _options.Deployment.Keys, _options.Deployment.Store, _options.Deployment.Tls, endpoint, _launches);
