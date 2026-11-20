@@ -63,7 +63,7 @@ internal static class ScenariosPairing
             MachineTls = hostDeployment.Tls,
         });
         string fp = KeyIdentity.Fingerprint(machineKey.PublicKey);
-        s.Check(paired.Ok && paired.MachineFingerprint == fp && store.Find(fp) is { Status: MachineStatus.Pending, HostName: "paired-host" } && store.Invitation(bundle!.InvitationId) is { Status: "consumed" }, "the second host pairs: it is Pending at the authority with its host name and the invitation is consumed");
+        s.Check(paired.Ok && paired.MachineFingerprint == fp && store.Find(fp) is { Status: MachineStatus.Pending, HostName: "paired-host" } && store.Invitation(bundle!.InvitationId) is { Status: "consumed" }, "the second host pairs: it is Pending at the authority with its host name and the invitation is consumed (" + (paired.Ok ? "paired" : paired.Message) + ")");
 
         // 3. The administrator sees it Pending with the fingerprint and host name and approves it (the existing operation, its own tap).
         ILocator row = c.Page.GetByRole(AriaRole.Region, new() { Name = "A machine paired and is waiting for you" }).GetByRole(AriaRole.Listitem).Filter(new() { HasText = KeyIdentity.Display(fp) });

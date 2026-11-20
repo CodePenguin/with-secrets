@@ -404,7 +404,7 @@ public static class PairingClient
         }
         catch (Exception error) when (error is HttpRequestException or IOException or AuthenticationException or OperationCanceledException or TimeoutException)
         {
-            return new BootstrapOutcome(null, "the authority could not be reached or did not complete a TLS 1.3 handshake", null, null, null);
+            return new BootstrapOutcome(null, "the authority could not be reached or did not complete a TLS 1.3 handshake (" + TransportFailure.Describe(error) + ")", null, null, null);
         }
     }
 
@@ -453,7 +453,7 @@ public static class PairingClient
             {
                 if (attempt >= options.Retries)
                 {
-                    return ("the authority could not be reached; the registration may or may not have been recorded (the administrator's machine list shows it)", null);
+                    return ("the authority could not be reached; the registration may or may not have been recorded (the administrator's machine list shows it) (" + TransportFailure.Describe(error) + ")", null);
                 }
 
                 await Task.Delay(TimeSpan.FromMilliseconds(200 * (attempt + 1)), options.Clock, cancel);

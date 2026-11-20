@@ -907,7 +907,8 @@ internal static class RemoteLaunchTests
             check(!ended.Started && auth.Store.Reads == 1 && !events.Contains("delivery-sent", StringComparison.Ordinal) && !Leaks(ended.Everything, Real), "revocation race: a machine disabled between the decryption and the send gets no values (final checkpoint), nothing runs, and no delivery is recorded as sent (" + events + ")");
         }
 
-        // L4: approved at the authority but the session ended first: the record says approved-not-delivered.
+        // L4: approved at the authority but the session ended: the record says approved-not-delivered, nothing is decrypted. The two orders in which the approval and the end of the session can meet, each made certain (no timing):
+        // (a) the session ends first: the page's answer comes only once the authority has seen the end (the approver waits for the cancellation and nothing else);
         PageWaiter late = new(approve: true, approveAfterCancel: true);
         using (Auth auth = Auth.Create(root, () => late))
         {
@@ -916,9 +917,37 @@ internal static class RemoteLaunchTests
             await HostServiceTests.WaitFor(() => late.Asked.IsSet);
             host.Remote.Disconnect();
             await running.WaitAsync(TimeSpan.FromSeconds(30));
-            late.Release.Set();
-            bool noted = await HostServiceTests.WaitFor(() => auth.Machine.Deployment.Store.Audit(500).Any(item => item.Event == "approved-not-delivered"), 15);
-            check(noted && auth.Store.Reads == 0 && !auth.Machine.Deployment.Store.Audit(500).Any(item => item.Event == "delivery-sent"), "audit: approval given but the session ended before delivery is recorded as approved-not-delivered, nothing was decrypted (noted " + noted + ", reads " + auth.Store.Reads + ", events " + string.Join(",", auth.Machine.Deployment.Store.Audit(500).Select(item => item.Event)) + ")");
+            bool noted = await HostServiceTests.WaitFor(() => auth.Machine.Deployment.Store.Audit(500).Any(item => item.Event == "approved-not-delivered"), 30);
+            string events = string.Join(",", auth.Machine.Deployment.Store.Audit(500).Select(item => item.Event));
+            check(noted && auth.Store.Reads == 0 && !events.Contains("delivery-", StringComparison.Ordinal), "audit: approval that comes after the session ended is recorded as approved-not-delivered, nothing was decrypted (noted " + noted + ", reads " + auth.Store.Reads + ", events " + events + ")");
+        }
+
+        // (b) the approval is committed first and the session ends before delivery: the end is placed exactly between the durable decision and the delivery check, and the authority must have seen it before it goes on.
+        PageWaiter first = new(approve: true);
+        using (Auth auth = Auth.Create(root, () => first))
+        {
+            using Host host = await Host.Create(root, auth, "wsl-approved-then-ended");
+            bool seen = false;
+            AuthorityLaunchHandler.AfterApprovalCommitted = token =>
+            {
+                host.Remote.Disconnect();
+                seen = SpinWait.SpinUntil(() => token.IsCancellationRequested, TimeSpan.FromSeconds(30));
+            };
+            try
+            {
+                Task<Ran> running = Run(host, "committed-then-ended");
+                await HostServiceTests.WaitFor(() => first.Asked.IsSet);
+                first.Release.Set();
+                Ran ran = await running.WaitAsync(TimeSpan.FromSeconds(60));
+                bool decided = auth.Machine.Deployment.Store.GetProcessed(ran.Request.RequestId)?.Response.Decision == AuthorityDecision.Approved;
+                bool noted = await HostServiceTests.WaitFor(() => auth.Machine.Deployment.Store.Audit(500).Any(item => item.Event == "approved-not-delivered"), 30);
+                string[] events = [.. auth.Machine.Deployment.Store.Audit(500).Select(item => item.Event)];
+                check(seen && noted && auth.Store.Reads == 0 && auth.Service.Launches!.Decryptions == 0 && decided && !events.Any(item => item.StartsWith("delivery-", StringComparison.Ordinal)), "audit: an approval committed just before the session ended is recorded as approved-not-delivered and the decision itself stays durable (approved) and nothing is decrypted or prepared (seen " + seen + ", noted " + noted + ", reads " + auth.Store.Reads + ", events " + string.Join(",", events) + ")");
+            }
+            finally
+            {
+                AuthorityLaunchHandler.AfterApprovalCommitted = null;
+            }
         }
 
         // The authority goes away entirely.

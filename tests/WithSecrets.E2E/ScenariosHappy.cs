@@ -126,7 +126,7 @@ internal static class ScenariosHappy
             MachineTls = hostDeployment.Tls,
         });
         string fp = KeyIdentity.Fingerprint(machineKey.PublicKey);
-        s.Check(paired.Ok && store.Find(fp) is { Status: MachineStatus.Pending }, "the second machine paired and waits for approval");
+        s.Check(paired.Ok && store.Find(fp) is { Status: MachineStatus.Pending }, "the second machine paired and waits for approval (" + (paired.Ok ? "paired" : paired.Message) + ")");
         ILocator row = c.Page.GetByRole(AriaRole.Region, new() { Name = "A machine paired and is waiting for you" }).GetByRole(AriaRole.Listitem).Filter(new() { HasText = KeyIdentity.Display(fp) });
         await row.WaitForAsync(new() { Timeout = 45000 });
         await c.DemoCaptionAsync("The new machine appears by itself. Check the fingerprint and host name, then Approve.");

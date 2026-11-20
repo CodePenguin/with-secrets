@@ -573,7 +573,8 @@ internal static class ApprovalSummaryTests
                 foreach (string part in path[real.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
                 {
                     real = Path.Combine(real, part);
-                    if (new DirectoryInfo(real).ResolveLinkTarget(true) is { } target)
+                    // A part that is gone (the private copy's folder is removed when the run ends) has nothing to resolve.
+                    if (Directory.Exists(real) && new DirectoryInfo(real).ResolveLinkTarget(true) is { } target)
                     {
                         real = target.FullName;
                     }
