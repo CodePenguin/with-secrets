@@ -177,6 +177,7 @@ internal static class ClientTlsProbeTests
             using (authorityKey)
             {
                 // The configured authority serves a TLS 1.3 + h2 endpoint that requires, and verifies, this machine's certificate.
+                Console.WriteLine("  client tls probe: case 1, the configured authority");
                 using (Probe probe = new(root, authorityLeaf, authorityKey, host.Deployment.IdentityCertificate))
                 {
                     check(await probe.WaitListeningAsync(), "client tls probe: the Node server is listening (" + string.Join(" | ", probe.Errors) + ")");
@@ -194,6 +195,7 @@ internal static class ClientTlsProbeTests
                 }
 
                 // Another authority's certificate: the client is configured for a different identity and must not connect.
+                Console.WriteLine("  client tls probe: case 2, a server that is not the configured authority");
                 (byte[] otherIdentity, _, ECDsa otherKey) = Server(now);
                 using (otherKey)
                 using (Probe impostor = new(root, authorityLeaf, authorityKey, host.Deployment.IdentityCertificate))
@@ -206,6 +208,7 @@ internal static class ClientTlsProbeTests
                 }
 
                 // A server that does not trust this machine's identity: the handshake fails and no request is served.
+                Console.WriteLine("  client tls probe: case 3, a server that does not trust this machine");
                 (byte[] strangerRoot, _, ECDsa strangerKey) = Server(now);
                 using (strangerKey)
                 using (Probe closed = new(root, authorityLeaf, authorityKey, strangerRoot))
