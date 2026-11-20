@@ -83,6 +83,7 @@ export function SignInPage() {
 
   const login = session.data?.login
 
+  // Until the status is known and the sign-in is being prepared, the button is disabled and not named "Sign in with passkey", so a click on that name always opens the passkey prompt.
   // The challenge is asked for as the page opens (asking is not a passkey prompt), so signing in is one click. After a failure the person starts again with the button.
   const autoStarted = useRef(false)
   // Not while the status is being read again: after a lock the cached status still says unlocked.
@@ -126,8 +127,8 @@ export function SignInPage() {
             {prompting ? <Button variant="quiet" onClick={cancelSignIn}>Cancel</Button> : null}
           </>
         ) : (
-          <Button variant="primary" onClick={() => start.mutate()} disabled={start.isPending}>
-            <Icon name="key" /> {start.isPending ? 'Preparing...' : login?.state === 'waiting' || login?.state === 'failed' || error ? 'Try again' : 'Sign in with passkey'}
+          <Button variant="primary" onClick={() => start.mutate()} disabled={start.isPending || status.isPending}>
+            <Icon name="key" /> {start.isPending || status.isPending ? 'Preparing...' : login?.state === 'waiting' || login?.state === 'failed' || error ? 'Try again' : 'Sign in with passkey'}
           </Button>
         )}
       </div>

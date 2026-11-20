@@ -304,6 +304,33 @@ describe('sign-in', () => {
     expect(fake.calls.filter((call) => call.path === '/api/v1/machines').every((call) => call.headers['X-Admin-Token'] === 'session-secret-1')).toBe(true)
   })
 
+  it('is not signed in by a click made before the sign-in is prepared: until then nothing is named like the sign-in button', async () => {
+    setBrowserSecret(null)
+    installFakeApi({
+      'GET /api/v1/status': { body: status() },
+      'GET /api/v1/session': { body: signedOut() },
+      'POST /api/v1/browser': { status: 201, body: { antiForgery: 'browser-secret-1' } },
+      'POST /api/v1/session/inline': { status: 201, body: { proof: { mode: 'webauthn', payload: JSON.stringify({ bind: 'AQ', rpId: 'localhost', timeout: 60000 }) } } },
+    })
+    // The service's status is slow (a loaded machine): the page is waiting for it.
+    const prepared = globalThis.fetch
+    let release: () => void = () => undefined
+    const slow = new Promise<void>((resolve) => { release = resolve })
+    vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/api/v1/status')) await slow
+
+      return prepared(input, init)
+    })
+    renderApp('/machines')
+
+    const waiting = await screen.findByRole('button', { name: /Preparing/ })
+    expect(waiting).toBeDisabled()
+    expect(screen.queryByRole('button', { name: 'Sign in with passkey' })).not.toBeInTheDocument()
+    release()
+    // Once prepared, the button with that name is the real one.
+    expect(await screen.findByRole('button', { name: 'Sign in with passkey' })).toBeEnabled()
+  })
+
   it('shows a service refusal when sign-in cannot be prepared', async () => {
     const user = userEvent.setup()
     installFakeApi({
