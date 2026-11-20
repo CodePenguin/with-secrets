@@ -7,10 +7,10 @@ using System.Text.Json;
 namespace WithSecrets.Tests;
 
 /// <summary>
-/// The client half of machine transport against a server this program did not write: <c>tls-probe/server.mjs</c> (Node: TLS 1.3 only, HTTP/2 only, a client certificate required and verified against one root). It exists for macOS,
-/// where .NET cannot serve TLS 1.3 so no machine listener can answer a handshake (see <see cref="PlatformTls" />), but it runs on every platform. The real <see cref="RemoteAuthority" /> connects with the machine certificates this
-/// program makes. What is shown: TLS 1.3 and h2 were negotiated, the client certificate (SAN = the machine's identity) was presented and verified, a request arrived; and that the client still refuses an authority that is not
-/// the one it was configured with, and a server that does not trust its certificate. Nothing is weakened for the test: the same validation code runs.
+/// The client half of machine transport against a server this program did not write: <c>tls-probe/server.mjs</c> (Node: TLS 1.3 only, HTTP/2 only, a client certificate required and verified against one root). The real <see cref="RemoteAuthority" />
+/// connects with the machine certificates this program makes. What is shown: TLS 1.3 and h2 were negotiated, the client certificate (SAN = the machine's identity) was presented and verified, a request arrived; and that the client still refuses
+/// an authority that is not the one it was configured with, and a server that does not trust its certificate. Nothing is weakened for the test: the same validation code runs. On macOS machine transport is not available (see <see cref="PlatformTls" />),
+/// so there the test shows the clear refusal instead: the client and the pairing client both refuse, say why, and make no connection.
 /// </summary>
 internal static class ClientTlsProbeTests
 {
@@ -158,8 +158,62 @@ internal static class ClientTlsProbeTests
         }
     }
 
+    /// <summary>Where machine transport is not available: the host's client and the pairing client refuse at once, with the reason, and nothing is connected.</summary>
+    private static async Task MacRefusal(Action<bool, string> check, string unsupported)
+    {
+        string root = Path.Combine(Path.GetTempPath(), "ws-tlsrefuse-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(root);
+        try
+        {
+            using TestMachine host = new(Path.Combine(root, "host"), trusted: false, hostName: "refuse-host");
+            (byte[] identity, _, ECDsa key) = Server(DateTimeOffset.UtcNow);
+            using (key)
+            {
+                RemoteAuthorityConfig config = new("https://127.0.0.1:8790", MachineCertificates.FingerprintOf(identity)!, identity);
+                PlatformNotSupportedException? thrown = null;
+                try
+                {
+                    using RemoteAuthority remote = new(config, host.Deployment.Tls, host.Deployment.HostConfig);
+                }
+                catch (PlatformNotSupportedException error)
+                {
+                    thrown = error;
+                }
+
+                check(thrown is not null && thrown.Message == unsupported && unsupported.Contains("macOS", StringComparison.Ordinal), "machine transport on macOS: the remote authority client refuses to be made and says why");
+                PairingBundle bundle = PairingBundle.Create("https://127.0.0.1:8790", PairingProtocol.NewToken(16), RandomNumberGenerator.GetBytes(16));
+                PairingResult paired = await PairingClient.RunAsync(new PairingClientOptions
+                {
+                    Bundle = bundle,
+                    MachineKey = host.MachineKey,
+                    IdentityCertificate = host.Deployment.IdentityCertificate,
+                    HostName = "refuse-host",
+                    HostConfig = host.Deployment.HostConfig,
+                    MachineTls = host.Deployment.Tls,
+                });
+                check(!paired.Ok && paired.Message == unsupported && host.Deployment.HostConfig.Load().Config?.Remote is null, "machine transport on macOS: pairing refuses before anything is sent and changes nothing, and says why");
+            }
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(root, true);
+            }
+            catch (IOException)
+            {
+                // A stray temp file is harmless.
+            }
+        }
+    }
     public static async Task Run(Action<bool, string> check)
     {
+        if (PlatformTls.MachineTransportUnsupported is { } unsupported)
+        {
+            await MacRefusal(check, unsupported);
+
+            return;
+        }
         if (!await NodeWorks())
         {
             Console.WriteLine("  SKIP client TLS 1.3 against a Node server: node is not available here, not run");

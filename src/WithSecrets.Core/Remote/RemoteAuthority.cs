@@ -59,7 +59,11 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, ILaunchAuthority, 
 
     public RemoteAuthority(RemoteAuthorityConfig config, TemporaryCertificate tls, HostConfigFile hostConfig, TimeProvider? clock = null)
     {
-        PlatformTls.EnableClientTls13();
+        if (PlatformTls.MachineTransportUnsupported is { } unsupported)
+        {
+            throw new PlatformNotSupportedException(unsupported);
+        }
+
         if (RemoteTarget.Problem(config) is { } problem)
         {
             throw new ArgumentException(problem);

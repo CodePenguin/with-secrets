@@ -246,7 +246,11 @@ public static class PairingClient
 
     public static async Task<PairingResult> RunAsync(PairingClientOptions options, CancellationToken cancel = default)
     {
-        PlatformTls.EnableClientTls13();
+        if (PlatformTls.MachineTransportUnsupported is { } unsupported)
+        {
+            return new PairingResult(false, unsupported, KeyIdentity.Fingerprint(options.MachineKey.PublicKey), options.HostName, "");
+        }
+
         string machineFingerprint = KeyIdentity.Fingerprint(options.MachineKey.PublicKey);
         PairingResult Fail(string message, string authority = "") => new(false, message, machineFingerprint, options.HostName, authority);
         if (WireText.HostNameProblem(options.HostName) is { } hostProblem)

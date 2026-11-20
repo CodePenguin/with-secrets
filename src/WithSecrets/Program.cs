@@ -228,7 +228,7 @@ internal static class Program
         MachineListenerOptions? machineEndpoint = null;
         if (command is CliCommand.Service { MachinePort: { } machinePort } machineCommand)
         {
-            if (PlatformTls.ListenerUnsupported is { } unsupported)
+            if (PlatformTls.MachineTransportUnsupported is { } unsupported)
             {
                 TerminalPrompt.Final("with-secrets: " + unsupported);
 
@@ -257,6 +257,13 @@ internal static class Program
             // host.json may select a remote authority (public data only: its endpoint address and its identity certificate).
             if (deployment.HostConfig.Load().Config?.Remote is { } remoteConfig)
             {
+                if (PlatformTls.MachineTransportUnsupported is { } noTransport)
+                {
+                    TerminalPrompt.Final("with-secrets: this machine is set to use a remote authority, but " + noTransport);
+
+                    return RunCommand.Usage;
+                }
+
                 deployment.UseRemote(new RemoteAuthority(remoteConfig, deployment.Tls, deployment.HostConfig));
                 TerminalPrompt.Line("with-secrets service: remote authority mode: the authority at " + ApprovalSummary.Clean(remoteConfig.Endpoint) + " (TLS 1.3 mutual authentication; its identity must be " + KeyIdentity.Display(remoteConfig.AuthorityIdentityFingerprint) + ").");
 
