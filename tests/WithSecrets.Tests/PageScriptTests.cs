@@ -45,12 +45,10 @@ internal static class PageScriptTests
 
     private static void Pages(Action<bool, string> check)
     {
-        string approval = ApprovalPage.Build(new ApprovalPrompt("h", "t"), new ProofStart("webauthn", "{}"), "n", [1], TimeSpan.Zero, new ReuseOffer(480, 10)).Body;
+        string approval = ApprovalPage.Build(new ApprovalPrompt("h", "t"), new ProofStart("webauthn", "{}"), "n", [1], TimeSpan.Zero).Body;
         string enroll = PasskeyRegistration.Build("laptop", "localhost", "{}", PasskeyRegistration.Script, ApprovalPage.Style, "Admin key: x").Body;
-        string firstRun = ConfigPageHtml.Build(true, ToolSettings.Defaults, "{}", AdminKey.NotSetUp).Body;
-        string gated = ConfigPageHtml.Build(false, ToolSettings.Defaults, "{}", "Admin key: x").Body;
-        string set = SetPage.Build("t", [("A_NAME", false)], new ProofStart("webauthn", "{}"), "n", [1], "k").Body;
-        foreach ((string name, string page, int prompts) in new[] { ("approval", approval, 1), ("enroll", enroll, 2), ("config", firstRun, 3), ("set", set, 1) })
+        string firstRun = ConfigPageHtml.Build("{}", AdminKey.NotSetUp).Body;
+        foreach ((string name, string page, int prompts) in new[] { ("approval", approval, 1), ("enroll", enroll, 2), ("setup", firstRun, 2) })
         {
             string script = Script(page);
             int count = Regex.Count(script, @"credentials\.(get|create)\s*\(");
@@ -59,29 +57,29 @@ internal static class PageScriptTests
         }
 
         // No sign-in names credentials: the sheet then lists every passkey for the host, password managers' too (iOS looks only in its own store when ids are given).
-        foreach ((string name, string page) in new[] { ("approval", approval), ("enroll", enroll), ("config (first run)", firstRun), ("config", gated), ("set", set) })
+        foreach ((string name, string page) in new[] { ("approval", approval), ("enroll", enroll), ("setup", firstRun) })
         {
             check(!Script(page).Contains("allowCredentials", StringComparison.Ordinal) && !page.Contains("allowCredentials", StringComparison.Ordinal), "no allowCredentials: the " + name + " page does not name credentials");
         }
 
         // Diagnostics: when a prompt is rejected, the status line carries the browser's error name and (cut) message, and
         // every "No passkey was ..." line is built with it; the script never reads that text from a PRF output.
-        foreach ((string name, string page) in new[] { ("approval", approval), ("enroll", enroll), ("config", firstRun), ("set", set) })
+        foreach ((string name, string page) in new[] { ("approval", approval), ("enroll", enroll), ("config", firstRun) })
         {
             string script = Script(page);
             MatchCollection lines = Regex.Matches(script, @"show\(""No passkey was [^\r\n]*");
             check(lines.Count > 0 && lines.All(m => m.Value.Contains("why(error)", StringComparison.Ordinal)), "diagnostics: every rejected-prompt line on the " + name + " page shows the error (" + lines.Count + " lines)");
             check(script.Contains("function why(error)", StringComparison.Ordinal) && script.Contains("text = error.name;", StringComparison.Ordinal) && script.Contains("error.message.slice(0, 120)", StringComparison.Ordinal) && Regex.Count(script, @"\}, function \(error\) \{") >= lines.Count, "diagnostics: the " + name + " page has the error name and a message cut to 120 characters, and each rejection handler takes the error");
         }
-        check(Script(approval).Contains("The proof data is not valid (\" + (error && typeof error.name", StringComparison.Ordinal) && Script(set).Contains("The proof data is not valid (\" + (error && typeof error.name", StringComparison.Ordinal), "diagnostics: a failed options build says so with the error name (approval and set pages)");
+        check(Script(approval).Contains("The proof data is not valid (\" + (error && typeof error.name", StringComparison.Ordinal), "diagnostics: a failed options build says so with the error name (approval page)");
 
         // PRF: the pages that create a passkey ask for the PRF output at create; the approval page asks for it at get, for the
         // chosen credential's salt; every page seals it to the page's server key before sending it, and none sends it as it is.
-        string approvalPrf = ApprovalPage.Build(new ApprovalPrompt("h", "t"), new ProofStart("webauthn", "{}"), "n", [1], TimeSpan.Zero, new ReuseOffer(480, 10), null, "k").Body;
+        string approvalPrf = ApprovalPage.Build(new ApprovalPrompt("h", "t"), new ProofStart("webauthn", "{}"), "n", [1], TimeSpan.Zero, null, "k").Body;
         string approvalPrfScript = Script(approvalPrf);
         check(TapRule.Violations(approvalPrfScript).Count == 0 && Regex.Count(approvalPrfScript, @"credentials\.(get|create)\s*\(") == 1, "prf: the approval page that releases the key still has one prompt, started in the tap");
         check(approvalPrfScript.Contains("extensions = { prf: { eval: { first: fromBase64Url(payload.salt) } } }", StringComparison.Ordinal) || approvalPrfScript.Contains("prf: { eval: {", StringComparison.Ordinal), "prf: the approval script asks the passkey for its PRF output with one eval salt");
-        foreach ((string name, string page) in new[] { ("approval", approval), ("approval+prf", approvalPrf), ("enroll", enroll), ("config", firstRun), ("set", set) })
+        foreach ((string name, string page) in new[] { ("approval", approval), ("approval+prf", approvalPrf), ("enroll", enroll), ("config", firstRun) })
         {
             check(!page.Contains("evalByCredential", StringComparison.Ordinal), "prf: no script on the " + name + " page uses evalByCredential (iOS refuses it before any prompt)");
         }
@@ -100,7 +98,7 @@ internal static class PageScriptTests
         // A prompt that closes without settling must not strand the page: while it is open the tapped button reads "Cancel" and
         // stays on; tapping it abandons the attempt (a counter every continuation checks) and starts no prompt; once the proof
         // is posted the button is off again.
-        foreach ((string name, string page, int prompts) in new[] { ("approval", approval, 1), ("enroll", enroll, 2), ("config", firstRun, 3), ("set", set, 1) })
+        foreach ((string name, string page, int prompts) in new[] { ("approval", approval, 1), ("enroll", enroll, 2), ("setup", firstRun, 2) })
         {
             string script = Script(page);
             int cancelAt = script.IndexOf("function cancelAttempt()", StringComparison.Ordinal);
@@ -111,12 +109,11 @@ internal static class PageScriptTests
             check(Regex.IsMatch(script, @"endWait\(\);\s+\w+\.disabled = true;\s+show\(""(Checking|Saving)") || Regex.IsMatch(script, @"endWait\(\);\s+controls\(false\);\s+show\(""Checking"), "cancel: the " + name + " page turns the button off again when the proof is posted");
         }
 
-        const string Step2 ="<button id=\"confirm\" type=\"button\" hidden disabled>Step 2 of 2: confirm with your passkey</button>";
+        const string Step2 ="<button id=\"confirm\" type=\"button\" hidden disabled>Confirm with your passkey</button>";
         check(enroll.Contains(Step2, StringComparison.Ordinal), "step 2: the enroll page has the hidden second-step button");
-        check(firstRun.Contains(Step2, StringComparison.Ordinal) && firstRun.Contains(">Step 1 of 2: save and create passkey</button>", StringComparison.Ordinal), "step 2: the first-run page has both step buttons");
-        check(!gated.Contains("id=\"confirm\"", StringComparison.Ordinal), "step 2: the settings page with an admin key has one step");
-        check(Script(enroll).Contains("Step 2 of 2: confirm with your new passkey", StringComparison.Ordinal) && Script(enroll).Contains("Step 2 of 2: confirm with your admin passkey", StringComparison.Ordinal)
-            && Script(firstRun).Contains("Step 2 of 2: confirm with your new passkey", StringComparison.Ordinal), "step 2: the scripts label the second button with the key to use");
+        check(firstRun.Contains(Step2, StringComparison.Ordinal) && firstRun.Contains(">Create passkey</button>", StringComparison.Ordinal), "step 2: the first-run page has both step buttons");
+        check(Script(enroll).Contains("Confirm with your new passkey", StringComparison.Ordinal) && Script(enroll).Contains("Confirm with your admin passkey", StringComparison.Ordinal)
+            && Script(firstRun).Contains("Confirm with your new passkey", StringComparison.Ordinal), "step 2: the scripts label the second button with the key to use");
         foreach ((string name, string page) in new[] { ("enroll", enroll), ("config", firstRun) })
         {
             check(!Regex.IsMatch(page, "\\son[a-z]+=", RegexOptions.IgnoreCase), "step 2: no inline event attributes on the " + name + " page");
@@ -127,17 +124,17 @@ internal static class PageScriptTests
         // edited while it is open (and on again if the prompt is cancelled).
         string config = Script(firstRun);
         int handler = config.IndexOf("save.addEventListener(\"click\"", StringComparison.Ordinal);
-        string tap = handler < 0 ? "" : config[handler..config.IndexOf("function changed()", handler, StringComparison.Ordinal)];
+        string tap = handler < 0 ? "" : config[handler..config.IndexOf("cancel.focus();", handler, StringComparison.Ordinal)];
         int invalid = tap.IndexOf("The page data is not valid.", StringComparison.Ordinal);
-        int seed = tap.IndexOf("var seed = register ? start.options.challenge : start.bind;", StringComparison.Ordinal);
+        int seed = tap.IndexOf("var seed = start.options.challenge;", StringComparison.Ordinal);
         int again = tap.IndexOf("Tap the button again.", StringComparison.Ordinal);
         int off = tap.IndexOf("inputs(false);", StringComparison.Ordinal);
         int prompt = tap.IndexOf("navigator.credentials.create", StringComparison.Ordinal);
         check(seed > 0 && invalid > seed && again > invalid && tap.Contains("typeof seed !== \"string\"", StringComparison.Ordinal), "settings save: the tap checks the bind or challenge and says the page data is not valid before asking for another tap");
-        check(off > again && prompt > off && tap.IndexOf("inputs(true);", prompt, StringComparison.Ordinal) > prompt, "settings save: the fields are turned off in the tap before the prompt, and on again when it is cancelled");
+        check(off > again && prompt > off && tap.IndexOf("inputs(true);", prompt, StringComparison.Ordinal) > prompt, "setup: the name field is turned off in the tap before the prompt, and on again when it is cancelled");
         int named = tap.IndexOf("chosenName()", StringComparison.Ordinal);
         check(named > 0 && named < prompt && tap.Contains("body.name = named.name;", StringComparison.Ordinal), "settings save: the first run reads and checks the passkey name in the tap, before the prompt, and sends it");
-        check(firstRun.Contains("<label for=\"f-key-name\">Name for this passkey</label>", StringComparison.Ordinal) && !gated.Contains("id=\"f-key-name\"", StringComparison.Ordinal), "settings page: only the first run has the name field");
+        check(firstRun.Contains("<label for=\"f-key-name\">Passkey name</label>", StringComparison.Ordinal), "setup page: has the name field");
         string enrollScript = Script(enroll);
         int create = enrollScript.IndexOf("create.addEventListener(\"click\"", StringComparison.Ordinal);
         string createTap = create < 0 ? "" : enrollScript[create..];

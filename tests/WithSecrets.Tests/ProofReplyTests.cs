@@ -75,7 +75,7 @@ internal static class ProofReplyTests
     private static async Task<(string Base, Task<ApprovalDecision> Decision)> Open(FakeProofMethod fake)
     {
         TaskCompletionSource<string> link = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        WebApprover approver = new(fake, new ApprovalSettings("passkey", null, 0, TimeSpan.FromSeconds(30)), line => link.TrySetResult(line), TimeSpan.Zero);
+        WebApprover approver = new(fake, new ApprovalSettings(null, 0, TimeSpan.FromSeconds(30)), line => link.TrySetResult(line), TimeSpan.Zero);
         Task<ApprovalDecision> decision = Task.Run(() => approver.Ask(new ApprovalPrompt("heading", "text")));
         Task first = await Task.WhenAny(link.Task, decision, Task.Delay(TimeSpan.FromSeconds(20)));
         if (first != link.Task)
@@ -216,9 +216,8 @@ internal static class ProofReplyTests
         (string Name, string Script)[] pages =
         [
             ("approval", approval),
-            ("settings", Source("SettingsPage.cs")),
+            ("setup", Source("FirstRunPage.cs")),
             ("enroll", Source("PasskeyRegistration.cs")),
-            ("set", Source("SecretEntry.cs")),
         ];
         foreach ((string name, string script) in pages)
         {

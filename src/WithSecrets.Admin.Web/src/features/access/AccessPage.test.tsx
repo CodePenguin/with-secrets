@@ -1,0 +1,293 @@
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { approvalDetail, approvalItem, problem, signedIn, violations } from '../../test/fakeApi'
+import { renderApp } from '../../test/render'
+
+const challengePath = 'POST /api/v1/approvals/req-0001/challenge'
+const approvePath = 'POST /api/v1/approvals/req-0001/approve'
+const denyPath = 'POST /api/v1/approvals/req-0001/deny'
+const detailPath = 'GET /api/v1/approvals/req-0001'
+
+/** Any valid uncompressed P-256 point stands in for the service's key for one request. */
+async function serverKey(): Promise<string> {
+  const pair = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits'])
+  const raw = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey))
+
+  return btoa(String.fromCharCode(...raw)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+async function challenge(prf: boolean) {
+  return {
+    flowId: 'flow-0001',
+    mode: 'webauthn' as const,
+    payload: { bind: 'AQIDBA', rpId: 'localhost', timeout: 60000, ...(prf ? { salt: 'BQYHCA' } : {}) },
+    expiresAt: new Date(Date.now() + 120_000).toISOString(),
+    prfKey: prf ? await serverKey() : null,
+  }
+}
+
+let credentials: { get: ReturnType<typeof vi.fn> }
+beforeEach(() => {
+  credentials = {
+    get: vi.fn(async () => ({
+      rawId: new Uint8Array([1]).buffer,
+      response: { authenticatorData: new Uint8Array([2]).buffer, clientDataJSON: new Uint8Array([3]).buffer, signature: new Uint8Array([4]).buffer },
+      getClientExtensionResults: () => ({ prf: { results: { first: new Uint8Array(32).fill(7).buffer } } }),
+    })),
+  }
+  Object.defineProperty(navigator, 'credentials', { configurable: true, value: credentials })
+})
+afterEach(() => {
+  vi.useRealTimers()
+})
+
+async function enabledApprove() {
+  const approve = await screen.findByRole('button', { name: 'Approve' })
+  await waitFor(() => expect(approve).toBeEnabled(), { timeout: 4000 })
+
+  return approve
+}
+
+describe('approvals', () => {
+  it('lists the run requests that wait, with a way to review each', async () => {
+    signedIn({ 'GET /api/v1/approvals': { body: { items: [approvalItem()], nextCursor: null, serverTime: '2026-11-09T10:00:00Z' } } })
+    renderApp('/access')
+
+    const list = await screen.findByRole('list', { name: 'Run requests' })
+    expect(within(list).getByRole('heading', { name: 'build box' })).toBeInTheDocument()
+    expect(within(list).getByText('DEPLOY_TOKEN')).toBeInTheDocument()
+    expect(within(list).getByRole('link', { name: /review/i })).toHaveAttribute('href', expect.stringContaining('/access/req-0001'))
+    expect(await violations(document.body)).toEqual([])
+  })
+
+  it('says so when nothing waits, and offers Access in the navigation', async () => {
+    signedIn()
+    renderApp('/access')
+
+    expect(await screen.findByText('No run request is waiting.')).toBeInTheDocument()
+    expect(within(screen.getByRole('navigation', { name: 'Main' })).getByRole('link', { name: 'Access' })).toBeInTheDocument()
+  })
+
+  it('shows the Overview a waiting request', async () => {
+    signedIn({ 'GET /api/v1/approvals': { body: { items: [approvalItem()], nextCursor: null, serverTime: '2026-11-09T10:00:00Z' } } })
+    renderApp('/')
+
+    expect(await screen.findByRole('link', { name: '1 run request is waiting' })).toBeInTheDocument()
+  })
+
+  it('shows what would run and why, with the code that runs, before any decision', async () => {
+    signedIn({ [detailPath]: { body: approvalDetail() }, [challengePath]: { status: 201, body: await challenge(false) } })
+    renderApp('/access/req-0001')
+
+    expect(await screen.findByRole('dialog', { name: 'Run request from build box' })).toBeInTheDocument()
+    expect(screen.getAllByText(/DEPLOY_TOKEN/).length).toBeGreaterThan(0)
+    expect(screen.getByText('ship the release')).toBeInTheDocument()
+    expect(screen.getByText('echo deploying')).toBeInTheDocument()
+    expect(screen.getByText('More details')).toBeInTheDocument()
+    expect(await violations(document.body)).toEqual([])
+  })
+
+  it('keeps a code-changes warning above the decision', async () => {
+    signedIn({
+      [detailPath]: { body: approvalDetail({ review: { ...approvalDetail().review!, codeChangeWarnings: [{ name: 'NODE_OPTIONS', why: 'loads a file before the program starts', value: '--require ./hook.js' }] } }) },
+      [challengePath]: { status: 201, body: await challenge(false) },
+    })
+    renderApp('/access/req-0001')
+
+    const warning = await screen.findByText('This changes how the program loads code or where it sends data')
+    const approve = screen.getByRole('button', { name: 'Approve' })
+    expect(warning.compareDocumentPosition(approve) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.getByText('NODE_OPTIONS=--require ./hook.js')).toBeInTheDocument()
+  })
+
+  it('shows the ordinary .env values the approval covers', async () => {
+    signedIn({
+      [detailPath]: { body: approvalDetail({ review: { ...approvalDetail().review!, shownEnvValues: [{ name: 'LOG_LEVEL', value: 'quiet' }] } }) },
+      [challengePath]: { status: 201, body: await challenge(false) },
+    })
+    renderApp('/access/req-0001')
+
+    expect(await screen.findByText('LOG_LEVEL=quiet')).toBeInTheDocument()
+  })
+
+  it('offers the times for a pre-approval and signs the chosen one', async () => {
+    const fake = signedIn({
+      [detailPath]: { body: approvalDetail({ review: { ...approvalDetail().review!, heading: 'Create a GRANT for this exact command.', times: [10, 60, 240], allowOnce: false } }) },
+      [challengePath]: { status: 201, body: await challenge(false) },
+      [approvePath]: { body: approvalDetail({ status: 'approved', review: null }) },
+    })
+    const user = userEvent.setup()
+    renderApp('/access/req-0001')
+
+    expect(await screen.findByText('Create a GRANT for this exact command.')).toBeInTheDocument()
+    const more = await screen.findByRole('button', { name: 'Approve for longer' })
+    await waitFor(() => expect(more).toBeEnabled(), { timeout: 4000 })
+    expect(screen.getByRole('button', { name: 'Approve for 10 minutes' })).toBeInTheDocument()
+    await user.click(more)
+    await user.click(screen.getByRole('menuitem', { name: 'Approve for 1 hour' }))
+
+    await waitFor(() => expect(fake.count(approvePath)).toBe(1))
+    const options = credentials.get.mock.calls[0]![0].publicKey
+    const expected = new Uint8Array(await crypto.subtle.digest('SHA-256', new Uint8Array([1, 2, 3, 4, ...new TextEncoder().encode('reuse=60')])))
+    expect(new Uint8Array(options.challenge)).toEqual(expected)
+    expect((fake.calls.find((call) => call.path === '/api/v1/approvals/req-0001/approve')!.body as { minutes: number }).minutes).toBe(60)
+  })
+
+  it('approves once by default, with the longer times behind the arrow', async () => {
+    const fake = signedIn({
+      [detailPath]: { body: approvalDetail({ review: { ...approvalDetail().review!, times: [10, 60, 1000000] } }) },
+      [challengePath]: { status: 201, body: await challenge(false) },
+      [approvePath]: { body: approvalDetail({ status: 'approved', review: null }) },
+    })
+    const user = userEvent.setup()
+    renderApp('/access/req-0001')
+
+    const more = await screen.findByRole('button', { name: 'Approve for longer' })
+    await waitFor(() => expect(more).toBeEnabled(), { timeout: 4000 })
+    await user.click(more)
+    expect(screen.getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Approve for 10 minutes', 'Approve for 1 hour', 'Approve always'])
+    await user.click(screen.getByRole('menuitem', { name: 'Approve for 10 minutes' }))
+
+    await waitFor(() => expect(fake.count(approvePath)).toBe(1))
+    expect((fake.calls.find((call) => call.path === '/api/v1/approvals/req-0001/approve')!.body as { minutes: number }).minutes).toBe(10)
+    expect(await screen.findByText('Approved. build box can run it now and again for 10 minutes.')).toBeInTheDocument()
+  })
+
+  it('shows the extra lines the passkey signs', async () => {
+    signedIn({
+      [detailPath]: { body: approvalDetail({ review: { ...approvalDetail().review!, extraLines: ['This keeps the key for the grant.'] } }) },
+      [challengePath]: { status: 201, body: await challenge(false) },
+    })
+    renderApp('/access/req-0001')
+
+    expect(await screen.findByText('This keeps the key for the grant.')).toBeInTheDocument()
+  })
+
+  it('asks for the challenge when the request opens, and starts no passkey prompt until Approve is pressed', async () => {
+    const fake = signedIn({ [detailPath]: { body: approvalDetail() }, [challengePath]: { status: 201, body: await challenge(false) } })
+    renderApp('/access/req-0001')
+
+    await screen.findByRole('dialog', { name: 'Run request from build box' })
+    await waitFor(() => expect(fake.count(challengePath)).toBe(1))
+    expect(credentials.get).not.toHaveBeenCalled()
+    expect(fake.count(approvePath)).toBe(0)
+  })
+
+  it('keeps Approve disabled for a moment, with Deny first and focused', async () => {
+    signedIn({ [detailPath]: { body: approvalDetail() }, [challengePath]: { status: 201, body: await challenge(false) } })
+    renderApp('/access/req-0001')
+
+    const deny = await screen.findByRole('button', { name: 'Deny' })
+    expect(deny).toHaveFocus()
+    expect(screen.getByRole('button', { name: 'Approve' })).toBeDisabled()
+    await enabledApprove()
+  })
+
+  it('approves once with one passkey tap, signing the request challenge and sending its proof', async () => {
+    const fake = signedIn({
+      [detailPath]: { body: approvalDetail() },
+      [challengePath]: { status: 201, body: await challenge(false) },
+      [approvePath]: { body: approvalDetail({ status: 'approved', review: null }) },
+    })
+    renderApp('/access/req-0001')
+
+    const approve = await enabledApprove()
+    fireEvent.click(approve)
+    fireEvent.click(approve)
+
+    await waitFor(() => expect(fake.count(approvePath)).toBe(1))
+    expect(credentials.get).toHaveBeenCalledTimes(1)
+    const options = credentials.get.mock.calls[0]![0].publicKey
+    expect(options.rpId).toBe('localhost')
+    expect(options.userVerification).toBe('required')
+    expect(options.extensions).toBeUndefined()
+    // The passkey signs SHA-256(bind || "reuse=0").
+    const expected = new Uint8Array(await crypto.subtle.digest('SHA-256', new Uint8Array([1, 2, 3, 4, ...new TextEncoder().encode('reuse=0')])))
+    expect(new Uint8Array(options.challenge)).toEqual(expected)
+    const body = fake.calls.find((call) => call.path === '/api/v1/approvals/req-0001/approve')!.body as { flowId: string; proof: Record<string, string>; prf?: unknown }
+    expect(body.flowId).toBe('flow-0001')
+    expect(body.proof).toEqual({ id: 'AQ', authenticatorData: 'Ag', clientDataJSON: 'Aw', signature: 'BA' })
+    expect(body.prf).toBeUndefined()
+    // Back on the list, with what happened said at the top: no extra click to get there.
+    expect(await screen.findByRole('heading', { level: 1, name: 'Access' })).toBeInTheDocument()
+    expect(await screen.findByText(/^Approved\. .* can run it now\.$/)).toBeInTheDocument()
+  })
+
+  it('asks the passkey for its PRF output and sends it sealed, never plain', async () => {
+    const fake = signedIn({
+      [detailPath]: { body: approvalDetail() },
+      [challengePath]: { status: 201, body: await challenge(true) },
+      [approvePath]: { body: approvalDetail({ status: 'approved', review: null }) },
+    })
+    renderApp('/access/req-0001')
+
+    fireEvent.click(await enabledApprove())
+
+    await waitFor(() => expect(fake.count(approvePath)).toBe(1))
+    const options = credentials.get.mock.calls[0]![0].publicKey
+    expect(options.extensions.prf.eval.first).toBeInstanceOf(Uint8Array)
+    const body = fake.calls.find((call) => call.path === '/api/v1/approvals/req-0001/approve')!.body as { prf: { epk: string; iv: string; ct: string } }
+    expect(Object.keys(body.prf).sort()).toEqual(['ct', 'epk', 'iv'])
+    expect(JSON.stringify(body)).not.toContain('BwcH')
+    expect(body.prf.ct.length).toBeGreaterThan(40)
+  })
+
+  it('sends nothing when the passkey gives no PRF output for a request that needs it', async () => {
+    credentials.get.mockResolvedValueOnce({
+      rawId: new Uint8Array([1]).buffer,
+      response: { authenticatorData: new Uint8Array([2]).buffer, clientDataJSON: new Uint8Array([3]).buffer, signature: new Uint8Array([4]).buffer },
+      getClientExtensionResults: () => ({}),
+    })
+    const fake = signedIn({ [detailPath]: { body: approvalDetail() }, [challengePath]: { status: 201, body: await challenge(true) } })
+    renderApp('/access/req-0001')
+
+    fireEvent.click(await enabledApprove())
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('cannot approve this request')
+    expect(fake.count(approvePath)).toBe(0)
+  })
+
+  it('says nothing was approved when the passkey prompt is cancelled, and asks for a fresh challenge', async () => {
+    credentials.get.mockRejectedValueOnce(new DOMException('cancelled', 'NotAllowedError'))
+    const fake = signedIn({ [detailPath]: { body: approvalDetail() }, [challengePath]: { status: 201, body: await challenge(false) } })
+    renderApp('/access/req-0001')
+
+    fireEvent.click(await enabledApprove())
+
+    expect(await screen.findByText('Passkey prompt cancelled. Nothing was approved.')).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(fake.count(approvePath)).toBe(0)
+    await waitFor(() => expect(fake.count(challengePath)).toBe(2))
+  })
+
+  it('denies without a passkey', async () => {
+    const fake = signedIn({
+      [detailPath]: { body: approvalDetail() },
+      [challengePath]: { status: 201, body: await challenge(false) },
+      [denyPath]: { body: approvalDetail({ status: 'denied', review: null }) },
+    })
+    const user = userEvent.setup()
+    renderApp('/access/req-0001')
+
+    await user.click(await screen.findByRole('button', { name: 'Deny' }))
+
+    await waitFor(() => expect(fake.count(denyPath)).toBe(1))
+    expect(credentials.get).not.toHaveBeenCalled()
+  })
+
+  it('shows what became of a request that is no longer pending', async () => {
+    signedIn({ [detailPath]: { body: approvalDetail({ status: 'expired', review: null }) } })
+    renderApp('/access/req-0001')
+
+    expect(await screen.findByText('This request expired.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull()
+  })
+
+  it('shows the service refusal as plain text', async () => {
+    signedIn({ [detailPath]: problem(404, 'request-unavailable', 'no request is available for that id') })
+    renderApp('/access/req-0001')
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('no request is available for that id')
+  })
+})

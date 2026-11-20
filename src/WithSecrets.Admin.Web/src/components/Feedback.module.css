@@ -1,0 +1,51 @@
+.alert {
+  border: 2px solid var(--border);
+  border-left-width: 0.5rem;
+  border-radius: var(--radius);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface);
+}
+
+.alertError {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.alertWarn {
+  border-color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.alertOk {
+  border-color: var(--ok);
+  background: var(--ok-soft);
+}
+
+.alertInfo {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.alertTitle {
+  margin: 0 0 var(--space-1);
+  font-weight: 700;
+}
+
+.alertText {
+  margin: 0;
+}
+
+.alertText > :last-child {
+  margin-bottom: 0;
+}
+
+.alertCode {
+  margin: var(--space-1) 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.loading {
+  color: var(--muted);
+  margin: 0;
+}

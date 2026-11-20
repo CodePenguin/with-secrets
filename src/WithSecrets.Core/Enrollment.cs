@@ -5,36 +5,14 @@ using System.Text;
 namespace WithSecrets;
 
 /// <summary>
-/// <c>--enrolled</c>: a header line with the admin keys' fingerprints (see <see cref="AdminKey" />), then one line per entry:
-/// name, host, date, and "admin" for the admin entry, separated by tabs. Never key bytes.
-/// </summary>
-public static class EnrolledListing
-{
-    public static void Write(StateDatabase db, IReadOnlyList<EnrolledEntry> entries, TextWriter stdout, TextWriter stderr)
-    {
-        stdout.WriteLine(AdminKey.Line(db));
-        foreach (EnrolledEntry entry in entries)
-        {
-            stdout.WriteLine(ApprovalSummary.Clean(entry.Name) + "\t" + ApprovalSummary.Clean(entry.Detail) + "\t"
-                + entry.Created.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + (entry.Admin ? "\tadmin" : ""));
-        }
-
-        if (entries.Count == 0)
-        {
-            stderr.WriteLine("Nothing is enrolled. Set up the first passkey with: with-secrets --config (with-secrets --enroll adds more).");
-        }
-    }
-}
-
-/// <summary>
 /// Adds and removes what a proof method trusts, the same way for every method. The first entry comes with the settings
-/// (<c>--config</c>) and is an admin; more admins can be added. Every change needs an admin: adding asks an admin first, then
+/// (first-time setup) and is an admin; more admins can be added. Every change needs an admin: adding asks an admin first, then
 /// the method's own setup has an admin sign the new manifest; removing has an admin sign the new manifest on the approval
 /// page. Any entry can be removed except the last admin. Names are chosen on the page and are unique without regard to case. Any doubt or error denies. The change happens at the command
 /// target; the approval happens at the first of the command target and the other target where the targets' methods can
 /// prove (Program gives both targets admin-only methods).
 /// </summary>
-public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget otherTarget, Action<string> announce, AuditLog? audit = null)
+public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget otherTarget, Action<string> announce, AdminAudit? audit = null)
 {
     // Every change is approved by an admin key.
     private readonly EnrollmentTarget command = commandTarget.Admin();
@@ -43,13 +21,34 @@ public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget 
     public const string DefaultName = "passkey";
     public const int MaxNameLength = 40;
 
-    private const string Heading = "Check this change to what can approve runs.";
+    private const string Heading = "Review this passkey change.";
 
     /// <summary>Why the last admin entry cannot be removed, and the ways on.</summary>
-    public const string LastAdmin = "The last admin passkey cannot be removed. First add another admin passkey (with-secrets --enroll, and tick \"Also make this key an admin\"), "
-        + "or, with no other admin device, delete state.db and run with-secrets --config again.";
+    public const string LastAdmin = "The last admin passkey cannot be removed. First add another admin passkey (in the admin web app, and tick \"Also make this key an admin\"), "
+        + "or, with no other admin device, delete state.db and run with-secrets admin again.";
 
     private IProofMethod Method => command.Method;
+
+    /// <summary>
+    /// Asked after each passkey page of a change has answered and before the new state is made: a non-null answer (the request was cancelled, the authority was locked) stops the change and nothing is
+    /// saved. Null for the command line, where nothing can stop it from outside.
+    /// </summary>
+    public Func<string?>? StopReason { get; init; }
+
+    private ApprovalDecision? Stopped() => StopReason?.Invoke() is { } reason ? ApprovalDecision.Deny("nothing was changed: " + reason) : null;
+
+    /// <summary>The admin's signature over the new state, unless the change must stop: asked before the page and again when it answered, because the answer is what lets the state be saved.</summary>
+    private ManifestApproval Guarded(Func<ManifestApproval> ask)
+    {
+        if (Stopped() is { } early)
+        {
+            return new ManifestApproval(early, null);
+        }
+
+        ManifestApproval asked = ask();
+
+        return Stopped() is { } late ? new ManifestApproval(late, null) : asked;
+    }
 
     /// <summary>
     /// Asks first with what is enrolled, when anything is. Then the method's own setup runs, where the person chooses the
@@ -58,7 +57,7 @@ public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget 
     /// </summary>
     public ApprovalDecision Enroll()
     {
-        return Logged("--enroll", EnrollCore());
+        return Logged("enroll-passkey", EnrollCore());
     }
 
     /// <summary>A refused or failed change goes into the audit log; the decision is returned as it is.</summary>
@@ -114,10 +113,15 @@ public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget 
                     return asked;
                 }
 
+                if (Stopped() is { } stopped)
+                {
+                    return stopped;
+                }
+
                 PageFlow.Plan("a", approval.Approver.Settings);
 
                 return Method.Enroll(Suggest(entries.Select(item => item.Name)), announce,
-                    manifest => approval.Approver.AskManifest(new ApprovalPrompt(Heading, SignText(manifest, entries)), manifest), asked.Unlock);
+                    manifest => Guarded(() => approval.Approver.AskManifest(new ApprovalPrompt(Heading, SignText(manifest, entries)), manifest)), asked.Unlock);
             }
             finally
             {
@@ -182,7 +186,7 @@ public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget 
     /// <summary>Always asks an admin, who signs the new manifest. The last admin entry cannot be removed. A refusal is recorded like Enroll's.</summary>
     public ApprovalDecision Unenroll(string name)
     {
-        return Logged("--unenroll", UnenrollCore(name));
+        return Logged("unenroll-passkey", UnenrollCore(name));
     }
 
     private ApprovalDecision UnenrollCore(string name)
@@ -226,7 +230,7 @@ public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget 
 
             string text = $"Remove the {Method.Id} named \"{stored}\"";
 
-            return Method.Unenroll(stored, manifest => approval.Approver.AskManifest(new ApprovalPrompt(Heading, text), manifest));
+            return Method.Unenroll(stored, manifest => Guarded(() => approval.Approver.AskManifest(new ApprovalPrompt(Heading, text), manifest)));
         }
         catch (ProofUnavailableException failure)
         {

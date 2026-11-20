@@ -136,21 +136,9 @@ internal static class LoggingTests
     {
         (string Mode, string[] Args)[] modes =
         [
-            ("--list", ["--list"]),
             ("--needs", ["--needs"]),
             ("--needs -f", ["--needs", "-f", ".env"]),
-            ("--set", ["--set", "A_NAME"]),
-            ("--remove", ["--remove", "A_NAME"]),
-            ("--revoke", ["--revoke"]),
-            ("--enroll", ["--enroll"]),
-            ("--enroll --local", ["--enroll", "--local"]),
-            ("--enrolled", ["--enrolled"]),
-            ("--unenroll", ["--unenroll", "phone"]),
-            ("--audit", ["--audit", "--last", "5"]),
-            ("--config", ["--config"]),
-            ("--config --show", ["--config", "--show"]),
             ("--recover", ["--recover"]),
-            ("--rotate-key", ["--rotate-key"]),
             ("a run", ["--secrets", "A_NAME", "--reason", "why", "--", "prog", "arg"]),
             ("a run with only a reason", ["--reason", "why", "--", "prog"]),
         ];
@@ -164,7 +152,7 @@ internal static class LoggingTests
             check(plain is not null && flagged is not null && plain.GetType() == flagged.GetType() && plain.Port == flagged.Port, $"debug flag: {mode}: --debug changes nothing else in the command");
         }
 
-        CliCommand? withPort = CliArgs.Parse(["--enroll", "--port", "4455", "--debug"], out _);
+        CliCommand? withPort = CliArgs.Parse(["--recover", "--port", "4455", "--debug"], out _);
         check(withPort is { Debug: true, Port: 4455 }, "debug flag: --debug together with --port");
         CliCommand? tail = CliArgs.Parse(["--reason", "x", "--", "prog", "--debug"], out _);
         check(tail is CliCommand.Run { Debug: false } run && run.Args.Arguments.SequenceEqual(["--debug"]), "debug flag: a --debug after -- belongs to the program and does not switch debug on");
@@ -402,8 +390,8 @@ internal static class LoggingTests
         using Setup third = new(Path.Combine(root, "faults3"), debug: false);
         string blocked = Path.Combine(root, "audit-blocked");
         File.WriteAllText(blocked, "a file, not a directory");
-        AuditLog audit = new(new StateDatabase(Path.Combine(blocked, "audit.db")));
-        bool written = audit.TryWrite("approved", new ApprovalRequest("tool", "/bin/tool", [], "/work", "r", ["OLD_NAME"]), "d");
+        StateDatabase blockedState = new(Path.Combine(blocked, "audit.db"));
+        bool written = blockedState.Audit.TryRecord(AdminEvent.Change("key-enrolled", "d", ""));
         check(!written && third.Events.Lines(LogEventLevel.Warning).Any(line => line.Contains("audit", StringComparison.OrdinalIgnoreCase)), "audit log: a failed write is a warning");
         string damaged = Path.Combine(root, "damaged");
         Directory.CreateDirectory(damaged);
@@ -426,7 +414,7 @@ internal static class LoggingTests
         using TestAuthenticator phone = TestAuthenticator.RS256();
         using TestAuthenticator fresh = TestAuthenticator.ES256();
         string settingsText = ToolSettings.Defaults.Canonical();
-        foreach (string name in new[] { "first --config", "--enroll", "--recover new-store step" })
+        foreach (string name in new[] { "first setup", "--enroll", "--recover new-store step" })
         {
             using Setup setup = new(Path.Combine(root, "last-" + name.GetHashCode(StringComparison.Ordinal).ToString(System.Globalization.CultureInfo.InvariantCulture)), debug: false);
             BlockingCollection<string?> typed = [];
@@ -435,20 +423,20 @@ internal static class LoggingTests
             Func<string?> readCode = () => TerminalPrompt.ReadCode(asked++ > 0);
             Action<Action<string>, string> noop = (_, _) => { };
             RecoveryTests.Flow flow;
-            RecoveryTests.World? w = name == "first --config" ? null : RecoveryTests.NewWorld(root, laptop);
+            RecoveryTests.World? w = name == "first setup" ? null : RecoveryTests.NewWorld(root, laptop);
             StateDatabase firstDb = StateDatabase.InFolder(Path.Combine(root, "last-first-" + Guid.NewGuid().ToString("N")));
             Func<Action<string>, ConfigChange> command = name switch
             {
-                "first --config" => announce =>
+                "first setup" => announce =>
                 {
                     (EnrollmentTarget primary, EnrollmentTarget local) = RecoveryTests.Targets(firstDb, announce, readCode);
 
-                    return new SettingsPage(firstDb, primary, local, announce, readCode).Run();
+                    return new FirstRunPage(firstDb, primary, local, announce, readCode).Run();
                 },
                 "--enroll" => announce =>
                 {
                     (EnrollmentTarget target, _) = RecoveryTests.Targets(w!.Db, announce, readCode);
-                    ApprovalDecision decision = new Enrollment(target, target, announce, new AuditLog(w.Db)).Enroll();
+                    ApprovalDecision decision = new Enrollment(target, target, announce, w.Db.Audit).Enroll();
 
                     return new ConfigChange(decision.Approved ? 0 : 1, decision.Detail);
                 },
@@ -468,7 +456,7 @@ internal static class LoggingTests
             (string Url, string Origin)? one = flow.Next();
             (string Url, string Origin) last;
             string? confirm;
-            if (name == "first --config")
+            if (name == "first setup")
             {
                 (_, _, string sign) = one is null ? ("", "", "") : RecoveryTests.RegisterFirst(client, one.Value, laptop, settingsText);
                 confirm = RecoveryTests.Member(sign, "code");
@@ -623,7 +611,7 @@ internal static class LoggingTests
                 {
                     (EnrollmentTarget primary, EnrollmentTarget local) = RecoveryTests.Targets(db, announce, read);
 
-                    return new SettingsPage(db, primary, local, announce, read).Run();
+                    return new FirstRunPage(db, primary, local, announce, read).Run();
                 });
                 (string Url, string Origin)? link = flow.Next();
                 (_, _, string sign) = link is null ? ("", "", "") : RecoveryTests.RegisterFirst(client, link.Value, laptop, settingsText);
@@ -635,7 +623,7 @@ internal static class LoggingTests
                 secrets.AddRange(recovery is null ? [] : RecoveryTests.CodeForms(recovery));
                 numbers.AddRange(confirm is null ? [] : [confirm]);
                 tokens.AddRange(TokensIn(flow.Lines));
-                check(recovery is not null && confirm is not null, "leak scan: the --config flow ran and made a recovery code and a confirmation code");
+                check(recovery is not null && confirm is not null, "leak scan: the first-setup flow ran and made a recovery code and a confirmation code");
                 flowsRun++;
             }
 
@@ -686,7 +674,7 @@ internal static class LoggingTests
                 RecoveryTests.Flow flow = new((announce, read) =>
                 {
                     (EnrollmentTarget target, _) = RecoveryTests.Targets(w.Db, announce, read);
-                    ApprovalDecision decision = new Enrollment(target, target, announce, new AuditLog(w.Db)).Enroll();
+                    ApprovalDecision decision = new Enrollment(target, target, announce, w.Db.Audit).Enroll();
 
                     return new ConfigChange(decision.Approved ? 0 : 1, decision.Detail);
                 });
@@ -712,10 +700,9 @@ internal static class LoggingTests
                 PasskeyStore passkeys = new(db);
                 TestState.Add(db, laptop.Record("localhost", "laptop"), withStore: true);
                 SecretStore store = new(db);
-                ApprovalSettings local = new("passkey", null, 0, TimeSpan.FromSeconds(20));
-                WebApprovalTests.EntryRun run = await WebApprovalTests.SetRun(client, passkeys, local, local, store, ["CANARY_NAME"], laptop, JsonSerializer.Serialize(new Dictionary<string, string> { ["CANARY_NAME"] = CanaryValue }));
+                ApprovalSettings local = new(null, 0, TimeSpan.FromSeconds(20));
+                WebApprovalTests.EntryRun run = WebApprovalTests.SetRun(passkeys, store, ["CANARY_NAME"], laptop, JsonSerializer.Serialize(new Dictionary<string, string> { ["CANARY_NAME"] = CanaryValue }));
                 SqliteConnection.ClearAllPools();
-                tokens.AddRange(TokensIn(run.Lines));
                 check(run.Result is { Code: 0 }, "leak scan: the --set flow stored a value (" + run.Result?.Detail + ")");
                 flowsRun++;
             }
@@ -724,7 +711,7 @@ internal static class LoggingTests
             {
                 string audit = Path.Combine(root, "leak-run-audit.db");
                 RunArgs args = CliArgs.ParseRun(["--secrets", "CANARY_RUN", "--reason", "leak scan", "--", "dotnet", "--version"], out _)!;
-                int code = await new RunCommand(new MemoryStore(new Dictionary<string, string> { ["CANARY_RUN"] = CanaryRunValue }), new FakeApprover(true), new AuditLog(new StateDatabase(audit)), new StringWriter(), new StringWriter()).ExecuteAsync(args, root);
+                int code = await new RunCommand(new MemoryStore(new Dictionary<string, string> { ["CANARY_RUN"] = CanaryRunValue }), new FakeApprover(true), new StringWriter(), new StringWriter()).ExecuteAsync(args, root);
                 check(code == 0, "leak scan: the run with a secret ran (" + code + ")");
                 flowsRun++;
             }

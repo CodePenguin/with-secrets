@@ -27,3 +27,4 @@ Thumbs.db
 # Local secrets and keys: never commit these
 .env.keys
 .env.local
+artifacts/

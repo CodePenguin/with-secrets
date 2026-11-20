@@ -6,17 +6,17 @@ namespace WithSecrets.E2E;
 
 internal static class Scenarios
 {
-    public static async Task FirstRunConfig(Host host, S s)
+    public static async Task FirstRunSetup(Host host, S s)
     {
         using Rig rig = new();
         await using Ctx c = await Ctx.NewAsync(host);
-        using Cmd<int> cmd = new((port, o, e) => CommandWiring.Config(rig.State, port));
+        using Cmd<int> cmd = new((port, o, e) => CommandWiring.Setup(rig.State, port));
         string link = await cmd.LinkAsync();
         await c.Page.GotoAsync(link);
-        await Task.Delay(300);
+        await c.Page.Locator("#save").WaitForAsync();
         s.Check(await c.PasskeyCalls() == 0 && (await c.AuthOps()) == (0, 0), "tap rule: no passkey prompt before the first click");
         s.Check(cmd.LinkCount == 1, "the command printed exactly one link");
-        s.Check((await c.Page.TitleAsync()).Contains("settings"), "settings page opened");
+        s.Check((await c.Page.TitleAsync()).Contains("Set up"), "setup page opened");
 
         await c.Click("#save");
         await c.Click("#confirm");
@@ -29,16 +29,15 @@ internal static class Scenarios
         await cmd.WaitPromptAsync();
         s.Check(cmd.Err.Text.EndsWith(TerminalPrompt.Waiting, StringComparison.Ordinal), "the terminal prompt is the last thing shown while waiting");
         s.Check(cmd.LinkCount == 1, "still exactly one link after the code page");
-        cmd.Type(code);
-        int exit = await cmd.Result.WaitAsync(TimeSpan.FromSeconds(30));
+        int exit = await c.TypeCodeAsync(cmd, code);
         s.Check(exit == 0, "command exit code 0");
-        s.Check(cmd.Err.Text.Contains("Saved the settings"), "the terminal shows the result");
+        s.Check(cmd.Err.Text.Contains("Set up. Admin passkey"), "the terminal shows the result");
         s.Check(!cmd.Err.Text.Contains(recovery) && !cmd.Err.Text.Contains(code), "neither code is printed on the terminal");
 
         bool have = rig.State.TryManifest(out Manifest? manifest, out _);
         s.Check(have && manifest is { Recovery: not null } && manifest.Keys.Count == 1 && manifest.Keys[0].Admin, "state: signed manifest with one admin key and a recovery slot");
         s.Check(rig.State.TryCheck(out _), "state.db passes its own check");
-        AuditChecks.Expect(s, rig, "settings-setup");
+        AuditChecks.Expect(s, rig, "setup");
 
         bool dead;
         try
@@ -53,85 +52,213 @@ internal static class Scenarios
         s.Check(dead, "the one-shot link is dead after the command finished");
         s.NoProblems(c);
     }
+
+    /// <summary>The first-run setup with a time limit, for the cases that end by it (the command is the same as <see cref="CommandWiring.Setup" />).</summary>
+    private static Cmd<int> SetupWithin(Rig rig, TimeSpan limit)
+    {
+        return new Cmd<int>((port, _, _) =>
+        {
+            Action<string> announce = TerminalPrompt.Line;
+            Func<string?> readCode = CommandWiring.CodeReader("Press Ctrl+C to cancel.");
+            ApprovalSettings settings = ToolSettings.Defaults.Approval.WithPort(port) with { Timeout = limit };
+            (EnrollmentTarget primary, EnrollmentTarget local) = CommandWiring.Targets(rig.State, settings, announce, readCode);
+            ConfigChange change = new FirstRunPage(rig.State, primary, local, announce, readCode).Run();
+            TerminalPrompt.Final(change.Done ? change.Detail : "with-secrets: " + change.Detail);
+
+            return change.Code;
+        });
+    }
+
+    /// <summary>Nothing is set up: no signed state, no passkey and no audit row. A setup that did not finish must leave the authority exactly as it found it.</summary>
+    private static bool Untouched(Rig rig)
+    {
+        bool none = rig.State.TryManifest(out Manifest? manifest, out _) && manifest is null;
+
+        return none && !AuditChecks.Events(rig).Any();
+    }
+
+    /// <summary>
+    /// First-time setup as a security sequence, with the real browser and the virtual authenticator: the first passkey (with PRF, which protects the secret
+    /// store key), the second prompt over the first manifest, the recovery code, the code typed in the terminal, then the signed state and the audit;
+    /// and every way it can stop before that, each of which must leave nothing set up.
+    /// </summary>
+    public static async Task FirstRunSecurity(Host host, S s)
+    {
+        // 1. The whole sequence: two passkey prompts, then the code. Nothing is saved before the code is typed.
+        using (Rig rig = new())
+        {
+            await using Ctx c = await Ctx.NewAsync(host);
+            using Cmd<int> cmd = new((port, o, e) => CommandWiring.Setup(rig.State, port));
+            await c.Page.GotoAsync(await cmd.LinkAsync());
+            await c.Page.Locator("#save").WaitForAsync();
+            s.Check(await c.PasskeyCalls() == 0 && Untouched(rig), "sequence: opening the page asks for no passkey and saves nothing");
+            await c.Click("#save");
+            await c.Page.Locator("#confirm").WaitForAsync(new() { State = WaitForSelectorState.Visible, Timeout = 20000 });
+            s.Check(await c.PasskeyCalls() == 1 && (await c.AuthOps()).Credentials == 1, "sequence: the first prompt made one passkey");
+            s.Check(Untouched(rig), "sequence: after the first prompt nothing is saved yet");
+            s.Check((await c.Text("#status")).Contains("Now confirm it", StringComparison.Ordinal), "sequence: the page asks for the second prompt");
+            (_, long signsBefore) = await c.AuthOps();
+            await c.Click("#confirm");
+            string code = await c.TextAppears("#code");
+            s.Check(await c.PasskeyCalls() == 2 && (await c.AuthOps()).Signs == signsBefore + 1, "sequence: the second prompt is a second passkey tap, a signature by the new passkey over the first manifest");
+            string recovery = await c.TextAppears("#recovery");
+            s.Check(recovery.Length >= 20 && await c.Page.Locator("#recovery-box").IsVisibleAsync(), "sequence: the recovery code is shown");
+            s.Check(Untouched(rig), "sequence: with both prompts done and the code on the page, nothing is saved until the code is typed in the terminal");
+            await cmd.WaitPromptAsync();
+            int exit = await c.TypeCodeAsync(cmd, code);
+            s.Check(exit == 0, "sequence: typing the code finishes the setup");
+
+            bool have = rig.State.TryManifest(out Manifest? manifest, out _);
+            s.Check(have && manifest is { Recovery: not null, Version: 1 } && manifest.Keys.Count == 1 && manifest.Keys[0].Admin && manifest.Store.Length > 0, "sequence: the signed state has one admin key, a recovery slot and the secret store key");
+            s.Check(rig.State.TryCheck(out _), "sequence: the state passes its own check");
+            AuditChecks.Expect(s, rig, "setup");
+            s.Check(AuditChecks.Events(rig).Count(name => name == "setup") == 1, "sequence: one audit event records the setup");
+            s.Check(!cmd.Err.Text.Contains(recovery, StringComparison.Ordinal) && !cmd.Err.Text.Contains(code, StringComparison.Ordinal), "sequence: neither code is on the terminal");
+
+            // The administration works with that passkey at once: sign in and see the Overview.
+            using SpaApp app = new(rig);
+            await Spa.SignIn(c, app, s);
+            await Spa.Heading(c, "Overview").WaitForAsync(new() { Timeout = 20000 });
+            s.Check(true, "sequence: the new passkey signs in to the administration");
+            s.NoProblems(c);
+        }
+
+        // 2. The person cancels the first prompt: nothing is saved, and Deny ends the command.
+        using (Rig rig = new())
+        {
+            await using Ctx c = await Ctx.NewAsync(host);
+            using Cmd<int> cmd = new((port, o, e) => CommandWiring.Setup(rig.State, port));
+            await c.Page.GotoAsync(await cmd.LinkAsync());
+            await c.Page.Locator("#save").WaitForAsync();
+            await c.Presence(false);
+            await c.Click("#save");
+            await c.StatusContains("Waiting for your passkey");
+            s.Check(await c.Text("#save") == "Cancel", "cancel 1: while the first prompt is open the button reads Cancel");
+            await c.Click("#save");
+            await c.StatusContains("Cancelled");
+            await c.Presence(true);
+            await c.QuietAsync();
+            s.Check(!cmd.Result.IsCompleted && Untouched(rig) && await c.Page.Locator("#confirm").IsHiddenAsync(), "cancel 1: nothing was saved and the page did not move on");
+            await c.Click("#deny");
+            s.Check(await cmd.Result.WaitAsync(TimeSpan.FromSeconds(30)) == RunCommand.Denied && Untouched(rig), "cancel 1: Deny ends the command and nothing is set up");
+            s.NoProblems(c);
+        }
+
+        // 3. The person cancels the second prompt after the passkey was made: still nothing is saved.
+        using (Rig rig = new())
+        {
+            await using Ctx c = await Ctx.NewAsync(host);
+            using Cmd<int> cmd = new((port, o, e) => CommandWiring.Setup(rig.State, port));
+            await c.Page.GotoAsync(await cmd.LinkAsync());
+            await c.Page.Locator("#save").WaitForAsync();
+            await c.Click("#save");
+            await c.Page.Locator("#confirm").WaitForAsync(new() { State = WaitForSelectorState.Visible, Timeout = 20000 });
+            await c.Presence(false);
+            await c.Click("#confirm");
+            await c.StatusContains("Waiting for your passkey");
+            s.Check(await c.Text("#confirm") == "Cancel", "cancel 2: while the second prompt is open the button reads Cancel");
+            await c.Click("#confirm");
+            await c.StatusContains("Cancelled");
+            await c.Presence(true);
+            await c.QuietAsync();
+            s.Check(!cmd.Result.IsCompleted && Untouched(rig) && !await c.Page.Locator("#code").IsVisibleAsync(), "cancel 2: no state, no code, although the passkey exists in the authenticator");
+            await c.Click("#deny");
+            s.Check(await cmd.Result.WaitAsync(TimeSpan.FromSeconds(30)) == RunCommand.Denied && Untouched(rig), "cancel 2: Deny ends the command and nothing is set up");
+            s.NoProblems(c);
+        }
+
+        // 4. The second prompt is refused (user verification fails): the page says so, nothing is saved, and nothing is shown that could be typed.
+        using (Rig rig = new())
+        {
+            await using Ctx c = await Ctx.NewAsync(host);
+            using Cmd<int> cmd = new((port, o, e) => CommandWiring.Setup(rig.State, port));
+            await c.Page.GotoAsync(await cmd.LinkAsync());
+            await c.Page.Locator("#save").WaitForAsync();
+            await c.Click("#save");
+            await c.Page.Locator("#confirm").WaitForAsync(new() { State = WaitForSelectorState.Visible, Timeout = 20000 });
+            await c.Verified(false);
+            await c.Click("#confirm");
+            await c.StatusContains("No passkey was used");
+            s.Check(Untouched(rig) && !cmd.Result.IsCompleted && string.IsNullOrWhiteSpace(await c.Page.Locator("#code").TextContentAsync()), "confirmation refused: nothing is saved, there is no code, the command still waits");
+            await c.Click("#deny");
+            s.Check(await cmd.Result.WaitAsync(TimeSpan.FromSeconds(30)) == RunCommand.Denied && Untouched(rig), "confirmation refused: Deny ends the command and nothing is set up");
+            s.NoProblems(c);
+        }
+
+        // 5. A passkey without PRF cannot protect the secret store key: refused, with the reason, before anything is stored.
+        using (Rig rig = new())
+        {
+            await using Ctx c = await Ctx.NewAsync(host, hasPrf: false);
+            c.Ignore("status of 400"); // the program refuses a passkey without PRF with a 400, which the browser logs
+            using Cmd<int> cmd = new((port, o, e) => CommandWiring.Setup(rig.State, port));
+            await c.Page.GotoAsync(await cmd.LinkAsync());
+            await c.Page.Locator("#save").WaitForAsync();
+            await c.Click("#save");
+            await c.StatusContains("cannot do PRF");
+            int code = await cmd.Result.WaitAsync(TimeSpan.FromSeconds(30));
+            s.Check(code != 0 && Untouched(rig) && await c.Page.Locator("#confirm").IsHiddenAsync(), "no PRF: the setup is refused, the page does not go on to the second prompt, nothing is saved (exit " + code + ")");
+            s.Check(cmd.Err.Text.Contains("PRF", StringComparison.Ordinal), "no PRF: the terminal says why");
+            s.NoProblems(c);
+        }
+
+        // 6. The browser is closed between the two prompts. The command ends at its time limit with nothing saved, and a new setup on the same state then works.
+        using (Rig rig = new())
+        {
+            Ctx c = await Ctx.NewAsync(host);
+            using (Cmd<int> cmd = SetupWithin(rig, TimeSpan.FromSeconds(10)))
+            {
+                await c.Page.GotoAsync(await cmd.LinkAsync());
+                await c.Page.Locator("#save").WaitForAsync();
+                await c.Click("#save");
+                await c.Page.Locator("#confirm").WaitForAsync(new() { State = WaitForSelectorState.Visible, Timeout = 20000 });
+                await c.Context.CloseAsync();
+                int ended = await cmd.Result.WaitAsync(TimeSpan.FromSeconds(60));
+                s.Check(ended != 0 && Untouched(rig), "browser closed: the command ends at its limit and nothing is saved (exit " + ended + ")");
+                s.Check(cmd.Err.Text.Contains("nothing was saved", StringComparison.OrdinalIgnoreCase) || cmd.Err.Text.Contains("time", StringComparison.OrdinalIgnoreCase), "browser closed: the terminal says that it stopped without saving (" + cmd.Err.Text.Trim().Split('\n')[^1] + ")");
+            }
+
+            await using Ctx again = await Ctx.NewAsync(host);
+            using Cmd<int> fresh = new((port, o, e) => CommandWiring.Setup(rig.State, port));
+            await again.Page.GotoAsync(await fresh.LinkAsync());
+            await again.Page.Locator("#save").WaitForAsync();
+            await again.Click("#save");
+            await again.Page.Locator("#confirm").WaitForAsync(new() { State = WaitForSelectorState.Visible, Timeout = 20000 });
+            await again.Click("#confirm");
+            string code = await again.TextAppears("#code");
+            await fresh.WaitPromptAsync();
+            s.Check(await again.TypeCodeAsync(fresh, code) == 0 && rig.State.TryManifest(out Manifest? manifest, out _) && manifest is { Version: 1 } && manifest.Keys.Count == 1, "browser closed: a new setup on the same folder works and makes exactly one admin passkey");
+            s.NoProblems(again);
+        }
+    }
 }
 
 internal static class Scenarios2
 {
     private const string Secret = "s3cr3t-e2e-value-1";
 
-    private static async Task<string> RawState(Rig rig)
+    internal static async Task<string> RawState(Rig rig)
     {
         Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         StringBuilder text = new();
         foreach (string file in Directory.GetFiles(rig.Folder))
         {
-            using FileStream stream = new(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            byte[] bytes = new byte[stream.Length];
-            await stream.ReadExactlyAsync(bytes);
-            text.Append(System.Text.Encoding.Latin1.GetString(bytes));
+            // SQLite removes its -shm and -wal files when the last connection closes, between the listing and the read (Windows then reports access denied).
+            try
+            {
+                using FileStream stream = new(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                byte[] bytes = new byte[stream.Length];
+                await stream.ReadExactlyAsync(bytes);
+                text.Append(System.Text.Encoding.Latin1.GetString(bytes));
+            }
+            catch (Exception failure) when (failure is FileNotFoundException or UnauthorizedAccessException)
+            {
+            }
         }
 
         return text.ToString();
     }
 
-    public static async Task SetRemove(Host host, S s)
-    {
-        using Rig rig = new();
-        await using Ctx c = await Ctx.NewAsync(host);
-        await Flows.Configure(rig, c);
-
-        using (Cmd<int> set = Cmds.Set(rig, "E2E_SECRET"))
-        {
-            string link = await set.LinkAsync();
-            await c.Page.GotoAsync(link);
-            await Task.Delay(300);
-            s.Check((await c.Text("#request")).Contains("E2E_SECRET"), "the page names the secret");
-            
-            await c.Page.FillAsync("#v0", Secret);
-            await PageSteps.TapSave(c);
-            await c.StatusContains("Stored", 20000);
-            s.Check(set.LinkCount == 1, "one link");
-            int exit = await set.Result.WaitAsync(TimeSpan.FromSeconds(30));
-            s.Check(exit == 0, "--set exit code 0");
-            s.Check(set.Err.Text.Contains("E2E_SECRET") && !set.Err.Text.Contains(Secret), "the terminal names the secret and never shows the value");
-        }
-
-        s.Check(rig.Store.ListNames().SequenceEqual(["E2E_SECRET"]), "state lists the secret name");
-        s.Check(!(await RawState(rig)).Contains(Secret), "state.db holds no plaintext of the value");
-        s.Check(rig.State.TryCheck(out _), "state.db passes its check");
-
-        // Decrypting works: a run through the page gets the value (its output is redacted, so the mask shows it was there).
-        File.WriteAllLines(Path.Combine(rig.Work, "show.cmd"), ["@echo off", "echo got=%E2E_SECRET%"]);
-        using (Cmd<int> run = Cmds.Run(rig, "E2E_SECRET", ["cmd", "/d", "/c", "show.cmd"]))
-        {
-            await c.Page.GotoAsync(await run.LinkAsync());
-            await c.Click("#approve");
-            s.Check(await run.Result.WaitAsync(TimeSpan.FromSeconds(30)) == 0 && run.Out.Text.Contains("got=" + StreamRedactor.Mask), "a run decrypts the stored value (output redacted)");
-        }
-
-        // --remove through the page.
-        using (Cmd<int> remove = Cmds.Remove(rig, "E2E_SECRET"))
-        {
-            await c.Page.GotoAsync(await remove.LinkAsync());
-            s.Check((await c.Text("#request")).Contains("E2E_SECRET"), "the remove page names the secret");
-            await c.Click("#approve");
-            int exit = await remove.Result.WaitAsync(TimeSpan.FromSeconds(30));
-            s.Check(exit == 0, "--remove exit code 0");
-            s.Check(remove.Err.Text.Contains("E2E_SECRET"), "the terminal names the removed secret");
-        }
-
-        s.Check(rig.Store.ListNames().Count == 0, "state no longer lists the secret");
-        s.Check(!(await RawState(rig)).Contains(Secret), "state.db still holds no plaintext");
-        AuditChecks.Expect(s, rig, "settings-setup", "secrets-set", "approved", "finished", "secrets-removed");
-        s.NoProblems(c);
-    }
-
-    private static IEnumerable<string> AuditEvents(Rig rig)
-    {
-        new AuditLog(rig.State).TryRead(50, null, out IReadOnlyList<AuditRecord> rows, out _);
-
-        return rows.Select(r => r.Event);
-    }
+    private static IEnumerable<string> AuditEvents(Rig rig) => AuditChecks.Events(rig);
 }
 
 internal static class Scenarios3
@@ -139,21 +266,21 @@ internal static class Scenarios3
     private const string Secret = "s3cr3t-e2e-value-1";
 
     /// <summary>Sets E2E_SECRET through the page (a fixture of the run scenarios).</summary>
-    public static async Task SeedSecret(Rig rig, Ctx c)
+    public static async Task SeedSecret(Rig rig, Ctx c, SpaApp? signedIn = null)
     {
-        using Cmd<int> set = Cmds.Set(rig, "E2E_SECRET");
-        await c.Page.GotoAsync(await set.LinkAsync());
-        await c.Page.FillAsync("#v0", Secret);
-        await PageSteps.TapSave(c);
-        await c.StatusContains("Stored");
-        await set.Result.WaitAsync(TimeSpan.FromSeconds(30));
+        // As a person does it: in the admin app, one tap. The session cookie is shared by every localhost port, so a
+        // scenario that already has its app signed in seeds through that one.
+        using SpaApp? own = signedIn is null ? new SpaApp(rig) : null;
+        if (own is not null)
+        {
+            await Spa.SignIn(c, own, new S("seed"));
+        }
+        await Spa.GoTo(c, "Secrets", "Secrets");
+        await c.Page.GetByLabel("Name").FillAsync("E2E_SECRET");
+        await c.Page.GetByLabel("Value").FillAsync(Secret);
+        await Spa.Click(Spa.Button(c, "Save secret", exact: true));
+        await c.Page.GetByText("Saved E2E_SECRET.").First.WaitForAsync(new() { Timeout = 20000 });
     }
-
-    private static readonly string[] Script =
-    [
-        "@echo off",
-        "echo script-value=%E2E_SECRET%",
-    ];
 
     public static async Task RunApproval(Host host, S s)
     {
@@ -161,72 +288,113 @@ internal static class Scenarios3
         await using Ctx c = await Ctx.NewAsync(host);
         await Flows.Configure(rig, c);
         await SeedSecret(rig, c);
-        File.WriteAllLines(Path.Combine(rig.Work, "check.cmd"), Script);
+        rig.WriteScript("check", "script-value");
+        using SpaApp app = new(rig, timeLimit: TimeSpan.FromSeconds(12));
+        await Spa.SignIn(c, app, s);
 
-        // 1. A script file: the page shows its contents; approve once; the program output appears.
-        using (Cmd<int> run = Cmds.Run(rig, "E2E_SECRET", ["cmd", "/d", "/c", "check.cmd"]))
+        // 1. A script file: the request shows its contents; approve once; the program output appears.
+        using (Cmd<int> run = Cmds.Run(rig, "E2E_SECRET", Rig.ScriptCommand("check"), app: app))
         {
-            await c.Page.GotoAsync(await run.LinkAsync());
-            string request = await c.TextAppears("#request");
-            s.Check(request.Contains("Script contents:") && request.Contains("echo script-value=%E2E_SECRET%"), "the page shows the script contents");
-            s.Check(request.Contains("E2E_SECRET") && request.Contains("check.cmd"), "the page shows the secret name and the command");
-            s.Check(await c.PasskeyCalls() == 0, "tap rule: no passkey prompt on load of the approval page");
-            s.Check(await c.Page.Locator("#approve-for").CountAsync() == 0 || !await c.Page.Locator("#approve-for").IsVisibleAsync(), "only Approve once is offered");
-            await c.Click("#approve");
+            await Spa.OpenRequest(c, run, app, s);
+            string request = await c.Page.Locator("main").InnerTextAsync();
+            s.Check(request.Contains(Rig.ScriptEcho("script-value")), "the request shows the script contents");
+            s.Check(request.Contains("E2E_SECRET") && request.Contains(Rig.ScriptFile("check")), "the request shows the secret name and the command");
+            int before = await c.PasskeyCalls();
+            s.Check(!(await Spa.Button(c, "Approve", exact: true).IsEnabledAsync()) || before == 1, "tap rule: opening the request asks for no passkey");
+            await Spa.ApproveOnce(c);
             int exit = await run.Result.WaitAsync(TimeSpan.FromSeconds(30));
             s.Check(exit == 0, "run exit code 0 (the program's own)");
             s.Check(run.Out.Text.Contains("script-value=" + StreamRedactor.Mask), "the program ran with the decrypted secret and its output was redacted");
             s.Check(!run.Out.Text.Contains(Secret) && !run.Err.Text.Contains(Secret), "the secret value is never printed");
-            await c.StatusContains("Approved");
+            s.Check(await c.PasskeyCalls() == before + 1, "approving used the passkey exactly once");
+            await c.Page.GetByText("Approved.").First.WaitForAsync(new() { Timeout = 20000 });
         }
 
-        // 2. Inline code: the page shows it (labelled), approve once, the output is redacted.
-        using (Cmd<int> run = Cmds.Run(rig, "E2E_SECRET", ["powershell", "-NoProfile", "-NonInteractive", "-Command", "Write-Output ('inline-' + $env:E2E_SECRET)"]))
+        // 2. Inline code: the request shows it, approve once, the output is redacted.
+        using (Cmd<int> run = Cmds.Run(rig, "E2E_SECRET", Rig.InlineCommand, app: app))
         {
-            await c.Page.GotoAsync(await run.LinkAsync());
-            string request = await c.TextAppears("#request");
-            s.Check(request.Contains("Inline code:") && request.Contains("Write-Output ('inline-' + $env:E2E_SECRET)"), "the page shows the inline code");
-            await c.Click("#approve");
+            await Spa.OpenRequest(c, run, app, s);
+            string request = await c.Page.Locator("main").InnerTextAsync();
+            s.Check(!request.Contains("Code it runs") && request.Contains(Rig.InlineCode), "the request shows the inline code once, in the Runs line");
+            await Spa.ApproveOnce(c);
             s.Check(await run.Result.WaitAsync(TimeSpan.FromSeconds(30)) == 0, "inline run exit code 0");
             s.Check(run.Out.Text.Contains("inline-" + StreamRedactor.Mask) && !run.Out.Text.Contains(Secret), "inline run output is redacted");
         }
 
         // 3. Deny: nothing runs.
-        using (Cmd<int> run = Cmds.Run(rig, "E2E_SECRET", ["cmd", "/d", "/c", "check.cmd"]))
+        using (Cmd<int> run = Cmds.Run(rig, "E2E_SECRET", Rig.ScriptCommand("check"), app: app))
         {
-            await c.Page.GotoAsync(await run.LinkAsync());
-            await c.TextAppears("#request");
-            await c.Click("#deny");
+            await Spa.OpenRequest(c, run, app, s);
+            await Spa.Click(Spa.Button(c, "Deny", exact: true));
             int exit = await run.Result.WaitAsync(TimeSpan.FromSeconds(30));
             s.Check(exit == RunCommand.Denied, "denied run exits with the denied code (" + exit + ")");
             s.Check(run.Out.Text.Length == 0, "nothing ran after Deny");
-            await c.StatusContains("Denied");
+            await c.Page.GetByText("Denied.").First.WaitForAsync(new() { Timeout = 20000 });
         }
 
-        // 4. Timeout: the page is left alone; the run is denied at the limit.
-        using (Cmd<int> run = Cmds.Run(rig, "E2E_SECRET", ["cmd", "/d", "/c", "check.cmd"], TimeSpan.FromSeconds(3)))
+        // 4. Timeout: nobody answers; the run is denied at the limit and the request page says it expired.
+        string expiredLink;
+        using (Cmd<int> run = Cmds.Run(rig, "E2E_SECRET", Rig.ScriptCommand("check"), app: app))
         {
-            await c.Page.GotoAsync(await run.LinkAsync());
-            await c.TextAppears("#request");
+            expiredLink = await run.LinkAsync();
             int exit = await run.Result.WaitAsync(TimeSpan.FromSeconds(30));
             s.Check(exit == RunCommand.Denied && run.Out.Text.Length == 0, "an unanswered run is denied at the time limit and nothing ran");
             s.Check(run.Err.Text.Contains("time limit"), "the terminal says it was the time limit");
         }
 
-        IReadOnlyList<AuditRecord> rows = Audit(rig);
-        s.Check(rows.Count(r => r.Detail.Contains("denied on the page")) >= 1, "audit records the Deny");
-        s.Check(rows.Count(r => r.Detail.Contains("time limit")) >= 1, "audit records the time limit");
+        await c.Page.GotoAsync(expiredLink);
+        await c.Page.GetByText("This request expired.").First.WaitForAsync(new() { Timeout = 20000 });
+        s.Check(await Spa.Button(c, "Approve", exact: true).CountAsync() == 0, "an expired request cannot be approved");
 
-        AuditChecks.Expect(s, rig, "settings-setup", "secrets-set", "approved", "finished", "approved", "finished", "denied", "denied");
+        IReadOnlyList<AuditEvent> events = AuditChecks.All(rig);
+        s.Check(events.Count(e => e.Type == AuditEventTypes.Authorization && e.Outcome == "denied") >= 2, "audit records the Deny and the time limit as denials");
+        s.Check(events.Count(e => e.Type == AuditEventTypes.Authorization && e.Outcome == "approved") >= 2, "audit records both approvals");
         s.NoProblems(c);
     }
 
-    private static IReadOnlyList<AuditRecord> Audit(Rig rig)
+    /// <summary>
+    /// M6: a project .env that sets variables which change how the program loads code or where it sends data. The page shows one prominent warning section
+    /// before the approve control, with every name, its visible value (escaped, never HTML) and a reason; axe finds no WCAG 2.2 A/AA violation at desktop and phone width.
+    /// </summary>
+    public static async Task CodeChanges(Host host, S s)
     {
-        new AuditLog(rig.State).TryRead(50, null, out IReadOnlyList<AuditRecord> rows, out _);
+        using Rig rig = new();
+        await using Ctx c = await Ctx.NewAsync(host);
+        await Flows.Configure(rig, c);
+        await SeedSecret(rig, c);
+        rig.WriteScript("check", "script-value");
+        File.WriteAllText(Path.Combine(rig.Work, ".env"), "NODE_OPTIONS=--require ./hook.js\nHTTPS_PROXY=http://proxy.example:3128\nLD_LIBRARY_PATH=/opt/lib\nGIT_SSH_COMMAND=ssh -o \"<img src=x onerror=alert(1)>\" & <b>\nLOG_LEVEL=quiet\n");
 
-        return rows;
+        using SpaApp app = new(rig);
+        await Spa.SignIn(c, app, s);
+        using Cmd<int> run = Cmds.Run(rig, "E2E_SECRET", Rig.ScriptCommand("check"), app: app);
+        await Spa.OpenRequest(c, run, app, s);
+        ILocator warning = c.Page.GetByRole(AriaRole.Region, new() { Name = "Code changes" });
+        s.Check(await warning.CountAsync() == 1, "exactly one warning is on the page");
+        string warned = await warning.InnerTextAsync();
+        s.Check(warned.Contains("This changes how the program loads code or where it sends data"), "the warning has its heading");
+        foreach (string expected in new[] { "NODE_OPTIONS=--require ./hook.js", "HTTPS_PROXY=http://proxy.example:3128", "LD_LIBRARY_PATH=/opt/lib", "GIT_SSH_COMMAND=", "loads code", "library path", "network traffic", "git" })
+        {
+            s.Check(warned.Contains(expected, StringComparison.Ordinal), "the warning shows " + expected);
+        }
+
+        string main = await c.Page.Locator("main").InnerTextAsync();
+        s.Check(!warned.Contains("LOG_LEVEL") && main.Contains("LOG_LEVEL"), "an ordinary variable is not in the warning");
+        s.Check(warned.Contains("<img src=x onerror=alert(1)>") && await c.Page.Locator("main img, main b").CountAsync() == 0, "a value with HTML is shown as text, never as markup");
+        bool before = await c.Page.EvaluateAsync<bool>("() => { const w = document.querySelector('[role=region]'); const a = [...document.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Approve'); return !!w && !!a && !!(w.compareDocumentPosition(a) & Node.DOCUMENT_POSITION_FOLLOWING); }");
+        s.Check(before, "the warning comes before the approve control in the page");
+        s.Check(await c.PasskeyCalls() == 0, "tap rule: opening the request asked for no passkey");
+        await Spa.Axe(c, s, "the run request with the warning (desktop)");
+        await c.Page.SetViewportSizeAsync(375, 667);
+        await Spa.Axe(c, s, "the run request with the warning (phone width)");
+        bool scrolls = await c.Page.EvaluateAsync<bool>("() => document.documentElement.scrollWidth > window.innerWidth + 1");
+        s.Check(!scrolls, "the page does not scroll sideways at phone width");
+        await c.Page.SetViewportSizeAsync(1280, 800);
+        await Spa.Click(Spa.Button(c, "Deny", exact: true));
+        await run.Result.WaitAsync(TimeSpan.FromSeconds(30));
+        s.NoProblems(c);
     }
+
 }
 internal static class Scenarios4
 {
@@ -237,12 +405,12 @@ internal static class Scenarios4
         Flows.Configured first = await Flows.Configure(rig, c);
         await Scenarios3.SeedSecret(rig, c);
 
-        using Cmd<int> cmd = new((port, o, e) => CommandWiring.RotateKey(rig.State, rig.Store, port));
+        using Cmd<int> cmd = Cmds.Rotate(rig);
         string link = await cmd.LinkAsync();
         await c.Page.GotoAsync(link);
         string firstUrl = c.Page.Url;
         string request = await c.TextAppears("#request");
-        s.Check(request.Contains("Rotate the store keys"), "page 1 explains the rotation");
+        s.Check(request.Contains("Only the key you tap now stays"), "page 1 explains the rotation");
         await c.Click("#approve");
         await c.Page.WaitForURLAsync(u => u != firstUrl, new() { Timeout = 20000 });
         string request2 = await c.TextAppears("#request");
@@ -267,13 +435,13 @@ internal static class Scenarios4
         string recoverUrl = c.Page.Url;
         await c.Page.FillAsync("#recovery-code", first.Recovery);
         await c.Click("#unlock");
-        await c.Page.WaitForFunctionAsync("() => document.getElementById('status').textContent.trim().length > 0", null, new() { Timeout = 20000 });
-        await Task.Delay(500);
+        // The refusal is shown and the button is ready again: the attempt is over and the page stayed.
+        await c.Page.WaitForFunctionAsync("() => document.getElementById('status').textContent.trim().length > 0 && !document.getElementById('unlock').disabled", null, new() { Timeout = 20000 });
         string why = await c.Text("#status");
-        s.Check(c.Page.Url == recoverUrl && !(await c.Page.TitleAsync()).Contains("settings"), "the old recovery code is refused: the page does not move on (" + why + ")");
+        s.Check(c.Page.Url == recoverUrl && !(await c.Page.TitleAsync()).Contains("Set up"), "the old recovery code is refused: the page does not move on (" + why + ")");
         await c.Click("#deny");
         s.Check(await again.Result.WaitAsync(TimeSpan.FromSeconds(30)) != 0, "--recover with the old code does not succeed");
-        AuditChecks.Expect(s, rig, "settings-setup", "secrets-set", "key-rotated", "change-denied");
+        AuditChecks.Expect(s, rig, "setup", "secrets-set", "key-rotated", "change-denied");
         s.Check(rig.State.TryManifest(out Manifest? after, out _) && after!.Keys.Count == 1 && !Directory.GetFiles(rig.Folder, "state.db.recovered-*").Any(), "state is unchanged by the refused recovery");
 
         s.NoProblems(c);
@@ -297,7 +465,7 @@ internal static class Scenarios5
         await c.Page.FillAsync("#recovery-code", first.Recovery);
         await c.Click("#unlock");
         await c.Page.WaitForURLAsync(u => u != url1, new() { Timeout = 20000 });
-        s.Check((await c.Page.TitleAsync()).Contains("settings") && cmd.LinkCount == 1, "the code page led by itself to the new passkey page, still one link");
+        s.Check((await c.Page.TitleAsync()).Contains("Set up") && cmd.LinkCount == 1, "the code page led by itself to the new passkey page, still one link");
         s.Check(await c.PasskeyCalls() == 0, "tap rule: the new passkey page makes no prompt on load");
         await c.Click("#save");
         await c.Click("#confirm");
@@ -306,14 +474,14 @@ internal static class Scenarios5
         s.Check(recovery != first.Recovery, "the final page shows a new recovery code");
         await cmd.WaitPromptAsync();
         s.Check(cmd.Err.Text.EndsWith(TerminalPrompt.Waiting, StringComparison.Ordinal) && cmd.LinkCount == 1, "the terminal prompt is the last thing shown; still one link");
-        cmd.Type(code);
-        int exit = await cmd.Result.WaitAsync(TimeSpan.FromSeconds(30));
+        int exit = await c.TypeCodeAsync(cmd, code);
         s.Check(exit == 0, "--recover exit code 0");
         s.Check(!cmd.Err.Text.Contains(code) && !cmd.Err.Text.Contains(recovery) && !cmd.Err.Text.Contains(first.Recovery), "no code is printed on the terminal");
         s.Check(Directory.GetFiles(rig.Folder, "state.db.recovered-*").Length == 1, "the old file was renamed (state.db.recovered-<time>), not deleted");
         s.Check(rig.State.TryManifest(out Manifest? manifest, out _) && manifest!.Keys.Count == 1 && manifest.Recovery is not null, "new state: one key and a recovery slot");
         s.Check(rig.Store.ListNames().SequenceEqual(["E2E_SECRET"]), "the secret was carried over");
-        AuditChecks.Expect(s, rig, "settings-setup", "recovered");
+        // The folder holds the events of the first setup and its secret too; the recovery adds the setup of the new state and "recovered" (recorded when the swap succeeded).
+        AuditChecks.Expect(s, rig, "setup", "secrets-set", "setup", "recovered");
     }
 }
 
@@ -325,9 +493,7 @@ internal static class Scenarios6
         await using Ctx c = await Ctx.NewAsync(host);
         await Flows.Configure(rig, c);
         await Scenarios3.SeedSecret(rig, c);
-        CliCommand enroll = Cmds.Parse("--enroll");
-
-        using Cmd<int> cmd = new((port, o, e) => CommandWiring.Passkeys(enroll, rig.State, port, o, e));
+        using Cmd<int> cmd = Cmds.Enroll(rig);
         await c.Page.GotoAsync(await cmd.LinkAsync());
         string url1 = c.Page.Url;
         s.Check((await c.Text("#request")).Contains("Add a"), "page 1 asks an admin key to approve the new passkey");
@@ -353,18 +519,17 @@ internal static class Scenarios6
         string code = await c.TextAppears("#code");
         await cmd.WaitPromptAsync();
         s.Check(cmd.Err.Text.EndsWith(TerminalPrompt.Waiting, StringComparison.Ordinal) && cmd.LinkCount == 1, "the terminal prompt is last; still one link");
-        cmd.Type(code);
-        int exit = await cmd.Result.WaitAsync(TimeSpan.FromSeconds(30));
+        int exit = await c.TypeCodeAsync(cmd, code);
         s.Check(exit == 0, "--enroll exit code 0");
         s.Check(!cmd.Err.Text.Contains(code), "the code is not printed");
-        AuditChecks.Expect(s, rig, "settings-setup", "secrets-set", "key-enrolled");
+        AuditChecks.Expect(s, rig, "setup", "secrets-set", "key-enrolled");
         s.Check(rig.State.TryManifest(out Manifest? manifest, out _) && manifest!.Keys.Count == 2 && manifest.Keys.Count(k => k.Admin) == 1 && manifest.Keys.Any(k => k.Name == "second key" && !k.Admin), "state: two keys, the new one is not an admin");
 
         // The second key approves a run on its own: the first device is gone.
         await c.Presence(false, adminAuth);
         await c.Presence(true, second);
-        File.WriteAllLines(Path.Combine(rig.Work, "show.cmd"), ["@echo off", "echo got=%E2E_SECRET%"]);
-        using Cmd<int> run = Cmds.Run(rig, "E2E_SECRET", ["cmd", "/d", "/c", "show.cmd"]);
+        rig.WriteScript("show", "got");
+        using Cmd<int> run = Cmds.Run(rig, "E2E_SECRET", Rig.ScriptCommand("show"));
         await c.Page.GotoAsync(await run.LinkAsync());
         await c.TextAppears("#request");
         (int _, long signsFirst) = await c.AuthOps(adminAuth);
@@ -372,7 +537,7 @@ internal static class Scenarios6
         await c.Click("#approve");
         s.Check(await run.Result.WaitAsync(TimeSpan.FromSeconds(30)) == 0 && run.Out.Text.Contains("got=" + StreamRedactor.Mask), "the second key approved a run and the secret was released");
         s.Check((await c.AuthOps(second)).Signs > signsSecond && (await c.AuthOps(adminAuth)).Signs == signsFirst, "the signature came from the second device");
-        AuditChecks.Expect(s, rig, "settings-setup", "secrets-set", "key-enrolled", "approved", "finished");
+        AuditChecks.Expect(s, rig, "setup", "secrets-set", "key-enrolled", "authorization-approved", "launch-started", "execution-exited");
         s.NoProblems(c);
     }
 }
@@ -394,10 +559,10 @@ internal static class Scenarios7
 
         using Cmd<ApprovalDecision> cmd = new((port, o, e) =>
         {
-            ApprovalSettings remote = new("passkey", "http://ws.localhost:" + port, port, TimeSpan.FromSeconds(60));
-            (EnrollmentTarget primary, EnrollmentTarget other) = CommandWiring.Targets(rig.State, remote, TerminalPrompt.Line, CommandWiring.CodeReader("If the page says nothing was added, press Ctrl+C."));
+            ApprovalSettings remote = new("http://ws.localhost:" + port, port, TimeSpan.FromSeconds(60));
+            (EnrollmentTarget primary, EnrollmentTarget other) = CommandWiring.Targets(rig.State, remote, TerminalPrompt.Line, CommandWiring.CodeReader("Press Ctrl+C to cancel."));
 
-            return new Enrollment(primary, other, TerminalPrompt.Line, new AuditLog(rig.State)).Enroll();
+            return new Enrollment(primary, other, TerminalPrompt.Line, rig.State.Audit).Enroll();
         });
         string link = await cmd.LinkAsync();
         s.Check(new Uri(link).Host == "localhost" && cmd.LinkCount == 1, "the one link is at the admin key's host (localhost)");
@@ -408,7 +573,7 @@ internal static class Scenarios7
         ApprovalDecision result = await cmd.Result.WaitAsync(TimeSpan.FromSeconds(30));
         s.Check(!result.Approved && result.Detail.Contains("https address or localhost"), "the program refuses the non-https cross host and says why (" + result.Detail + ")");
         s.Check(rig.State.TryManifest(out Manifest? manifest, out _) && manifest!.Keys.Count == 1, "nothing was enrolled");
-        s.Check(new AuditLog(rig.State).TryRead(10, null, out IReadOnlyList<AuditRecord> rows, out _) && rows.Any(r => r.Detail.Contains("https address or localhost")), "audit records the refusal");
+        s.Check(AuditChecks.All(rig).Any(e => e.Type == AuditEventTypes.Admin && e.Outcome == AdminEvent.ChangeDenied && e.Reason.Contains("https address or localhost")), "audit records the refusal");
         s.NoProblems(c);
     }
 }

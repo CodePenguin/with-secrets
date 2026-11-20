@@ -47,7 +47,7 @@ public static class AppLog
     /// <summary>For tests: also receives every event, whatever the mode (null when not set).</summary>
     internal static ILogEventSink? Tap { get; set; }
 
-    internal static string DefaultFolder => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".with-secrets", "logs");
+    internal static string DefaultFolder => Path.Combine(TestIsolation.StoreFolder, "logs");
 
     /// <summary>True when --debug was given or WITH_SECRETS_DEBUG is 1.</summary>
     public static bool DebugRequested(bool flag) => flag || Environment.GetEnvironmentVariable(DebugVariable) == "1";

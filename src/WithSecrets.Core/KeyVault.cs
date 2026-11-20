@@ -22,7 +22,10 @@ public sealed class Unlock(string credentialId, byte[] output) : IDisposable
     /// <summary>The PRF output. Valid until <see cref="Dispose" />.</summary>
     public byte[] Output { get; } = output;
 
-    public void Dispose() => CryptographicOperations.ZeroMemory(Output);
+    // Linux: the pages of the PRF output are kept out of swap while it lives (best effort; skipped on Windows).
+    private readonly IDisposable _pages = LinuxHardening.TryLock(output);
+
+    public void Dispose() => LinuxHardening.Wipe(Output, _pages);
 
     public override string ToString() => "Unlock(" + CredentialId + ")";
 }

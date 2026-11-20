@@ -20,7 +20,7 @@ public interface ISecretSource
 
     /// <summary>
     /// True when the values can be opened only with what the approving passkey released (WebAuthn PRF, see <see cref="Unlock" />):
-    /// then every run is approved by a passkey tap, and a saved approval (which has no PRF output) is never offered or used.
+    /// then every run is approved by a passkey tap.
     /// </summary>
     bool NeedsUnlock => false;
 
@@ -147,7 +147,7 @@ public sealed class SecretStore(StateDatabase db, ISecretCipher? cipher = null) 
 
     public IReadOnlyList<string> ListNames() => Verified((manifest, _, _) => (IReadOnlyList<string>)[.. manifest?.Secrets.Keys ?? []]);
 
-    /// <summary>The key to the values is released by the approving passkey at every run, so a saved approval cannot stand in for it.</summary>
+    /// <summary>The key to the values is released by the approving passkey at every run.</summary>
     public bool NeedsUnlock => true;
 
     /// <summary>
@@ -263,9 +263,9 @@ public sealed class SecretStore(StateDatabase db, ISecretCipher? cipher = null) 
     /// One write transaction: the signed manifest replaces version <paramref name="expectedVersion" /> (see
     /// <see cref="StateDatabase.TryReplace" />: signed by an admin, the next version), <paramref name="removes" /> are deleted,
     /// <paramref name="rows" /> written, every row must then match the new manifest's hashes, and <paramref name="audit" /> is
-    /// appended. Null when committed, else why not; then nothing was written.
+    /// recorded in the signed audit (just before the commit; when it cannot be, nothing is written). Null when committed, else why not; then nothing was written.
     /// </summary>
-    internal string? TryApply(long expectedVersion, SignedManifest signed, IReadOnlyDictionary<string, string> rows, IReadOnlyCollection<string> removes, AuditLog.Row audit)
+    internal string? TryApply(long expectedVersion, SignedManifest signed, IReadOnlyDictionary<string, string> rows, IReadOnlyCollection<string> removes, AdminEvent audit)
     {
         try
         {
@@ -293,8 +293,8 @@ public sealed class SecretStore(StateDatabase db, ISecretCipher? cipher = null) 
                     throw new Abort("the secrets do not match the new state (" + mismatch + "); nothing was stored");
                 }
 
-                AuditLog.Append(connection, transaction, audit);
                 BeforeCommit?.Invoke();
+                db.AppendAudit(audit);
 
                 return null;
             });

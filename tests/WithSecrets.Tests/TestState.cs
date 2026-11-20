@@ -17,7 +17,7 @@ internal static class TestState
     private static int _signs = 1_000_000;
 
     /// <summary>An enrollment where the approval and the change happen at the same place.</summary>
-    public static Enrollment Enrollment(IProofMethod method, WebApprover approver, Action<string> announce, AuditLog? audit = null)
+    public static Enrollment Enrollment(IProofMethod method, WebApprover approver, Action<string> announce, AdminAudit? audit = null)
     {
         return new Enrollment(EnrollmentTarget.For(method, approver), EnrollmentTarget.For(method, approver), announce, audit);
     }
@@ -122,7 +122,7 @@ internal static class TestState
     /// challenge when the page signs a new state, else over "approve once". When the page asks for the PRF output (it has a
     /// prfKey) the proof carries it sealed to the page's key, as the page script does, except as <paramref name="prf" /> says.
     /// </summary>
-    public static (int Status, string Body) Approve(HttpClient client, string pageUrl, string origin, string rpId, TestAuthenticator signer, PrfMode prf = PrfMode.Normal, TestAuthenticator? other = null)
+    public static (int Status, string Body) Approve(HttpClient client, string pageUrl, string origin, string rpId, TestAuthenticator signer, PrfMode prf = PrfMode.Normal, TestAuthenticator? other = null, bool userVerified = true, Func<byte[], byte[]>? changeChallenge = null)
     {
         (_, string page) = Get(client, pageUrl);
         const string open = "<script type=\"application/json\" id=\"start\">";
@@ -138,7 +138,12 @@ internal static class TestState
         byte[] challenge = start.RootElement.TryGetProperty("manifest", out JsonElement manifest)
             ? Manifest.Challenge(bind, manifest.GetString()!)
             : ReuseBinding.Challenge(bind, 0);
-        string body = ReuseTests.Body(0, signer.Assert(challenge, origin, rpId, NextCount()));
+        if (changeChallenge is not null)
+        {
+            challenge = changeChallenge(challenge);
+        }
+
+        string body = ReuseTests.Body(0, signer.Assert(challenge, origin, rpId, NextCount(), userVerified));
         if (start.RootElement.TryGetProperty("prfKey", out JsonElement prfKey) && prf != PrfMode.Missing)
         {
             body = body[..^1] + ",\"prf\":" + PrfMember(start.RootElement, prfKey.GetString()!, bind, signer, prf, other) + "}";
@@ -323,9 +328,7 @@ internal static class TestState
         int Number() => int.Parse(value, System.Globalization.CultureInfo.InvariantCulture);
         ToolSettings next = name switch
         {
-            "reuseMinutes" => s with { ReuseMinutes = Number() },
             "reuseMaxMinutes" => s with { ReuseMaxMinutes = Number() },
-            "method" => s with { Method = value },
             "baseUrl" => s with { BaseUrl = value },
             "port" => s with { Port = Number() },
             "timeoutMinutes" => s with { TimeoutMinutes = Number() },
@@ -381,58 +384,6 @@ internal static class TestVault
     public static string Vault(StateDatabase db, string privateKey, string publicKey)
     {
         return KeyVault.WrapVault(Encoding.UTF8.GetBytes(privateKey), Master(db), publicKey);
-    }
-}
-
-/// <summary>
-/// Saves grants the way a real approval does, so tests read the same: the key named <paramref name="keyName" /> (else the
-/// admin) signs a run approval text with the request id and the page issued time (the store's clock), for the minutes.
-/// </summary>
-internal static class GrantStoreTestExtensions
-{
-    private static int _signs = 3_000_000;
-
-    /// <summary>A grant for the key that verifies and is in force, under the largest ceiling there is.</summary>
-    public static bool TryGet(this GrantStore grants, string key, out DateTimeOffset approved, out DateTimeOffset expires)
-    {
-        return grants.TryGet(key, ReuseSettings.MaxMinutes, out approved, out expires);
-    }
-
-    /// <summary>A grant for the key that verifies, is in force now and lasts no longer than <paramref name="maxMinutes" />.</summary>
-    public static bool TryGet(this GrantStore grants, string key, int maxMinutes, out DateTimeOffset approved, out DateTimeOffset expires)
-    {
-        GrantEntry? grant = grants.Find(key, maxMinutes).Grant;
-        approved = grant?.Approved ?? default;
-        expires = grant?.Expires ?? default;
-
-        return grant is not null;
-    }
-
-    public static void Clear(this GrantStore grants) => grants.TryClear();
-
-    public static bool Add(this GrantStore grants, string key, int minutes, string? keyName = null)
-    {
-        Manifest? manifest;
-        try
-        {
-            manifest = TestState.Current(grants.Database);
-        }
-        catch (InvalidOperationException)
-        {
-            return false;
-        }
-
-        ManifestKey? signer = manifest?.Keys.FirstOrDefault(item => item.Name == keyName) ?? manifest?.Admins.FirstOrDefault();
-        if (signer is null || TestAuthenticator.ById(signer.Id) is not { } authenticator)
-        {
-            return false;
-        }
-
-        string text = "Allow an agent to use secrets?\n" + ApprovalSummary.RequestIdPrefix + key + "\n" + ApprovalSummary.IssuedLine(grants.Now());
-        string nonce = "test-nonce";
-        string proof = authenticator.Assert(ReuseBinding.Challenge(RequestBinding.Compute(nonce, text), minutes), TestState.Origin, signer.RpId, (uint)Interlocked.Increment(ref _signs));
-
-        return grants.Add(key, minutes, new ApprovalEvidence(nonce, text, proof));
     }
 }
 

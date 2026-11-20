@@ -6,7 +6,7 @@ using Microsoft.Playwright;
 namespace WithSecrets.E2E;
 
 /// <summary>
-/// Runs one real command (here: --config) in-process against a temp state folder, with the terminal replaced by the test:
+/// Runs one real command (here: first-run setup) in-process against a temp state folder, with the terminal replaced by the test:
 /// lines the program writes are captured (the link is read from them) and the typed confirmation code is fed from the test.
 /// Never touches ~/.with-secrets.
 /// </summary>
@@ -63,7 +63,7 @@ internal sealed class CommandRun : IDisposable
             return EnrollmentTarget.For(method, new WebApprover(method, s, Announce));
         }
 
-        return new SettingsPage(State, Target(approval), Target(approval with { BaseUrl = null }), Announce, readCode).Run();
+        return new FirstRunPage(State, Target(approval), Target(approval with { BaseUrl = null }), Announce, readCode).Run();
     }
 
     public async Task<string> LinkAsync() => await _link.Task.WaitAsync(TimeSpan.FromSeconds(30));

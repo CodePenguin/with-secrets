@@ -11,7 +11,7 @@ public sealed class StateDatabaseException(string message, Exception? inner = nu
 
 /// <summary>
 /// <c>state.db</c> in the protected store folder: the signed manifest (passkeys and settings, see <see cref="Manifest" />), the
-/// sign counts, saved approvals and the audit log, in SQLite. Every read of keys, settings or approvals verifies the manifest
+/// sign counts and secrets, in SQLite. Every read of keys, settings or secrets verifies the manifest
 /// first (see <see cref="CurrentManifest" />); a state that fails verification can be used for nothing. Every
 /// write is one transaction that takes the write lock first (<c>BEGIN IMMEDIATE</c>), so two processes writing at once wait for
 /// each other (up to the busy timeout) and no update is lost. A missing database is empty. A database that exists but cannot be
@@ -23,14 +23,13 @@ public sealed class StateDatabaseException(string message, Exception? inner = nu
 public sealed class StateDatabase
 {
     public const string FileName = "state.db";
-    public const int SchemaVersion = 9;
+    public const int SchemaVersion = 11;
 
     public static readonly TimeSpan DefaultBusyTimeout = TimeSpan.FromSeconds(5);
 
     /// <summary>
     /// The tables. Keys and settings live only in the signed manifest (one row); sign counts sit beside it, outside the
-    /// signature, because every approval raises them. Each saved approval keeps the passkey assertion that approved it, the
-    /// page nonce and the exact text that was signed (see <see cref="GrantStore" />), all base64url or text. Each secret is one
+    /// signature, because every approval raises them. Each secret is one
     /// row with its Dotenvx ciphertext; the manifest has the hash of each (see <see cref="SecretStore" />).
     /// </summary>
     private const string Schema = """
@@ -39,14 +38,6 @@ public sealed class StateDatabase
             id INTEGER PRIMARY KEY NOT NULL, version INTEGER NOT NULL, text TEXT NOT NULL, bind TEXT NOT NULL,
             credential_id TEXT NOT NULL, authenticator_data TEXT NOT NULL, client_data TEXT NOT NULL, signature TEXT NOT NULL);
         CREATE TABLE sign_counts (id TEXT PRIMARY KEY NOT NULL, count INTEGER NOT NULL);
-        CREATE TABLE grants (
-            key TEXT PRIMARY KEY NOT NULL, credential_id TEXT NOT NULL, authenticator_data TEXT NOT NULL, client_data TEXT NOT NULL,
-            signature TEXT NOT NULL, nonce TEXT NOT NULL, text TEXT NOT NULL, minutes INTEGER NOT NULL, approved INTEGER NOT NULL,
-            expires INTEGER NOT NULL);
-        CREATE TABLE audit (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT NOT NULL, event TEXT NOT NULL, secrets TEXT NOT NULL,
-            program TEXT NOT NULL, detail TEXT NOT NULL, key_name TEXT NOT NULL, entry TEXT NOT NULL,
-            prev_hash TEXT NOT NULL, hash TEXT NOT NULL);
         CREATE TABLE secrets (name TEXT PRIMARY KEY NOT NULL, ciphertext TEXT NOT NULL);
         """;
 
@@ -54,7 +45,7 @@ public sealed class StateDatabase
     /// The tables a store holds, all of them (sqlite_sequence may or may not be there). Any other table, any view, trigger or
     /// index other than SQLite's own primary-key indexes is an edit made outside the tool.
     /// </summary>
-    private static readonly string[] Tables = ["audit", "grants", "manifest", "schema_version", "secrets", "sign_counts"];
+    private static readonly string[] Tables = ["manifest", "schema_version", "secrets", "sign_counts"];
 
     /// <summary>Manifests already verified in this process, by the stored row, so the signature is checked once per process.</summary>
     private static readonly ConcurrentDictionary<string, Manifest> Verified = new(StringComparer.Ordinal);
@@ -73,6 +64,21 @@ public sealed class StateDatabase
     }
 
     public string FilePath { get; }
+
+    private AdminAudit? _audit;
+
+    /// <summary>
+    /// Where this store's administrative events go (the signed host audit; there is no audit table in state.db). By default the machine identity key of the platform key store
+    /// and the outbox beside the state, opened on first use; the host service puts its own audit here so that an event wakes its uploader.
+    /// </summary>
+    public AdminAudit Audit
+    {
+        get => _audit ??= AdminAudit.ForState(FilePath);
+        set => _audit = value;
+    }
+
+    /// <summary>Records one administrative event inside the caller's write transaction (just before it commits); throws <see cref="StateDatabaseException" /> when it cannot be committed, which rolls the change back.</summary>
+    internal void AppendAudit(AdminEvent item) => Audit.Append(item);
 
     /// <summary>The file name, for messages.</summary>
     public string FileLabel => Path.GetFileName(FilePath);
@@ -144,7 +150,7 @@ public sealed class StateDatabase
 
     /// <summary>
     /// The verified manifest on this connection, or null for an empty state: no database, or no manifest and no sign counts and
-    /// no saved approvals. Throws <see cref="StateDatabaseException" /> with <see cref="FailedMessage" /> for anything else: a
+    /// no rows. Throws <see cref="StateDatabaseException" /> with <see cref="FailedMessage" /> for anything else: a
     /// manifest that does not verify, two rows, rows that need a manifest without one, a sign count for a key that is not in
     /// it, or a table that is not part of the store.
     /// </summary>
@@ -215,10 +221,9 @@ public sealed class StateDatabase
         Dictionary<string, long> counts = SignCounts(connection, transaction);
         if (rows.Count == 0)
         {
-            if (counts.Count > 0 || Scalar(connection, transaction, "SELECT COUNT(*) FROM grants") is not 0L
-                || Scalar(connection, transaction, "SELECT COUNT(*) FROM secrets") is not 0L)
+            if (counts.Count > 0 || Scalar(connection, transaction, "SELECT COUNT(*) FROM secrets") is not 0L)
             {
-                throw Failed("keys, saved approvals or secrets without a manifest");
+                throw Failed("keys or secrets without a manifest");
             }
 
             return null;
@@ -268,7 +273,7 @@ public sealed class StateDatabase
     /// Inside the caller's write transaction: replaces the manifest with <paramref name="next" />, only when the stored one is
     /// still version <paramref name="expectedVersion" /> (0 for none), <paramref name="next" /> is the version after it, and it
     /// is signed by a key that is an admin of the stored manifest and stays an admin in <paramref name="next" /> (see
-    /// <see cref="SignedManifest.Verify(Manifest?, out string?)" />; on the first run, by an admin of <paramref name="next" />). Sign counts and saved approvals of keys that are no longer in it are removed. Null when it was written,
+    /// <see cref="SignedManifest.Verify(Manifest?, out string?)" />; on the first run, by an admin of <paramref name="next" />). Sign counts of keys that are no longer in it are removed. Null when it was written,
     /// else why not (nothing is written). The caller has already checked the assertion in full on the page.
     /// </summary>
     internal string? TryReplace(SqliteConnection connection, SqliteTransaction transaction, long expectedVersion, SignedManifest next)
@@ -303,15 +308,6 @@ public sealed class StateDatabase
         foreach (string id in SignCounts(connection, transaction).Keys.Where(id => !manifest.Keys.Any(key => key.Id == id)))
         {
             Execute(connection, transaction, "DELETE FROM sign_counts WHERE id = $id", ("$id", id));
-        }
-
-        // Saved approvals of a removed key end with it, in the same transaction, so they are never read as a failure later.
-        if (current is not null)
-        {
-            foreach (ManifestKey removed in current.Keys.Where(old => !manifest.Keys.Any(key => key.Id == old.Id)))
-            {
-                Execute(connection, transaction, "DELETE FROM grants WHERE credential_id = $id", ("$id", removed.Id));
-            }
         }
 
         return null;

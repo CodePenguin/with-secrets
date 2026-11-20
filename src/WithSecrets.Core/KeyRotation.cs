@@ -6,7 +6,7 @@ using System.Text;
 namespace WithSecrets;
 
 /// <summary>
-/// <c>--rotate-key</c>: new store key K and new master key MK, for when the keys may have been seen (an admin key lost, a
+/// The rotation of the store keys (admin app, Secrets): new store key K and new master key MK, for when the keys may have been seen (an admin key lost, a
 /// device given away). Admin only, two taps.
 /// <para>
 /// Tap 1 (the approval page) is an admin approval that also releases the PRF output of the tapped key S. The page lists the
@@ -30,8 +30,11 @@ public sealed class KeyRotation(StateDatabase db, SecretStore store, EnrollmentT
     private readonly EnrollmentTarget primary = primaryTarget.Admin();
     private readonly EnrollmentTarget local = localTarget.Admin();
 
-    private const string Heading = "Rotate the with-secrets keys. Read all of it before you approve.";
-    private const string SignHeading = "Step 2 of 2: confirm the key change with the same admin key.";
+    /// <summary>Answers null while the rotation may go on and a short reason once it must not (the request was cancelled or the authority was locked); it is asked before the new state is written.</summary>
+    public Func<string?>? StopReason { get; init; }
+
+    private const string Heading = "Rotate the keys";
+    private const string SignHeading = "Confirm the key change";
 
     /// <summary>For tests: runs on the new rows when the proof is checked, after the page got its bind; it may change them.</summary>
     internal Action<Dictionary<string, string>>? RowsBeforeSign { get; set; }
@@ -54,7 +57,7 @@ public sealed class KeyRotation(StateDatabase db, SecretStore store, EnrollmentT
 
         if (!change.Done)
         {
-            new AuditLog(db).TryWriteDenied("--rotate-key", [], change.Detail);
+            db.Audit.TryWriteDenied("rotate-store-key", [], change.Detail);
         }
 
         return change;
@@ -76,7 +79,7 @@ public sealed class KeyRotation(StateDatabase db, SecretStore store, EnrollmentT
 
         if (manifest.Store.Length == 0 || manifest.Vault.Length == 0)
         {
-            return Denied("the state has no secret store key; delete " + db.FileLabel + " and set up again with: with-secrets --config");
+            return Denied("the state has no secret store key; delete " + db.FileLabel + " and set up again with: with-secrets admin");
         }
 
         EnrollmentTarget? target = EnrollmentTarget.FirstThatCanProve(primary, local);
@@ -95,12 +98,12 @@ public sealed class KeyRotation(StateDatabase db, SecretStore store, EnrollmentT
             return new ConfigChange(RunCommand.StoreError, "cannot use the secret store: " + failure.Message);
         }
 
-        string text = "Rotate the store keys: a new secret store key and a new master key, with every secret encrypted again.\n"
-            + "Only the key you tap now stays. These keys will be removed and must be enrolled again with --enroll: "
+        string text = "New secret store and master keys; every secret is encrypted again.\n"
+            + "Only the key you tap now stays. Removed (add them again as passkeys): "
             + RemovedList(manifest, null) + ".\n"
-            + "A new recovery code is shown on the last page, and the old recovery code stops working.\n"
+            + "You get a new recovery code; the old one stops working.\n"
             + "Nothing changes until you confirm on the next page.";
-        announce?.Invoke(AdminKey.Line(manifest) + "\nCompare it with the fingerprint you noted. If it differs, do not approve.");
+        announce?.Invoke(AdminKey.Line(manifest) + "\nIf it is not the one you noted, stop.");
         // One link: tap 1 leads to the Step 2 page.
         using IDisposable flow = PageFlow.Enter();
         PageFlow.Plan("a", target.Approver.Settings);
@@ -217,17 +220,22 @@ public sealed class KeyRotation(StateDatabase db, SecretStore store, EnrollmentT
                         return "the key that confirmed is not the key that was tapped first; nothing was changed";
                     }
 
+                    if (StopReason?.Invoke() is { } stopped)
+                    {
+                        return "nothing was changed: " + stopped;
+                    }
+
                     string note = $"keys rotated; {removedNames.Count.ToString(CultureInfo.InvariantCulture)} key(s) removed"
                         + (removedNames.Count == 0 ? "" : ": " + string.Join(", ", removedNames.Select(ApprovalSummary.Clean))) + $"; {rows.Count.ToString(CultureInfo.InvariantCulture)} secret(s) encrypted again";
 
-                    return store.TryApply(manifest.Version, signed, rows, [], AuditLog.ChangeRow("key-rotated", note, signer.Name));
+                    return store.TryApply(manifest.Version, signed, rows, [], AdminEvent.Change("key-rotated", note, signer.Name));
                 },
                 recoveryText);
 
             string signText = "Rotate the store keys and keep only " + ApprovalSummary.Clean(signer.Name) + ".\n"
-                + "Removed (enroll again with --enroll): " + (removedNames.Count == 0 ? "(none)" : string.Join(", ", removedNames.Select(ApprovalSummary.Clean))) + ".\n"
+                + "Removed (add them again): " + (removedNames.Count == 0 ? "(none)" : string.Join(", ", removedNames.Select(ApprovalSummary.Clean))) + ".\n"
                 + rows.Count.ToString(CultureInfo.InvariantCulture) + " secret(s) will be encrypted again under the new keys.\n"
-                + "Confirm the new state with the same admin key.";
+                + "Confirm with the same admin key.";
             ManifestApproval confirmed = target.Approver.AskManifest(new ApprovalPrompt(SignHeading, signText), nextText, commit);
             if (!confirmed.Decision.Approved)
             {
@@ -235,7 +243,7 @@ public sealed class KeyRotation(StateDatabase db, SecretStore store, EnrollmentT
             }
 
             return new ConfigChange(0, $"Rotated the keys. Kept: {signer.Name}. Removed: {(removedNames.Count == 0 ? "none" : string.Join(", ", removedNames))}. "
-                + $"{rows.Count.ToString(CultureInfo.InvariantCulture)} secret(s) encrypted again. The new recovery code is shown on the last page only once. If the page did not show it (lost connection), the old code is already dead: run --rotate-key again.");
+                + $"{rows.Count.ToString(CultureInfo.InvariantCulture)} secret(s) encrypted again. The new recovery code is shown on the last page only once. If the page did not show it (lost connection), the old code is already dead: rotate again.");
         }
         finally
         {

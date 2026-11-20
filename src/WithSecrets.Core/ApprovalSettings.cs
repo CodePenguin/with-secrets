@@ -3,9 +3,8 @@ using System.Globalization;
 namespace WithSecrets;
 
 /// <summary>How approval works. Only the approval settings are read here; they are kept in state.db (see <see cref="ToolSettings" />).</summary>
-public sealed record ApprovalSettings(string Method, string? BaseUrl, int Port, TimeSpan Timeout)
+public sealed record ApprovalSettings(string? BaseUrl, int Port, TimeSpan Timeout)
 {
-    public const string DefaultMethod = "passkey";
     public const int DefaultTimeoutMinutes = 5;
     public const int MaxTimeoutMinutes = 30;
 

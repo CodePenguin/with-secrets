@@ -15,7 +15,7 @@ internal static class SecretCrypto
 {
     public const string Info = "with-secrets/v1 secrets";
 
-    /// <summary>The HKDF info of the PRF output's transport (not the --set key, so one cannot be opened as the other).</summary>
+    /// <summary>The HKDF info of the PRF output's transport (not the secret entry key, so one cannot be opened as the other).</summary>
     public const string PrfInfo = "with-secrets/v1 prf";
 
 
@@ -78,7 +78,7 @@ internal static class SecretCrypto
 
     /// <summary>
     /// The same scheme, returning the plaintext bytes (the caller zeroes them) under the HKDF info <paramref name="info" />
-    /// (<see cref="Info" /> for the --set values, <see cref="PrfInfo" /> for a PRF output). Every failure is a
+    /// (<see cref="Info" /> for the secret values, <see cref="PrfInfo" /> for a PRF output). Every failure is a
     /// <see cref="CryptographicException" /> with the same message.
     /// </summary>
     public static byte[] DecryptBytes(byte[] privateState, byte[] bind, string epk, string iv, string ct, string info)

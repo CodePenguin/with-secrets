@@ -7,15 +7,14 @@ internal static class Flows
 {
     public sealed record Configured(string Recovery, int Code);
 
-    /// <summary>First-run --config in the browser: save, Step 2, read the code and the recovery code from the page, type the code.</summary>
-    public static async Task<Configured> Configure(Rig rig, Ctx c, S? s = null)
+    /// <summary>First-run setup in the browser: save, Step 2, read the code and the recovery code from the page, type the code.</summary>
+    public static async Task<Configured> Configure(Rig rig, Ctx c, S? s = null, bool keepSetup = false)
     {
-        using Cmd<int> cmd = new((port, o, e) => CommandWiring.Config(rig.State, port));
+        using Cmd<int> cmd = new((port, o, e) => CommandWiring.Setup(rig.State, port));
         string link = await cmd.LinkAsync();
         await c.Page.GotoAsync(link);
         if (s is not null)
         {
-            await Task.Delay(300);
             s.Check(await c.PasskeyCalls() == 0, "tap rule: no passkey prompt on page load");
         }
 
@@ -23,9 +22,17 @@ internal static class Flows
         await c.Click("#confirm");
         string code = await c.TextAppears("#code");
         string recovery = await c.TextAppears("#recovery");
-        cmd.Type(code);
+        int exit = await c.TypeCodeAsync(cmd, code);
 
-        return new Configured(recovery, await cmd.Result.WaitAsync(TimeSpan.FromSeconds(30)));
+        // The shared first-run setup is identical in every scenario, so demo recordings are trimmed to start at the
+        // scenario's own steps instead of replaying it.
+        if (c.IsDemo && !keepSetup)
+        {
+            c.MarkScenarioStart();
+            await c.DemoIntroAsync(c.ScenarioIntroduction());
+        }
+
+        return new Configured(recovery, exit);
     }
 }
 
@@ -38,26 +45,57 @@ internal static class Cmds
         return command ?? throw new InvalidOperationException("bad test arguments: " + error);
     }
 
-    /// <summary>A run of a program with secrets, on its own task; the page shows the approval.</summary>
-    public static Cmd<int> Run(Rig rig, string secrets, string[] program, TimeSpan? timeLimit = null)
+    /// <summary>
+    /// A run of a program with secrets, on its own task. Without <paramref name="app" /> the command's own page shows the approval (what a run does while "allow again
+    /// for a few minutes" is on). With it the run goes to that app's service and the request waits in its Approvals queue, as it does by default.
+    /// </summary>
+    public static Cmd<int> Run(Rig rig, string secrets, string[] program, TimeSpan? timeLimit = null, SpaApp? app = null)
     {
         CliCommand.Run run = (CliCommand.Run)Parse(["--secrets", secrets, "--reason", "e2e run", "--", .. program]);
 
-        return new Cmd<int>((port, o, e) => CommandWiring.Run(rig.State, rig.Store, rig.Grants, run.Args, port, o, e, rig.Work, timeLimit).GetAwaiter().GetResult());
+        // The run goes through the host service, as the program does: the service is in this process on a free port, and the CLI client
+        // talks to it over HTTP. The page listens on the port the harness chose (the --port of the run).
+        return new Cmd<int>((port, o, e) =>
+        {
+            // The machine is enrolled and approved through AdminActions (what the admin web app does after the passkey tap), with software keys.
+            E2EMachine machine = rig.Machine;
+            if (app is not null)
+            {
+                return LaunchClient.RunAsync(run.Args, rig.Work, app.Service.Port, null, o, e, machine.Trust).GetAwaiter().GetResult();
+            }
+
+            using HostService service = HostService.Start(new HostServiceOptions { Lock = AuthorityLock.UnlockedForTests(), State = rig.State, Store = rig.Store, Deployment = machine.Deployment, Port = 0, TimeLimit = timeLimit, ApproverFactory = (settings, announce) => CommandWiring.RunApprover(rig.State, settings, announce) });
+
+            return LaunchClient.RunAsync(run.Args, rig.Work, service.Port, port, o, e, machine.Trust).GetAwaiter().GetResult();
+        });
     }
 
-    public static Cmd<int> Set(Rig rig, params string[] names)
+    /// <summary>The passkey enrollment pages (what the admin app starts after its tap), with the confirmation code typed in this terminal.</summary>
+    public static Cmd<int> Enroll(Rig rig)
     {
-        CliCommand command = Parse(["--set", string.Join(',', names)]);
+        return new Cmd<int>((port, o, e) =>
+        {
+            Action<string> announce = TerminalPrompt.Line;
+            (EnrollmentTarget primary, EnrollmentTarget local) = CommandWiring.Targets(rig.State, ApprovalSettings.Load(rig.State, out _).WithPort(port), announce, CommandWiring.CodeReader("Press Ctrl+C to cancel."));
+            ApprovalDecision decision = new Enrollment(primary, local, announce, rig.State.Audit).Enroll();
+            TerminalPrompt.Final(decision.Approved ? decision.Detail : "with-secrets: " + decision.Detail);
 
-        return new Cmd<int>((port, o, e) => CommandWiring.Change(command, rig.Store, rig.State, port));
+            return decision.Approved ? 0 : RunCommand.Denied;
+        });
     }
 
-    public static Cmd<int> Remove(Rig rig, params string[] names)
+    /// <summary>The rotation of the store keys (what the admin app starts after its tap): two admin taps on pages the link leads to.</summary>
+    public static Cmd<int> Rotate(Rig rig)
     {
-        CliCommand command = Parse(["--remove", string.Join(',', names)]);
+        return new Cmd<int>((port, o, e) =>
+        {
+            Action<string> announce = TerminalPrompt.Line;
+            (EnrollmentTarget primary, EnrollmentTarget local) = CommandWiring.Targets(rig.State, ApprovalSettings.Load(rig.State, out _).WithPort(port), announce, null);
+            ConfigChange change = new KeyRotation(rig.State, rig.Store, primary, local, announce).Run();
+            TerminalPrompt.Final(change.Done ? change.Detail : "with-secrets: " + change.Detail);
 
-        return new Cmd<int>((port, o, e) => CommandWiring.Change(command, rig.Store, rig.State, port));
+            return change.Code;
+        });
     }
 }
 
@@ -80,17 +118,33 @@ internal static class PageSteps
 
 internal static class AuditChecks
 {
-    /// <summary>The audit event names, oldest first.</summary>
-    public static IReadOnlyList<string> Events(Rig rig)
+    /// <summary>
+    /// The audit events, oldest first: what the authority already has plus what is still in the outbox (the service uploads and removes). An administrative event is
+    /// named by its event name, a run's by "type-outcome" (authorization-approved, launch-started, execution-exited).
+    /// </summary>
+    public static IReadOnlyList<AuditEvent> All(Rig rig)
     {
-        new AuditLog(rig.State).TryRead(200, null, out IReadOnlyList<AuditRecord> rows, out _);
+        Dictionary<string, AuditEvent> events = [];
+        foreach (AuditHistoryRecord item in rig.Machine.Deployment.Store.AuditHistory(new AuditQuery(Limit: AuditQuery.MaxLimit)))
+        {
+            events[item.Event.EventId] = item.Event;
+        }
 
-        return [.. rows.Select(r => r.Event)];
+        foreach (AuditEvent item in HostAuditOutbox.InFolder(rig.Folder, E2EAudit.KeyFor(rig.Folder)).Pending(100000))
+        {
+            events[item.EventId] = item;
+        }
+
+        return [.. events.Values.OrderBy(item => item.Sequence)];
     }
+
+    public static string Name(AuditEvent item) => item.Type == AuditEventTypes.Admin ? item.Outcome : item.Type + "-" + item.Outcome;
+
+    public static IReadOnlyList<string> Events(Rig rig) => [.. All(rig).Select(Name)];
 
     public static void Expect(S s, Rig rig, params string[] expected)
     {
         IReadOnlyList<string> events = Events(rig);
-        s.Check(events.SequenceEqual(expected) && new AuditLog(rig.State).Verify().Ok, "audit rows: " + string.Join(", ", expected) + (events.SequenceEqual(expected) ? "" : " (got " + string.Join(", ", events) + ")"));
+        s.Check(events.SequenceEqual(expected) && All(rig).All(item => item.Verify(E2EAudit.KeyFor(rig.Folder).PublicKey)), "audit events (signed): " + string.Join(", ", expected) + (events.SequenceEqual(expected) ? "" : " (got " + string.Join(", ", events) + ")"));
     }
 }

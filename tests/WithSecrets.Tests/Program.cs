@@ -155,19 +155,15 @@ internal static class Program
         Check(CliArgs.ParseRun(["--secrets", "A, B,C", "--reason", "x", "--", "p"], out _)!.Secrets.SequenceEqual(["A", "B", "C"]), "parse: --secrets takes a comma list");
         Check(CliArgs.ParseRun(["--secrets", "A", "--secrets", "A,B", "--reason", "x", "--", "p"], out _)!.Secrets.SequenceEqual(["A", "B"]), "parse: repeated names are merged");
         // --- the full command line (System.CommandLine): one mode per call, the program's own arguments are never parsed
-        Check(CliArgs.Parse(["--list"], out _) is CliCommand.List && CliArgs.Parse(["-List"], out _) is CliCommand.List, "cli: --list and -List");
-        Check(CliArgs.Parse(["--set", "DB_URL"], out _) is CliCommand.Set { Names: ["DB_URL"] }, "cli: --set NAME");
-        Check(CliArgs.Parse(["--remove", "DB_URL"], out _) is CliCommand.Remove { Names: ["DB_URL"] }, "cli: --remove NAME");
-        Check(CliArgs.Parse(["--revoke"], out _) is CliCommand.Revoke, "cli: --revoke");
-        Check(CliArgs.Parse(["--set"], out _) is null, "cli: --set needs a name");
-        Check(CliArgs.Parse(["--list", "--revoke"], out _) is null, "cli: two modes are refused");
-        Check(CliArgs.Parse(["--list", "--secrets", "A", "--reason", "x", "--", "p"], out _) is null, "cli: a human mode and a run are refused together");
-        Check(CliArgs.Parse(["--list", "--", "prog"], out _) is null, "cli: --list takes no program");
+        Check(CliArgs.Parse(["--revoke"], out _) is null, "cli: --revoke does not exist any more");
+        Check(CliArgs.Parse(["--recover"], out _) is CliCommand.Recover && CliArgs.Parse(["--needs"], out _) is CliCommand.Needs, "cli: --recover and --needs");
+        Check(CliArgs.Parse(["--recover", "--needs"], out _) is null, "cli: two modes are refused");
+        Check(CliArgs.Parse(["--recover", "--secrets", "A", "--reason", "x", "--", "p"], out _) is null, "cli: a human mode and a run are refused together");
         Check(CliArgs.Parse(["--secrets", "A", "--reason", "x", "--"], out _) is null, "cli: nothing after -- is refused");
         Check(CliArgs.Parse(["--secrets", "A", "--reason", "x", "prog"], out _) is null, "cli: the program must come after --");
         Check(CliArgs.Parse(["--secrets", "A", "--reason", "-dash first", "--", "p"], out _) is CliCommand.Run { Args.Reason: "-dash first" }, "cli: a reason may start with a dash");
         Check(CliArgs.Parse(["--help"], out _) is CliCommand.Help { Text: var help } && help.Contains("--secrets", StringComparison.Ordinal), "cli: --help lists the options");
-        Check(CliArgs.Parse([], out _) is CliCommand.Help { Text: var bare } && bare.Contains("--secrets", StringComparison.Ordinal) && bare.Contains("reuseMinutes", StringComparison.Ordinal) && bare.Contains("reuseMaxMinutes", StringComparison.Ordinal) && bare.Contains("Approve once", StringComparison.Ordinal), "cli: no arguments shows the built-in help, with the approval reuse settings");
+        Check(CliArgs.Parse([], out _) is CliCommand.Help { Text: var bare } && bare.Contains("--secrets", StringComparison.Ordinal) && bare.Contains("reuseMaxMinutes", StringComparison.Ordinal) && !bare.Contains("--revoke", StringComparison.Ordinal), "cli: no arguments shows the built-in help, with the grant time setting");
         CliCommand? verbatim = CliArgs.Parse(["--secrets", "A", "--reason", "x", "--", "prog", "--help", "-h", "@file.rsp", "[env:A=b]", "--secrets", "--"], out _);
         Check(verbatim is CliCommand.Run run && run.Args.Program == "prog" && run.Args.Arguments.SequenceEqual(["--help", "-h", "@file.rsp", "[env:A=b]", "--secrets", "--"]), "cli: everything after -- reaches the program unchanged");
         string responseFile = Path.Combine(Path.GetTempPath(), "with-secrets-rsp-" + Guid.NewGuid().ToString("N") + ".rsp");
@@ -175,7 +171,7 @@ internal static class Program
         Check(CliArgs.Parse(["@" + responseFile, "--", "prog"], out _) is null, "cli: a response file is not expanded");
         File.Delete(responseFile);
         Check(CliArgs.Parse(["[env:PATH=C:\\evil]", "--secrets", "A", "--reason", "x", "--", "prog"], out _) is null, "cli: a directive is not accepted");
-        Check(SecretNames.IsValid("DB_URL") && !SecretNames.IsValid("db_url") && !SecretNames.IsValid("DOTENV_PRIVATE_KEY"), "name rules");
+        Check(SecretNames.IsValid("DB_URL") && SecretNames.IsValid("db_url") && SecretNames.IsValid("DOTENV_PRIVATE_KEY") && !SecretNames.IsValid("DOTENV_PUBLIC_KEY") && !SecretNames.IsValid("1db"), "name rules");
 
         // --- program resolution
         string temp = Path.Combine(Path.GetTempPath(), "with-secrets-test-" + Guid.NewGuid().ToString("N"));
@@ -207,14 +203,14 @@ internal static class Program
         Check(linkedText.Contains("Link: /x/sh -> /x/dash", StringComparison.Ordinal) && linkedText.Split('\n').Count(line => line.StartsWith("INJECTED", StringComparison.Ordinal)) == 0, "paths: link notes are shown and cleaned");
         Check(Policy.CheckLength("p", [new string('y', 17000)]) is not null && Policy.CheckLength("p", [new string('y', 600)]) is null, "paths: the technical limit can run on the expanded command");
 
-        // --- approval reuse: fingerprint
+        // --- request fingerprint
         string fpDir = Path.Combine(temp, "fp");
         Directory.CreateDirectory(fpDir);
         string fpScript = Path.Combine(fpDir, "check.sh");
         File.WriteAllText(fpScript, "echo one");
         ApprovalRequest baseRequest = new("prog", fpScript, ["./check.sh"], fpDir, "reason A", ["B_NAME", "A_NAME"]);
         string baseKey = RequestFingerprint.Compute(baseRequest).Key;
-        Check(RequestFingerprint.Compute(baseRequest with { Reason = "other words", Reuse = new ReuseOffer(480, 10) }).Key == baseKey, "fingerprint: reason and reuse minutes are not part of the key");
+        Check(RequestFingerprint.Compute(baseRequest with { Reason = "other words", Reuse = new ReuseOffer(480) }).Key == baseKey, "fingerprint: reason and grant times are not part of the key");
         Check(RequestFingerprint.Compute(baseRequest with { SecretNames = ["A_NAME", "B_NAME"] }).Key == baseKey, "fingerprint: order of names does not matter");
         Check(RequestFingerprint.Compute(baseRequest with { SecretNames = ["A_NAME"] }).Key != baseKey, "fingerprint: different names, different key");
         Check(RequestFingerprint.Compute(baseRequest with { Arguments = ["./check.sh", "--flag", "7"] }).Key == baseKey, "fingerprint: other arguments are not part of the key");
@@ -261,31 +257,7 @@ internal static class Program
         File.WriteAllText(scriptA, "A changed");
         Check(RequestFingerprint.Compute(viaInterpreter).Key != interpKey, "fingerprint: an edited script given to an interpreter changes the key");
 
-        // --- approval reuse: grants
-        string grantFile = Path.Combine(temp, "grants.db");
-        DateTimeOffset clock = new(2026, 10, 31, 12, 0, 0, TimeSpan.Zero);
-        GrantStore grantStore = new(new StateDatabase(grantFile), () => clock);
-        Check(!grantStore.TryGet("K1", out _, out _), "grants: nothing before an approval");
-        Check(!grantStore.Add("K1", 10), "grants: no grant without an enrolled key (no manifest)");
-        TestState.Seeded(grantFile);
-        Check(grantStore.Add("K1", 10), "grants: add");
-        clock = clock.AddMinutes(9);
-        Check(grantStore.TryGet("K1", out _, out DateTimeOffset ends) && ends == new DateTimeOffset(2026, 10, 31, 12, 10, 0, TimeSpan.Zero), "grants: valid inside the time, expiry fixed at approval");
-        clock = clock.AddMinutes(2);
-        Check(!grantStore.TryGet("K1", out _, out _), "grants: expired after the time");
-        grantStore.Add("K2", 5);
-        grantStore.Clear();
-        Check(!grantStore.TryGet("K2", out _, out _), "grants: clear ends everything");
-        File.WriteAllText(grantFile, "{ not json");
-        Check(!grantStore.TryGet("K2", out _, out _), "grants: a broken file means no approvals");
-        File.Delete(grantFile);
-        TestState.Seeded(grantFile);
-        new GrantStore(new StateDatabase(grantFile), () => clock.AddMinutes(5)).Add("K3", 55);
-        Check(!grantStore.TryGet("K3", out _, out _), "grants: an approval dated in the future is ignored");
-
-        ApprovalRequest reuseText = baseRequest with { Reuse = new ReuseOffer(480, 10) };
-        Check(ApprovalSummary.BuildMessage(reuseText).Contains("up to 480 min", StringComparison.Ordinal), "prompt text states the longest reuse time offered");
-        Check(!ApprovalSummary.BuildMessage(baseRequest).Contains("whatever the other arguments", StringComparison.Ordinal), "prompt text has no reuse line when reuse is off");
+        Check(!ApprovalSummary.BuildMessage(baseRequest with { Reuse = new ReuseOffer(480) }).Contains("whatever the other arguments", StringComparison.Ordinal), "prompt text: no saved approval is offered");
 
         if (!OperatingSystem.IsWindows())
         {
@@ -304,6 +276,11 @@ internal static class Program
         if (Wants("ApprovalSummary"))
         {
             ApprovalSummaryTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("ApprovalQueue"))
+        {
+            ApprovalQueueTests.Run(Check);
         }
 
         if (Wants("ProofReply"))
@@ -346,6 +323,71 @@ internal static class Program
             WebApprovalTests.Run(Check).GetAwaiter().GetResult();
         }
 
+        if (Wants("HostService"))
+        {
+            HostServiceTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("AuthorityLock"))
+        {
+            AuthorityLockTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("Identity"))
+        {
+            IdentityTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("TestIsolation"))
+        {
+            TestIsolationTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("KeyStore"))
+        {
+            KeyStoreTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("Authority"))
+        {
+            AuthorityTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("GrantAuthority"))
+        {
+            GrantAuthorityTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("Remote"))
+        {
+            RemoteAuthorityTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("RemoteLaunch"))
+        {
+            RemoteLaunchTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("AuditTrail"))
+        {
+            AuditTrailTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("Api"))
+        {
+            ApiTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("Admin"))
+        {
+            AdminTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("LaunchContract"))
+        {
+            LaunchContractTests.Run(Check).GetAwaiter().GetResult();
+        }
+
         if (Wants("Reuse"))
         {
             ReuseTests.Run(Check).GetAwaiter().GetResult();
@@ -371,6 +413,11 @@ internal static class Program
             PageScriptTests.Run(Check).GetAwaiter().GetResult();
         }
 
+        if (Wants("Operations"))
+        {
+            OperationsTests.Run(Check).GetAwaiter().GetResult();
+        }
+
         if (Wants("AdminKeys"))
         {
             AdminKeysTests.Run(Check).GetAwaiter().GetResult();
@@ -391,9 +438,24 @@ internal static class Program
             RecoveryTests.Run(Check).GetAwaiter().GetResult();
         }
 
+        if (Wants("Pairing"))
+        {
+            PairingTests.Run(Check).GetAwaiter().GetResult();
+        }
+
         if (Wants("OneFlow"))
         {
             OneFlowTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("Hardening"))
+        {
+            HardeningTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("BlockedRun"))
+        {
+            BlockedRunTests.Run(Check).GetAwaiter().GetResult();
         }
 
         Directory.Delete(temp, true);
@@ -426,7 +488,7 @@ internal static class Program
         StringWriter stdout = new();
         StringWriter stderr = new();
         RunArgs approved = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "test", "--", "./script.sh"], out _)!;
-        int code = await new RunCommand(new MemoryStore(values), yes, new AuditLog(new StateDatabase(auditPath)), stdout, stderr).ExecuteAsync(approved, temp);
+        int code = await new RunCommand(new MemoryStore(values), yes, stdout, stderr).ExecuteAsync(approved, temp, TestAudit.Sink(new StateDatabase(auditPath)));
         Check(code == 7, "e2e: exit code of the program passes through");
         Check(stdout.ToString().Contains("plain=[REDACTED]", StringComparison.Ordinal), "e2e: exact value redacted");
         Check(!stdout.ToString().Contains(Secret, StringComparison.Ordinal) && !stdout.ToString().Contains(Convert.ToBase64String(Encoding.UTF8.GetBytes(Secret)), StringComparison.Ordinal), "e2e: base64 form redacted");
@@ -434,8 +496,8 @@ internal static class Program
         Check(stderr.ToString().Contains("key=none", StringComparison.Ordinal), "e2e: dotenvx private key is not passed");
         Check(yes.Requests.Count == 1 && yes.Requests[0].SecretNames.SequenceEqual(["DB_URL"]), "e2e: the approver saw the requested names");
         string audit = StateDatabaseTests.AuditText(auditPath);
-        Check(audit.Contains("DB_URL", StringComparison.Ordinal) && !audit.Contains(Secret, StringComparison.Ordinal) && audit.Contains("\"exitCode\":7", StringComparison.Ordinal), "e2e: audit log has names and exit code, no values");
-        Check(JsonDocument.Parse(audit.Split('\n')[0]).RootElement.GetProperty("event").GetString() == "approved", "e2e: audit log is JSON lines");
+        Check(audit.Contains("script.sh", StringComparison.Ordinal) && !audit.Contains(Secret, StringComparison.Ordinal) && audit.Contains("\"exitCode\":7", StringComparison.Ordinal), "e2e: the signed audit events have the program and exit code, no values");
+        Check(JsonDocument.Parse(audit.Split('\n')[0]).RootElement.GetProperty("type").GetString() == "authorization" && audit.Split((char)10).Length == 3, "e2e: three signed events (authorization, launch, execution)");
 
         // several secrets in one run: exactly the named ones, and a third is left out
         Dictionary<string, string> three = new() { ["DB_URL"] = Secret, ["API_KEY"] = "Api-Key-Value-1", ["LEFT_OUT"] = "Left-Out-Value-1" };
@@ -445,21 +507,21 @@ internal static class Program
         FakeApprover pair = new(true);
         StringWriter multiOut = new();
         RunArgs two = CliArgs.ParseRun(["--secrets", "DB_URL", "--secrets", "API_KEY", "--reason", "two", "--", "./multi.sh"], out _)!;
-        code = await new RunCommand(new MemoryStore(three), pair, new AuditLog(new StateDatabase(auditPath)), multiOut, new StringWriter()).ExecuteAsync(two, temp);
+        code = await new RunCommand(new MemoryStore(three), pair, multiOut, new StringWriter()).ExecuteAsync(two, temp);
         Check(code == 0 && multiOut.ToString().Trim() == "a=[REDACTED] b=[REDACTED] c=unset", "e2e: two named secrets are injected, the third is not");
         Check(pair.Requests.Count == 1 && pair.Requests[0].SecretNames.SequenceEqual(["DB_URL", "API_KEY"]), "e2e: one prompt lists both names");
 
         // a wildcard is not a name
         FakeApprover star = new(true);
         RunArgs wildcard = CliArgs.ParseRun(["--secrets", "*", "--reason", "x", "--", "./multi.sh"], out _)!;
-        code = await new RunCommand(new MemoryStore(three), star, new AuditLog(new StateDatabase(auditPath)), new StringWriter(), new StringWriter()).ExecuteAsync(wildcard, temp);
+        code = await new RunCommand(new MemoryStore(three), star, new StringWriter(), new StringWriter()).ExecuteAsync(wildcard, temp);
         Check(code == RunCommand.Usage && star.Requests.Count == 0, "e2e: wildcard name is refused without a prompt");
 
         // denied: the program does not run
         File.Delete(marker);
         FakeApprover no = new(false);
         stderr = new StringWriter();
-        code = await new RunCommand(new MemoryStore(values), no, new AuditLog(new StateDatabase(auditPath)), new StringWriter(), stderr).ExecuteAsync(approved, temp);
+        code = await new RunCommand(new MemoryStore(values), no, new StringWriter(), stderr).ExecuteAsync(approved, temp);
         Check(code == RunCommand.Denied && !File.Exists(marker), "e2e: denied request runs nothing");
         Check(stderr.ToString().Contains("Do not retry", StringComparison.Ordinal), "e2e: denial tells the agent to ask the user");
 
@@ -467,10 +529,10 @@ internal static class Program
         FakeApprover untouched = new(true);
         RunArgs inline = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", "sh", "-c", "echo $DB_URL"], out _)!;
         FakeApprover inlineApprover = new(true);
-        code = await new RunCommand(new MemoryStore(values), inlineApprover, new AuditLog(new StateDatabase(auditPath)), new StringWriter(), new StringWriter()).ExecuteAsync(inline, temp);
+        code = await new RunCommand(new MemoryStore(values), inlineApprover, new StringWriter(), new StringWriter()).ExecuteAsync(inline, temp);
         Check(code == 0 && inlineApprover.Requests.Count == 1 && ApprovalSummary.BuildMessage(inlineApprover.Requests[0]).Contains("  | echo $DB_URL", StringComparison.Ordinal), "e2e: inline shell now gets a prompt that shows the code");
         RunArgs unknown = CliArgs.ParseRun(["--secrets", "NOPE_NAME", "--reason", "x", "--", "./script.sh"], out _)!;
-        code = await new RunCommand(new MemoryStore(values), untouched, new AuditLog(new StateDatabase(auditPath)), new StringWriter(), new StringWriter()).ExecuteAsync(unknown, temp);
+        code = await new RunCommand(new MemoryStore(values), untouched, new StringWriter(), new StringWriter()).ExecuteAsync(unknown, temp);
         Check(code == RunCommand.Usage && untouched.Requests.Count == 0, "e2e: unknown secret is refused without a prompt");
 
         // --- full paths in the prompt and in the run
@@ -481,15 +543,16 @@ internal static class Program
         FakeApprover pathApprover = new(true);
         StringWriter pathOut = new();
         RunArgs relativeScript = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "paths", "--", "sh", "./where.sh", "extra"], out _)!;
-        code = await new RunCommand(new MemoryStore(values), pathApprover, new AuditLog(new StateDatabase(auditPath)), pathOut, new StringWriter()).ExecuteAsync(relativeScript, whereDir);
+        code = await new RunCommand(new MemoryStore(values), pathApprover, pathOut, new StringWriter()).ExecuteAsync(relativeScript, whereDir);
         ApprovalRequest seen = pathApprover.Requests[0];
         Check(code == 0 && Path.IsPathRooted(seen.ResolvedProgram), "paths e2e: the program is a full path");
         Check(seen.Arguments[0] == whereScript && seen.Arguments[1] == "extra", "paths e2e: the approver sees the script in full and other arguments as typed");
         Check(seen.TypedArguments!.SequenceEqual(["./where.sh", "extra"]), "paths e2e: the typed arguments are kept for the audit log");
         string seenText = ApprovalSummary.BuildMessage(seen);
         Check(seenText.Contains(whereScript, StringComparison.Ordinal) && !seenText.Contains(" ./where.sh", StringComparison.Ordinal), "paths e2e: the prompt shows the full path, not the relative one");
-        Check(pathOut.ToString().Contains("I am " + whereScript, StringComparison.Ordinal), "paths e2e: the program really ran the full path that was shown");
-        Check(StateDatabaseTests.AuditText(auditPath).Contains("typedArguments", StringComparison.Ordinal), "paths e2e: audit log keeps what was typed");
+        // This runs where the system cannot lock a file: the program is told to run a private copy of the shown file (HeldFiles), under the same name.
+        string whereRan = pathOut.ToString().Trim();
+        Check(whereRan.StartsWith("I am ", StringComparison.Ordinal) && whereRan.EndsWith(Path.DirectorySeparatorChar + "where.sh", StringComparison.Ordinal) && !whereRan.Contains(whereDir, StringComparison.Ordinal), "paths e2e: the program ran a private copy of the file that was shown, under the same name");
 
         // a symbolic link is shown with where it leads
         string realScript = Path.Combine(whereDir, "real.sh");
@@ -498,7 +561,7 @@ internal static class Program
         File.CreateSymbolicLink(linkScript, realScript);
         FakeApprover linkApprover = new(true);
         RunArgs viaLink = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "link", "--", "sh", "link.sh"], out _)!;
-        await new RunCommand(new MemoryStore(values), linkApprover, new AuditLog(new StateDatabase(auditPath)), new StringWriter(), new StringWriter()).ExecuteAsync(viaLink, whereDir);
+        await new RunCommand(new MemoryStore(values), linkApprover, new StringWriter(), new StringWriter()).ExecuteAsync(viaLink, whereDir);
         Check(linkApprover.Requests[0].Links!.Any(note => note == $"{linkScript} -> {realScript}"), "paths e2e: a symbolic link shows its target");
         Check(ApprovalSummary.BuildMessage(linkApprover.Requests[0]).Contains("Link: ", StringComparison.Ordinal), "paths e2e: the prompt has the link line");
 
@@ -507,95 +570,30 @@ internal static class Program
         string reuseScript = Path.Combine(temp, "reuse.sh");
         await File.WriteAllTextAsync(reuseScript, "#!/bin/sh\necho \"v=$DB_URL\"\n");
         File.SetUnixFileMode(reuseScript, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-        string reuseGrants = Path.Combine(temp, "reuse-grants.db");
-        using TestAuthenticator reuseKey = TestAuthenticator.ES256();
-        FakeApprover reuseApprover = new(true, 10, reuseKey);
-        void Fresh()
+        // every run asks: nothing an approval says is kept for a later run
+        FakeApprover asks = new(true);
+        RunArgs reuseArgs = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "loop", "--", "./reuse.sh"], out _)!;
+        for (int round = 0; round < 2; round++)
         {
-            File.Delete(reuseGrants);
-            TestState.Add(new StateDatabase(reuseGrants), reuseKey.Record("localhost", "reuse-key"));
+            await new RunCommand(new MemoryStore(values), asks, new StringWriter(), new StringWriter()).ExecuteAsync(reuseArgs, temp, TestAudit.Sink(new StateDatabase(reuseAudit)));
         }
 
-        ReuseOffer offer = new(480, 10);
-        RunArgs reuseArgs = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "loop", "--", "./reuse.sh"], out _)!;
-        Task<int> Reuse(IApprover approver, ReuseOffer window, TextWriter? err = null, string? grantPath = null)
-            => new RunCommand(new MemoryStore(values), approver, new AuditLog(new StateDatabase(reuseAudit)), new StringWriter(), err ?? new StringWriter(), new GrantStore(new StateDatabase(grantPath ?? reuseGrants)), window).ExecuteAsync(reuseArgs, temp);
-
-        Fresh();
-        Check(await Reuse(reuseApprover, offer) == 0 && reuseApprover.Requests.Count == 1, "reuse: first run asks");
-        StringWriter reuseErr = new();
-        Check(await Reuse(reuseApprover, offer, reuseErr) == 0 && reuseApprover.Requests.Count == 1, "reuse: second identical run does not ask");
-        Check(reuseErr.ToString().Contains("reusing the approval", StringComparison.Ordinal), "reuse: the agent is told the approval was reused");
-        Check(reuseApprover.Requests[0].Reuse == offer, "reuse: the prompt carried the reuse offer");
-
-        string[] auditLines = (await File.ReadAllTextAsync(reuseAudit)).Split('\n', StringSplitOptions.RemoveEmptyEntries);
-        Check(auditLines.Any(line => line.Contains("\"event\":\"reused\"", StringComparison.Ordinal)) && auditLines.Any(line => line.Contains(reuseScript.Replace("\\", "\\\\", StringComparison.Ordinal), StringComparison.Ordinal)), "reuse: audit records the reuse and the script hash");
-
-        RunArgs withFlags = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "loop", "--", "./reuse.sh", "--filter", "slow"], out _)!;
-        await new RunCommand(new MemoryStore(values), reuseApprover, new AuditLog(new StateDatabase(reuseAudit)), new StringWriter(), new StringWriter(), new GrantStore(new StateDatabase(reuseGrants)), offer).ExecuteAsync(withFlags, temp);
-        Check(reuseApprover.Requests.Count == 1, "reuse: the same script with other arguments does not ask again");
-
-        await File.WriteAllTextAsync(reuseScript, "#!/bin/sh\necho \"v=$DB_URL\"; echo changed\n");
-        Check(await Reuse(reuseApprover, offer) == 0 && reuseApprover.Requests.Count == 2, "reuse: a changed script asks again");
-
-        RunArgs otherNames = CliArgs.ParseRun(["--secrets", "DB_URL,OTHER", "--reason", "loop", "--", "./reuse.sh"], out _)!;
-        await new RunCommand(new MemoryStore(values), reuseApprover, new AuditLog(new StateDatabase(reuseAudit)), new StringWriter(), new StringWriter(), new GrantStore(new StateDatabase(reuseGrants)), offer).ExecuteAsync(otherNames, temp);
-        Check(reuseApprover.Requests.Count == 3, "reuse: different secret names ask again");
-
-        FakeApprover off = new(true);
-        Fresh();
-        await Reuse(off, ReuseOffer.Off);
-        await Reuse(off, ReuseOffer.Off);
-        Check(off.Requests.Count == 2 && off.Requests.All(request => request.Reuse is null), "reuse: reuse off asks every time");
-        FakeApprover once = new(true, 0);
-        Fresh();
-        await Reuse(once, offer);
-        await Reuse(once, offer);
-        Check(once.Requests.Count == 2 && new GrantStore(new StateDatabase(reuseGrants)).Entries().Count == 0, "reuse: approve once asks every time and saves nothing");
-
-        FakeApprover refuse = new(false);
-        Fresh();
-        await Reuse(refuse, offer);
-        await Reuse(refuse, offer);
-        Check(refuse.Requests.Count == 2 && new GrantStore(new StateDatabase(reuseGrants)).Entries().Count == 0, "reuse: a denial is never remembered");
-
-        // an interpreter runs the script: editing the script asks again, a different flag does not
-        Fresh();
-        FakeApprover viaSh = new(true, 10, reuseKey);
-        RunArgs shArgs = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", "sh", "./reuse.sh", "one"], out _)!;
-        RunArgs shArgsFlag = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", "sh", "./reuse.sh", "two"], out _)!;
-        Task<int> Sh(RunArgs arguments) => new RunCommand(new MemoryStore(values), viaSh, new AuditLog(new StateDatabase(reuseAudit)), new StringWriter(), new StringWriter(), new GrantStore(new StateDatabase(reuseGrants)), offer).ExecuteAsync(arguments, temp);
-        await Sh(shArgs);
-        await Sh(shArgsFlag);
-        Check(viaSh.Requests.Count == 1, "reuse: interpreter with the same script and other arguments does not ask again");
-        await File.WriteAllTextAsync(reuseScript, "#!/bin/sh\necho edited again\n");
-        await Sh(shArgs);
-        Check(viaSh.Requests.Count == 2, "reuse: an interpreter with an edited script asks again");
-
-        // an expired approval asks again: write one that ended a minute ago
-        Fresh();
-        FakeApprover late = new(true, 10, reuseKey);
-        await Reuse(late, offer);
-        string key = new GrantStore(new StateDatabase(reuseGrants)).Entries()[0].Key;
-        new GrantStore(new StateDatabase(reuseGrants), () => DateTimeOffset.UtcNow.AddMinutes(-11)).Add(key, 10);
-        await Reuse(late, offer);
-        Check(late.Requests.Count == 2, "reuse: an expired approval asks again");
+        Check(asks.Requests.Count == 2, "run: the same request asks every time");
 
         // a script that changes while the prompt is open does not run
-        Fresh();
         string racing = Path.Combine(temp, "racing.sh");
         await File.WriteAllTextAsync(racing, "#!/bin/sh\necho first\n");
         File.SetUnixFileMode(racing, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         RunArgs racingArgs = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "race", "--", "./racing.sh"], out _)!;
         EditingApprover editing = new(racing);
-        code = await new RunCommand(new MemoryStore(values), editing, new AuditLog(new StateDatabase(reuseAudit)), new StringWriter(), new StringWriter(), new GrantStore(new StateDatabase(reuseGrants)), offer).ExecuteAsync(racingArgs, temp);
-        Check(code == RunCommand.Denied && new GrantStore(new StateDatabase(reuseGrants)).Entries().Count == 0, "reuse: a script edited during the prompt is not run and not remembered");
+        code = await new RunCommand(new MemoryStore(values), editing, new StringWriter(), new StringWriter()).ExecuteAsync(racingArgs, temp);
+        Check(code == RunCommand.Denied, "run: a script edited during the prompt is not run");
 
         // audit failure fails closed
         string blocked = Path.Combine(temp, "blocked");
         await File.WriteAllTextAsync(blocked, "a file, not a directory");
         File.Delete(marker);
-        code = await new RunCommand(new MemoryStore(values), yes, new AuditLog(new StateDatabase(Path.Combine(blocked, "audit.db"))), new StringWriter(), new StringWriter()).ExecuteAsync(approved, temp);
-        Check(code == RunCommand.AuditError && !File.Exists(marker), "e2e: unwritable audit log means nothing runs");
+        code = await new RunCommand(new MemoryStore(values), yes, new StringWriter(), new StringWriter()).ExecuteAsync(approved, temp, new RecordingAudit(refuse: true));
+        Check(code == RunCommand.AuditError && !File.Exists(marker), "e2e: an audit event that cannot be committed means nothing runs");
     }
 }

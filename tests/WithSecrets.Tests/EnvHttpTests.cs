@@ -15,7 +15,7 @@ internal static partial class WebApprovalTests
         Directory.CreateDirectory(folder);
         using HttpClient client = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false });
         client.Timeout = TimeSpan.FromSeconds(20);
-        ApprovalSettings local = new("passkey", null, 0, TimeSpan.FromSeconds(20));
+        ApprovalSettings local = new(null, 0, TimeSpan.FromSeconds(20));
         using TestAuthenticator laptop = TestAuthenticator.ES256();
         const string Stripe = "team/payments/STRIPE_KEY";
         const string StripeValue = "Stripe-Value-4711";
@@ -35,7 +35,7 @@ internal static partial class WebApprovalTests
         }
         else
         {
-            File.WriteAllText(programPath, "#!/bin/sh\nenv > \"$(dirname \"$0\")/env.txt\"\necho \"t=$TOKEN\"\necho \"l=$LOG_LEVEL\"\n");
+            File.WriteAllText(programPath, "#!/bin/sh\nenv > \"" + envFile + "\"\necho \"t=$TOKEN\"\necho \"l=$LOG_LEVEL\"\n");
             File.SetUnixFileMode(programPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
 
@@ -68,8 +68,8 @@ internal static partial class WebApprovalTests
                 link.TrySetResult(line);
             }, TimeSpan.Zero);
             RunArgs args = CliArgs.ParseRun(["--reason", "env http test", "--", "./" + program], out _)!;
-            RunCommand command = new(store, approver, new AuditLog(db), TextWriter.Synchronized(stdout), errors, environment: _ => null);
-            Task<int> running = Task.Run(() => command.ExecuteAsync(args, scripts));
+            RunCommand command = new(store, approver, TextWriter.Synchronized(stdout), errors, environment: _ => null);
+            Task<int> running = Task.Run(() => command.ExecuteAsync(args, scripts, TestAudit.Sink(db)));
             List<string> seen = [];
             Task first = await Task.WhenAny(link.Task, running, Task.Delay(TimeSpan.FromSeconds(20)));
             if (first == link.Task)
@@ -98,7 +98,7 @@ internal static partial class WebApprovalTests
         check(page.Contains($"TOKEN <- secret {Stripe}", StringComparison.Ordinal) && page.Contains(dotenv, StringComparison.Ordinal) && page.Contains("LOG_LEVEL", StringComparison.Ordinal), "env http: the page shows the pair, the .env path and the ordinary name");
         string everything = string.Join("\n", [.. result.Seen, result.Out, result.Err, audit]);
         check(!everything.Contains(StripeValue, StringComparison.Ordinal) && page.Contains("\n  | LOG_LEVEL=" + Ordinary, StringComparison.Ordinal) && !result.Err.Contains(Ordinary, StringComparison.Ordinal) && !audit.Contains(Ordinary, StringComparison.Ordinal), "env http: no secret value is on the page, stderr or audit; the ordinary value is on the page and not on the terminal");
-        check(audit.Contains($"\"variable\":\"TOKEN\",\"secret\":\"{Stripe}\"", StringComparison.Ordinal), "env http: the audit row names the pair");
+        check(audit.Contains("\"outcome\":\"approved\"", StringComparison.Ordinal) && !audit.Contains(StripeValue, StringComparison.Ordinal), "env http: the signed authorization event is there and has no value");
 
         // denied: no row is decrypted, nothing runs
         (db, passkeys, store, cipher) = NewState();
@@ -124,7 +124,7 @@ internal static partial class WebApprovalTests
             PasskeyStore setPasskeys = new(setDb);
             TestState.Add(setDb, laptop.Record("localhost", "laptop"), withStore: true);
             SecretStore setStore = new(setDb);
-            EntryRun set = await SetRun(client, setPasskeys, local, local, setStore, [Stripe], laptop, Values((Stripe, StripeValue)));
+            EntryRun set = SetRun(setPasskeys, setStore, [Stripe], laptop, Values((Stripe, StripeValue)));
             check(set.Result is { Code: 0 } && setStore.ListNames().SequenceEqual([Stripe]) && StateDatabaseTests.AuditText(setDb.FilePath).Contains(Stripe, StringComparison.Ordinal), "env http: --set takes a folder name, the whole path is the store name (" + set.Result?.Detail + ")");
             File.WriteAllText(dotenv, $"TOKEN=secret://{Stripe}\n");
             result = await RunWith(setDb, setPasskeys, setStore, (url, origin, rp) => TestState.Approve(client, url, origin, rp, laptop));

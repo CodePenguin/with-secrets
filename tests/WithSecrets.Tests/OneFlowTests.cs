@@ -173,12 +173,12 @@ internal static class OneFlowTests
         using TestAuthenticator laptop = TestAuthenticator.ES256();
         using TestAuthenticator phone = TestAuthenticator.RS256();
         RecoveryTests.World w = RecoveryTests.NewWorld(root, laptop);
-        ApprovalSettings settings = new("passkey", null, 0, TimeSpan.FromSeconds(20));
+        ApprovalSettings settings = new(null, 0, TimeSpan.FromSeconds(20));
         Rig rig = new((announce, read) =>
         {
             (EnrollmentTarget target, _) = Target(w.Db, settings, announce, read);
 
-            return new Enrollment(target, target, announce, new AuditLog(w.Db)).Enroll();
+            return new Enrollment(target, target, announce, w.Db.Audit).Enroll();
         });
 
         (string Url, string Origin)? one = rig.First();
@@ -226,7 +226,7 @@ internal static class OneFlowTests
         {
             RecoveryTests.World w = RecoveryTests.NewWorld(root, laptop);
             int port = FreePort();
-            ApprovalSettings remote = new("passkey", "https://ws.example.com:" + port, port, TimeSpan.FromSeconds(20));
+            ApprovalSettings remote = new("https://ws.example.com:" + port, port, TimeSpan.FromSeconds(20));
             ApprovalSettings localOnly = remote with { BaseUrl = null };
             int codeAskedAtSign = -1;
             Rig rig = new((announce, read) =>
@@ -234,7 +234,7 @@ internal static class OneFlowTests
                 (EnrollmentTarget primary, _) = Target(w.Db, remote, announce, read);
                 (EnrollmentTarget other, _) = Target(w.Db, localOnly, announce, read);
 
-                return new Enrollment(primary, other, announce, new AuditLog(w.Db)).Enroll();
+                return new Enrollment(primary, other, announce, w.Db.Audit).Enroll();
             });
 
             // The command target is the baseUrl host; the admin key works only at localhost, so the approval and the signature are there.
@@ -330,7 +330,7 @@ internal static class OneFlowTests
         {
             RecoveryTests.World w = RecoveryTests.NewWorld(root, laptop);
             string before = RecoveryTests.Snapshot(w.Db);
-            ApprovalSettings quick = new("passkey", null, 0, TimeSpan.FromSeconds(4));
+            ApprovalSettings quick = new(null, 0, TimeSpan.FromSeconds(4));
             RecoveryTests.Flow flow = RecoveryTests.StartRotate(w, null, quick);
             (string Url, string Origin)? one = flow.Next();
             System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
@@ -394,7 +394,7 @@ internal static class OneFlowTests
             typed.Add("111111");
             check(reading.Wait(TimeSpan.FromSeconds(10)) && reading.Result == "111111", "prompt: the typed line is returned");
             check(Unix(output) == now, "prompt: nothing is replayed after Enter");
-            check(TerminalPrompt.Waiting.EndsWith(": ", StringComparison.Ordinal) && !TerminalPrompt.Waiting.Contains('\n') && TerminalPrompt.Waiting.StartsWith("Waiting for the code from the page. Paste it here and press Enter", StringComparison.Ordinal), "prompt: the text names the page and Enter and ends so that the cursor stays on its line");
+            check(TerminalPrompt.Waiting.EndsWith(": ", StringComparison.Ordinal) && !TerminalPrompt.Waiting.Contains('\n') && TerminalPrompt.Waiting.StartsWith("Type the code from the page", StringComparison.Ordinal), "prompt: the text names the page and Enter and ends so that the cursor stays on its line");
 
             // The whole --enroll flow, with the real gate as terminal: after the last tap the prompt is last, whatever the network does.
             output.GetStringBuilder().Clear();
@@ -402,7 +402,7 @@ internal static class OneFlowTests
             using TestAuthenticator laptop = TestAuthenticator.ES256();
             using TestAuthenticator phone = TestAuthenticator.RS256();
             RecoveryTests.World w = RecoveryTests.NewWorld(root, laptop);
-            ApprovalSettings settings = new("passkey", null, 0, TimeSpan.FromSeconds(20));
+            ApprovalSettings settings = new(null, 0, TimeSpan.FromSeconds(20));
             int asked = 0;
             Rig rig = new((announce, unused) =>
             {
@@ -413,7 +413,7 @@ internal static class OneFlowTests
                 };
                 (EnrollmentTarget target, _) = Target(w.Db, settings, both, () => TerminalPrompt.ReadCode(asked++ > 0));
 
-                return new Enrollment(target, target, both, new AuditLog(w.Db)).Enroll();
+                return new Enrollment(target, target, both, w.Db.Audit).Enroll();
             });
             (string Url, string Origin)? one = rig.First();
             (_, string body1) = one is null ? (0, "") : TestState.Approve(client, one.Value.Url, one.Value.Origin, "localhost", laptop);
@@ -506,14 +506,14 @@ internal static class OneFlowTests
         {
             RecoveryTests.World w = RecoveryTests.NewWorld(root, laptop);
             int port = FreePort();
-            ApprovalSettings remote = new("passkey", "https://ws.example.com:" + port, port, TimeSpan.FromSeconds(20));
+            ApprovalSettings remote = new("https://ws.example.com:" + port, port, TimeSpan.FromSeconds(20));
             ApprovalSettings localOnly = remote with { BaseUrl = null };
             Rig rig = new((announce, read) =>
             {
                 (EnrollmentTarget primary, _) = Target(w.Db, remote, announce, read);
                 (EnrollmentTarget other, _) = Target(w.Db, localOnly, announce, read);
 
-                return new Enrollment(primary, other, announce, new AuditLog(w.Db)).Enroll();
+                return new Enrollment(primary, other, announce, w.Db.Audit).Enroll();
             });
             (string Url, string Origin)? one = rig.First();
             (_, string body1) = one is null ? (0, "") : TestState.Approve(client, one.Value.Url, one.Value.Origin, "localhost", laptop);
@@ -616,8 +616,8 @@ internal static class OneFlowTests
     internal static void Pages(Action<bool, string> check)
     {
         string recovery = RecoveryPage.Build("Admins: laptop ab12", [1, 2, 3], "k", 3).Body;
-        string approval = ApprovalPage.Build(new ApprovalPrompt("h", "t"), new ProofStart("webauthn", "{}"), "n", [1], TimeSpan.Zero, null, null, "k").Body;
-        string signing = ApprovalPage.Build(new ApprovalPrompt("h", "t"), new ProofStart("webauthn", "{}"), "n", [1], TimeSpan.Zero, null, "{}", null, false, "123456").Body;
+        string approval = ApprovalPage.Build(new ApprovalPrompt("h", "t"), new ProofStart("webauthn", "{}"), "n", [1], TimeSpan.Zero, null, "k").Body;
+        string signing = ApprovalPage.Build(new ApprovalPrompt("h", "t"), new ProofStart("webauthn", "{}"), "n", [1], TimeSpan.Zero, "{}", null, false, "123456").Body;
         string enroll = PasskeyRegistration.Build("laptop", "localhost", "{}", PasskeyRegistration.Script, ApprovalPage.Style, "Admin key: x").Body;
         foreach ((string name, string page) in new[] { ("recovery", recovery), ("approval", approval), ("signing", signing), ("enroll", enroll) })
         {

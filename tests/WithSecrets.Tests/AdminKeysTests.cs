@@ -24,7 +24,7 @@ internal static class AdminKeysTests
         }
     }
 
-    private static readonly ApprovalSettings Settings = new("passkey", null, 0, TimeSpan.FromSeconds(10));
+    private static readonly ApprovalSettings Settings = new(null, 0, TimeSpan.FromSeconds(10));
 
     private static (EnrollmentTarget, EnrollmentTarget) Targets(StateDatabase db, Action<string> announce)
     {
@@ -38,10 +38,10 @@ internal static class AdminKeysTests
     {
         (EnrollmentTarget a, EnrollmentTarget b) = Targets(db, announce);
 
-        return new Enrollment(a, b, announce, new AuditLog(db)).Unenroll(name);
+        return new Enrollment(a, b, announce, db.Audit).Unenroll(name);
     };
 
-    private static IReadOnlyList<AuditRecord> Rows(StateDatabase db) => new AuditLog(db).TryRead(100, null, out IReadOnlyList<AuditRecord> rows, out _) ? rows : [];
+    private static IReadOnlyList<AuditRow> Rows(StateDatabase db) => TestAudit.TryRead(db, 100, null, out IReadOnlyList<AuditRow> rows, out _) ? rows : [];
 
     /// <summary>The box: ticked makes the new key an admin in the signed manifest; not ticked (or not sent) does not.</summary>
     private static async Task Box(Action<bool, string> check, HttpClient client, string root)
@@ -139,7 +139,7 @@ internal static class AdminKeysTests
 
         // The last admin cannot be removed: refused before anything opens.
         pages = await GrantTests.Served(client, Unenroll(db, "phone"), phone, 1);
-        check(pages.Count == 0 && TestState.Current(db)!.Admins.Count == 1 && Rows(db).Any(row => row.Event == AuditLog.ChangeDenied && row.Detail.Contains(Enrollment.LastAdmin, StringComparison.Ordinal)), "second admin: the last admin cannot be removed, with a clear message");
+        check(pages.Count == 0 && TestState.Current(db)!.Admins.Count == 1 && Rows(db).Any(row => row.Event == AdminEvent.ChangeDenied && row.Detail.Contains(Enrollment.LastAdmin, StringComparison.Ordinal)), "second admin: the last admin cannot be removed, with a clear message");
 
         // Other keys can still be removed by the admin.
         await GrantTests.Served(client, Unenroll(db, "runner"), phone, 1);

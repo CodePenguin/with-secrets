@@ -1,0 +1,45 @@
+/* The first screen anyone sees: the product's name and mark, then the one thing to do. */
+.page {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-5);
+  max-width: 24rem;
+  margin: clamp(var(--space-5), 10vh, 6rem) auto 0;
+  text-align: center;
+}
+
+.brand {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-3);
+}
+
+/* The heading is the logo: its picture says the name. */
+.name {
+  margin: 0;
+  line-height: 0;
+}
+
+.logo {
+  display: block;
+  width: min(100%, 22rem);
+  height: auto;
+}
+
+.note {
+  margin: 0;
+  color: var(--muted);
+  text-align: center;
+}
+
+.actions {
+  display: grid;
+  gap: var(--space-3);
+  justify-items: stretch;
+  width: 100%;
+}
+
+.alerts {
+  width: 100%;
+  text-align: left;
+}

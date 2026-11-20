@@ -1,326 +1,143 @@
 # with-secrets
 
-An agent starts a program that needs secrets. A person approves each request on a web page with a passkey. The CLI does not print secret values; it injects approved values into the child process environment.
+[![ci](https://github.com/CodePenguin/with-secrets/actions/workflows/ci.yml/badge.svg)](https://github.com/CodePenguin/with-secrets/actions/workflows/ci.yml)
+
+Give an AI agent (or any script) the secrets a command needs, without giving it the secrets.
+
+The agent runs a command and names the secrets it wants. A person reads the exact request on a web page and approves it with a passkey. Only then does `with-secrets` decrypt those secrets, put them in the program's environment and start it. The agent sees the program's output with the values redacted, and never sees a value, a key or a password.
 
 ```
-with-secrets --secrets DB_URL,API_KEY --reason "run the migration" -- dotnet ef database update
+with-secrets --secrets DB_URL --reason "list tables in the staging database" -- psql "$DB_URL" -c "\dt"
 ```
 
-## How approval works
+> **Status: early (0.1.0), pre-release software.** Hand-tested on Windows. The unit suite and the single-file build run on Linux (including WSL); macOS builds in CI but has not been tried by hand. Read [What it does not protect against](#what-it-does-not-protect-against) before you rely on it.
 
-1. The agent runs the command. The program checks the names against the store in `state.db` (and checks every stored ciphertext against its signed hash) and decrypts nothing.
-2. It prints a **one-use link** to the terminal (stderr). The agent shows the link to you.
-3. You open the link on any device that can reach it. The page shows the whole request: the program and the script as **full paths** (no `./`, no `..`), the secret names, the folder, and the agent's reason. The full path is also what runs. For the allowed forms the page shows the full command and the files it reads as code; the limits below remain. If the program or script is a symbolic link, the page adds a `Link:` line that shows where it leads. The page also shows what will run: an `Inline code:` block for code written in the command (`sh -c`, `cmd /c`, `pwsh -Command`, `python -c`, `node -e`, `perl -e`, `ruby -e`), and for every file that will be read as code (the script argument, and the program itself when it is a text file such as `evil.cmd`) its `Script file:` path, `Script SHA-256:` and a `Script contents:` block (first 200 lines, at most 16 KB; a binary or non-UTF-8 file says so). Every line of that code starts with `  | `, so no line of the agent's text can look like a line of the page (`Request id:`, `Run:`); control, bidi and zero-width characters are replaced by a mark; and these blocks are part of the text the passkey signs. A script that cannot be read, or is larger than 1 MB, refuses the run. The child gets no standard input (it reads end of file), and these variables are removed from its environment: `NODE_OPTIONS`, `BASH_ENV`, `ENV`, `PYTHONPATH`, `PYTHONSTARTUP`, `PYTHONHOME`, `PYTHONINSPECT`, `PERL5OPT`, `PERL5LIB`, `RUBYOPT`, `RUBYLIB`, `DOTNET_STARTUP_HOOKS`, `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, `DYLD_INSERT_LIBRARIES`, `PERLLIB`, `ZDOTDIR`, `PYTHONUSERBASE`, `PYTHONWARNINGS`, `NODE_PATH`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_EXEC_PATH`, `GIT_SSH_COMMAND`, `GIT_ASKPASS`, `SHELLOPTS`, `BASHOPTS`, `PS4`, `PS0`, `PROMPT_COMMAND`, and every name starting with `BASH_FUNC_`.
-4. You read all of it, then press **Approve once** (or Ctrl+Enter, Cmd+Enter on a Mac), or (only with a store that is not protected by a passkey PRF; the secret store always is, so this list is not shown there and every run asks) pick a time in the **Approve for** list (10 minutes, 1 hour, 4 hours, 8 hours, up to the `reuseMaxMinutes` setting) and press **Approve for selected time** (the list starts on the `reuseMinutes` setting; when it is 0, no time is preselected). The approve controls stay off for a moment so they cannot be pressed by accident. Enter on the focused Deny button denies.
-5. You prove it with a **passkey**. The passkey signs the request and the time you chose, so nothing can change the time afterwards. The program checks the proof itself, and accepts only a time the page offered. The page cannot approve anything alone. Sign-in lists all your passkeys for `localhost` (it does not name them), so it works with a password manager; new passkeys are created as discoverable keys.
+## How a run works
 
-While a passkey prompt is open, the button you tapped reads **Cancel**; if the prompt closes without an answer (it happens with some password managers on iPhone), tap it to abandon that attempt and tap the original button again.
-6. If the proof is good, the program decrypts **only the named secrets** (with the Dotenvx crypto library), passes them to the program as environment variables, and redacts them from the output. Give a comma-separated list (`--secrets DB_URL,API_KEY`) to inject several secrets in one run, or declare them in the project's `.env` (see [Project `.env` declarations](#project-env-declarations)). There is no `--all`: every name must be written out.
-7. It writes an audit line (names, command, result, and a hash of any script file in the command; never values).
+1. The agent runs `with-secrets --secrets NAME --reason "..." -- program args`. Nothing is decrypted yet.
+2. The command prints a one-use link. The agent shows it to you.
+3. You open the page. It shows the whole request: the full program path and arguments, the folder, the secret names, the agent's reason, and the full text of every script or inline command the program will read. Warnings appear for things that change which code runs or where data goes.
+4. You approve with a passkey. The passkey signs what you saw, and its PRF output is what unlocks the secret store, so the page alone cannot approve anything.
+5. The program decrypts only the named secrets, starts the child with them as environment variables, redacts them from the output, and writes a signed audit entry (names and a hash, never values).
 
-Deny, a wrong proof, an error, or no answer before the time limit all deny the run (exit code 3). The link works once.
+Deny, a wrong proof, an error or no answer before the time limit all end the run with exit code 3, and nothing is decrypted.
+
+## What you get
+
+- **Secrets the agent cannot read.** Values are typed in the admin web app, encrypted with [dotenvx](https://dotenvx.com/) crypto, and stored in a SQLite database. The key that opens them is wrapped by your passkeys and is never kept on disk.
+- **Approval of the exact command.** What you approve is what runs: the page shows the script's contents and hash, and the program runs a private snapshot of that file (on Linux and macOS) or holds it against changes (on Windows).
+- **A small, strict command grammar.** Interpreters are allowed in one reviewable form (`sh script.sh`, `python -c CODE`, `pwsh -NoProfile -File x.ps1`); forms that load unshown code are refused, and variables that change which code loads are removed from the child's environment.
+- **Pre-approvals.** A grant lets one exact command run again for a chosen time without another page.
+- **An admin web app** for secrets, passkeys, machines, grants and a searchable, signed audit history, served by the program itself.
+- **Machines.** One machine can be the authority for others over mutual TLS.
 
 ## Install
 
-Requires the .NET 10 SDK. Third-party components (Dotenvx.Primitives, SQLite, Serilog and Serilog.Sinks.File for logging, and others) are listed in `THIRD-PARTY-NOTICES.md`.
+You need a passkey with the PRF extension (a phone passkey from iCloud Keychain or Google Password Manager, or a security key).
+
+**From a release.** Download the file for your platform from the [releases page](https://github.com/CodePenguin/with-secrets/releases): `with-secrets-win-x64.exe`, `with-secrets-linux-x64.tar.gz` or `with-secrets-osx-arm64.tar.gz`, and check it against `SHA256SUMS`. It is one self-contained file with the admin app inside; nothing else to install.
+
+**From source.** You need the .NET 10 SDK and Node.js 22 or newer.
 
 ```
-dotnet tool install -g WithSecrets
-dotnet tool update -g WithSecrets
+git clone https://github.com/CodePenguin/with-secrets
+cd with-secrets
+pwsh scripts/publish.ps1        # builds and verifies artifacts/publish/<platform>/
 ```
 
-Not yet published to nuget.org. Until it is, pack it and install from a local feed: `dotnet pack src/WithSecrets -c Release -o <feed>`, then `dotnet tool install -g WithSecrets --add-source <feed>`.
+It is not on NuGet yet.
 
-## First-time setup
+## First run
 
-Do steps 1 and 2 in **your own terminal** (an ssh session or a separate window), never in the agent's.
+Do these in your own terminal, never in the agent's.
 
-1. `with-secrets --config`. Open the link, check the settings (the defaults are fine to start), give the passkey a name in **Name for this passkey** (for example `laptop`; empty means `passkey`), then press **Step 1 of 2: save and create passkey** and create the passkey. A second button then appears: press **Step 2 of 2: confirm with your new passkey** and confirm with it (the new passkey signs the settings and itself as the first **admin** key). Each passkey prompt has its own tap, because iOS refuses a second prompt in the same tap. Then type the code the page shows into the terminal (only a code shown on the page you opened yourself; if it shows none, press Ctrl+C). Nothing is saved until you do: the settings and the passkey are written together, and so are the store's key pair and its vault (see below). The passkey works on the page's host, normally `localhost`. **The passkey must support PRF** (the WebAuthn extension that lets a passkey derive a secret): a passkey from your phone (iCloud Keychain, Google Password Manager) or a security key does, and one that does not is refused before anything is stored (`This passkey cannot do PRF (it cannot protect the secret store key). Use a passkey from your phone or a security key.`). The first passkey is trusted on first use, so make sure you are the one at the keyboard. It is an admin key: only admin keys can change the settings, the passkeys and the secrets. Add more passkeys later with `with-secrets --enroll`; a new one only approves runs unless you tick **Also make this key an admin** on its page. **We recommend two admin keys** (for example your laptop and your phone), so that a lost device does not lock you out (see [Admin keys](#admin-keys)). When the setup is done, the page and the terminal show the admin keys' fingerprints, such as `Admins: laptop ab12 cd34 ef56 7890`. **Write them down** (outside this machine). Every page the tool serves shows them again; check them each time you approve (see [Admin keys](#admin-keys)).
-2. `with-secrets --set DB_URL`. Open the link, type the value in the browser, and approve with your passkey (one page, one tap: the first `--set` is the same as any other, and needs no PRF). The terminal never sees the value. Nothing is asked in the terminal, and no key file is written. The secrets are stored in `%USERPROFILE%\.with-secrets\state.db` (see [The secret store](#the-secret-store)).
-3. Give the agent the run command (see above) and tell it which secret names it may use.
+1. **Create the store and the first passkey.** Run `with-secrets admin`, open the link, create a passkey, confirm it, and type the code the page shows into the terminal. Write down the admin key fingerprints it prints; every page shows them again, so you can notice if they change. Add a second passkey later, so a lost phone does not lock you out.
+2. **Start the host service.** Run `with-secrets service` in a terminal of its own and leave it running. It starts locked and prints the admin app's link and this machine's fingerprint.
+3. **Unlock and approve this machine.** Open that link, unlock with one tap, then in **Machines** compare the fingerprint, name the machine and press **Approve**.
+4. **Store a secret.** In **Secrets**, type a name (`DB_URL`) and a value and save. The terminal never sees the value.
+5. **Tell the agent which names it may use** and how to run commands: see [Using with-secrets safely from an agent](docs/agent-usage.md).
 
-## Commands
+The full walk-through, with backup, recovery, Docker, WSL and every exit code, is in the [operations guide](docs/operations.md).
 
-| Command | What it does | Who |
-| --- | --- | --- |
-| `with-secrets [--secrets A,B] --reason TEXT [-f FILE]... -- PROGRAM [ARGS...]` | Run a program with the named secrets, and the secrets the project's `.env` declares (see [Project `.env` declarations](#project-env-declarations)), after approval. `--secrets` is optional when the `.env` has `secret://` references | Agent |
-| `--needs [-f FILE]...` | Print what the current project would ask for: the `.env` files used, the ordinary variable names, and each `VARIABLE <- secret NAME` with `in store` or `NOT IN STORE`. Names only; no approval, no passkey, no decrypt, no terminal needed. Exit 2 on a bad `.env`; exit 4 when the store fails verification | Agent |
-| `--list` | Print the secret names (never values); exit 4 when the store fails verification | Anyone |
-| `--set NAME[,NAME...]` | Store secrets (a name is `NAME` or `folder/NAME`, see [Secret names](#secret-names)): you type the values on a web page and approve with an admin passkey | Person |
-| `--remove NAME[,NAME...]` | Delete secrets after approval with an admin passkey on a web page (the passkey signs the new state without them) | Person |
-| `--revoke` | Clear every saved approval now, after approval with an admin passkey on a web page. Best effort: it stops reuse by the tool, not by a same-user agent that kept a copy of a saved approval (see [Approval reuse](#approval-reuse)). Exit 4 if the saved approvals cannot be cleared (they may still be in force) | Person, in a terminal you own |
-| `--config` | Change the settings on a web page, approved with an admin passkey. With nothing enrolled, it is the first-time setup and also creates the first passkey (named on the page), the first admin key and the secret store's key pair (its public key and its private key wrapped under the master key into the **vault**, in the same signed first state; the private key is made in memory and stored nowhere else) | Person, in a terminal you own |
-| `--config --show` | Print the settings and their values (none is secret) | Anyone |
-| `--recover` | When every passkey is lost: type the recovery code on a web page, make a new passkey and new keys, and carry your secrets over (see [The recovery code](#the-recovery-code)). The old file is renamed, never deleted | Person, in a terminal you own |
-| `--rotate-key` | An admin makes a new secret store key and master key and encrypts every secret again; only the admin key you tap stays, the others are removed and must be enrolled again (see [The recovery code](#the-recovery-code)) | Person, in a terminal you own |
-| `--enroll [--local]` | Add a passkey on a web page. You type its name there (**Name for this passkey**: unique without regard to case, at most 40 characters, no control or hidden characters; the page suggests a free one) and choose **Also make this key an admin** (off by default: the key then only approves runs). An admin passkey approves first, then signs the change, which holds the name and the choice: on the same page, with a second button (**Step 2 of 2: confirm with your admin passkey**) when an admin passkey works there, else on the page the registration leads to by itself (before the code, which that last page shows), whose text says `New key: NAME` and whether it will be an admin | Person, in a terminal you own |
-| `--enrolled` | Print the admin keys' fingerprints (first line), then the passkeys that can approve (name, host, date, and `admin` for each admin key) | Person, in a terminal you own |
-| `--unenroll NAME [--local]` | Remove a passkey, approved with an admin passkey. Any key can be removed, an admin key too, except the last admin key. An admin key cannot approve its own removal: another admin key does | Person, in a terminal you own |
-| `--audit [--last N] [--secret NAME] [--verify]` | Print the admin keys' fingerprints (first line), then the newest audit entries (default 20, N from 1 to 1000), one per line: time, event, secret names, program, outcome, key name. Never values. `--verify` checks the hash chain and names the first broken entry (exit 4) | Anyone (read-only) |
-
-`--local` uses the page at `http://localhost:<port>` and ignores `baseUrl`. A run picks the page by itself: the first of the `baseUrl` page and the localhost page where an enrolled passkey works. `--set`, `--remove`, `--revoke`, `--config` and the approvals of `--enroll` and `--unenroll` do the same with the admin passkeys. `--config`, `--recover`, `--rotate-key`, `--enroll`, `--enrolled`, `--unenroll` and `--revoke` refuse to run when input or output is redirected, as in an agent's shell.
-
-## Secret names
-
-A secret name is `NAME` or `folder/NAME`: one to four segments separated by a single `/`, at most 200 characters in all. The last segment is the name proper: `UPPER_SNAKE_CASE` (capital letters, digits, underscores, starting with a letter) and not starting with `DOTENV_`. Each folder segment is 1 to 64 of letters, digits, `_`, `.` and `-`, and is not `.` or `..`. So `STRIPE_KEY`, `team/STRIPE_KEY` and `team/payments/STRIPE_KEY` are names; `team//KEY`, `/KEY`, `KEY/`, `../KEY`, `a b/KEY`, `a?/KEY`, `a#/KEY`, `a%41/KEY`, `a\KEY`, `team/stripe_key` and five or more segments are refused. The whole path is the store name, and it is data only: it is never a file path, and it is compared exactly (case counts, so `Team/KEY` and `team/KEY` are two secrets; the approval page shows the exact name). One rule is used everywhere: `--set`, `--remove`, `--list`, `--audit --secret`, `--needs`, `.env` references and the store. A folder has no meaning to the program; it only groups names (`--list` prints the whole path).
-
-An environment variable cannot hold a `/`, so `--secrets` takes plain names only (the variable has the secret's name). A secret in a folder reaches a program through a `.env` reference: `STRIPE_KEY=secret://team/payments/STRIPE_KEY`.
-
-## Project `.env` declarations
-
-A project declares what it needs in its `.env` instead of the agent listing names. Example:
+## Using it
 
 ```
-# .env in the project folder
-LOG_LEVEL=Debug
+with-secrets --needs                                   # what this project would ask for (names only, no approval)
+with-secrets --secrets DB_URL --reason "migrate" -- sh ./scripts/migrate.sh
+with-secrets --reason "deploy" -- ./deploy.sh          # secrets declared in the project's .env
+with-secrets approve --secrets DB_URL --reason "nightly" -- sh ./report.sh   # make a grant; nothing runs
+```
+
+A project can declare what it needs in its `.env`, so the agent does not list names:
+
+```
+LOG_LEVEL=info
 STRIPE_KEY=secret://team/payments/STRIPE_PRODUCTION_KEY
 GITHUB_TOKEN=secret://GITHUB_TOKEN
 ```
 
-```
-with-secrets --needs                                  # what would be asked for (names only)
-with-secrets --reason "deploy" -- ./deploy.sh         # --secrets is no longer needed
-with-secrets --secrets DB_URL --reason "deploy" -f .env -f ../shared.env -- ./deploy.sh
-```
+The program receives `STRIPE_KEY` and `GITHUB_TOKEN` as environment variables, and `LOG_LEVEL` as an ordinary value. Dotenvx `encrypted:` values work too. Details: [Project `.env` declarations](docs/reference.md#project-env-declarations).
 
-- **Files.** The default is `.env` in the working directory (no search upward). `-f`/`--env-file PATH` (repeatable) replaces that list. A missing default `.env` means no declarations; a missing `-f` file is an error (exit 2). A file over 256 KB is refused, and it must be a regular file (it is opened once and read to the cap). Limits, all errors (exit 2) and never cut: at most 8 files, 50 ordinary variables and 50 pairs; a variable name of at most 64 characters; an ordinary value of at most 512 characters. A `-f` file outside the working directory, or a symlink/junction, gets a `Link:` line on the page. The files are read once, when the request is built: the approval page, the fingerprint, the audit row and the launch all use that one reading, so a `.env` changed while the page is open changes nothing.
-- **Syntax (Dotenvx style).** `NAME=value`, `#` comment lines, an optional `export `, blank lines, and values with single quotes (literal), double quotes (`\n`, `\r`, `\t`, `\"` and `\\` are escapes) or none (a ` #` ends the value). No `${}` expansion and no multiline values yet. A name is letters, digits and `_`, not starting with a digit. A bad line is an error that names the file and line (never the value). A name repeated in one file: the last line wins.
-- **Three kinds of value, decided on the final value of each name.** `secret://...` is a reference; a value starting with `encrypted:` is a Dotenvx encrypted value (**not supported yet**: when it is the effective declaration the run stops with exit 2, "Dotenvx encrypted values in .env are not supported yet"; one that is overridden is ignored); anything else is an ordinary value.
-- **Composition (like Dotenvx).** The first file wins per name. An existing environment variable beats an ordinary `.env` value (the program simply inherits it). A `secret://` reference always beats an inherited variable of the same name: it is explicit. A reference that loses to an earlier file's value is never requested, so only the final references reach the approval page and the store. `--secrets NAME` is a pair `NAME <- secret NAME`; the same variable given by `--secrets` and by a different reference is an error, and `--secrets` beats an ordinary `.env` value of that name.
-- **Reference grammar.** `secret://NAME` or `secret://folder/NAME` (the rules of [Secret names](#secret-names)). The whole path is the store name: `secret://team/payments/STRIPE_KEY` is the secret `team/payments/STRIPE_KEY`. The left side is the variable the program receives, and may differ from the secret: `STRIPE_KEY=secret://team/payments/STRIPE_PRODUCTION_KEY`. Anything else (empty, `//`, a query, a fragment, a space, `%`, `..`, a lower-case name) is an error that names the variable, not the value. At most 50 pairs per run.
-- **The run.** The program gets every pair under its variable name, injected and redacted as before, and the ordinary values as plain environment variables (not secret, not redacted). `--reason` is always required. With neither `--secrets` nor a reference the error is the old one: "Name the secrets with --secrets NAME[,NAME...]".
-- **The approval page and the passkey.** After the `Run:` line and the script blocks (so a long `.env` cannot push them out of sight) the page lists every `Env file:` path, then **one `Pair:` line per secret** (`Pair: STRIPE_KEY <- secret team/payments/STRIPE_PRODUCTION_KEY (renamed)`; `renamed` marks every pair whose variable differs from the secret's name; the `Secrets:` line still lists the store names), then **every ordinary variable with its value** (`  | LOG_LEVEL=Debug`, marked like script lines, control and bidi characters replaced by a mark). All of it is part of the text the passkey signs and of the request fingerprint (pairs, paths, names and values). The terminal echo of the same page lists ordinary variable **names only**. The audit row keeps names only: the secrets, the variable-to-secret pairs, the file paths and the ordinary names, never a value or the file contents.
-- **Trust: the agent can write the `.env`.** So the human approves the pairs, not the file. (1) The variables removed from the child's environment (the list under [How approval works](#how-approval-works)) are also removed from ordinary `.env` values, with a one-line stderr note that names the variable and says it was left out of the program's environment (a program that reads the `.env` itself may still load it). That list is not complete, so **the page is the control**: read the ordinary values it shows (a proxy, a CA file, a git or JVM option, an API base URL can redirect a secret or load code). (2) A reference whose variable is on that list, or is `PATH`, `PATHEXT`, `COMSPEC`, `SystemRoot`, `windir`, starts with `DOTENV_PRIVATE_KEY`, `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, `GIT_AUTHOR_` or `GIT_COMMITTER_`, or ends in `_PROXY` (case-insensitive), is refused (exit 2). (3) Command grammar, script display and the file lock are unchanged. (4) The terminal shows names only. A reference to a secret you did not expect shows on the page as a pair: read it.
-- **Not built yet.** Dotenvx decryption (`encrypted:` values), `${VAR}` expansion, `--env NAME` layering, a project namespace, and the host service. `secret://project/NAME` is just a folder named `project` in the global store.
-
-## State and audit
-
-Passkeys, saved approvals, the audit log and the settings are kept in `%USERPROFILE%\.with-secrets\state.db`, a SQLite database (WAL mode). The passkeys and the settings are one signed manifest (canonical JSON with a version that goes up with each change), signed by an admin passkey over `SHA-256(bind || SHA-256(manifest))`. The key that signed must be an admin key in that manifest. Every command verifies it first; if it fails (the file was edited outside the tool, a key or setting added, a signature swapped), every command stops with exit 4, `state failed verification: delete state.db to start over (only if you did not edit it)`, and nothing runs. Sign counts are kept beside it, outside the signature. A change is written only if the manifest is still the version the page started from, and only when it is signed by a key that is an admin key in the stored manifest (not one that the new manifest makes an admin) and stays one. **Verification only catches edits that keep your admin keys.** An agent that can write `state.db` can still delete it and write a whole new state signed by its own software key, with no page and no terminal. That state has other admin keys, so it shows **other fingerprints** on every page, in `--enrolled` and in `--audit` (see [Admin keys](#admin-keys)). Each saved approval keeps the passkey assertion that approved it and is checked again every time it is used (see [Approval reuse](#approval-reuse)). Every write is one transaction, so two runs at once cannot lose an update; a run waits up to 5 seconds for another one to finish writing. The database holds names and Dotenvx ciphertext, never secret values in plain text. A missing database is empty (nothing enrolled). A database that cannot be read, is damaged (checked with `PRAGMA integrity_check` at open), or stays locked longer than 5 seconds stops the command with exit 4; nothing is asked and nothing runs. If the audit entry cannot be written, nothing runs (exit 5).
-
-The audit log records runs (`approved`, `denied`, `reused`, `finished`), changes (`secrets-set`, `secrets-removed`, `settings-changed`, `settings-setup`, `key-enrolled`, `key-removed`, `approvals-revoked`, each with the approving admin key; `key-enrolled` also says whether the new key is an admin; `approvals-revoked` says how many were cleared) and refused or failed changes (`change-denied`, with the command, the secret names and why). It holds names, never values. A change to `state.db` and its audit entry are written in one transaction; for `--set` and `--remove` that transaction also holds the secret rows and the new signed manifest. A refused change is recorded only when `state.db` already exists.
-
-Each audit entry carries the SHA-256 hash of the entry before it. `with-secrets --audit --verify` reports the first entry whose link does not hold. This finds an edited or deleted entry, but not entries removed from the end.
-
-The schema version is 9 (the signed manifest, with any number of admin keys, holds the passkeys with their key slots, the settings, the store's public key, the vault, the recovery slot and the hash of every secret; the `secrets` table holds one Dotenvx ciphertext per secret; each saved approval holds its signed approval). A database of another schema version (an older or newer one) is never moved forward: the command stops with exit 4 and says to delete `state.db` to start over. There is no import from the `.env.local` file of earlier versions. **An existing `state.db` (schema 8 or older) is incompatible with the recovery slot: delete it and set up again** (`with-secrets --config`; the store key is made there, then `--set`); there is no migration. The program reads no other file in the store folder.
-
-### The secret store
-
-- **Rows.** Each secret is one row of the `secrets` table in `state.db`: its name and its value encrypted by Dotenvx (the `encrypted:` format, ECIES on secp256k1). Dotenvx is the crypto library here, not the file store: there is no `.env.local` and no `.env.keys`.
-- **Signed hashes.** Anyone with the public key can make a valid ciphertext, so a row alone proves nothing. The signed manifest therefore holds the store's public key and, for every secret, the SHA-256 of its ciphertext. Every read (`--list`, a run, `--set`, `--remove`) checks every row against its hash first. A row whose ciphertext is not the signed one (another valid ciphertext, or another row's), a row without a hash and a hash without a row all stop the command with exit 4 (`the secret store failed verification`), before anything is asked or decrypted. A changed hash or store key in the manifest fails the manifest's own signature, so every command stops.
-- **One tap for `--set`.** As you type, the page sends the encrypted values to the program, which checks them, encrypts each to the store key and answers with the next manifest (names and hashes, nothing secret). Your Save tap then signs `SHA-256(bind || SHA-256(ct) || SHA-256(manifest))` once: it covers both the values the page sent and the hashes of the rows the program will write. The rows, the new manifest and the audit entry are one transaction that is written only if the state is still the version the page started from.
-- **`--remove`** asks you to sign the next manifest, without the removed hashes; the rows go in the same transaction.
-- **Only the requested rows are decrypted**, with the private key passed as a parameter (never an environment variable or a file). A run with `--secrets A` decrypts `A` and no other secret.
-- **The store key never rests on the machine.** The Dotenvx private key `K` exists only wrapped, and in memory during an approved run. Each enrolled passkey has a **key slot** in the signed manifest (`salt`, `wrap`): the passkey's WebAuthn PRF output for that salt gives a key-encryption key (HKDF-SHA-256), which unwraps a random **master key** `MK` (AES-256-GCM, bound to the credential id and the salt); `MK` unwraps the **vault**, which is `K` encrypted with AES-256-GCM under `MK` (bound to the store's public key). The vault and the slots are in the signed manifest, so an edited slot or vault fails verification (exit 4). Only a passkey with PRF can be enrolled. Every slot in a store uses the same `salt` (the first key's; `--enroll` reuses it), because the sign-in page can pass only one `eval` salt; the PRF output, and so the key-encryption key, still differs per passkey. On iPhone, use a passkey in Chrome; Safari did not return PRF output at sign-in in our test.
-- **A run needs one tap that does two things.** The approval page asks the passkey for its assertion and its PRF output in the same prompt. The browser encrypts the PRF output to a key that exists only for that page in the program (ECDH P-256, HKDF-SHA-256, AES-256-GCM, bound to the page), sends it with the proof, and the program derives `K` only after the proof verifies, decrypts only the requested rows, and zeroes `K`, `MK`, the key-encryption key and the PRF output. A missing, garbled or foreign PRF payload denies the run; there is no fallback. The same holds when a key is enrolled (the approving admin passkey releases `MK` for the new key's slot). The first `--config` makes the master key `MK`, the store key pair and the vault in memory, all in the first signed manifest, and then zeroes them, so no `--set` ever needs the master key.
-- **No saved approvals for the secret store.** A saved approval (reuse) has no passkey tap and so no PRF output; with this store a run always asks, and the page offers no reuse.
-- **Cross-platform.** There is no Credential Manager, no `.env.keys` and no Windows-only step: the store works wherever the tool runs and a PRF passkey is available.
-- **A failed or abandoned first `--config` leaves no key anywhere.** The store's private key is made in memory at the first `--config` and goes only into the vault of the first manifest the new admin passkey signs, which is written in one transaction with the settings and the key. A cancelled or failed first `--config` stores nothing; a `--set` stores only ciphertexts and their hashes.
-- **Memory.** Decrypted values are kept as bytes and zeroed when the program ends. `K`, `MK`, the key-encryption key and the PRF output are byte arrays that are zeroed after use, and during a call they are in the process's memory. Some copies cannot be wiped: the string Dotenvx's decrypt returns, the strings the redactor and the child's environment need, the child's environment block itself, and the private key as a hex string (a .NET string). .NET strings stay in memory until the garbage collector reuses it. An agent running as the same user could read the process's memory while a run is open. **If `K` is read from memory once, all secrets present and future are exposed until the keys are rotated with `--rotate-key` or the store is rebuilt with `--recover`.** The same holds for a tap on a look-alike approval page served by another local process on localhost (a passkey's RP ID ignores ports, so the passkey cannot tell the pages apart): that tap releases `MK` and so `K`. Check the link the terminal printed before you tap.
-- **`--unenroll` does not stop a removed key from opening `MK` using an older copy of `state.db`.** `MK` and `K` are not rotated by `--unenroll`; `--rotate-key` rotates them (and keeps only the tapped key). Until you run `--rotate-key`, a removed key with its authenticator, plus an older `state.db` copy that still has its slot and the vault, still opens the store key.
-- **The PRF output crosses localhost HTTP encrypted** to the page's own server key. This protects against passive observation, for example in a tunnel that ends TLS; it does not protect against an active man in the middle who replaces the page's server key (the same limit as the `--set` values).
-
-### One link per command
-
-A command prints one link. When it has more steps (`--enroll`, `--recover`, `--rotate-key`), the page of a step that has verified (the passkey proof or the recovery code was checked) answers with the address of the next step's page, made at that moment (a new one-use token, the same server and port; the host is the admin keys' host or the `baseUrl` host, as before), and moves on by itself with the text "Step done. Continuing..." If the browser blocks that, the page shows the same address as a link and a **Continue** button. The next page needs the step before it done: its address is not known before, and each page works once. Every page keeps its own rules (a passkey prompt only in a tap, Cancel, retries, diagnostics). The command's time limit is shared by its steps, not restarted at each. Where a command ends with a code from the page (the first `--config`, `--enroll`, the new-store step of `--recover`), the terminal asks for it after every tap, and nothing is stored before it is typed. While it waits, the last thing on the terminal is `Waiting for the code from the page. Paste it here and press Enter: ` with the cursor after it; the command writes nothing else meanwhile (no line is held back or dropped; with `--debug` the diagnostic lines print as they arrive). The first `--config` is one page too (its Step 2 button signs the new state on the same page), like `--unenroll`, `--revoke`, `--set`, `--remove` and a later change with `--config`.
-
-If the reply of a step that verified is lost on the way, the page sends the same request again and gets the same reply (the same next address or the same code), which makes no second page and no second code; the program keeps that reply only in memory until the command ends, and a different request after the decision gets 404. If the page still did not move on, press Ctrl+C and run the command again. A page whose step is gone says so in a short text (404) and points to the terminal.
-
-### The recovery code
-
-- **The first `--config` shows a recovery code, once.** It is 8 groups of 4 letters and digits (for example `ABCD-EFGH-JKLM-NPQR-STUV-WXYZ-2345-6723`), shown on the last page together with the 6-digit code, in the page only (never in the terminal, a log, the audit log or `state.db`). **Write it down and keep it offline**, apart from this computer. **Anyone who has the code and `state.db` can open all your secrets**, so keep it as private as a password. Typing it accepts lower case, spaces and dashes.
-- **What it is.** 20 random bytes. `RK = HKDF-SHA-256(code, salt, "with-secrets/v1 recovery")` opens the **recovery slot** in the signed manifest: `MK` wrapped with AES-256-GCM under `RK` (12-byte nonce, the store public key as associated data). `MK` then opens the vault, like a passkey's slot does.
-- **`with-secrets --recover`** is for when every passkey is lost. Page 1 (the only link the terminal prints) asks for the code (the browser encrypts it to a key that exists only for that page, like a value of `--set`; three wrong codes end it, and a refusal changes nothing). The page then moves on by itself (see [One link per command](#one-link-per-command)) to a first setup on a new, empty state: you create a **new passkey** (and can change the settings), and the new master key, store key, vault and **recovery code** are made. The secrets are decrypted with the old store key and encrypted again for the new one, one at a time, and everything is written in one transaction. Only then is the old file renamed to `state.db.recovered-<UTC yyyyMMddHHmmss>` (never deleted) and the new one put in place, with a `recovered` audit entry (the number of secrets and the old file name). **The old admin keys are gone** from the new state; enroll them again with `--enroll`. Any failure leaves the old `state.db` as it was. It works while the old keys still exist, too. The old recovery code does not open the new store.
-- **`with-secrets --rotate-key`** (admin) makes a new store key `K` and master key `MK` and encrypts every secret again. Tap 1 is an admin approval that also releases the PRF output of the key you tap (the page lists the keys that will be removed); tap 2 (**Step 2 of 2**, reached from the page after tap 1; the terminal prints no second link) has the same key sign the new state, including the hashes of the new ciphertexts. **Only the key you tap stays**: every other key is removed, because their slots wrap the old `MK` and would still open an older copy of `state.db`. Enroll them again with `--enroll`. A new recovery code is shown once on the last page and the old one stops working. The change is one transaction (with a `key-rotated` audit entry naming the removed keys); a failure or a timeout between the taps changes nothing. A key that has a slot is required.
-- **Compare the fingerprint before you type the code.** `--recover` and `--rotate-key` print the old store's admin fingerprint line (`Admins: laptop ab12 cd34 ef56 7890`, the same as `--audit` and `--enrolled`) in the terminal before the link, and tell you to compare it with the one you wrote down. If it differs, do not type the code or approve: the state was replaced. Why: a typed recovery code is not tied to the page's origin the way a passkey tap is, so a look-alike page can read it; only the fingerprint, checked against your own note, tells you the page belongs to your store.
-- **Rotation does not help if the kept key's PRF output may have leaked** (a tap on a look-alike page, a memory read during a run): the leaked output still opens the new master key, because the kept key keeps its slot salt. After such a doubt, tap a key that was never used on a doubtful page, or rebuild the store with `--recover` on new keys.
-- **Show-once.** The new recovery code is shown on the last page only once. If the page did not show it (lost connection), the old code is already dead after `--rotate-key`: run `--rotate-key` again. After `--config` or `--recover`, run `--rotate-key` to get a new code.
-- **Rotating does not recall values that were already exposed.** An older copy of `state.db` plus an old key, or an old recovery code, still opens the secrets it held. Rotate the secrets themselves at their source (the service that issued them) as well.
-- **Schema 9.** The recovery slot is new in schema 9. A `state.db` of schema 8 or older is not moved forward: delete it and set up again (`with-secrets --config`), then store the secrets again with `--set`. There is no migration.
-
-## Admin keys
-
-Any number of passkeys can be **admin keys**; at least one always is. The first passkey (from the first-time setup) is an admin key. A passkey added with `--enroll` becomes one only when you tick **Also make this key an admin** on its page; that choice is part of the new state the approving admin key signs, and the page says it. Only admin keys can change the settings, the passkeys and the secrets, and `--revoke`; every passkey can approve runs. Each page that changes the state offers all admin keys that work at its host.
-
-- **Use two admin keys**, for example your laptop and your phone. Then a lost or broken device is no emergency: the other admin key removes it with `with-secrets --unenroll NAME`.
-- **To replace an admin key** (a new device): `with-secrets --enroll` with the new key, tick **Also make this key an admin**, then `with-secrets --unenroll OLD-NAME`, approved with the new key (an admin key cannot approve its own removal).
-- **After a reset, delete the old `localhost` passkeys in your password manager.** Each passkey is labelled `with-secrets <name> <random guid>` (the name is cut first if the label would pass 64 characters); the label is only for display.
-- **The last admin key cannot be removed.** With a single admin key and that device lost, nothing can change the state any more: delete `state.db` and run `with-secrets --config` again (your passkeys, settings and secrets start over: the secrets are in `state.db` too, so store them again with `--set`).
-
-### The fingerprints
-
-An admin key's fingerprint is the first 8 bytes of SHA-256 of its public key (as stored in the manifest), written as four groups of four hex digits. Every admin key is listed, oldest first: `Admins: laptop ab12 cd34 ef56 7890, phone 1234 5678 9abc def0`. It is not secret. The line is shown:
-
-- on every page the tool serves: run approvals, `--enroll`, `--unenroll`, `--set`, `--remove`, `--revoke` and `--config` (on an approval page it is part of the text your passkey signs);
-- as the first line of `--enrolled` and of `--audit`;
-- once when the first-time setup finishes, and when `--enroll` shows its code, on the page and in the terminal.
-
-Note the fingerprints down when you first see them, and check the line on each page before you approve. **If it ever changes without you adding or removing an admin key, the state was replaced**: someone deleted `state.db` and set up their own admin key, or an admin key was added that you did not add. Do not approve anything; find out what happened, then delete `state.db` and set up again with `with-secrets --config`. The fingerprints do not stop a same-user agent from resetting the database; they make the reset visible to you. Restoring an older copy of `state.db` (with your own admin keys) is not detected: it can bring back passkeys you removed (an admin key you removed too) and settings you changed, saved approvals that have not yet ended, and old secret values, including one you replaced after it leaked (so rotate a leaked value at its source, not only here). `--revoke` is not a recall: it clears the saved approvals on a best-effort basis, it does not take back a secret a program already saw, and an agent that kept a copy of a saved approval can put it back until it ends. Keep reuse times short, and rotate any value that may have leaked.
-
-## Where the page can be reached
-
-By default the page is at `http://localhost:<port>` on the machine that runs the program, with a free port picked each time. When that machine is remote, forward the port with ssh and open the link on your own computer:
-
-```
-ssh -L PORT:localhost:PORT user@host
-```
-
-Set `port` with `with-secrets --config` to a fixed number so the forward can be set up once. For one call, `--port N` (1 to 65535) does the same without changing the setting: `with-secrets --enroll --port 8765`, then `ssh -L 8765:localhost:8765 user@host`. It is not saved, and if the port is in use the call fails (no other port is tried). To use an HTTPS name (a Cloudflare or Tailscale name, for example), set `baseUrl` and `port`, and point that name at the port. Browsers allow passkeys only on `https` or `localhost`, so plain `http` to another name does not work. A passkey is tied to the host name it was created for. Changing `baseUrl` removes no passkey: a passkey made for `localhost` keeps working on the localhost page (a run picks it by itself, see `--local` above). Add a passkey for the new name with `with-secrets --enroll` (it is approved with a passkey you already have).
-
-## Settings
-
-The settings are kept in `state.db` in the protected folder, not in an environment variable or flag, because the agent controls those. They change only on the `--config` page:
-
-- `with-secrets --config` prints only a one-use link. The page shows every setting with its current value and its limits as a form, and a summary of your changes. **Save** is approved with your admin passkey, which signs exactly the new state: the challenge is `SHA-256(bind || SHA-256(manifest))`, the manifest being the current one with the new values and the next version. The program checks the passkey, then checks every value, then writes the new manifest and an audit entry (the names of the settings that changed, old -> new, and the key; none of the settings is secret) in one transaction. Cancel, a wrong passkey, a value out of its limits or the time limit saves nothing.
-- With nothing enrolled, the same page is the first-time setup (see above). There is no way to save settings without a passkey.
-- `with-secrets --config --show` prints the current values. It works anywhere.
-
-With nothing enrolled every setting has its default. A manifest with a value that cannot be used never verifies, so it stops every command with exit 4.
-
-| Setting | Default | Meaning and limits |
-| --- | --- | --- |
-| `reuseMinutes` | `10` | Not used with the passkey-protected secret store: every run asks. The time the **Approve for** list starts on: the longest offered time at or below it. 0 to `reuseMaxMinutes`. 0 starts with no time chosen (the list still works) |
-| `reuseMaxMinutes` | `480` | Not used with the passkey-protected secret store: every run asks. The ceiling: the longest time one approval may cover. 10 to 1440. Longer times are not offered, and a saved approval longer than the current ceiling is not used |
-| `method` | `passkey` | How approval is proved. Only `passkey` exists |
-| `baseUrl` | none | The address of the page, such as `https://secrets.example.net`. Empty for none. A full `http` or `https` address, no user name or password, at most 2048 characters |
-| `port` | `0` | The port the page listens on. 0 picks a free one. 0 to 65535. `--port N` overrides it for one call |
-| `timeoutMinutes` | `5` | How long the program waits for an answer on a page. 1 to 30 |
-
-## Approval reuse
-
-**Saved approvals do not apply while the secret store is protected by a passkey PRF, which is how the secret store is always protected: every run asks, and the approval page shows no "Approve for" list.** A saved approval has no passkey tap and so no PRF output to open the store key. The mechanism below stays in the code and its tests but is inactive for this store.
-
-You choose on the approval page, each time, whether an approval is reused. **Approve once** runs the program once and saves nothing. **Approve for selected time** saves the approval for that time, so a test loop does not prompt every run: it covers the **same secret names, program, script, and folder** until it ends.
-
-- **The time is signed.** The passkey signs `SHA-256(bind || "reuse=" || minutes)` (0 for once). The program refuses a time the page did not offer or above `reuseMaxMinutes`, and saves exactly the signed time.
-- **A saved approval is signed, and checked at every use.** It keeps the passkey assertion, the page nonce and the exact text you approved, which names the request (`Request id: ...`) and the time the page was made (`Page issued: ...`). Each time it would be used, the program checks: the key is in the verified manifest; the assertion verifies over `SHA-256(bind || "reuse=" || minutes)` with `bind = SHA-256(nonce + "\n" + text)`; the text names this request; the minutes are 1 to 1440; it was saved no earlier than the page was made and at most 30 minutes after; it ends exactly that many minutes after it was saved. A saved approval that fails is not used, the agent's run prints `a saved approval failed verification and was ignored`, and you are asked again (the run is not refused). Sign counts are not checked again. An expired one, or one longer than the current ceiling, is simply not used.
-- **A longer approval means the agent can run the same command again, without asking you, until it ends**, with other arguments. Choose the shortest time that does the job; use **Approve once** for anything you would not run again unseen.
-
-- **What is matched:** the secret names, the full path of the program, the working folder, and the full path and hash of the script being executed. Two programs with the same name in different folders are approved one by one, even when their bytes are identical. The script is the program itself (`./check.sh`). When an interpreter runs it, the script is the **first argument that names an existing file up to 1 MB** (`pwsh -File run.ps1`, `node app.js`, `sh check.sh`).
-- **Not matched:** flags, other arguments, later files (a data file, for example), and the agent's reason.
-- **The clock starts at approval and never extends.** Running the command again does not renew it.
-- **A changed script asks again.** A script edited while the page is open is not run.
-- **A denial is never remembered.**
-- **Clear all approvals now:** `with-secrets --revoke`. This is best effort, not a security boundary: it stops reuse by the tool and by an agent that plays fair, but a same-user agent that copied a saved approval row before `--revoke` can put it back afterwards, and it still verifies until it ends (its signature is still good). Keep reuse times short. A secret a program already saw is not recalled; rotate a value that may have leaked.
-- **The start can be moved later, within limits.** The program records when an approval was saved, and only the page time is signed. An agent that edits `state.db` can move the start of a saved approval later, up to 30 minutes after the page was made (less the time you took to approve). So a saved approval can last at most until the page time + 30 minutes + the time you chose, never longer.
-- **Removing a passkey ends its saved approvals.** `--unenroll` deletes them in the same change.
-- **A lower ceiling applies at once.** A saved approval longer than the current `reuseMaxMinutes` is not used.
-- The audit entry records the time you chose (`approved once` or `approved for N min`) and the approving key; a reused approval records the key that approved it.
-
-## Rules
-
-- **Terminal output is public.** The agent reads it. Nothing the program prints is secret: it shows links, names, and results, never values or key bytes.
-- Run `--config`, `--recover`, `--rotate-key`, `--enroll`, `--unenroll` and `--revoke` only in a terminal you own. Values are typed in the browser, never in a terminal. The confirmation code of a new passkey is shown only on the page (the last page of the command) and typed by you in that terminal.
-- **Only type a confirmation code that a page you opened yourself shows.** If the page has already ended or shows no code, press Ctrl+C. (An agent that holds the link could register its own key and pass you its code.)
-
-## Parts
-
-| Path | What it is |
+| Command | What it does |
 | --- | --- |
-| `src/WithSecrets.Core` | Logic: command line (System.CommandLine), policy, approval text, redaction, child process, audit log, the web approval page (Kestrel), passkey checks, enrollment |
-| `src/WithSecrets` | The `with-secrets` exe: wiring of `--set`, `--remove`, `--enroll` and the rest |
-| `tests/WithSecrets.Tests` | Console test runner (no test framework package). `dotnet run --project tests/WithSecrets.Tests` |
-| `tests/WithSecrets.E2E` | Opt-in browser tests (Playwright, headless Chromium, virtual passkey). Not in the slnx; see Browser tests |
+| `with-secrets [--secrets A,B] --reason TEXT -- PROGRAM [ARGS]` | Run a program with the named secrets, after approval |
+| `with-secrets approve ...` | Same arguments; on approval make a grant instead of running |
+| `with-secrets --needs` | Show what the project asks for; names only |
+| `with-secrets admin` | First-time setup, then print the admin app's link |
+| `with-secrets service` | Run the host service |
+| `with-secrets pair` | Pair this machine with a remote authority |
+| `with-secrets --recover` | Rebuild after every passkey is lost, with the recovery code |
 
-## Build
+Exit codes: `3` not approved, `4` the state failed verification, `5` the audit could not be written, `6` the service is not running, `7` the service is not this machine's, `8` the authority is locked, `9` the authority cannot be reached; anything else is the program's own code. A list is in [operations](docs/operations.md#exit-codes).
 
-```
-dotnet build with-secrets.slnx
-```
+## What it protects against
 
-It needs .NET 10 and the NuGet packages `Dotenvx.Primitives` (3.3.1), `Microsoft.Data.Sqlite` (10.0.14) and `SQLitePCLRaw.bundle_e_sqlite3` (2.1.14, which carries its own native SQLite build).
+- An agent that asks for a secret you did not expect: the page names every secret, and nothing is decrypted before you tap.
+- An agent that changes a script or the `.env` after you read it: the bytes you saw are the bytes that run, and the request fingerprint covers the script, the arguments, the folder and the `.env` pairs.
+- Secrets in the agent's context: terminal output is public by design, values and keys appear only in the browser, and the child's output is redacted.
+- A stolen `state.db`: it holds ciphertext and a signed manifest, and the key is wrapped by your passkeys.
+- Tampered state: every command verifies the signed manifest and every ciphertext's hash first, and stops (exit 4) if anything was edited.
 
-## Checks
+## What it does not protect against
 
-| Check | Status |
+- **A program that sends its secret somewhere.** The tool limits what the program is given, shows you what will run, and redacts the output. Your reading of the request is the control; write requests that are easy to read.
+- **Code a script loads.** Approval covers the files shown. Files a script sources, imports or reads from beside itself are read as they are when it runs, and the page says so.
+- **A process running as you.** Anything running as your user can read the program's memory and environment while a run is open, and can change files you own. On Linux and macOS the private copy of a script closes the swap-after-approval attack, not a same-user process that races the interpreter.
+- **A look-alike page.** Passkeys ignore the port, so another local program serving a page on `localhost` can ask for the same tap. Check the link the terminal printed.
+- **A weaker machine key off Windows.** On Windows the machine identity is a non-exportable key in the TPM or CNG; on Linux, WSL and macOS it is an owner-only file.
+
+The full lists are in [Known limits](docs/reference.md#known-limits) and the [threat model](docs/architecture.md).
+
+## Documentation
+
+| Document | What is in it |
 | --- | --- |
-| Per-approval reuse: the page controls (Approve once, the times up to the ceiling, the starting entry, reuse off), the challenge for once and for a time differ, a signature for one time is refused for another, times not offered or above the ceiling and malformed bodies deny, a grant lasts exactly the signed time, once saves nothing, an expired grant or one longer than the current ceiling is not used, the audit entry records the time | **Tested** in code (the `reuse` checks, through `RunCommand`, `WebApprover` and `PasskeyMethod` over real HTTP). The page script (the select, Ctrl+Enter, the challenge hash in the browser) is **not tested** in a browser |
-| Core logic: reuse (fingerprint, expiry, changed script, denial, settings), redaction (forms, chunk splits), policy, approval text, command line, program lookup, audit, exit codes | **Tested.** All checks pass (`dotnet run --project tests/WithSecrets.Tests`) |
-| Web approval, server side, with a test authenticator that signs like a passkey: the one-use page and its headers, deny, time limit, a wrong proof (assertion checks: signature, origin, challenge, sign count), enroll and unenroll, `--set` and `--remove` (the encryption is checked in code, not in a browser) | **Tested** in code (the web approval, passkey, enrollment and secret entry test groups) |
-| A run through the real chain: `RunCommand`, `WebApprover`, `PasskeyMethod`, a passkey store, an audit log (both SQLite) and a real child process, over real HTTP. Approve (exit 0, output redacted, audit names the key), Deny on the page (exit 3, child never ran), nothing enrolled (exit 3, names `--config`, no link) | **Tested** in code (the `run chain` checks) |
-| The signed manifest: canonical text and round trip; each edit fails verification (exit 4, no run, no saved approval used): edited text, settings or signature, a manifest signed by another key, a key flipped to admin, zero admins, a manifest signed by a key in it that is not an admin, a table or sign count added by hand, the manifest deleted while keys or approvals exist; a stale version is refused; sign counts only go up; parallel writers lose nothing; only admin keys can `--config`, `--enroll`, `--unenroll`, `--set`, `--remove` and `--revoke`; a second admin key can do all of it, including removing the first; a key that is an admin only in the new manifest cannot sign it; the last admin key cannot be removed; the **Also make this key an admin** box (ticked: an admin in the signed manifest and in the fingerprint line; not ticked: not), also on the three-link `--enroll`; the name chosen on the page (a name in use in any case, too long or with bad characters is refused and adds nothing; empty is the suggestion); a key that is not an admin approves runs | **Tested** in code (the `manifest` checks and the admin checks in the other groups). The second passkey prompt of the first run and of `--enroll` is **not tested** in a browser |
-| Signed saved approvals and the fingerprint: a good grant is reused without a page; each of these is ignored, reported once, and the run asks again and works: no or an invalid assertion, a key not in the manifest, a signature for once with the minutes edited, minutes or the end edited, the start moved past the page time, the text or nonce edited, the request id moved to another request, the credential swapped to another enrolled key; an expired grant or one over a lowered ceiling is not used; the fingerprint is the 4x4 hex form, every admin key is listed, it changes with the admin keys, and it is on every page type and the first line of `--enrolled` and `--audit` | **Tested** in code (the `grant` and `fingerprint` checks, through `RunCommand`, `WebApprover` and `PasskeyMethod` over real HTTP). The fingerprint in the page scripts' final messages is **not tested** in a browser |
-| `state.db`: round trips of passkeys, saved approvals and audit entries; two writers at once (no lost update); a garbage or damaged file and a lock past the timeout are errors, not an empty store; a database of another schema version is an error; the hash chain finds an edited or deleted entry; `--audit` output has names and never a value | **Tested** in code (the `db`, `chain` and `audit output` checks). `--audit` on an empty store in the installed tool was **tested by hand** |
-| Settings and `--config`: the limits of every setting, the round trip through the signed manifest, an edited setting (the state fails verification, so every command stops with exit 4, `--config --show` too), a save signed by an admin passkey (a key that is not an admin is refused), refusals that save nothing (an assertion over other values or another page, a value changed after the assertion, a value out of its limits, a key that is not enrolled, cancel, the time limit, settings changed meanwhile), a second POST is 404, the first-run setup (settings and key stored together only after the code; nothing in `state.db` before it; three wrong codes or no code store nothing), the audit entry, `--config --show` | **Tested** in code (the `settings`, `db settings`, `db schema`, `config` and `config first run` checks). The page script (the form, the summary, the canonical JSON) is **not tested** in a browser; its canonical JSON was compared with the program's by hand in Node |
-| Command line: the parsing of every option (`--list`, `--needs`, `-f`, `--set`, `--remove`, `--revoke`, `--enroll`, `--local`, `--enrolled`, `--unenroll`, `--audit`, `--last`, `--secret`, `--verify`, a run), bad options (also `--name`, which no longer exists) and two commands at once, and that `--help` lists the options | **Tested** in code (the `cli:` checks). The exit codes of `--help` and of an unknown secret in the real exe were **tested by hand** only |
-| Project `.env` declarations: the parser (quotes, `export`, comments, CRLF, bad names and lines with file and line but never the value, the 256 KB cap), the composition (first file wins, an OS variable beats an ordinary value, a reference beats it, an overridden reference is never requested or decrypted, `--secrets` plus references, conflicts, encrypted values), the `secret://` grammar and the folder-name rule (accepted and refused forms), the trust rules (code-loading variables dropped with a note, references to them or to PATH refused, a `.env` changed while the page is open changes nothing, no value in stdout, stderr, audit or page), a run over real HTTP with a test authenticator (the mapping, redaction, a folder name from `--set` to the child, deny reads nothing), `--needs`, and the command line | **Tested** in code (`EnvDeclarations` suite). By hand only: the real exe in a real project with a real passkey |
-| The secret store in `state.db`: round trips with the real Dotenvx crypto; only the requested rows are decrypted (counted); a row replaced by another valid ciphertext made with the public key, a row swapped with another, a row without a hash, a hash without a row, a hash or the store key edited in the manifest: exit 4, nothing asked or decrypted (also when the row is swapped while the approval page is open); `--set` of a new and an existing name; `--remove` re-signs; a stale version, rows that do not match the signed hashes, or a failure inside the transaction write nothing (no row, no manifest, no audit entry); the audit has names only; the zeroing of decrypted bytes | **Tested** in code (the `store` and `secrets` checks) |
-| The passkey flow in a real browser (create and use a passkey) and on a phone, over `ssh -L` and over an HTTPS name | **Not tested.** Must be tried by hand |
-| Safari and iOS (WebKit, also Chrome on iOS) refuse a passkey prompt that does not start in its own tap. Every page now starts each prompt synchronously in a click (or Ctrl+Enter) handler, with the challenge made before the tap: the approval page makes the challenges for Approve once and every offered time before its buttons turn on; the settings and `--set` pages make theirs as the form changes (the `--set` page after the program answered its values with the next manifest); the first-run `--config` and `--enroll` pages have a separate **Step 2 of 2** button for the second prompt | A text check of the served scripts is **tested** in code (the `tap rule` and `step 2` checks: every `credentials.get(`/`create(` is in a click or keydown handler or a function only called from one, with no `await` before it). The pages on an iPhone are **not tested**: hand test on Safari (macOS) and on an iPhone (Safari and Chrome): the first run in two taps, `--enroll` in two taps, a run approval, and **Approve for** with a time chosen |
-| `--enroll` across hosts (one link): when `baseUrl`'s host differs from the admin keys' hosts, the approval page (where an admin key works) leads to the enrollment page at the new host (name and admin box), which leads to a page where an admin key signs the new state and which shows the code, typed last in the terminal | **Not tested** in a browser (the server side is tested). Hand test |
-| The first-run `--config` in two taps (Step 1 creates the passkey; Step 2 confirms with the new passkey) | **Not tested** in a browser. Hand test |
-| The PRF key slots: slot and vault round trips and their failures (wrong key, tampered wrap, wrong credential id, wrong salt, wrong master key, wrong store key), the PRF transport (sealed to the page's key), first setup (the store public key and the vault are in the first manifest, the private key in no file; a failed first setup leaves nothing; an edited vault in the first manifest fails the signature), the first `--set` as one page without PRF, enrollment and runs over real HTTP with a test authenticator that simulates PRF (a passkey without PRF refused before anything is stored; a missing, garbled, foreign or wrongly bound PRF payload denies; only the requested rows decrypted; the private key in no file, row, response or audit entry; an edited slot or vault is exit 4) | **Tested** in code (the `key vault` and `prf` checks) |
-| A real passkey with PRF (iPhone / iCloud Keychain, a security key) in a real browser: PRF result at create (first setup and `--enroll`), a `--set`, a run approval, enrolling a second key | **Not tested** in a browser. Hand test, in this order: (1) `--config` on an iPhone: the PRF result is returned by `create`; (2) `--set` (one page); (3) a run approval; (4) `--enroll` a second key and run with it. Windows Hello PRF is untested |
-| The page scripts (buttons, the Approve delay, messages, encryption of `--set` values in the browser) | **Not tested** in a browser. Only the server side is tested. Check by hand |
-| `.cmd` and `.bat` programs | **Tested.** A quote in an argument ran another command through `cmd.exe`; such arguments are now refused (see Known limits). `npm` resolves to `npm.CMD` |
+| [Using with-secrets safely from an agent](docs/agent-usage.md) | Rules and Bash and PowerShell examples for an agent's author |
+| [Operations guide](docs/operations.md) | Install, first run, machines, backup, recovery, Docker and WSL, troubleshooting, exit codes |
+| [Reference](docs/reference.md) | Every behaviour in detail: approval, the store, `.env`, grants, the admin API, audit, mutual TLS, known limits |
+| [Architecture](docs/architecture.md) | Design, trust boundaries and threat model |
+| [OpenAPI contract](docs/api/openapi.json) | The admin API |
 
-## Browser tests
-
-`tests/WithSecrets.E2E` drives the real page scripts in headless Chromium (Microsoft.Playwright) with a virtual authenticator (CTAP2, resident keys, user verification, WebAuthn PRF). Each scenario runs the real command in-process through `CommandWiring` (the same wiring as the exe), a temp state folder (never `~/.with-secrets`) and a fresh browser context. It checks the page text, the command result, `state.db` (through the Core APIs) and the audit rows, and fails on any CSP violation, console error or page error.
-
-Covered: first-run `--config` (recovery code shown once, terminal prompt last, one link); `--set` and `--remove` (values typed on the page, no plaintext in `state.db`, a run decrypts); run approval with a script file (contents shown), inline code, Deny and the time limit; `--rotate-key` (one link, automatic next page, new recovery code, the old one refused); `--recover` (one link, code page to new passkey page, old file renamed); `--enroll` on one host (a second key then approves a run); `--enroll` across hosts (only up to the program's own refusal: it will not serve a page on a host other than `localhost` over http, and the test server has no https); a refused passkey, Cancel while the prompt is pending, resend after an aborted POST, a lost reply answered identically on resend, the Continue fallback when navigation is blocked, and the tap rule (no passkey operation on page load).
-
-Run (opt-in, about a minute; not part of `dotnet build with-secrets.slnx` or the normal checks):
+## Development
 
 ```
-dotnet build tests/WithSecrets.E2E
-powershell -NoProfile -ExecutionPolicy Bypass -File tests/WithSecrets.E2E/bin/Debug/net10.0/playwright.ps1 install --only-shell chromium
-dotnet run --project tests/WithSecrets.E2E            # all scenarios; or: dotnet run --project tests/WithSecrets.E2E -- c  (names starting with c)
+dotnet build with-secrets.slnx                          # warnings are errors; also builds the admin web app (needs Node.js 22+)
+dotnet run --project tests/WithSecrets.Tests            # the .NET suite; WS_ONLY=Name,Name runs groups
+cd src/WithSecrets.Admin.Web && npm run verify          # API client freshness, typecheck, lint, component and accessibility tests
+pwsh scripts/publish.ps1                                # the single-file release for this platform, verified
+pwsh scripts/verify-all.ps1                             # all of the above plus the browser tests
 ```
 
-The one-time browser install downloads Chromium's headless shell (about 280 MB, plus a few MB for ffmpeg) into `%LOCALAPPDATA%\ms-playwright`, per user; nothing global is changed. Chromium and a virtual authenticator are not an iPhone or 1Password: Safari and iOS prompt rules, a phone's real PRF, 1Password and Windows Hello still need the hand tests listed above.
+- **CI** (`.github/workflows/ci.yml`) builds and runs the .NET suite on Windows, Linux and macOS, runs the frontend checks, publishes and verifies the single file on each, and runs the browser tests on each.
+- **Browser tests** (`tests/WithSecrets.E2E`) drive the real pages in headless Chromium with a virtual passkey authenticator (including PRF). See [Browser tests](docs/reference.md#browser-tests).
+- **Releases** are made by pushing a tag `vX.Y.Z` that equals `Version` in `Directory.Build.props`; `.github/workflows/release.yml` tests, builds and verifies all three platforms and attaches them with checksums.
 
-## Logging
+Layout: `src/WithSecrets.Core` (logic, the approval page, the host and the authority), `src/WithSecrets` (the executable), `src/WithSecrets.Admin.Web` (the React admin app), `tests/`, `scripts/`, `docs/`.
 
-Normally the terminal shows only what a command always showed: its result, errors, links and the code prompt. The lines that explain what the program is doing (`with-secrets: connection opened (3 s)`, `request POST /proof (headers read, 3 s)`, `proof received (N bytes)`, `proof checked: accepted`) are Debug events and are not shown.
+## Credits
 
-- **`--debug`** (with any command, before `--`) or **`WITH_SECRETS_DEBUG=1`**: those lines print on the terminal as they happen, and are also written to the log file.
-- **Log file:** `%USERPROFILE%\.with-secrets\logs\with-secrets-YYYYMMDD.log`, one file a day, rolled at 1 MB, the newest 7 files kept. The folder is made when needed; if the file cannot be opened or written, the command goes on without it.
-- **Always in the file, without `--debug`:** warnings and errors: a request handler that failed (the exception type name only), a request body that timed out, a state that failed its check, an audit row that could not be written.
-- **Nothing secret:** the log holds route words (`page`, `proof`, `save`...), sizes, whole seconds and exception type names. Never a link or token, a request body, a key, PRF output, a code or recovery code, a secret value, a `.env` value or exception text.
-
-## Troubleshooting
-
-If a page sits on "Checking your passkey..." and then says the program did not answer, run the command again with `--debug` (or set `WITH_SECRETS_DEBUG=1`) and look at the terminal and the log file (see [Logging](#logging)). `with-secrets: connection opened (N s)` and `request POST /proof (headers read, N s)` (a method, a route word and whole seconds since the link was made, never the link, a body or a key) show that the request reached the program; `body slow` means its body was still arriving after 5 seconds; no line means it never arrived. The page adds a `Diagnostics:` line after a failed post (never after a success), with times only: when it was opened, when the passkey prompt started and answered, how long the page was hidden, each attempt, and whether the phone was online. Send those lines, not a screenshot of anything secret, when you report a problem.
-
-## Known limits
-
-- **The page shows the code, but only so much of it.** It shows the whole command line, the inline code, and the first 200 lines (at most 16 KB) of each script file, with a `...cut` notice when there is more. A long or obfuscated script can still be hard to judge, and an agent can write a script that prints `$DB_URL` in a form that is not redacted. Approve only code you have read and understood.
-- **Interpreters are allowed in one strict form only.** Options are not parsed: anything else is refused with "put options inside the script file". Program names are matched without regard to case; an argument with leading or trailing whitespace is refused.
-  - `sh`, `bash`, `zsh`, `dash`, `ksh`, `fish`, `python`, `py`, `python3`: `PROG script [args]` (the first argument does not start with `-`) or `PROG -c CODE [args]`. Not allowed: `-`, `-l`, `--login`, `-e`, `-m`, `-u`, `-W`, `-X`, `-I`, `--`, combined flags.
-  - `node`, `perl`, `ruby`: `PROG script [args]` or `PROG -e CODE`. Not allowed: `--env-file`, `-C`, `--require`, `-M`, `-I`, `-E`, `--test`, `--`, combined flags.
-  - `powershell`, `pwsh`: `-NoProfile` (required), `-NonInteractive`, `-NoLogo` and `-ExecutionPolicy` with one of Bypass, RemoteSigned, Unrestricted, AllSigned, Restricted, Default, Undefined (each at most once, any order), then exactly `-File path [args]` or `-Command CODE` (one code argument), written in full and in any case. The `-File` path may not contain `[`, `]` or a backtick, in the script name or its folder (PowerShell reads it as a wildcard): run from another folder. Not allowed: abbreviations (`-f`, `-c`), a bare positional, `-EncodedCommand` in any form (`-e`, `-ec`, `-enc`), padded flags, flags starting with an en dash, em dash, horizontal bar or minus sign, and code on standard input.
-  - `cmd`: `cmd /d /c TAIL` (or `/k`, `/r`; `/d` is required) where every word of the tail has only letters, digits and `. _ : \ / -`, and the first word is a `.cmd` or `.bat` file written with its extension, or `echo`, `dir`, `type`, `ver`. The script path itself may contain spaces and brackets (the working folder is written in full), but a folder name with a quote or one of `% ^ & | < > !` is refused for cmd. Not allowed: `/c` without `/d`, `/s` and other switches, quotes, spaces in a word, `% ^ & | < > !`, a name without an extension (PATHEXT lookup).
-  - An interpreter with nothing to run (`bash`, `python`, `cmd`, `pwsh` alone) is refused: it would read code from outside the approval. The script an interpreter names must exist and be at most 1 MB; the page, the fingerprint and the file lock all use that one operand.
-  - Any other program has no analysis: the page shows its `Run:` line; a first file argument is only guessed and marked "guessed from the arguments, not verified"; a program that is itself a text script (`.cmd`, `.bat`, `.ps1`, `.sh`, `.py`, `.js`, `.pl`, `.rb`) is shown and hashed with its arguments unparsed.
-- **Limits that remain.**
-  - Files a shown script loads (`source`, `import`, `require`, dot-sourcing, `-m` modules, `bash -c` code that runs other files) are not shown. Only the files named in the command are.
-  - Startup files can still load. The allowed forms refuse `-l` and other options, but zsh always reads `~/.zshenv`, fish reads its config, Python loads its user site (`.pth` files, `usercustomize`), and similar files exist for other runtimes. An agent that can write to your profile or startup files can use them to run code the page never showed.
-  - A script given to an interpreter must be text: binary scripts, zipapps and `.pyc` files are refused. Windows PowerShell 5.1 (`powershell`, not `pwsh`) refuses a script with non-ASCII bytes and no UTF-8 BOM, because it would read it in another code page than the page shows. A program that resolves to a Windows App Execution Alias (a zero-length reparse point in a `WindowsApps` folder, such as the `python3` stub, `winget` or `wt`) is refused with a message that names it; use the full path to the real program. A `.cmd` or `.bat` file (as the script of `cmd`, or run directly) must be ASCII: cmd reads it in the console code page, so a byte above 127 could mean another character than the page shows. A batch file run directly is started as `cmd.exe /d /c "path" args`, so the AutoRun commands of the registry are skipped.
-  - Other startup code is not covered: a console code page that is a double-byte one (DBCS) can read ASCII-looking bytes in a `.ps1` or other script differently, and anything a profile or the registry runs outside the forms above. A renamed or copied interpreter skips the analysis; the `Run:` line still shows the real path and is what to check.
-  - The environment denylist (the variables listed above) cannot be complete. Known gaps (the list is not complete): `PSModulePath`, `COMSPEC`, the effect of `PATH` and `PATHEXT` on programs the child starts, other `GIT_*` variables, and other runtime-specific `*OPT`/`*OPTS` variables.
-  - The write lock: on Windows the files the page showed are opened so that nobody can write or delete them until the program ends, and are hashed once more after that (if that fails the run is refused). It covers only those files, not a renamed parent folder or a junction. Off Windows there is no lock: the files are only checked just before launch and an interpreter may read a file again after it was changed.
-- **`.env` declarations are written by the agent.** The environment denylist cannot be complete, so an ordinary `.env` value (such as `GIT_CONFIG_COUNT`, `HTTPS_PROXY`, `SSL_CERT_FILE`, `CORECLR_PROFILER_PATH`, `GH_HOST`) can still reach the program; that is why the page shows every ordinary value. A value is shown only if it is on the page: a program that reads the `.env` (or `.env.local`) itself sees the whole file. The inherited environment of the `with-secrets` process is not shown, and an agent controls it too.
-- **Redaction does not catch** reversed, split, compressed, or encrypted copies.
-- **A program that sends its environment over the network is out of scope.**
-- **No length limit on the command** except a technical one of 16,000 characters. The program refuses a longer command instead of cutting it short.
-- **Only file symbolic links are shown.** A link in a parent folder (a junction, for example) is not.
-- **A script can load other files.** The page shows, hashes and locks only the files named in the command (the script an interpreter runs, and a program that is a text script). Files that script loads are not shown, hashed or locked.
-- **Same OS user.** (See also the memory and look-alike page limits under "The secret store".) An agent that runs as you can write `state.db` in the store folder and read the process's memory at any moment a run is open (where the store key, the master key and the PRF output are for a moment); it cannot decrypt the secrets from the disk alone, because the store key is not on it. An edit to your passkeys, settings or secret rows fails verification and stops everything, and an edited or forged saved approval is ignored. But the agent can still delete `state.db` and write a whole new state signed by its own software key, with no page and no terminal; that key then approves its runs. The admin keys' fingerprints make that visible to you: they change on every page and in `--enrolled` and `--audit`. The agent can also restore an older copy (accepted, see [Admin keys](#admin-keys)), put back a saved approval it copied before `--revoke` (it works until it ends, so `--revoke` is not a boundary against it), move a saved approval's start up to 30 minutes past its page time, or rewrite the audit log (and recompute the hash chain). The hook and file permissions must protect that folder, like the store itself.
-- **Sign counts are not signed.** They sit outside the manifest signature. An agent can set the admin keys' counts very high, and then every admin assertion fails ("sign count did not increase"), which also blocks `--revoke`. This is denial of service only: deleting `state.db` does the same.
-- **The first passkey is trust on first use.** Whoever finishes the first `--config` becomes the first admin. Do it yourself, in your own terminal.
-- **An agent that owns your terminal** can read the link and the confirmation code. Use a terminal the agent cannot read.
-- **Plain `http` is not accepted for passkeys** except on localhost. Use `https` for any other name.
-- **`.cmd` and `.bat` programs** run through `cmd.exe`, which reads quotes and `& | < > ^ % !` in arguments as commands. Arguments that contain them are refused.
-- **A store made before the shared PRF salt (commit a9dddd7) does not work.** Delete `state.db` and set up again.
-- **Passkeys that are not discoverable can no longer sign.** Approval sign-in lists the passkeys for `localhost`; make new passkeys discoverable.
-- **Output is read as UTF-8.** Binary output and output in another code page (the console's OEM page, UTF-16) are garbled, and UTF-16 copies of a secret are not redacted.
-
-## References
-
-- [Agent Secret](https://kovyrin.net/2026/06/04/agent-secret/) (Kovyrin, 2026-06-04). Where several of the ideas come from: the approval request shows the command, the folder, the secrets, and the agent's reason, and an approval can be reused for a limited time. It is macOS only and uses 1Password; this project applies those ideas with Dotenvx and passkeys.
-- [dotenvx](https://dotenvx.com/): its encryption format is what the store uses.
-- [dotnet-dotenvx](https://github.com/CodePenguin/dotnet-dotenvx) is the .NET port (`Dotenvx.Primitives`) that this project calls, and the source of the command-line style.
+Several of the ideas come from [Agent Secret](https://kovyrin.net/2026/06/04/agent-secret/) (Kovyrin, 2026). The encryption format is [dotenvx](https://dotenvx.com/); [dotnet-dotenvx](https://github.com/CodePenguin/dotnet-dotenvx) is the .NET port this project calls.
 
 ## License
 
-BSD 3-Clause. See `LICENSE`. The released exe contains third-party components, listed with their licenses in `THIRD-PARTY-NOTICES.md`. Ship that file with the exe.
+BSD 3-Clause. See [LICENSE](LICENSE). The released program contains third-party components, listed with their licenses in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md); ship that file with it.

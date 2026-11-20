@@ -187,14 +187,14 @@ internal static class ApprovalSummaryTests
                 FakeApprover never = new(true);
                 StringWriter errors = new();
                 RunArgs missing = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", .. Prefix("nope" + extension)], out _)!;
-                int code = await new RunCommand(new MemoryStore(values), never, new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(missing, folder);
+                int code = await new RunCommand(new MemoryStore(values), never, new StringWriter(), errors).ExecuteAsync(missing, folder);
                 check(code == RunCommand.Usage && never.Requests.Count == 0 && errors.ToString().Contains("does not exist", StringComparison.Ordinal), "round4 run: a script that does not exist is refused before any prompt");
 
                 // A binary script is refused.
                 await File.WriteAllBytesAsync(Path.Combine(folder, "bin" + extension), [0, 1, 2, 3]);
                 errors = new StringWriter();
                 RunArgs binary = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", .. Prefix("bin" + extension)], out _)!;
-                code = await new RunCommand(new MemoryStore(values), never, new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(binary, folder);
+                code = await new RunCommand(new MemoryStore(values), never, new StringWriter(), errors).ExecuteAsync(binary, folder);
                 check(code == RunCommand.Usage && never.Requests.Count == 0 && errors.ToString().Contains("Binary scripts", StringComparison.Ordinal), "round4 run: a binary script given to an interpreter is refused");
 
                 // A working folder with spaces and brackets works, and the script is shown, hashed and held.
@@ -206,7 +206,7 @@ internal static class ApprovalSummaryTests
                 StringWriter output = new();
                 errors = new StringWriter();
                 RunArgs spacedRun = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", .. Prefix(scriptName)], out _)!;
-                code = await new RunCommand(new MemoryStore(values), approver, new AuditLog(new StateDatabase(audit)), output, errors).ExecuteAsync(spacedRun, spacedFolder);
+                code = await new RunCommand(new MemoryStore(values), approver, output, errors).ExecuteAsync(spacedRun, spacedFolder);
                 ApprovalRequest? seen = approver.Requests.SingleOrDefault();
                 bool shown = seen?.Script is { Text: not null } view && view.Path.StartsWith(spacedFolder, StringComparison.Ordinal) && ApprovalSummary.BuildMessage(seen).Contains(Marker + "echo SPACE_MARK_OK", StringComparison.Ordinal);
                 check(code == 0 && shown && output.ToString().Contains("SPACE_MARK_OK", StringComparison.Ordinal), "round4 run: a folder with spaces and brackets runs and the script is shown (" + code + " " + errors.ToString().Trim().Replace('\n', ' ') + ")");
@@ -239,7 +239,7 @@ internal static class ApprovalSummaryTests
                     await File.WriteAllTextAsync(Path.Combine(ampFolder, scriptName), "@echo off\r\necho AMP_MARK\r\n");
                     FakeApprover none = new(true);
                     errors = new StringWriter();
-                    code = await new RunCommand(new MemoryStore(values), none, new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(spacedRun, ampFolder);
+                    code = await new RunCommand(new MemoryStore(values), none, new StringWriter(), errors).ExecuteAsync(spacedRun, ampFolder);
                     check(code == RunCommand.Usage && none.Requests.Count == 0 && errors.ToString().Contains("folder name", StringComparison.Ordinal), "round4 run: cmd in a folder with & is refused with a clear message");
                 }
             }
@@ -252,10 +252,10 @@ internal static class ApprovalSummaryTests
                 FakeApprover deny = new(false);
                 StringWriter errors = new();
                 RunArgs noBom = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", "powershell", "-NoProfile", "-File", "u.ps1"], out _)!;
-                int code = await new RunCommand(new MemoryStore(values), deny, new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(noBom, folder);
+                int code = await new RunCommand(new MemoryStore(values), deny, new StringWriter(), errors).ExecuteAsync(noBom, folder);
                 check(code == RunCommand.Usage && deny.Requests.Count == 0 && errors.ToString().Contains("byte order mark", StringComparison.Ordinal), "round4 run: powershell.exe refuses a non-ASCII script without a BOM");
                 RunArgs withBom = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", "powershell", "-NoProfile", "-File", "b.ps1"], out _)!;
-                await new RunCommand(new MemoryStore(values), deny, new AuditLog(new StateDatabase(audit)), new StringWriter(), new StringWriter()).ExecuteAsync(withBom, folder);
+                await new RunCommand(new MemoryStore(values), deny, new StringWriter(), new StringWriter()).ExecuteAsync(withBom, folder);
                 check(deny.Requests.Count == 1, "round4 run: powershell.exe accepts the same script with a BOM");
             }
         }
@@ -311,7 +311,7 @@ internal static class ApprovalSummaryTests
                 StringWriter output = new();
                 StringWriter errors = new();
                 RunArgs run = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", "cmd", "/d", "/c", "t.cmd", "x1"], out _)!;
-                int code = await new RunCommand(new MemoryStore(values), approver, new AuditLog(new StateDatabase(audit)), output, errors).ExecuteAsync(run, folder);
+                int code = await new RunCommand(new MemoryStore(values), approver, output, errors).ExecuteAsync(run, folder);
                 string text = output.ToString();
                 check(code == 0 && text.Contains("SHOWN_T x1", StringComparison.Ordinal) && !text.Contains("HIDDEN_A_MARKER", StringComparison.Ordinal) && approver.Requests.Single().Script is { Text: not null } shown && shown.Path.StartsWith(folder, StringComparison.Ordinal),
                     "round5 run: cmd /d /c t.cmd in a folder named '" + name + "' runs the shown file (" + code + " " + errors.ToString().Trim().Replace('\n', ' ') + ")");
@@ -335,7 +335,7 @@ internal static class ApprovalSummaryTests
                 FakeApprover none = new(true);
                 StringWriter errors = new();
                 RunArgs run = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", .. words], out _)!;
-                int code = await new RunCommand(new MemoryStore(values), none, new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(run, root);
+                int code = await new RunCommand(new MemoryStore(values), none, new StringWriter(), errors).ExecuteAsync(run, root);
                 check(code == RunCommand.Usage && none.Requests.Count == 0 && errors.ToString().Contains("batch files must be ASCII", StringComparison.Ordinal), "round5 run: a non-ASCII batch file is refused (" + string.Join(' ', words) + ")");
             }
 
@@ -351,11 +351,11 @@ internal static class ApprovalSummaryTests
                 RunArgs psRun = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", "powershell", "-NoProfile", "-File", "t.ps1"], out _)!;
                 FakeApprover approver = new(true);
                 StringWriter output = new();
-                int code = await new RunCommand(new MemoryStore(values), approver, new AuditLog(new StateDatabase(audit)), output, new StringWriter()).ExecuteAsync(psRun, plain);
+                int code = await new RunCommand(new MemoryStore(values), approver, output, new StringWriter()).ExecuteAsync(psRun, plain);
                 check(code == 0 && output.ToString().Contains("PS_MARK_OK", StringComparison.Ordinal), "round5 run: powershell -File in a plain folder with a space runs");
                 FakeApprover none = new(true);
                 StringWriter errors = new();
-                code = await new RunCommand(new MemoryStore(values), none, new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(psRun, wild);
+                code = await new RunCommand(new MemoryStore(values), none, new StringWriter(), errors).ExecuteAsync(psRun, wild);
                 check(code == RunCommand.Usage && none.Requests.Count == 0 && errors.ToString().Contains("wildcards", StringComparison.Ordinal), "round5 run: powershell -File in a folder with [ ] is refused before any prompt");
             }
         }
@@ -403,14 +403,14 @@ internal static class ApprovalSummaryTests
             await File.WriteAllTextAsync(data, "just data\n");
             FakeApprover deny = new(false);
             RunArgs benign = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", "./" + Path.GetFileName(evil), "hello"], out _)!;
-            int code = await new RunCommand(new MemoryStore(values), deny, new AuditLog(new StateDatabase(audit)), new StringWriter(), new StringWriter()).ExecuteAsync(benign, folder);
+            int code = await new RunCommand(new MemoryStore(values), deny, new StringWriter(), new StringWriter()).ExecuteAsync(benign, folder);
             ApprovalRequest seen = deny.Requests.Single();
             string message = ApprovalSummary.BuildMessage(seen);
             check(code == RunCommand.Denied && seen.ProgramFile is { Text: not null } && seen.Script is null && Lines(message).Contains(Marker + "echo EVIL_MARK"), "program file: a script run directly is shown even with a benign argument");
 
             deny = new FakeApprover(false);
             RunArgs both = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", "./" + Path.GetFileName(evil), "./data.txt"], out _)!;
-            await new RunCommand(new MemoryStore(values), deny, new AuditLog(new StateDatabase(audit)), new StringWriter(), new StringWriter()).ExecuteAsync(both, folder);
+            await new RunCommand(new MemoryStore(values), deny, new StringWriter(), new StringWriter()).ExecuteAsync(both, folder);
             message = ApprovalSummary.BuildMessage(deny.Requests.Single());
             check(Lines(message).Count(line => line.StartsWith("Script file: ", StringComparison.Ordinal)) == 2 && Lines(message).Contains(Marker + "echo EVIL_MARK") && Lines(message).Contains(Marker + "just data"), "program file: the program and its script argument are both shown, each with its hash");
             check(Lines(message).Count(line => line.StartsWith("Script SHA-256: ", StringComparison.Ordinal)) == 2, "program file: two hashes");
@@ -425,13 +425,13 @@ internal static class ApprovalSummaryTests
             if (interpreter is not null)
             {
                 RunArgs bigRun = CliArgs.ParseRun(windows ? ["--secrets", "DB_URL", "--reason", "x", "--", "cmd", "/d", "/c", bigName] : ["--secrets", "DB_URL", "--reason", "x", "--", "sh", bigName], out _)!;
-                code = await new RunCommand(new MemoryStore(values), never, new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(bigRun, folder);
+                code = await new RunCommand(new MemoryStore(values), never, new StringWriter(), errors).ExecuteAsync(bigRun, folder);
                 check(code == RunCommand.Usage && never.Requests.Count == 0 && errors.ToString().Contains("larger than 1 MB", StringComparison.Ordinal), "big: a script over 1 MB given to an interpreter is refused before any prompt (" + code + ")");
             }
 
             RunArgs bigDirect = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", "./" + bigName], out _)!;
             errors = new StringWriter();
-            code = await new RunCommand(new MemoryStore(values), never, new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(bigDirect, folder);
+            code = await new RunCommand(new MemoryStore(values), never, new StringWriter(), errors).ExecuteAsync(bigDirect, folder);
             check(code == RunCommand.Usage && never.Requests.Count == 0 && errors.ToString().Contains("larger than 1 MB", StringComparison.Ordinal), "big: a script over 1 MB run directly is refused before any prompt (" + code + ")");
 
             // bare interpreter through a run: refused without a prompt
@@ -439,7 +439,7 @@ internal static class ApprovalSummaryTests
             {
                 RunArgs bare = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", interpreter], out _)!;
                 errors = new StringWriter();
-                code = await new RunCommand(new MemoryStore(values), never, new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(bare, folder);
+                code = await new RunCommand(new MemoryStore(values), never, new StringWriter(), errors).ExecuteAsync(bare, folder);
                 check(code == RunCommand.Usage && never.Requests.Count == 0 && errors.ToString().Contains("nothing to run", StringComparison.Ordinal), "bare: an interpreter with nothing to run is refused before any prompt");
             }
 
@@ -457,7 +457,7 @@ internal static class ApprovalSummaryTests
             try
             {
                 errors = new StringWriter();
-                code = await new RunCommand(new MemoryStore(values), approver, new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(racerRun, folder);
+                code = await new RunCommand(new MemoryStore(values), approver, new StringWriter(), errors).ExecuteAsync(racerRun, folder);
             }
             finally
             {
@@ -469,8 +469,553 @@ internal static class ApprovalSummaryTests
             // a file edited while the prompt is open is not run (the fingerprint check after the approval)
             await File.WriteAllTextAsync(racer, windows ? "@echo off\r\necho first\r\n" : "#!/bin/sh\necho first\n");
             errors = new StringWriter();
-            code = await new RunCommand(new MemoryStore(values), new EditingApprover(racer), new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(racerRun, folder);
+            code = await new RunCommand(new MemoryStore(values), new EditingApprover(racer), new StringWriter(), errors).ExecuteAsync(racerRun, folder);
             check(code == RunCommand.Denied && errors.ToString().Contains("while the prompt was open", StringComparison.Ordinal), "race: a file edited while the prompt is open is refused by the fingerprint check (" + code + "; " + errors + ")");
+
+            // (8) The program runs the files as they were shown, even if the file at its path is replaced after the check, in the window before the
+            // program starts. Windows holds the file (the replacement is refused); elsewhere the program is told to run a private copy.
+            HashSet<string> copiesBefore = [.. Directory.GetDirectories(Path.GetTempPath(), "with-secrets-*")];
+            await File.WriteAllTextAsync(Path.Combine(folder, "relative.txt"), "RELATIVE_MARK\n");
+            string swapName = windows ? "swap.cmd" : "swap.sh";
+            string swapPath = Path.Combine(folder, swapName);
+            string[][] swapCommands = windows ? [["./" + swapName], ["cmd", "/d", "/c", swapName]] : [["./" + swapName], ["sh", swapName]];
+            foreach (string[] command in swapCommands)
+            {
+                await File.WriteAllTextAsync(swapPath, windows ? "@echo off\r\necho FIRST_MARK\r\ntype relative.txt\r\necho SELF=%~f0\r\n" : "#!/bin/sh\necho FIRST_MARK\ncat relative.txt\necho \"SELF=$0\"\n");
+                if (!windows)
+                {
+                    File.SetUnixFileMode(swapPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                }
+
+                bool replaced = false;
+                bool refused = false;
+                RunCommand.AfterHold = () =>
+                {
+                    try
+                    {
+                        File.WriteAllText(swapPath, windows ? "@echo off\r\necho SECOND_MARK\r\n" : "#!/bin/sh\necho SECOND_MARK\n");
+                        replaced = true;
+                    }
+                    catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+                    {
+                        refused = true;
+                    }
+                };
+                StringWriter swapOutput = new();
+                errors = new StringWriter();
+                try
+                {
+                    code = await new RunCommand(new MemoryStore(values), new FakeApprover(true), swapOutput, errors).ExecuteAsync(CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "swap", "--", .. command], out _)!, folder);
+                }
+                finally
+                {
+                    RunCommand.AfterHold = null;
+                }
+
+                string ran = swapOutput.ToString();
+                string label = "swap (" + string.Join(' ', command) + "): ";
+                check(code == 0 && ran.Contains("FIRST_MARK", StringComparison.Ordinal) && !ran.Contains("SECOND_MARK", StringComparison.Ordinal), label + "a script replaced after the check still runs as it was shown (" + code + ": " + ran.Trim().Replace('\n', ' ') + " " + errors.ToString().Trim() + ")");
+                check(ran.Contains("RELATIVE_MARK", StringComparison.Ordinal), label + "the script still reads a file relative to the working folder");
+                if (windows)
+                {
+                    check(refused && !replaced, label + "on Windows the file cannot be replaced while it is held");
+                }
+                else
+                {
+                    check(replaced && ran.Contains("SELF=", StringComparison.Ordinal) && !ran.Contains("SELF=" + swapPath, StringComparison.Ordinal), label + "elsewhere the replacement succeeded but the program ran a private copy, not the file at its path");
+                }
+            }
+
+            check(Directory.GetDirectories(Path.GetTempPath(), "with-secrets-*").All(copiesBefore.Contains), "swap: no private copy is left after the programs ended");
+
+            if (!windows)
+            {
+                // A program that cannot start (its interpreter is missing) leaves no copy behind either.
+                string broken = Path.Combine(folder, "broken.sh");
+                await File.WriteAllTextAsync(broken, "#!/nonexistent/interpreter\necho never\n");
+                File.SetUnixFileMode(broken, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                errors = new StringWriter();
+                code = await new RunCommand(new MemoryStore(values), new FakeApprover(true), new StringWriter(), errors).ExecuteAsync(CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "broken", "--", "./broken.sh"], out _)!, folder);
+                check(code != 0 && Directory.GetDirectories(Path.GetTempPath(), "with-secrets-*").All(copiesBefore.Contains), "swap: a program that cannot start leaves no private copy (" + code + ")");
+            }
+
+            // (9) Where the script is. The program runs a copy of the script on systems that cannot lock files, so the copy sits beside links to what was beside the
+            // original: a script that finds its neighbours by its own location still does. Windows runs the held original, so every location is the original's.
+            string home = Path.Combine(folder, "neighbours");
+            Directory.CreateDirectory(Path.Combine(home, "lib"));
+            Directory.CreateDirectory(Path.Combine(home, "pkg"));
+            await File.WriteAllTextAsync(Path.Combine(home, "lib", "data.txt"), "lib-mark\n");
+
+            async Task<(int Code, string Output, string Errors, FakeApprover Approver)> Execute(string[] command, Action? hook = null)
+            {
+                FakeApprover approver = new(true);
+                StringWriter output = new();
+                StringWriter failures = new();
+                RunCommand.AfterHold = hook;
+                try
+                {
+                    int result = await new RunCommand(new MemoryStore(values), approver, output, failures).ExecuteAsync(CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "neighbours", "--", .. command], out _)!, folder);
+
+                    return (result, output.ToString(), failures.ToString(), approver);
+                }
+                finally
+                {
+                    RunCommand.AfterHold = null;
+                }
+            }
+
+            static string Line(string output, string name) => output.Split('\n').Select(line => line.TrimEnd('\r')).FirstOrDefault(line => line.StartsWith(name + "=", StringComparison.Ordinal))?[(name.Length + 1)..] ?? "(missing)";
+
+            async Task<bool> Works(string program, params string[] probe)
+            {
+                string? path = ProgramResolver.Resolve(program, folder);
+                if (path is null)
+                {
+                    return false;
+                }
+
+                try
+                {
+                    return await ChildRunner.RunAsync(new ChildSpec(path, probe, folder, new Dictionary<string, string>()), new StringWriter(), new StringWriter()) == 0;
+                }
+                catch (Exception error) when (error is System.ComponentModel.Win32Exception or IOException or InvalidOperationException)
+                {
+                    return false;
+                }
+            }
+
+            string homeRelative = "neighbours" + Path.DirectorySeparatorChar;
+            if (windows)
+            {
+                await File.WriteAllTextAsync(Path.Combine(home, "common.cmd"), "@echo off\r\nset COMMON_MARK=common-mark\r\n");
+                await File.WriteAllTextAsync(Path.Combine(home, "main.cmd"), "@echo off\r\ncall \"%~dp0common.cmd\"\r\necho COMMON=%COMMON_MARK%\r\necho ZERO=%~f0\r\necho ARGS=%~1^|%~2\r\nif defined DB_URL echo SECRET=set\r\ntype relative.txt\r\ntype \"%~dp0lib\\data.txt\"\r\n");
+                (int windowsCode, string windowsOutput, string windowsErrors, FakeApprover windowsApprover) = await Execute(["cmd", "/d", "/c", homeRelative + "main.cmd", "a", "c"]);
+                check(windowsCode == 0 && Line(windowsOutput, "COMMON") == "common-mark" && Line(windowsOutput, "ARGS") == "a|c" && Line(windowsOutput, "SECRET") == "set" && windowsOutput.Contains("RELATIVE_MARK", StringComparison.Ordinal) && windowsOutput.Contains("lib-mark", StringComparison.Ordinal), "neighbours (cmd): a sibling and a sub-folder are found by the script's own location, the working folder, the arguments and the secret are as before (" + windowsCode + ": " + windowsOutput.Trim().Replace('\n', ' ') + " " + windowsErrors.Trim() + ")");
+                check(string.Equals(Line(windowsOutput, "ZERO"), Path.Combine(home, "main.cmd"), StringComparison.OrdinalIgnoreCase), "neighbours (cmd): on Windows the script is run in place, so its own path is the original's");
+                check(windowsApprover.Requests[0].Script is { } shownCmd && !(shownCmd.Text ?? "").Contains("common-mark", StringComparison.Ordinal), "neighbours (cmd): the approval shows the script, not the file it calls");
+            }
+            else
+            {
+                await File.WriteAllTextAsync(Path.Combine(home, "common.sh"), "COMMON_MARK=common-mark\n");
+                string bashScript = string.Join('\n',
+                    "#!/bin/bash",
+                    "SCRIPT_DIR=\"$(cd -- \"$(dirname -- \"${BASH_SOURCE[0]}\")\" && pwd)\"",
+                    "source \"$SCRIPT_DIR/common.sh\"",
+                    "echo \"COMMON=$COMMON_MARK\"",
+                    "echo \"ZERO=$0\"",
+                    "echo \"SOURCE=${BASH_SOURCE[0]}\"",
+                    "echo \"DIR=$SCRIPT_DIR\"",
+                    "echo \"PWD=$PWD\"",
+                    "echo \"REL=$(cat relative.txt)\"",
+                    "echo \"ARGS=$1|$2|$#\"",
+                    "echo \"SECRET=${DB_URL:+set}\"",
+                    "echo \"LIB=$(cat \"$SCRIPT_DIR/lib/data.txt\")\"",
+                    "");
+                string bashPath = Path.Combine(home, "main.sh");
+                await File.WriteAllTextAsync(bashPath, bashScript);
+                (int bashCode, string bashOutput, string bashErrors, FakeApprover bashApprover) = await Execute(["bash", homeRelative + "main.sh", "a b", "c"]);
+                string bashZero = Line(bashOutput, "ZERO");
+                check(bashCode == 0 && Line(bashOutput, "COMMON") == "common-mark" && Line(bashOutput, "LIB") == "lib-mark", "neighbours (bash): a script that sources a sibling and reads a sub-folder by BASH_SOURCE finds them (" + bashCode + ": " + bashOutput.Trim().Replace('\n', ' ') + " " + bashErrors.Trim() + ")");
+                check(bashZero.EndsWith("/main.sh", StringComparison.Ordinal) && bashZero != bashPath && !bashZero.StartsWith(home, StringComparison.Ordinal) && Line(bashOutput, "SOURCE") == bashZero && Line(bashOutput, "DIR") == Path.GetDirectoryName(bashZero), "neighbours (bash): $0 and BASH_SOURCE are the private copy's path, the same as each other, with the script's own name (" + bashZero + ")");
+                check(Line(bashOutput, "PWD") == folder && Line(bashOutput, "REL") == "RELATIVE_MARK" && Line(bashOutput, "ARGS") == "a b|c|2" && Line(bashOutput, "SECRET") == "set", "neighbours (bash): the working folder, a relative path, the arguments and the secret are as they were");
+                check(bashApprover.Requests[0].Script is { } shownBash && shownBash.Path.EndsWith("main.sh", StringComparison.Ordinal) && !(shownBash.Text ?? "").Contains("common-mark", StringComparison.Ordinal), "neighbours (bash): the approval shows the script and not the file it sources");
+            }
+
+            // python3 where it exists; the Windows installer names the program python (python3 there is a Store stub that does not work).
+            string pythonName = await Works("python3", "--version") ? "python3" : "python";
+            if (await Works(pythonName, "--version"))
+            {
+                await File.WriteAllTextAsync(Path.Combine(home, "helper.py"), "VALUE = 'py-helper-mark'\n");
+                await File.WriteAllTextAsync(Path.Combine(home, "pkg", "__init__.py"), "NAME = 'py-package-mark'\n");
+                string pyScript = string.Join('\n',
+                    "from pathlib import Path",
+                    "import sys",
+                    "SCRIPT_DIR = Path(__file__).resolve().parent",
+                    "sys.path.insert(0, str(SCRIPT_DIR))",
+                    "import helper, pkg",
+                    "print('HELPER=' + helper.VALUE)",
+                    "print('PACKAGE=' + pkg.NAME)",
+                    "print('FILE=' + __file__)",
+                    "print('DIR=' + str(SCRIPT_DIR))",
+                    "print('ARGV=' + '|'.join(sys.argv[1:]))",
+                    "");
+                await File.WriteAllTextAsync(Path.Combine(home, "main.py"), pyScript);
+                (int pyCode, string pyOutput, string pyErrors, _) = await Execute([pythonName, homeRelative + "main.py", "a b", "c"]);
+                string pyFile = Line(pyOutput, "FILE");
+                check(pyCode == 0 && Line(pyOutput, "HELPER") == "py-helper-mark" && Line(pyOutput, "PACKAGE") == "py-package-mark" && Line(pyOutput, "ARGV") == "a b|c", "neighbours (python): a sibling module and a package are imported from the script's own location (" + pyCode + ": " + pyOutput.Trim().Replace('\n', ' ') + " " + pyErrors.Trim() + ")");
+                if (windows)
+                {
+                    check(string.Equals(pyFile, Path.Combine(home, "main.py"), StringComparison.OrdinalIgnoreCase) && string.Equals(Line(pyOutput, "DIR"), home, StringComparison.OrdinalIgnoreCase), "neighbours (python): on Windows __file__ is the original's");
+                }
+                else
+                {
+                    check(pyFile.EndsWith("/main.py", StringComparison.Ordinal) && !pyFile.StartsWith(home, StringComparison.Ordinal) && Line(pyOutput, "DIR") == Path.GetDirectoryName(pyFile), "neighbours (python): __file__ is the private copy's path and its folder is where the modules are found (" + pyFile + ")");
+                }
+            }
+            else
+            {
+                Console.WriteLine("  SKIP neighbours (python): " + pythonName + " is not available here, not run");
+            }
+
+            string powerShell = windows ? "powershell" : "pwsh";
+            if (await Works(powerShell, "-NoProfile", "-Command", "exit 0"))
+            {
+                await File.WriteAllTextAsync(Path.Combine(home, "common.ps1"), "$CommonMark = 'common-mark'\n");
+                string psScript = string.Join('\n',
+                    ". (Join-Path $PSScriptRoot \"common.ps1\")",
+                    "\"COMMON=$CommonMark\"",
+                    "\"ROOT=$PSScriptRoot\"",
+                    "\"SELF=$PSCommandPath\"",
+                    "\"ARGS=$($args -join '|')\"",
+                    "");
+                await File.WriteAllTextAsync(Path.Combine(home, "main.ps1"), psScript);
+                (int psCode, string psOutput, string psErrors, _) = await Execute([powerShell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", homeRelative + "main.ps1", "a", "c"]);
+                string psRoot = Line(psOutput, "ROOT");
+                check(psCode == 0 && Line(psOutput, "COMMON") == "common-mark" && Line(psOutput, "ARGS") == "a|c", "neighbours (powershell): a file dot-sourced from $PSScriptRoot is found (" + psCode + ": " + psOutput.Trim().Replace('\n', ' ') + " " + psErrors.Trim() + ")");
+                check(windows ? string.Equals(psRoot, home, StringComparison.OrdinalIgnoreCase) : psRoot != home && !psRoot.StartsWith(home, StringComparison.Ordinal), "neighbours (powershell): $PSScriptRoot is the original's folder on Windows and the private copy's folder elsewhere (" + psRoot + ")");
+            }
+            else
+            {
+                Console.WriteLine("  SKIP neighbours (powershell): " + powerShell + " is not available here, not run");
+            }
+
+            if (!windows)
+            {
+                // The script on disk is not the bytes that run, whichever way it is replaced after approval: in place, by a rename (another file),
+                // or by a link to other content; and the bytes are the ones the person saw, however the file changes while it is being read.
+                string sec = Path.Combine(folder, "sec.sh");
+                string other = Path.Combine(folder, "other.sh");
+                string[] kinds = ["in place", "rename", "link"];
+                foreach (string kind in kinds)
+                {
+                    File.Delete(sec);
+                    await File.WriteAllTextAsync(sec, "#!/bin/sh\necho FIRST_MARK\n");
+                    await File.WriteAllTextAsync(other, "#!/bin/sh\necho SECOND_MARK\n");
+                    (int secCode, string secOutput, string secErrors, _) = await Execute(["sh", "sec.sh"], () =>
+                    {
+                        if (kind == "in place")
+                        {
+                            File.WriteAllText(sec, "#!/bin/sh\necho SECOND_MARK\n");
+                        }
+                        else if (kind == "rename")
+                        {
+                            File.WriteAllText(sec + ".new", "#!/bin/sh\necho SECOND_MARK\n");
+                            File.Move(sec + ".new", sec, true);
+                        }
+                        else
+                        {
+                            File.Delete(sec);
+                            File.CreateSymbolicLink(sec, other);
+                        }
+                    });
+                    check(secCode == 0 && secOutput.Contains("FIRST_MARK", StringComparison.Ordinal) && !secOutput.Contains("SECOND_MARK", StringComparison.Ordinal), "security (" + kind + "): the original replaced after approval does not change what runs (" + secCode + ": " + secOutput.Trim() + " " + secErrors.Trim() + ")");
+                }
+
+                // The file is rewritten without a pause while the request is made and the files are held. A run that goes ahead runs what the person was shown; the others stop.
+                string racing = Path.Combine(folder, "racing.sh");
+                string[] versions = ["#!/bin/sh\necho A_MARK\n", "#!/bin/sh\necho B_MARK\n"];
+                await File.WriteAllTextAsync(racing, versions[0]);
+                bool stop = false;
+                Thread writer = new(() =>
+                {
+                    for (int turn = 0; !Volatile.Read(ref stop); turn++)
+                    {
+                        try
+                        {
+                            File.WriteAllText(racing, versions[turn % 2]);
+                        }
+                        catch (IOException)
+                        {
+                        }
+                    }
+                });
+                writer.Start();
+                int wrongBytes = 0;
+                int ranRacing = 0;
+                int stoppedRacing = 0;
+                try
+                {
+                    for (int round = 0; round < 25; round++)
+                    {
+                        (int raceCode, string raceOutput, _, FakeApprover raceApprover) = await Execute(["sh", "racing.sh"]);
+                        string? shown = raceApprover.Requests.Count == 1 ? raceApprover.Requests[0].Script?.Text : null;
+                        if (raceCode == 0 && raceOutput.Length > 0)
+                        {
+                            ranRacing++;
+                            string shownMark = shown is not null && shown.Contains("A_MARK", StringComparison.Ordinal) ? "A_MARK" : "B_MARK";
+                            string otherMark = shownMark == "A_MARK" ? "B_MARK" : "A_MARK";
+                            if (shown is null || !raceOutput.Contains(shownMark, StringComparison.Ordinal) || raceOutput.Contains(otherMark, StringComparison.Ordinal))
+                            {
+                                wrongBytes++;
+                            }
+                        }
+                        else
+                        {
+                            stoppedRacing++;
+                            if (raceOutput.Length > 0)
+                            {
+                                wrongBytes++;
+                            }
+                        }
+                    }
+                }
+                finally
+                {
+                    Volatile.Write(ref stop, true);
+                    writer.Join();
+                }
+
+                check(wrongBytes == 0, "security (concurrent): with the file rewritten all the time, no run ran other bytes than the ones shown (" + ranRacing + " ran what was shown, " + stoppedRacing + " stopped)");
+
+                // The copy is damaged or replaced by a link after it was made and before the program starts: nothing runs.
+                foreach (string damage in new[] { "changed bytes", "link to other content" })
+                {
+                    File.Delete(sec);
+                    await File.WriteAllTextAsync(sec, "#!/bin/sh\necho FIRST_MARK\n");
+                    await File.WriteAllTextAsync(other, "#!/bin/sh\necho SECOND_MARK\n");
+                    (int damagedCode, string damagedOutput, string damagedErrors, _) = await Execute(["sh", "sec.sh"], () =>
+                    {
+                        if (OperatingSystem.IsWindows())
+                        {
+                            return;
+                        }
+
+                        string made = Directory.GetDirectories(Path.GetTempPath(), "with-secrets-*").Except(copiesBefore).Single();
+                        string inside = Path.Combine(made, "0");
+                        File.SetUnixFileMode(inside, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                        string copyFile = Path.Combine(inside, "sec.sh");
+                        if (damage == "changed bytes")
+                        {
+                            File.SetUnixFileMode(copyFile, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                            File.WriteAllText(copyFile, "#!/bin/sh\necho SECOND_MARK\n");
+                        }
+                        else
+                        {
+                            File.Delete(copyFile);
+                            File.CreateSymbolicLink(copyFile, other);
+                        }
+                    });
+                    check(damagedCode == RunCommand.Denied && damagedOutput.Length == 0 && damagedErrors.Contains("not the file that was shown", StringComparison.Ordinal), "security (" + damage + "): a copy that is not what was shown is not run (" + damagedCode + ": " + damagedOutput.Trim() + " " + damagedErrors.Trim() + ")");
+                }
+
+                check(Directory.GetDirectories(Path.GetTempPath(), "with-secrets-*").All(copiesBefore.Contains), "security: no private copy is left after a refused run");
+            }
+
+            // The copy and what is beside it, on every system.
+            string neighbourSource = Path.Combine(home, "own.sh");
+            await File.WriteAllTextAsync(neighbourSource, "echo own\n");
+            string readOnly = Path.Combine(home, "readonly.txt");
+            await File.WriteAllTextAsync(readOnly, "readonly\n");
+            if (!windows)
+            {
+                File.SetUnixFileMode(readOnly, UnixFileMode.UserRead);
+            }
+
+            string copyFolder;
+            using (HeldFiles beside = new(copy: true))
+            {
+                check(beside.Hold([ScriptView.Read(neighbourSource)]) is null && beside.Verify() is null, "beside: a copy is made and checks out");
+                copyFolder = Path.GetDirectoryName(beside.PathFor(neighbourSource))!;
+                string[] entries = [.. Directory.GetFileSystemEntries(copyFolder).Select(entry => Path.GetFileName(entry)).Order(StringComparer.Ordinal)];
+                if (windows)
+                {
+                    check(entries.SequenceEqual(["own.sh"]), "beside: on Windows the copy is alone in its folder (" + string.Join(',', entries) + ")");
+                }
+                else
+                {
+                    string[] expected = [.. Directory.GetFileSystemEntries(home).Select(entry => Path.GetFileName(entry)).Order(StringComparer.Ordinal)];
+                    check(entries.SequenceEqual(expected), "beside: the copy has a name for every entry of the original's folder (" + string.Join(',', entries) + ")");
+                    check(new FileInfo(Path.Combine(copyFolder, "own.sh")).LinkTarget is null && File.ReadAllText(Path.Combine(copyFolder, "own.sh")) == "echo own\n", "beside: the script itself is the copy, not a link");
+                    check(entries.Where(name => name != "own.sh").All(name => new FileInfo(Path.Combine(copyFolder, name)).LinkTarget == Path.Combine(home, name)) && File.ReadAllText(Path.Combine(copyFolder, "readonly.txt")) == "readonly\n" && File.ReadAllText(Path.Combine(copyFolder, "lib", "data.txt")) == "lib-mark\n", "beside: every other name is a link to the same name in the original's folder, which is read through it");
+                    check(File.GetUnixFileMode(copyFolder) == (UnixFileMode.UserRead | UnixFileMode.UserExecute), "beside: nobody can add to or replace what is in the copy's folder");
+                }
+            }
+
+            check(!Directory.Exists(copyFolder), "beside: the copy's folder is gone when the files are released");
+            check(File.ReadAllText(neighbourSource) == "echo own\n" && File.ReadAllText(readOnly) == "readonly\n" && File.ReadAllText(Path.Combine(home, "lib", "data.txt")) == "lib-mark\n" && Directory.Exists(Path.Combine(home, "pkg")), "beside: deleting the copy leaves the original's folder and everything in it");
+            if (!windows)
+            {
+                check(File.GetUnixFileMode(readOnly) == UnixFileMode.UserRead, "beside: deleting the copy does not change the permissions of a file it was linked to");
+            }
+
+            // A damaged or replaced copy is found by Verify, and the check cannot be passed by a file that is a link.
+            using (HeldFiles checkedCopy = new(copy: true))
+            {
+                checkedCopy.Hold([ScriptView.Read(neighbourSource)]);
+                if (!windows)
+                {
+                    string copiedFile = checkedCopy.PathFor(neighbourSource);
+                    string copiedFolder = Path.GetDirectoryName(copiedFile)!;
+                    File.SetUnixFileMode(copiedFolder, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                    File.SetUnixFileMode(copiedFile, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                    File.AppendAllText(copiedFile, "echo more\n");
+                    check(checkedCopy.Verify() is { } damagedWhy && damagedWhy.Contains("not the file that was shown", StringComparison.Ordinal), "verify: a copy whose bytes changed is found");
+                    File.Delete(copiedFile);
+                    File.CreateSymbolicLink(copiedFile, neighbourSource);
+                    check(checkedCopy.Verify() is not null, "verify: a copy replaced by a link, even to a file with the same bytes, is found");
+                    File.Delete(copiedFile);
+                    check(checkedCopy.Verify() is not null, "verify: a copy that is gone is found");
+                }
+            }
+
+            // What an approval covers: the script that was shown, not what it loads. A sibling that the script sources (executable code) or reads (data) and that changes
+            // after approval is what runs or is read, on every system; the page says so, the shown hash and the fingerprint are the script's alone, and nothing is refused.
+            {
+                string boundaryHome = Path.Combine(folder, "boundary");
+                Directory.CreateDirectory(boundaryHome);
+                string codeSibling = Path.Combine(boundaryHome, windows ? "dep.cmd" : "dep.sh");
+                string dataSibling = Path.Combine(boundaryHome, "data.txt");
+                string[] command;
+                string mainText;
+                if (windows)
+                {
+                    mainText = "@echo off\r\ncall \"%~dp0dep.cmd\"\r\necho CODE=%DEP_MARK%\r\nset /p DATA=<\"%~dp0data.txt\"\r\necho DATA=%DATA%\r\n";
+                    command = ["cmd", "/d", "/c", "boundary" + Path.DirectorySeparatorChar + "main.cmd"];
+                }
+                else
+                {
+                    mainText = "#!/bin/sh\nD=$(dirname \"$0\")\n. \"$D/dep.sh\"\necho CODE=$DEP_MARK\necho DATA=$(cat \"$D/data.txt\")\n";
+                    command = ["sh", "boundary/main.sh"];
+                }
+
+                string mainPath = Path.Combine(boundaryHome, windows ? "main.cmd" : "main.sh");
+                await File.WriteAllTextAsync(mainPath, mainText);
+                string Dep(string mark) => windows ? "@echo off\r\nset DEP_MARK=" + mark + "\r\n" : "DEP_MARK=" + mark + "\n";
+
+                await File.WriteAllTextAsync(codeSibling, Dep("dep-v1"));
+                await File.WriteAllTextAsync(dataSibling, "data-approved\n");
+                (int firstCode, string firstOutput, _, FakeApprover firstApprover) = await Execute(command);
+                string approvedHash = firstApprover.Requests[0].Script!.Sha256;
+                check(firstCode == 0 && Line(firstOutput, "CODE") == "dep-v1" && Line(firstOutput, "DATA") == "data-approved", "dependency: the script finds its code and data siblings (" + firstOutput.Trim().Replace('\n', ' ') + ")");
+
+                (int changedCode, string changedOutput, _, FakeApprover changedApprover) = await Execute(command, () =>
+                {
+                    File.WriteAllText(codeSibling, Dep("dep-v2"));
+                    File.WriteAllText(dataSibling, "data-changed\n");
+                });
+                string changedMessage = ApprovalSummary.BuildMessage(changedApprover.Requests[0]);
+                check(changedCode == 0 && Line(changedOutput, "CODE") == "dep-v2", "dependency: a sourced sibling changed after approval is the code that runs, as it is when used, and is not stopped (" + changedOutput.Trim().Replace('\n', ' ') + ")");
+                check(Line(changedOutput, "DATA") == "data-changed", "dependency: a data sibling changed after approval is read as it is when used");
+                check(changedApprover.Requests[0].Script!.Sha256 == approvedHash && !changedMessage.Contains("dep-v1", StringComparison.Ordinal) && !changedMessage.Contains("dep-v2", StringComparison.Ordinal), "dependency: the shown hash and text are the script's alone, whatever its siblings hold");
+                check(Lines(changedMessage).Contains(ApprovalSummary.ScriptBoundary) && ApprovalSummary.ScriptBoundary.Contains("Not approved", StringComparison.Ordinal), "dependency: the approval says that what the script loads is not approved");
+            }
+
+            if (!windows)
+            {
+                (_, _, _, FakeApprover plainApprover) = await Execute(["echo", "hi"]);
+                check(plainApprover.Requests[0].Script is null && plainApprover.Requests[0].ProgramFile is null && !ApprovalSummary.BuildMessage(plainApprover.Requests[0]).Contains("Not approved", StringComparison.Ordinal), "dependency: a command with no script file makes no claim about one");
+            }
+
+            // The copy is protected until the program starts: a loosened permission, a folder swapped for a link or another folder with the same bytes, and a file
+            // opened for another user are found, not only changed bytes. Each case starts from a fresh copy.
+            if (!windows)
+            {
+                string[] attempts = ["file group-readable", "file writable", "folder writable", "folder replaced by a link", "folder renamed and rebuilt", "root replaced by a link", "root loosened"];
+                foreach (string attempt in attempts)
+                {
+                    using HeldFiles tampered = new(copy: true);
+                    tampered.Hold([ScriptView.Read(neighbourSource)]);
+                    string tamperedFile = tampered.PathFor(neighbourSource);
+                    string tamperedFolder = Path.GetDirectoryName(tamperedFile)!;
+                    string tamperedRoot = Path.GetDirectoryName(tamperedFolder)!;
+                    check(tampered.Verify() is null, "protect (" + attempt + "): an untouched copy passes");
+                    switch (attempt)
+                    {
+                        case "file group-readable":
+                            File.SetUnixFileMode(tamperedFile, UnixFileMode.UserRead | UnixFileMode.GroupRead);
+                            break;
+                        case "file writable":
+                            File.SetUnixFileMode(tamperedFile, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                            break;
+                        case "folder writable":
+                            File.SetUnixFileMode(tamperedFolder, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                            break;
+                        case "folder replaced by a link":
+                            Directory.Move(tamperedFolder, tamperedFolder + "-moved");
+                            Directory.CreateSymbolicLink(tamperedFolder, tamperedFolder + "-moved");
+                            break;
+                        case "folder renamed and rebuilt":
+                            Directory.Move(tamperedFolder, tamperedFolder + "-moved");
+                            Directory.CreateDirectory(tamperedFolder);
+                            File.Copy(Path.Combine(tamperedFolder + "-moved", "own.sh"), tamperedFile);
+                            File.SetUnixFileMode(tamperedFile, UnixFileMode.UserRead);
+                            File.SetUnixFileMode(tamperedFolder, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+                            break;
+                        case "root replaced by a link":
+                            Directory.Move(tamperedRoot, tamperedRoot + "-moved");
+                            Directory.CreateSymbolicLink(tamperedRoot, tamperedRoot + "-moved");
+                            break;
+                        default:
+                            File.SetUnixFileMode(tamperedRoot, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupExecute);
+                            break;
+                    }
+
+                    // A folder rebuilt with the same bytes and the same modes is the same to every check made here and harmless at that moment: it is the case that shows what a path check cannot see.
+                    bool refused = tampered.Verify() is not null;
+                    check(attempt == "folder renamed and rebuilt" ? !refused : refused, "protect (" + attempt + "): " + (attempt == "folder renamed and rebuilt" ? "identical bytes in a rebuilt folder pass (a path check cannot tell, see the threat model)" : "refused, nothing would run"));
+
+                    // Put back so that the folder can be removed by Dispose.
+                    foreach (string moved in Directory.GetDirectories(Path.GetTempPath(), "with-secrets-*-moved"))
+                    {
+                        File.SetUnixFileMode(moved, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                    }
+                }
+
+                foreach (string leftover in Directory.GetDirectories(Path.GetTempPath(), "with-secrets-*").Except(copiesBefore))
+                {
+                    File.SetUnixFileMode(leftover, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                    Directory.Delete(leftover, true);
+                }
+            }
+
+            // A folder with too many entries is not linked at all, and the script is still held and copied.
+            if (!windows)
+            {
+                string crowded = Path.Combine(folder, "crowded");
+                Directory.CreateDirectory(crowded);
+                for (int index = 0; index <= HeldFiles.MaxLinkedEntries; index++)
+                {
+                    File.WriteAllText(Path.Combine(crowded, "f" + index), "x");
+                }
+
+                string crowdedScript = Path.Combine(crowded, "run.sh");
+                File.WriteAllText(crowdedScript, "echo crowded\n");
+                using HeldFiles many = new(copy: true);
+                check(many.Hold([ScriptView.Read(crowdedScript)]) is null && Directory.GetFileSystemEntries(Path.GetDirectoryName(many.PathFor(crowdedScript))!).Length == 1, "beside: a folder with more than " + HeldFiles.MaxLinkedEntries + " entries gets no links, and the script is still copied");
+            }
+
+            check(Directory.GetDirectories(Path.GetTempPath(), "with-secrets-*").All(copiesBefore.Contains), "beside: no private copy is left once every run and check has ended");
+
+            // The copy itself, on every system: what is in it, where it is, who can open it, and that it goes away.
+            string copySource = Path.Combine(folder, "copy-source.sh");
+            await File.WriteAllTextAsync(copySource, "echo copied\n");
+            ScriptView shownCopy = ScriptView.Read(copySource);
+            string copyPath;
+            using (HeldFiles copied = new(copy: true))
+            {
+                check(copied.Hold([shownCopy]) is null, "copy: a shown file is held and copied");
+                copyPath = copied.PathFor(copySource);
+                check(copyPath != copySource && !copyPath.StartsWith(folder, StringComparison.Ordinal) && Path.GetFileName(copyPath) == "copy-source.sh" && File.ReadAllText(copyPath) == "echo copied\n", "copy: the copy is outside the project, keeps the file's name and holds the shown bytes");
+                check(copied.PathFor(Path.Combine(folder, "other.sh")) == Path.Combine(folder, "other.sh"), "copy: a path that was not shown is left as it is");
+                if (!windows)
+                {
+                    UnixFileMode fileMode = File.GetUnixFileMode(copyPath);
+                    UnixFileMode folderMode = File.GetUnixFileMode(Path.GetDirectoryName(copyPath)!);
+                    UnixFileMode rootMode = File.GetUnixFileMode(Path.GetDirectoryName(Path.GetDirectoryName(copyPath))!);
+                    check(fileMode == UnixFileMode.UserRead && folderMode == (UnixFileMode.UserRead | UnixFileMode.UserExecute) && rootMode == (UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute), "copy: owner only, read-only, in a folder nobody can add to (" + fileMode + ", " + folderMode + ", " + rootMode + ")");
+                    File.SetUnixFileMode(copySource, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                    check(File.GetUnixFileMode(copyPath) == UnixFileMode.UserRead, "copy: a file that is not executable stays so");
+                    await File.WriteAllTextAsync(copySource, "echo replaced\n");
+                    check(File.ReadAllText(copyPath) == "echo copied\n", "copy: replacing the original afterwards does not change the copy");
+                }
+            }
+
+            check(!File.Exists(copyPath) && !Directory.Exists(Path.GetDirectoryName(Path.GetDirectoryName(copyPath))), "copy: the copy and its folders are deleted when the files are released");
+            await File.WriteAllTextAsync(copySource, "echo copied\n");
+            using (HeldFiles refusedCopy = new(copy: true))
+            {
+                check(refusedCopy.Hold([shownCopy with { Sha256 = new string('0', 64) }]) is { } refusedWhy && refusedWhy.Contains("changed after it was shown", StringComparison.Ordinal) && refusedCopy.PathFor(copySource) == copySource, "copy: a file that does not match what was shown is refused and no copy is made");
+            }
 
             // held files: nobody can write or delete a shown file while it is held (Windows); a changed file is caught on every system
             await File.WriteAllTextAsync(data, "just data\n");
@@ -598,7 +1143,7 @@ internal static class ApprovalSummaryTests
         check(!lines.Any(line => line.StartsWith("Admin key:", StringComparison.Ordinal) || line.StartsWith("Page issued:", StringComparison.Ordinal)), "script: fake Admin key and Page issued lines cannot start a line");
         check(lines.Count(line => line.StartsWith("Run: ", StringComparison.Ordinal)) == 1 && lines.Count(line => line.StartsWith("Secrets:", StringComparison.Ordinal)) == 1, "script: fake Run and Secrets lines cannot start a line");
         int start = Array.IndexOf(lines, "Script contents:");
-        string[] shown = lines[(start + 1)..^1];
+        string[] shown = lines[(start + 1)..^1].Where(line => line != ApprovalSummary.ScriptBoundary).ToArray();
         check(shown.Length == 7 && shown.All(line => line.StartsWith(Marker, StringComparison.Ordinal)), "script: every content line is behind the marker (" + shown.Length + ")");
         check(shown[0] == Marker + "echo hi" && shown[1] == Marker + "Request id: x", "script: content is shown as it is after the marker");
         check(shown[5] == Marker + "Secrets: none" && shown[6] == Marker + "    indented", "script: CR is a line break and a tab is 4 spaces");
@@ -707,7 +1252,7 @@ internal static class ApprovalSummaryTests
             File.WriteAllText(script, content);
             FakeApprover deny = new(false);
             RunArgs run = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "show", "--", "sh", "./show.sh"], out _)!;
-            int code = await new RunCommand(new MemoryStore(values), deny, new AuditLog(new StateDatabase(audit)), new StringWriter(), new StringWriter()).ExecuteAsync(run, folder);
+            int code = await new RunCommand(new MemoryStore(values), deny, new StringWriter(), new StringWriter()).ExecuteAsync(run, folder);
             ApprovalRequest seen = deny.Requests.Single();
             string message = ApprovalSummary.BuildMessage(seen);
             check(code == RunCommand.Denied && seen.Script is { } view && view.Sha256 == Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(script))), "run: the request carries the script that will run, with its hash");
@@ -717,16 +1262,17 @@ internal static class ApprovalSummaryTests
             FakeApprover direct = new(false);
             if (!OperatingSystem.IsWindows())
             {
+                File.WriteAllText(script, "#!/bin/sh\n" + content);
                 File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
                 RunArgs self = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "self", "--", "./show.sh"], out _)!;
-                await new RunCommand(new MemoryStore(values), direct, new AuditLog(new StateDatabase(audit)), new StringWriter(), new StringWriter()).ExecuteAsync(self, folder);
-                check(direct.Requests.Single().Script is not null, "run: a script run directly is shown too");
+                await new RunCommand(new MemoryStore(values), direct, new StringWriter(), new StringWriter()).ExecuteAsync(self, folder);
+                check(direct.Requests.Single().ProgramFile is not null, "run: a script run directly is shown too (as the program file)");
             }
 
             // Inline code now gets a page that shows it.
             FakeApprover inline = new(false);
             RunArgs code1 = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "inline", "--", "sh", "-c", "echo $DB_URL"], out _)!;
-            code = await new RunCommand(new MemoryStore(values), inline, new AuditLog(new StateDatabase(audit)), new StringWriter(), new StringWriter()).ExecuteAsync(code1, folder);
+            code = await new RunCommand(new MemoryStore(values), inline, new StringWriter(), new StringWriter()).ExecuteAsync(code1, folder);
             check(code == RunCommand.Denied && inline.Requests.Count == 1 && ApprovalSummary.BuildMessage(inline.Requests[0]).Contains(Marker + "echo $DB_URL", StringComparison.Ordinal), "run: sh -c reaches the approval page with its code shown");
             foreach ((string program, string[] arguments) in new (string, string[])[] { ("cmd.exe", ["/d", "/c", "echo"]), ("pwsh", ["-NoProfile", "-Command", "x"]), ("bash", ["-c", "x"]) })
             {
@@ -738,7 +1284,7 @@ internal static class ApprovalSummaryTests
             File.WriteAllText(Path.Combine(folder, "real.sh"), "echo REAL_MARKER\n");
             FakeApprover optionApprover = new(false);
             RunArgs optionRun = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "x", "--", "sh", "real.sh", "data"], out _)!;
-            await new RunCommand(new MemoryStore(values), optionApprover, new AuditLog(new StateDatabase(audit)), new StringWriter(), new StringWriter()).ExecuteAsync(optionRun, folder);
+            await new RunCommand(new MemoryStore(values), optionApprover, new StringWriter(), new StringWriter()).ExecuteAsync(optionRun, folder);
             ApprovalRequest optionSeen = optionApprover.Requests.Single();
             Fingerprint optionPrint = RequestFingerprint.Compute(optionSeen);
             check(optionSeen.Script is { } realView && realView.Path.EndsWith("real.sh", StringComparison.Ordinal) && !realView.Guessed && Lines(ApprovalSummary.BuildMessage(optionSeen)).Contains(Marker + "echo REAL_MARKER")
@@ -755,14 +1301,14 @@ internal static class ApprovalSummaryTests
             if (OperatingSystem.IsWindows())
             {
                 using FileStream hold = new(locked, FileMode.Open, FileAccess.Read, FileShare.None);
-                code = await new RunCommand(new MemoryStore(values), unseen, new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(lockedRun, folder);
+                code = await new RunCommand(new MemoryStore(values), unseen, new StringWriter(), errors).ExecuteAsync(lockedRun, folder);
                 blocked = true;
             }
             else
             {
                 File.SetUnixFileMode(locked, UnixFileMode.None);
                 blocked = !CanRead(locked);
-                code = blocked ? await new RunCommand(new MemoryStore(values), unseen, new AuditLog(new StateDatabase(audit)), new StringWriter(), errors).ExecuteAsync(lockedRun, folder) : 0;
+                code = blocked ? await new RunCommand(new MemoryStore(values), unseen, new StringWriter(), errors).ExecuteAsync(lockedRun, folder) : 0;
             }
 
             if (blocked)

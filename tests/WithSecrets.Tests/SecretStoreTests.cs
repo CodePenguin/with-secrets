@@ -72,7 +72,7 @@ internal static class SecretStoreTests
         ManifestKey admin = current.Admins.First(key => TestAuthenticator.ById(key.Id) is not null);
         SignedManifest signed = TestState.Sign(TestAuthenticator.ById(admin.Id)!, next.Canonical(), admin.RpId);
 
-        return store.TryApply(current.Version, signed, rows, removes ?? [], AuditLog.ChangeRow("test-put", "test", admin.Name));
+        return store.TryApply(current.Version, signed, rows, removes ?? [], AdminEvent.Change("test-put", "test", admin.Name));
     }
 
     /// <summary>The store public key of <paramref name="manifest" /> (no vault); before the first secret, a new key pair and its vault under the state's master key.</summary>
@@ -311,31 +311,36 @@ internal static class SecretStoreTests
         FakeApprover approver = new(true, unlock: () => AdminUnlock(db));
         StringWriter stdout = new();
         StringWriter stderr = new();
-        int code = await new RunCommand(store, approver, new AuditLog(db), stdout, stderr).ExecuteAsync(args, folder);
+        int code = await new RunCommand(store, approver, stdout, stderr).ExecuteAsync(args, folder, TestAudit.Sink(db));
         check(code == 0 && stdout.ToString().Contains("a=[REDACTED]", StringComparison.Ordinal) && !stdout.ToString().Contains(ValueA, StringComparison.Ordinal), "store run: the requested secret reaches the program, redacted (" + code + " " + stderr + ")");
         check(cipher.Decrypts == 1, "store run: only the requested secret is decrypted; the other two never are (" + cipher.Decrypts + ")");
         check(approver.Requests.Single().Sources is { } sources && sources["A_NAME"] == "global" && ApprovalSummary.BuildMessage(approver.Requests[0]).Contains("Secrets: A_NAME (global)", StringComparison.Ordinal), "store run: the approval text names each secret's source");
         string audit = StateDatabaseTests.AuditText(db.FilePath);
-        check(audit.Contains("A_NAME", StringComparison.Ordinal) && !audit.Contains(ValueA, StringComparison.Ordinal) && !audit.Contains(ValueB, StringComparison.Ordinal) && !audit.Contains("encrypted:", StringComparison.Ordinal), "store run: the audit has names only (no value, no ciphertext)");
+        check(audit.Contains("\"outcome\":\"test-put\"", StringComparison.Ordinal) && audit.Contains("\"type\":\"execution\"", StringComparison.Ordinal), "store run: the signed audit has the store write and the run");
+        string[] canaries = [ValueA, ValueB, ValueC, "encrypted:", Convert.ToHexString(TestVault.RecoveryCode(db))];
+        check(canaries.All(canary => !audit.Contains(canary, StringComparison.Ordinal)), "audit canary: no secret value, ciphertext or recovery code appears in the admin or run events");
+        check(TestAudit.MetadataClean(db, canaries, out HashSet<string> scanned) && AuditEventTypes.All.All(scanned.Contains), "audit canary: the metadata of every event type (" + string.Join(",", scanned) + ") holds no value, ciphertext or code");
+        AuditEvent authorized = TestAudit.Events(db, all: true).First(item => item.Type == AuditEventTypes.Authorization && item.Outcome == "approved");
+        check(authorized.Meta.TryGetValue("secrets", out string? named) && named == "A_NAME" && authorized.Meta.ContainsKey("files"), "run metadata: the approval event names the secrets and the file fingerprints (" + string.Join(",", authorized.Meta.Keys) + ")");
 
         // A swapped row: the run stops before it asks, with exit 4.
         Sql(db, "UPDATE secrets SET ciphertext = $c WHERE name = 'A_NAME'", ("$c", DotenvxCipher.Instance.Encrypt("Attacker-Value-1", TestState.Current(db)!.Store)));
         FakeApprover never = new(true, unlock: () => AdminUnlock(db));
         stderr = new StringWriter();
-        code = await new RunCommand(new SecretStore(new StateDatabase(db.FilePath), cipher), never, new AuditLog(db), new StringWriter(), stderr).ExecuteAsync(args, folder);
+        code = await new RunCommand(new SecretStore(new StateDatabase(db.FilePath), cipher), never, new StringWriter(), stderr).ExecuteAsync(args, folder);
         check(code == RunCommand.StoreError && never.Requests.Count == 0 && cipher.Decrypts == 1 && stderr.ToString().Contains("failed verification", StringComparison.Ordinal), "store run: a swapped ciphertext is exit 4, nobody is asked, nothing is decrypted (" + stderr + ")");
 
         // A swap after the approval (between the check and the read): the read checks again.
         (StateDatabase late, SecretStore lateStore, CountingCipher lateCipher) = NewStore(root, "runs-late");
         Put(lateStore, new Dictionary<string, string> { ["A_NAME"] = ValueA });
         SwapApprover swap = new(late, TestState.Current(late)!.Store, false);
-        code = await new RunCommand(lateStore, swap, new AuditLog(late), new StringWriter(), new StringWriter()).ExecuteAsync(args, folder);
+        code = await new RunCommand(lateStore, swap, new StringWriter(), new StringWriter()).ExecuteAsync(args, folder);
         check(code == RunCommand.StoreError && lateCipher.Decrypts == 0, "store run: a row swapped while the approval page was open is exit 4, nothing is decrypted");
 
         // A row added (without a hash) while the approval page was open: the read checks every row, so exit 4 too.
         (StateDatabase extra, SecretStore extraStore, CountingCipher extraCipher) = NewStore(root, "runs-extra");
         Put(extraStore, new Dictionary<string, string> { ["A_NAME"] = ValueA });
-        code = await new RunCommand(extraStore, new SwapApprover(extra, TestState.Current(extra)!.Store, true), new AuditLog(extra), new StringWriter(), new StringWriter()).ExecuteAsync(args, folder);
+        code = await new RunCommand(extraStore, new SwapApprover(extra, TestState.Current(extra)!.Store, true), new StringWriter(), new StringWriter()).ExecuteAsync(args, folder);
         check(code == RunCommand.StoreError && extraCipher.Decrypts == 0, "store run: a row added while the approval page was open is exit 4, nothing is decrypted");
     }
 
@@ -392,26 +397,26 @@ internal static class SecretStoreTests
         Manifest next = SecretStore.Next(current, publicKey, rows, []);
         ManifestKey admin = current.Admins[0];
         SignedManifest signed = TestState.Sign(TestAuthenticator.ById(admin.Id)!, next.Canonical());
-        string? stale = store.TryApply(current.Version - 1, signed, rows, [], AuditLog.ChangeRow("secrets-set", "test", admin.Name));
+        string? stale = store.TryApply(current.Version - 1, signed, rows, [], AdminEvent.Change("secrets-set", "test", admin.Name));
         check(stale is not null && Row(db, "B_NAME") == "" && TestState.Current(db)!.Version == current.Version, "store write: a stale version writes nothing (" + stale + ")");
 
         // Rows that are not the ones the manifest names: refused, nothing written.
         Dictionary<string, string> other = new() { ["B_NAME"] = store.Encrypt("Other-Value-12", publicKey) };
-        string? mismatch = store.TryApply(current.Version, signed, other, [], AuditLog.ChangeRow("secrets-set", "test", admin.Name));
+        string? mismatch = store.TryApply(current.Version, signed, other, [], AdminEvent.Change("secrets-set", "test", admin.Name));
         check(mismatch is not null && Row(db, "B_NAME") == "" && TestState.Current(db)!.Version == current.Version, "store write: rows that do not match the signed hashes write nothing (" + mismatch + ")");
 
         // A failure inside the transaction (after the manifest and the rows): everything is rolled back.
-        int before = new AuditLog(db).TryRead(100, null, out IReadOnlyList<AuditRecord> rowsBefore, out _) ? rowsBefore.Count : -1;
+        int before = TestAudit.TryRead(db, 100, null, out IReadOnlyList<AuditRow> rowsBefore, out _) ? rowsBefore.Count : -1;
         store.BeforeCommit = () => throw new IOException("the test write failed");
-        string? failed = store.TryApply(current.Version, signed, rows, [], AuditLog.ChangeRow("secrets-set", "test", admin.Name));
+        string? failed = store.TryApply(current.Version, signed, rows, [], AdminEvent.Change("secrets-set", "test", admin.Name));
         store.BeforeCommit = null;
-        int after = new AuditLog(db).TryRead(100, null, out IReadOnlyList<AuditRecord> rowsAfter, out _) ? rowsAfter.Count : -1;
+        int after = TestAudit.TryRead(db, 100, null, out IReadOnlyList<AuditRow> rowsAfter, out _) ? rowsAfter.Count : -1;
         check(failed is not null && Row(db, "B_NAME") == "" && TestState.Current(db)!.Version == current.Version && after == before, "store write: a failure in the transaction leaves rows, manifest and audit as they were (" + failed + ")");
 
         // The good write, with its audit row in the same transaction.
-        check(store.TryApply(current.Version, signed, rows, [], AuditLog.ChangeRow("secrets-set", "test", admin.Name)) is null && Row(db, "B_NAME") == rows["B_NAME"], "store write: the same write succeeds when nothing fails");
-        check(new AuditLog(db).TryRead(100, null, out IReadOnlyList<AuditRecord> rowsDone, out _) && rowsDone.Count == before + 1, "store write: the audit row is written with it");
+        check(store.TryApply(current.Version, signed, rows, [], AdminEvent.Change("secrets-set", "test", admin.Name)) is null && Row(db, "B_NAME") == rows["B_NAME"], "store write: the same write succeeds when nothing fails");
+        check(TestAudit.TryRead(db, 100, null, out IReadOnlyList<AuditRow> rowsDone, out _) && rowsDone.Count == before + 1, "store write: the audit row is written with it");
 
-        check(StateDatabase.SchemaVersion == 9, "store: the schema version is 9");
+        check(StateDatabase.SchemaVersion == 11, "store: the schema version is 11");
     }
 }

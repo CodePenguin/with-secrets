@@ -21,6 +21,9 @@ internal sealed class RecoveryCarry(byte[] oldPrivateKey, IReadOnlyDictionary<st
     /// <summary>The name the old file gets when everything else has worked: <c>state.db.recovered-&lt;UTC yyyyMMddHHmmss&gt;</c>.</summary>
     public string RecoveredName => recoveredName;
 
+    /// <summary>The administrative events of the recovery, recorded after the swap made the new state the store (see <see cref="StoreRecovery" />).</summary>
+    internal List<AdminEvent> Pending { get; } = [];
+
     public int Count => oldRows.Count;
 
     /// <summary>What the first page of the new passkey says about this setup, where it otherwise says "Admins: not set up yet".</summary>
@@ -50,8 +53,8 @@ internal sealed class RecoveryCarry(byte[] oldPrivateKey, IReadOnlyDictionary<st
 /// <summary>
 /// <c>--recover</c>: for when every passkey is lost. The old state is read and verified as every command does (public keys
 /// only, no passkey). Page 1 asks for the recovery code (encrypted in the browser to the page's server key, like a
-/// <c>--set</c> value); the server derives the recovery key, opens the master key from the recovery slot and the old store key
-/// from the vault. The same call then continues as a first-run <c>--config</c> on a new, empty state next to the old file
+/// secret value); the server derives the recovery key, opens the master key from the recovery slot and the old store key
+/// from the vault. The same call then continues as a first-run setup on a new, empty state next to the old file
 /// (a new passkey, new master key, new store key, vault and recovery code), holding only the old store key and the old
 /// ciphertext rows in between. The new store key's public key is made first; every old row is decrypted and encrypted again
 /// for it one at a time, and the new first manifest lists their hashes. At the final commit one transaction on the new file
@@ -91,7 +94,7 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
 
         if (!change.Done)
         {
-            new AuditLog(db).TryWriteDenied("--recover", [], change.Detail);
+            db.Audit.TryWriteDenied("--recover", [], change.Detail);
         }
 
         return change;
@@ -108,12 +111,12 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
 
         if (manifest is null)
         {
-            return Denied("There is nothing to recover: no state.db is set up. Set up with: with-secrets --config");
+            return Denied("There is nothing to recover: no state.db is set up. Set up with: with-secrets admin");
         }
 
         if (manifest.Recovery is null || manifest.Store.Length == 0)
         {
-            return Denied("This state has no recovery code, so it cannot be recovered. Delete " + db.FileLabel + " and set up again with: with-secrets --config");
+            return Denied("This state has no recovery code, so it cannot be recovered. Delete " + db.FileLabel + " and set up again with: with-secrets admin");
         }
 
         Dictionary<string, string> rows;
@@ -159,7 +162,7 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
         ConfigChange made;
         try
         {
-            made = new SettingsPage(fresh, primaryTarget, localTarget, announce, readCode) { Carry = carry }.Run();
+            made = new FirstRunPage(fresh, primaryTarget, localTarget, announce, readCode) { Carry = carry }.Run();
             if (!made.Done)
             {
                 return made;
@@ -167,7 +170,7 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
 
             BeforeSwap?.Invoke();
 
-            // The old store must be exactly what page 1 verified (a --set or --remove meanwhile would be lost by the swap).
+            // The old store must be exactly what page 1 verified (a secret change meanwhile would be lost by the swap).
             (Manifest? nowManifest, Dictionary<string, string> nowRows) = new SecretStore(db).Snapshot();
             if (nowManifest is null || nowManifest.Version != manifest.Version || nowRows.Count != rows.Count || rows.Any(row => !nowRows.TryGetValue(row.Key, out string? value) || value != row.Value))
             {
@@ -177,6 +180,12 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
             if (Swap(db.FilePath, newPath, recoveredPath) is { } problem)
             {
                 return new ConfigChange(RunCommand.StoreError, problem);
+            }
+
+            // The swap is the change: its events are recorded now. If they cannot be committed the store is already the new one, and the person is told.
+            if (carry.Pending.Any(item => !db.Audit.TryRecord(item)))
+            {
+                return new ConfigChange(RunCommand.AuditError, "the store was recovered (the old state is in " + recoveredName + "), but its audit events could not be committed to the audit outbox");
             }
         }
         catch (Exception)
@@ -189,7 +198,7 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
         }
 
         return new ConfigChange(0, made.Detail + "\nRecovered " + carry.Count.ToString(CultureInfo.InvariantCulture) + (carry.Count == 1 ? " secret" : " secrets")
-            + " into the new store. The old state was renamed to " + recoveredName + " (with-secrets never deletes it; its admin keys are gone from the new state). The new recovery code is shown on the last page only once. If the page did not show it (lost connection), run --rotate-key to get a new one.");
+            + " into the new store. The old state was renamed to " + recoveredName + ". Its admin keys are gone from the new state. The new recovery code was shown once, on the last page.");
     }
 
     private static bool Usable(EnrollmentTarget target)
@@ -284,7 +293,7 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
     {
         (byte[] serverKey, string publicKey) = SecretCrypto.NewServerKey();
         // The page after this one is the new store's first setup, served at the same place; this page's reply to the right code leads to it.
-        PageFlow.Plan(SettingsPage.PathPrefix, settings);
+        PageFlow.Plan(FirstRunPage.PathPrefix, settings);
         CodeSession session = new(manifest, serverKey, PageFlow.Current is { } flow ? flow.TakeNext : null);
         try
         {
@@ -294,7 +303,7 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
             byte[] bind = RandomNumberGenerator.GetBytes(32);
             session.Open(bind, RecoveryPage.Build(AdminKey.Line(manifest), bind, publicKey, manifest.Secrets.Count));
             server.Ready();
-            announce(AdminKey.Line(manifest) + "\nCompare it with the fingerprint you noted. If it differs, do not type the code.");
+            announce(AdminKey.Line(manifest) + "\nIf it is not the one you noted, stop.");
             announce(AnnouncePrefix + origin + "/" + PathPrefix + "/" + server.Token);
 
             return session.Wait(PageFlow.Left(settings.Timeout), out why);
@@ -420,7 +429,7 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
         /// <summary>Called with the lock held.</summary>
         private OneShotResponse Code(byte[] bind, string body)
         {
-            Dictionary<string, string>? members = SettingsPage.StringMembers(body);
+            Dictionary<string, string>? members = FirstRunPage.StringMembers(body);
             if (members is null || members.Count != 3 || new[] { "epk", "iv", "ct" }.Any(field => !members.ContainsKey(field)))
             {
                 _why = "the page sent a request that is not valid; nothing was changed";
@@ -435,7 +444,7 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
             try
             {
                 string text = SecretCrypto.Decrypt(serverKey, bind, members["epk"], members["iv"], members["ct"]);
-                Dictionary<string, string>? plain = SettingsPage.StringMembers(text);
+                Dictionary<string, string>? plain = FirstRunPage.StringMembers(text);
                 if (plain is null || plain.Count != 1 || !plain.TryGetValue("code", out string? code) || !RecoveryCode.TryParse(code, out typed))
                 {
                     return Wrong("That is not a recovery code. It is 32 letters and digits in groups of four.");

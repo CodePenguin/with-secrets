@@ -1,0 +1,90 @@
+.pageHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.pageHeader h1 {
+  margin: 0;
+}
+
+.pageActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.cardTitle {
+  margin-top: 0;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: var(--space-3) var(--space-5);
+  margin: 0;
+}
+
+.stacked {
+  grid-template-columns: 1fr;
+  margin-bottom: var(--space-3);
+}
+
+.fact dd code {
+  overflow-wrap: anywhere;
+}
+
+.fact dt {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.fact dd {
+  margin: 0;
+  font-weight: 600;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0 var(--space-2);
+  border: 1px solid currentcolor;
+  border-radius: 999px;
+  font-size: 0.9rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.tone-ok {
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+
+.tone-warn {
+  color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.tone-bad {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.tone-neutral {
+  color: var(--muted);
+  background: var(--surface-2);
+}
+
+.empty {
+  color: var(--muted);
+}

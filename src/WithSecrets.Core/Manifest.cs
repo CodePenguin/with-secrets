@@ -331,7 +331,7 @@ public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, Too
 }
 
 /// <summary>
-/// The admin keys' short fingerprints, which every page, <c>--enrolled</c> and <c>--audit</c> show so that a replaced or added
+/// The admin keys' short fingerprints, which every page shows so that a replaced or added
 /// admin key (a state.db written by someone else) is visible to the person. A fingerprint is the first 8 bytes of SHA-256 of
 /// the public key bytes as the manifest stores them (the COSE key, decoded from base64url), as four groups of four lower-case
 /// hex digits, for example <c>ab12 cd34 ef56 7890</c>. It is not secret.

@@ -9,32 +9,30 @@ public sealed record SettingChange(string Name, string Old, string New);
 
 /// <summary>
 /// Every setting of the tool, kept in the signed manifest in <see cref="StateDatabase" /> (see <see cref="Manifest" />). An empty
-/// state uses the defaults. They change only on the <c>--config</c> page, signed by an admin passkey (see <see cref="SettingsPage" />).
+/// state uses the defaults. They change only in the admin web app, signed by an admin passkey; the first state takes the defaults (see <see cref="FirstRunPage" />).
 /// A state that fails verification gives the defaults and an error.
 /// </summary>
-public sealed record ToolSettings(int ReuseMinutes, int ReuseMaxMinutes, string Method, string? BaseUrl, int Port, int TimeoutMinutes)
+public sealed record ToolSettings(int ReuseMaxMinutes, string? BaseUrl, int Port, int TimeoutMinutes)
 {
     public const int MinTimeoutMinutes = 1;
     public const int MaxPort = 65535;
     public const int MaxBaseUrlLength = 2048;
 
     /// <summary>The settings in their fixed order: the order of the canonical JSON, of the page and of the change lists.</summary>
-    public static readonly IReadOnlyList<string> Names = ["reuseMinutes", "reuseMaxMinutes", "method", "baseUrl", "port", "timeoutMinutes"];
+    public static readonly IReadOnlyList<string> Names = ["reuseMaxMinutes", "baseUrl", "port", "timeoutMinutes"];
 
-    public static ToolSettings Defaults { get; } = new(ReuseSettings.DefaultMinutes, ReuseSettings.DefaultMaxMinutes, ApprovalSettings.DefaultMethod, null, 0, ApprovalSettings.DefaultTimeoutMinutes);
+    public static ToolSettings Defaults { get; } = new(ReuseSettings.DefaultMaxMinutes, null, 0, ApprovalSettings.DefaultTimeoutMinutes);
 
     /// <summary>The settings the approval page uses.</summary>
-    public ApprovalSettings Approval => new(Method, BaseUrl, Port, TimeSpan.FromMinutes(TimeoutMinutes));
+    public ApprovalSettings Approval => new(BaseUrl, Port, TimeSpan.FromMinutes(TimeoutMinutes));
 
-    /// <summary>What the approval page offers besides "Approve once": the steps up to the ceiling, starting on reuseMinutes. Not used while the secret store is protected by a passkey PRF: every run asks.</summary>
-    public ReuseOffer Reuse => new(ReuseMaxMinutes, ReuseMinutes);
+    /// <summary>The times a grant may last: the steps up to the ceiling.</summary>
+    public ReuseOffer Reuse => new(ReuseMaxMinutes);
 
     /// <summary>The limits of a setting, as the page and the README show them.</summary>
     public static string Limits(string name) => name switch
     {
-        "reuseMinutes" => $"0 to reuseMaxMinutes (at most {ReuseSettings.MaxMinutes}) minutes. The approval page starts on the longest offered time at or below it; 0 starts with no time chosen.",
-        "reuseMaxMinutes" => $"{ReuseSettings.MinMaxMinutes} to {ReuseSettings.MaxMinutes} minutes. No longer reuse is offered or honoured.",
-        "method" => $"Only \"{ApprovalSettings.DefaultMethod}\".",
+        "reuseMaxMinutes" => $"{ReuseSettings.MinMaxMinutes} to {ReuseSettings.MaxMinutes} minutes. A longer grant is neither offered nor honoured.",
         "baseUrl" => "Empty for none (the page is at http://localhost). A full http or https address, no user name or password, at most " + MaxBaseUrlLength.ToString(CultureInfo.InvariantCulture) + " characters.",
         "port" => $"0 to {MaxPort}. 0 picks a free port each time.",
         "timeoutMinutes" => $"{MinTimeoutMinutes} to {ApprovalSettings.MaxTimeoutMinutes} minutes.",
@@ -47,16 +45,6 @@ public sealed record ToolSettings(int ReuseMinutes, int ReuseMaxMinutes, string 
         if (ReuseMaxMinutes is < ReuseSettings.MinMaxMinutes or > ReuseSettings.MaxMinutes)
         {
             return ReuseMaxProblem;
-        }
-
-        if (ReuseMinutes < 0 || ReuseMinutes > ReuseMaxMinutes)
-        {
-            return ReuseProblem;
-        }
-
-        if (Method != ApprovalSettings.DefaultMethod)
-        {
-            return $"Setting 'method' must be \"{ApprovalSettings.DefaultMethod}\".";
         }
 
         if (BaseUrl is not null && BaseUrlProblem(BaseUrl) is { } urlProblem)
@@ -77,8 +65,6 @@ public sealed record ToolSettings(int ReuseMinutes, int ReuseMaxMinutes, string 
         return null;
     }
 
-    private static string ReuseProblem => $"Setting 'reuseMinutes' must be a number from 0 to reuseMaxMinutes (at most {ReuseSettings.MaxMinutes}).";
-
     private static string ReuseMaxProblem => $"Setting 'reuseMaxMinutes' must be a number from {ReuseSettings.MinMaxMinutes} to {ReuseSettings.MaxMinutes}.";
 
     /// <summary>Null when the text may be a baseUrl, else why not.</summary>
@@ -95,8 +81,8 @@ public sealed record ToolSettings(int ReuseMinutes, int ReuseMaxMinutes, string 
     }
 
     /// <summary>
-    /// The canonical JSON of these values, which the passkey signs on the <c>--config</c> page. It is exactly
-    /// <c>{"reuseMinutes":N,"reuseMaxMinutes":N,"method":"S","baseUrl":"S"|null,"port":N,"timeoutMinutes":N}</c>: this key order, no white space,
+    /// The canonical JSON of these values, which the passkey signs on the first-run setup page. It is exactly
+    /// <c>{"reuseMaxMinutes":N,"baseUrl":"S"|null,"port":N,"timeoutMinutes":N}</c>: this key order, no white space,
     /// numbers as plain invariant integers, strings with only <c>"</c> and <c>\</c> escaped (as <c>\"</c> and <c>\\</c>) and
     /// every character from U+007F up written as a lower-case <c>\uXXXX</c> escape (one per UTF-16 unit). Control characters
     /// are never valid in a value. The page builds the same text with <c>JSON.stringify</c> and the same escape step.
@@ -104,10 +90,7 @@ public sealed record ToolSettings(int ReuseMinutes, int ReuseMaxMinutes, string 
     public string Canonical()
     {
         StringBuilder text = new();
-        text.Append("{\"reuseMinutes\":").Append(ReuseMinutes.ToString(CultureInfo.InvariantCulture));
-        text.Append(",\"reuseMaxMinutes\":").Append(ReuseMaxMinutes.ToString(CultureInfo.InvariantCulture));
-        text.Append(",\"method\":");
-        Quote(text, Method);
+        text.Append("{\"reuseMaxMinutes\":").Append(ReuseMaxMinutes.ToString(CultureInfo.InvariantCulture));
         text.Append(",\"baseUrl\":");
         if (BaseUrl is null)
         {
@@ -135,16 +118,15 @@ public sealed record ToolSettings(int ReuseMinutes, int ReuseMaxMinutes, string 
             using JsonDocument document = JsonDocument.Parse(text);
             JsonElement root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object
-                || !Int(root, "reuseMinutes", out int reuse) || !Int(root, "reuseMaxMinutes", out int reuseMax) || !Int(root, "port", out int port) || !Int(root, "timeoutMinutes", out int timeout)
-                || !root.TryGetProperty("method", out JsonElement method) || method.ValueKind != JsonValueKind.String
+                || !Int(root, "reuseMaxMinutes", out int reuseMax) || !Int(root, "port", out int port) || !Int(root, "timeoutMinutes", out int timeout)
                 || !root.TryGetProperty("baseUrl", out JsonElement url) || url.ValueKind is not (JsonValueKind.String or JsonValueKind.Null))
             {
-                error = "the settings are not the six settings with values of the right type";
+                error = "the settings are not the four settings with values of the right type";
 
                 return null;
             }
 
-            ToolSettings settings = new(reuse, reuseMax, method.GetString()!, url.ValueKind == JsonValueKind.Null ? null : url.GetString(), port, timeout);
+            ToolSettings settings = new(reuseMax, url.ValueKind == JsonValueKind.Null ? null : url.GetString(), port, timeout);
             error = settings.Problem();
             if (error is not null)
             {
@@ -185,12 +167,10 @@ public sealed record ToolSettings(int ReuseMinutes, int ReuseMaxMinutes, string 
         return changes;
     }
 
-    /// <summary>The value of a setting as text: what <c>--config --show</c> prints and the audit log records. No baseUrl is "none".</summary>
+    /// <summary>The value of a setting as text: what the audit log records. No baseUrl is "none".</summary>
     public string Text(string name) => name switch
     {
-        "reuseMinutes" => ReuseMinutes.ToString(CultureInfo.InvariantCulture),
         "reuseMaxMinutes" => ReuseMaxMinutes.ToString(CultureInfo.InvariantCulture),
-        "method" => Method,
         "baseUrl" => BaseUrl ?? "none",
         "port" => Port.ToString(CultureInfo.InvariantCulture),
         "timeoutMinutes" => TimeoutMinutes.ToString(CultureInfo.InvariantCulture),
@@ -220,6 +200,33 @@ public sealed record ToolSettings(int ReuseMinutes, int ReuseMaxMinutes, string 
         return root.TryGetProperty(name, out JsonElement element) && element.ValueKind == JsonValueKind.Number && element.TryGetInt32(out value);
     }
 
+    /// <summary>
+    /// <see cref="Quote" /> for text that may hold control characters (a reason, a command line): the same escapes, and U+0000 to
+    /// U+001F as a \u00XX escape, so that the result is always valid JSON. <see cref="Quote" /> itself is unchanged, because the
+    /// manifest and the settings are signed over its exact output.
+    /// </summary>
+    internal static void QuoteJson(StringBuilder text, string value)
+    {
+        text.Append('"');
+        foreach (char c in value)
+        {
+            if (c is '"' or '\\')
+            {
+                text.Append('\\').Append(c);
+            }
+            else if (c < ' ' || c >= '\u007f')
+            {
+                text.Append("\\u").Append(((int)c).ToString("x4", CultureInfo.InvariantCulture));
+            }
+            else
+            {
+                text.Append(c);
+            }
+        }
+
+        text.Append('"');
+    }
+
     internal static void Quote(StringBuilder text, string value)
     {
         text.Append('"');
@@ -240,27 +247,5 @@ public sealed record ToolSettings(int ReuseMinutes, int ReuseMaxMinutes, string 
         }
 
         text.Append('"');
-    }
-}
-
-/// <summary><c>--config --show</c>: prints every setting and its value, one per line, tab-separated. Nothing in it is secret.</summary>
-public static class ConfigShow
-{
-    public static int Run(StateDatabase db, TextWriter stdout, TextWriter stderr)
-    {
-        ToolSettings settings = ToolSettings.Load(db, out string? error);
-        if (error is not null)
-        {
-            stderr.WriteLine("with-secrets: settings: " + error);
-
-            return RunCommand.StoreError;
-        }
-
-        foreach (string name in ToolSettings.Names)
-        {
-            stdout.WriteLine(name + "\t" + ApprovalSummary.Clean(settings.Text(name)));
-        }
-
-        return 0;
     }
 }

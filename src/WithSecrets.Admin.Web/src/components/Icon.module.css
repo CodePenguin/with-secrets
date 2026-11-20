@@ -1,0 +1,19 @@
+.icon {
+  vertical-align: -0.125em;
+}
+
+.flow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  align-items: center;
+  list-style: none;
+  padding: 0;
+  margin: 0 0 1rem;
+}
+
+.step {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+}

@@ -8,7 +8,7 @@ namespace WithSecrets;
 /// </summary>
 public static class TerminalPrompt
 {
-    public const string Waiting = "Waiting for the code from the page. Paste it here and press Enter: ";
+    public const string Waiting = "Type the code from the page: ";
 
     public const string Wrong = "That code is wrong. Paste the code from the page and press Enter: ";
 

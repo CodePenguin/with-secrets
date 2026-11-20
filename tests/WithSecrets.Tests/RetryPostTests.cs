@@ -23,9 +23,8 @@ internal static class RetryPostTests
         (string Name, string Script)[] pages =
         [
             ("approval", approval),
-            ("settings", Source("SettingsPage.cs")),
+            ("setup", Source("FirstRunPage.cs")),
             ("enroll", Source("PasskeyRegistration.cs")),
-            ("set", Source("SecretEntry.cs")),
             ("recovery", Source("StoreRecovery.cs")),
         ];
         foreach ((string name, string script) in pages)
@@ -54,7 +53,7 @@ internal static class RetryPostTests
             using TestAuthenticator admin = TestAuthenticator.ES256();
             StateDatabase db = StateDatabase.InFolder(root);
             TestState.Add(db, admin.Record("localhost", "laptop"));
-            ApprovalSettings settings = new("passkey", null, 0, TimeSpan.FromSeconds(30));
+            ApprovalSettings settings = new(null, 0, TimeSpan.FromSeconds(30));
             PasskeyMethod method = new(new PasskeyStore(db), settings, () => null);
             System.Collections.Concurrent.BlockingCollection<string> queue = [];
             IApprover approver = EnrollmentTarget.For(method, new WebApprover(method, settings, queue.Add, TimeSpan.Zero)).Approver;
@@ -81,7 +80,7 @@ internal static class RetryPostTests
             ApprovalDecision? decision = await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(5))) == task ? task.Result : null;
             check(first == 200 && decision is { Approved: true }, "resend: the first proof is approved (" + first + ")");
             check(again is 404 or 409 or 0 && third is 404 or 409 or 0, "resend: the same proof sent again gets 404 and changes nothing (" + again + ", " + third + ")");
-            check(decision is { Approved: true } && new GrantStore(db).Entries().Count == 0, "resend: the decision stays the first one and no grant was stored");
+            check(decision is { Approved: true }, "resend: the decision stays the first one");
         }
         finally
         {

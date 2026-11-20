@@ -59,7 +59,7 @@ internal static partial class WebApprovalTests
         {
             using HttpClient client = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false });
             client.Timeout = TimeSpan.FromSeconds(20);
-            ApprovalSettings local = new("passkey", null, 0, TimeSpan.FromSeconds(20));
+            ApprovalSettings local = new(null, 0, TimeSpan.FromSeconds(20));
             using TestAuthenticator laptop = TestAuthenticator.ES256();
             using TestAuthenticator phone = TestAuthenticator.RS256();
             using TestAuthenticator noPrf = TestAuthenticator.ES256(prf: false);
@@ -77,7 +77,7 @@ internal static partial class WebApprovalTests
             }
             else
             {
-                File.WriteAllText(programPath, "#!/bin/sh\nenv > \"$(dirname \"$0\")/env.txt\"\necho \"a=$A_NAME\"\n");
+                File.WriteAllText(programPath, "#!/bin/sh\nenv > \"" + envFile + "\"\necho \"a=$A_NAME\"\n");
                 File.SetUnixFileMode(programPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             }
 
@@ -120,7 +120,7 @@ internal static partial class WebApprovalTests
                     errors.WriteLine(line);
                     link.TrySetResult(line);
                 }, TimeSpan.Zero);
-                RunCommand command = new(store, approver, new AuditLog(db), TextWriter.Synchronized(stdout), errors);
+                RunCommand command = new(store, approver, TextWriter.Synchronized(stdout), errors);
                 Task<int> running = Task.Run(() => command.ExecuteAsync(args, scripts));
                 List<string> seen = [];
                 Task first = await Task.WhenAny(link.Task, running, Task.Delay(TimeSpan.FromSeconds(20)));
@@ -163,9 +163,9 @@ internal static partial class WebApprovalTests
                 Manifest before = TestState.Current(db)!;
                 check(before.Store.Length == 66 && KeyVault.IsVault(before.Vault), "prf first set: the state from the first setup already has the store key and the vault");
                 (byte[] master, string privateHex) = Open(db, laptop);
-                EntryRun run = await SetRun(client, passkeys, local, local, store, ["A_NAME"], laptop, Values(("A_NAME", PrfA)));
+                EntryRun run = SetRun(passkeys, store, ["A_NAME"], laptop, Values(("A_NAME", PrfA)));
                 Manifest? after = TestState.Current(db);
-                check(run.Result is { Code: 0 } && run.Approvals == 0 && run.Link is not null && after is { Version: 2 } && after.Store == before.Store && after.Vault == before.Vault && after.Secrets.ContainsKey("A_NAME"), "prf first set: one page, no PRF, no approval page; the manifest keeps the store key and vault and adds the hash of the first secret (" + run.Result?.Detail + ")");
+                check(run.Result is { Code: 0 } && run.Entry is not null && after is { Version: 2 } && after.Store == before.Store && after.Vault == before.Vault && after.Secrets.ContainsKey("A_NAME"), "prf first set: one page, no PRF, no approval page; the manifest keeps the store key and vault and adds the hash of the first secret (" + run.Result?.Detail + ")");
                 check(privateHex.Length == 64 && DotenvxCipher.Instance.Derive(privateHex) == after!.Store, "prf first set: the vault holds the private key of the stored public key, and the passkey's PRF output opens it");
                 byte[] privateAscii = Encoding.ASCII.GetBytes(privateHex);
                 SqliteConnection.ClearAllPools();
@@ -179,22 +179,22 @@ internal static partial class WebApprovalTests
 
             // (2) A first --set that is cancelled or fails changes nothing: the manifest stays as the first setup left it.
             {
-                foreach ((string label, Func<StateDatabase, PasskeyStore, Task<EntryRun>> act) in new (string, Func<StateDatabase, PasskeyStore, Task<EntryRun>>)[]
+                foreach ((string label, Func<StateDatabase, PasskeyStore, EntryRun> act) in new (string, Func<StateDatabase, PasskeyStore, EntryRun>)[]
                 {
-                    ("the write fails", async (db, passkeys) =>
+                    ("the write fails", (db, passkeys) =>
                     {
                         SecretStore store = new(db) { BeforeCommit = () => throw new IOException("the test write failed") };
 
-                        return await SetRun(client, passkeys, local, local, store, ["A_NAME"], laptop, Values(("A_NAME", PrfA)));
+                        return SetRun(passkeys, store, ["A_NAME"], laptop, Values(("A_NAME", PrfA)));
                     }),
-                    ("the set page is cancelled", async (db, passkeys) => await SetRun(client, passkeys, local, local, new SecretStore(db), ["A_NAME"], laptop, Values(("A_NAME", PrfA)), Twist.Cancel)),
+                    ("the entry is cancelled", (db, passkeys) => SetRun(passkeys, new SecretStore(db), ["A_NAME"], laptop, Values(("A_NAME", PrfA)), Twist.Cancel)),
                 })
                 {
                     StateDatabase db = StateDatabase.InFolder(Path.Combine(folder, "first-fail-" + Interlocked.Increment(ref states)));
                     PasskeyStore passkeys = new(db);
                     TestState.Add(db, laptop.Record("localhost", "laptop"), withStore: true);
                     Manifest before = TestState.Current(db)!;
-                    EntryRun run = await act(db, passkeys);
+                    EntryRun run = act(db, passkeys);
                     check(run.Result is { Code: not 0 } && TestState.Current(db) == before && new SecretStore(db).ListNames().Count == 0, "prf first set: " + label + ": nothing is stored and the manifest is unchanged (" + run.Result?.Detail + ")");
                 }
             }
@@ -323,14 +323,14 @@ internal static partial class WebApprovalTests
                 ManifestTests.Execute(db.FilePath, "UPDATE manifest SET text = replace(text, '" + original + "', '" + Flip(original) + "')");
                 FakeApprover asked = new(true, unlock: () => TestVault.Unlock(db, laptop));
                 StringWriter errors = new();
-                int code = await new RunCommand(new SecretStore(new StateDatabase(db.FilePath), cipher), asked, new AuditLog(db), new StringWriter(), errors).ExecuteAsync(args, scripts);
+                int code = await new RunCommand(new SecretStore(new StateDatabase(db.FilePath), cipher), asked, new StringWriter(), errors).ExecuteAsync(args, scripts);
                 check(!new StateDatabase(db.FilePath).TryCheck(out _) && code == RunCommand.StoreError && asked.Requests.Count == 0 && cipher.Decrypts == 0, "prf tamper: " + label + " fails verification: exit 4, nobody is asked, nothing is decrypted (" + code + " " + errors + ")");
             }
-            // (7) A store that needs the passkey's key offers no saved approval: the run asks every time.
+            // (7) A run asks for the key release and offers nothing else.
             {
                 (StateDatabase db, _, SecretStore store, _) = NewState();
                 FakeApprover asked = new(false);
-                await new RunCommand(store, asked, new AuditLog(db), new StringWriter(), new StringWriter(), new GrantStore(db), new ReuseOffer(480, 10)).ExecuteAsync(args, scripts);
+                await new RunCommand(store, asked, new StringWriter(), new StringWriter()).ExecuteAsync(args, scripts);
                 check(asked.Requests.Count == 1 && asked.Requests[0].Reuse is null && asked.Requests[0].Unlock, "prf run: the request asks for the key release and offers no reuse");
             }
         }

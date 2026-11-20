@@ -9,7 +9,7 @@ using System.Text.Json;
 namespace WithSecrets;
 
 /// <summary>
-/// How one registration page differs from the plain <c>--enroll</c> page. The first-run <c>--config</c> page uses it to bind
+/// How one registration page differs from the plain enrollment page. The first-run first-run setup page uses it to bind
 /// the settings into the passkey's challenge and to store them with the key in one transaction.
 /// </summary>
 /// <param name="Prefix">The first part of the page path, before the token.</param>
@@ -75,6 +75,8 @@ internal static class PasskeyRegistration
             function show(text) {
                 status.textContent = text + (diagLine ? " " + diagLine : "");
             }
+
+            //@PROGRESS@
 
             //@FOLLOW@
 
@@ -252,11 +254,11 @@ internal static class PasskeyRegistration
                         timeout: step.timeout,
                         userVerification: "required"
                     };
-                    second.textContent = step.first ? "Step 2 of 2: confirm with your new passkey" : "Step 2 of 2: confirm with your admin passkey";
+                    second.textContent = step.first ? "Confirm with your new passkey" : "Confirm with your admin passkey";
                     second.hidden = false;
+                    progress(2);
                     second.disabled = false;
-                    show("Step 1 is done: your passkey \"" + step.name + "\" was made. " + (step.makeAdmin ? "It will be an admin. " : "It will only approve runs (not an admin). ")
-                        + "Now tap \"" + second.textContent + "\". Nothing is added until you do and type the code in the terminal.");
+                    show("Passkey \"" + step.name + "\" created. " + (step.makeAdmin ? "It will be an admin. " : "It will only approve runs. ") + "Now confirm it.");
                     second.focus();
                 });
             }
@@ -288,9 +290,10 @@ internal static class PasskeyRegistration
                     if (typeof data.code !== "string") {
                         throw new Error("no code");
                     }
-                    finish("Type this code in the terminal to finish."
-                        + (typeof data.admin === "string" ? " " + data.admin + ". Pages and --enrolled show this; if it ever changes, the state was replaced." : ""));
+                    finish("Type this code in the terminal to finish. Nothing is saved until you do."
+                        + (typeof data.admin === "string" ? " " + data.admin + "." : ""));
                     code.textContent = data.code;
+                    progress(3);
                 });
             }
 
@@ -573,7 +576,7 @@ internal static class PasskeyRegistration
             return ApprovalDecision.Deny(store.UnreadableMessage);
         }
 
-        // The plain enrollment page adds a key the admin approves; the first key comes with the settings (--config).
+        // The plain enrollment page adds a key the admin approves; the first key comes with the settings.
         if (plan is null && current is null)
         {
             return ApprovalDecision.Deny(NothingEnrolled);
@@ -601,7 +604,7 @@ internal static class PasskeyRegistration
                 string signer = PasskeyMethod.Signer(current!, signed);
 
                 return Commit(store.Database, signed, () => ApprovalDecision.Allow($"Added the passkey named \"{key.Name}\" for {key.RpId}" + (admin ? ", as an admin." : ".")),
-                    (connection, transaction) => AuditLog.Append(connection, transaction, AuditLog.ChangeRow("key-enrolled",
+                    (connection, transaction) => store.Database.AppendAudit(AdminEvent.Change("key-enrolled",
                         $"passkey \"{key.Name}\" added for {key.RpId}" + (admin ? " as an admin" : " (approves runs only)") + $"; admin passkey {signer} verified", signer)));
             });
 
@@ -732,7 +735,7 @@ internal static class PasskeyRegistration
     /// </summary>
     private sealed record PrfContext(byte[] ServerState, byte[] Salt, byte[] Master, FirstStore? FirstStore);
 
-    internal const string NothingEnrolled = "Nothing is enrolled. Set up the first passkey with: with-secrets --config (with-secrets --enroll adds more).";
+    internal const string NothingEnrolled = "Nothing is enrolled. Set up the first passkey with: with-secrets admin (more are added in the admin web app).";
 
     /// <summary>
     /// Stores a signed manifest in one transaction, only when the stored one is still the version before it; then runs
@@ -761,12 +764,33 @@ internal static class PasskeyRegistration
         });
     }
 
+    /// <summary>The three steps of a page that makes a passkey: the script marks the current one (<c>progress(n)</c>).</summary>
+    internal const string Steps = "<ol class=\"steps\" aria-label=\"Steps\"><li id=\"s1\" aria-current=\"step\">Create the passkey</li><li id=\"s2\">Confirm it</li><li id=\"s3\">Type the code</li></ol>\n";
+
+    /// <summary>The script's <c>progress(n)</c>: steps before n are done, step n is the current one. Nothing happens on a page without the steps.</summary>
+    internal const string ProgressScript = """
+        function progress(n) {
+                for (var i = 1; i <= 3; i++) {
+                    var item = document.getElementById("s" + i);
+                    if (!item) { continue; }
+                    item.className = i < n ? "done" : "";
+                    if (i === n) { item.setAttribute("aria-current", "step"); } else { item.removeAttribute("aria-current"); }
+                }
+                var intro = document.getElementById("intro");
+                var form = document.getElementById("form");
+                if (intro) { intro.hidden = n > 1; }
+                if (form) { form.hidden = n > 2; }
+                var first = document.getElementById("save") || document.getElementById("create");
+                if (first) { first.hidden = n > 1; }
+            }
+        """;
+
     /// <summary>The Step 2 button of a page with two passkey prompts: hidden until step 1 is done, then the script names the key.</summary>
-    internal const string StepTwoButton = "<button id=\"confirm\" type=\"button\" hidden disabled>Step 2 of 2: confirm with your passkey</button>";
+    internal const string StepTwoButton = "<button id=\"confirm\" type=\"button\" hidden disabled>Confirm with your passkey</button>";
 
     internal const string CodeStyle = """
-        #code { font-size: 3rem; font-family: ui-monospace, monospace; letter-spacing: 0.3em; }
-        #recovery { font-size: 1.4rem; font-family: ui-monospace, monospace; letter-spacing: 0.1em; overflow-wrap: anywhere; background: #f4f4f4; border: 2px solid #111; padding: 1rem; }
+        #code { margin: 1rem 0; font-size: 2.5rem; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; letter-spacing: 0.3em; }
+        #recovery { margin: 0 0 1rem; font-size: 1.3rem; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; letter-spacing: 0.1em; overflow-wrap: anywhere; background: var(--surface-2); border: 2px solid var(--border); border-radius: 0.5rem; padding: 1rem; }
         """;
 
     /// <summary>
@@ -774,8 +798,7 @@ internal static class PasskeyRegistration
     /// <c>textContent</c>, never as HTML.
     /// </summary>
     internal const string RecoveryBox = "<div id=\"recovery-box\" hidden><h2>Recovery code</h2>"
-        + "<p>Write this recovery code down now and keep it offline, apart from this computer. It is shown once and cannot be shown again. "
-        + "If every passkey is lost, this code and state.db open all your secrets (with-secrets --recover). Anyone who has the code and state.db can open them, so keep it private.</p>"
+        + "<p>Write it down and keep it offline. It is shown once. If every passkey is lost, it is the only way back to your secrets (with-secrets --recover).</p>"
         + "<p id=\"recovery\"></p></div>\n";
 
     /// <summary>
@@ -796,8 +819,8 @@ internal static class PasskeyRegistration
     /// <summary>The style of the name field and the admin box on the enrollment page.</summary>
     internal const string FieldStyle = """
         .field { margin: 1rem 0; }
-        .field label { display: block; font-weight: bold; margin-bottom: 0.3rem; }
-        .field input[type=text] { font-size: 1rem; padding: 0.5rem; width: 100%; max-width: 30rem; box-sizing: border-box; }
+        .field label { display: block; font-weight: 700; margin-bottom: 0.3rem; }
+        .field input[type=text] { font: inherit; padding: 0.5rem 0.75rem; width: 100%; border: 2px solid var(--border); border-radius: 0.5rem; background: var(--surface); color: var(--text); }
         .check label { display: inline; font-weight: normal; }
         """;
 
@@ -811,9 +834,9 @@ internal static class PasskeyRegistration
         string limit = Enrollment.MaxNameLength.ToString(CultureInfo.InvariantCulture);
         string value = WebUtility.HtmlEncode(suggestion);
 
-        return "<div class=\"field\"><label for=\"f-key-name\">Name for this passkey</label><input id=\"f-key-name\" type=\"text\" autocomplete=\"off\" autocapitalize=\"off\" spellcheck=\"false\" maxlength=\""
+        return "<div class=\"field\"><label for=\"f-key-name\">Passkey name</label><input id=\"f-key-name\" type=\"text\" autocomplete=\"off\" autocapitalize=\"off\" spellcheck=\"false\" maxlength=\""
             + limit + "\" value=\"" + value + "\" data-default=\"" + value + "\" data-taken=\"" + WebUtility.HtmlEncode(JsonSerializer.Serialize(taken)) + "\">"
-            + "<p class=\"hint\">Up to " + limit + " characters, and not a name already enrolled (without regard to case). Empty is \"" + value + "\". Pages, --enrolled and --audit show it.</p></div>\n";
+            + "<p class=\"hint\">Up to " + limit + " characters. Shown in the app and the audit history.</p></div>\n";
     }
 
     /// <summary>
@@ -822,7 +845,7 @@ internal static class PasskeyRegistration
     /// </summary>
     internal static OneShotResponse Build(string name, string rpId, string options, string script, string style, string adminLine, IEnumerable<string>? taken = null)
     {
-        script = PrfClient.Fill(PageContinue.Fill(script.ReplaceLineEndings("\n")));
+        script = PrfClient.Fill(PageContinue.Fill(script.Replace("//@PROGRESS@", ProgressScript, StringComparison.Ordinal).ReplaceLineEndings("\n")));
         style = (style + FieldStyle).ReplaceLineEndings("\n");
         string policy = ApprovalPage.Policy(script, style);
         string text = "Works on: " + ApprovalSummary.Clean(rpId) + "\n" + ApprovalSummary.Clean(adminLine);
@@ -832,21 +855,19 @@ internal static class PasskeyRegistration
         page.Append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
         page.Append("<meta name=\"referrer\" content=\"no-referrer\">\n");
         page.Append("<title>Add a passkey</title>\n");
-        page.Append("<style>").Append(style).Append("</style>\n</head>\n<body>\n<main>\n");
-        page.Append("<h1>Add a passkey for with-secrets</h1>\n");
-        page.Append("<pre id=\"request\">").Append(WebUtility.HtmlEncode(text)).Append("</pre>\n");
-        page.Append("<p>This passkey will be able to approve runs that use your secrets. Make it only on a device you keep with you.</p>\n");
-        page.Append("<p>" + WebUtility.HtmlEncode(PrfClient.RequiredText) + "</p>\n");
+        page.Append("<style>").Append(style).Append("</style>\n</head>\n<body>\n<header class=\"bar\">with-secrets administration</header>\n<main class=\"setup\">\n");
+        page.Append("<h1>Add a passkey</h1>\n");
+        page.Append(Steps);
+        page.Append("<div id=\"intro\">\n<pre id=\"request\">").Append(WebUtility.HtmlEncode(text)).Append("</pre>\n");
+        page.Append("<p>" + WebUtility.HtmlEncode(PrfClient.RequiredText) + "</p>\n</div>\n<div id=\"form\">\n");
         page.Append(NameField(name, taken ?? []));
         page.Append("<div class=\"field check\"><input id=\"make-admin\" type=\"checkbox\"> <label for=\"make-admin\">Also make this key an admin</label>"
-            + "<p class=\"hint\">An admin key can change the settings, the secrets and the passkeys, and remove other admin keys. Leave it off for a key that only approves runs. "
-            + "Two admin keys (for example a laptop and a phone) mean a lost device does not lock you out.</p></div>\n");
-        page.Append("<p>Choose the name, then tap Create passkey. When an admin passkey works on this page, a second button then appears: tap it to confirm with your admin passkey (Step 2 of 2). Otherwise the next step opens by itself on the page of an admin passkey. The terminal asks for the code last.</p>\n");
+            + "<p class=\"hint\">An admin key can also change settings, secrets and passkeys. Keep two, on different devices.</p></div>\n");
         page.Append("<div class=\"buttons\">");
-        page.Append("<button id=\"deny\" type=\"button\" autofocus>Cancel</button>");
         page.Append("<button id=\"create\" type=\"button\">Create passkey</button>");
         page.Append(StepTwoButton);
-        page.Append("</div>\n<p id=\"status\" role=\"status\"></p>\n" + PageContinue.Box + "<p id=\"code\"></p>\n</main>\n");
+        page.Append("<button id=\"deny\" type=\"button\" autofocus>Cancel</button>");
+        page.Append("</div>\n</div>\n<p id=\"status\" role=\"status\"></p>\n" + PageContinue.Box + "<p id=\"code\"></p>\n</main>\n");
         page.Append("<script type=\"application/json\" id=\"options\">").Append(options).Append("</script>\n");
         page.Append("<script>").Append(script).Append("</script>\n</body>\n</html>\n");
 
@@ -1329,7 +1350,7 @@ internal static class PasskeyRegistration
         {
             try
             {
-                Dictionary<string, string>? members = SettingsPage.StringMembers(body);
+                Dictionary<string, string>? members = FirstRunPage.StringMembers(body);
                 if (members is null || members.Count != 4 || new[] { "id", "authenticatorData", "clientDataJSON", "signature" }.Any(field => !members.ContainsKey(field)))
                 {
                     _decision.TrySetResult(ApprovalDecision.Deny("the page sent a request that is not valid"));

@@ -43,7 +43,7 @@ public sealed class PasskeyMethod(PasskeyStore store, ApprovalSettings settings,
             throw new ProofUnavailableException(admins.Count > 0
                 ? $"Only an admin passkey can approve this change ({string.Join(", ", admins.Select(item => $"\"{item.Name}\" for {item.RpId}"))}), and none works at {rpId}."
                 : adminOnly && store.All().Any(item => item.Admin) ? "No other admin passkey can approve this change: an admin passkey cannot approve its own removal."
-                : $"No passkey is enrolled for {rpId}. With nothing enrolled, set up the first one with: with-secrets --config (with-secrets --enroll adds more).");
+                : $"No passkey is enrolled for {rpId}. With nothing enrolled, set up the first one with: with-secrets admin (more are added in the admin web app).");
         }
 
         string payload = JsonSerializer.Serialize(new
@@ -80,7 +80,7 @@ public sealed class PasskeyMethod(PasskeyStore store, ApprovalSettings settings,
             // The assertion was valid, so the approval stands even if the new count could not be saved.
             store.UpdateSignCount(key.Id, result.NewSignCount);
 
-            return new ProofResult(true, Verified(key));
+            return new ProofResult(true, Verified(key), new VerifiedCredential(key.Name, key.Admin));
         }
         catch (Exception)
         {
@@ -149,8 +149,8 @@ public sealed class PasskeyMethod(PasskeyStore store, ApprovalSettings settings,
         return approval.Signed.Text != next.Canonical()
             ? ApprovalDecision.Deny("the admin approval did not sign the new state; nothing was removed")
             : PasskeyRegistration.Commit(store.Database, approval.Signed, () => ApprovalDecision.Allow($"Removed the passkey named \"{stored}\"."),
-                (connection, transaction) => AuditLog.Append(connection, transaction, AuditLog.ChangeRow("key-removed",
-                    $"passkey \"{stored}\" removed (with its saved approvals){(matches[0].Admin ? ", it was an admin" : "")}; admin passkey {Signer(current, approval.Signed)} verified", Signer(current, approval.Signed))));
+                (connection, transaction) => store.Database.AppendAudit(AdminEvent.Change("key-removed",
+                    $"passkey \"{stored}\" removed{(matches[0].Admin ? ", it was an admin" : "")}; admin passkey {Signer(current, approval.Signed)} verified", Signer(current, approval.Signed))));
     }
 
     /// <summary>The name of the admin key that signed <paramref name="signed" />, as <paramref name="current" /> names it.</summary>

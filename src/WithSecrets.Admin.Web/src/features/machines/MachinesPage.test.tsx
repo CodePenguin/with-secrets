@@ -1,0 +1,184 @@
+import { screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { pendingAuthorization } from '../../api/client'
+import { authorization, machine, problem, signedIn, violations } from '../../test/fakeApi'
+import { renderApp } from '../../test/render'
+
+let opened: ReturnType<typeof vi.spyOn>
+beforeEach(() => {
+  opened = vi.spyOn(window, 'open').mockReturnValue(null)
+  Object.defineProperty(navigator, 'credentials', { configurable: true, value: { get: vi.fn(async () => ({ rawId: new Uint8Array([1]).buffer, response: { authenticatorData: new Uint8Array([2]).buffer, clientDataJSON: new Uint8Array([3]).buffer, signature: new Uint8Array([4]).buffer } })) } })
+})
+afterEach(() => {
+  opened.mockRestore()
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined })
+})
+
+const BUNDLE = 'ws-invite-SECRETBUNDLE'
+const invitationResult = (extra = {}) => ({ outcome: 'applied' as const, code: null, detail: null, link: null, invitation: { id: 'inv-0001', expires: '2026-11-09T10:10:00Z', bundle: BUNDLE }, invitationGone: false, ...extra })
+const createReplies = {
+  'GET /api/v1/machines': { body: { items: [] } },
+  'POST /api/v1/authorizations/inline': { status: 201, body: authorization({ operation: 'pairing-create', link: null, proof: { mode: 'webauthn', payload: JSON.stringify({ bind: 'AQ', rpId: 'localhost', timeout: 60000 }) }, parameters: [] }) },
+}
+
+describe('machines: pairing is part of the view', () => {
+  it('has no Pairing entry in the navigation', async () => {
+    signedIn()
+    renderApp('/machines')
+
+    expect(await screen.findByRole('heading', { level: 1, name: 'Machines' })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Pairing' })).toBeNull()
+  })
+
+  it('shows a machine that paired as a card to check and approve, with its name filled in from the host name', async () => {
+    const user = userEvent.setup()
+    signedIn()
+    renderApp('/machines')
+    const section = await screen.findByRole('region', { name: /paired and is waiting/i })
+    expect(within(section).getByRole('heading', { name: 'build-host' })).toBeInTheDocument()
+    expect(within(section).getByText('ab12 cd34 ef56 ab12')).toBeInTheDocument()
+    expect(screen.getAllByText('ab12 cd34 ef56 ab12')).toHaveLength(1)
+    expect(await violations(document.body)).toEqual([])
+
+    await user.click(within(section).getByRole('button', { name: /^approve/i }))
+    const dialog = await screen.findByRole('dialog')
+    // Prepared with the host name as the name; Change details shows it for editing.
+    await user.click(await within(dialog).findByRole('button', { name: 'Change details' }))
+    expect(within(dialog).getByLabelText(/friendly name/i)).toHaveValue('build-host')
+  })
+
+  it('lists invitations by status with no bundle, and revokes with its own authorization', async () => {
+    const user = userEvent.setup()
+    signedIn({
+      'GET /api/v1/machines': { body: { items: [] } },
+      'GET /api/v1/pairing/invitations': { body: { items: [{ id: 'inv-0001', status: 'pending', created: '2026-11-09T10:00:00Z', expires: '2026-11-09T10:10:00Z', ended: null, machine: null, canRevoke: true, bundle: BUNDLE }] } },
+      'POST /api/v1/authorizations/inline': { status: 201, body: authorization({ operation: 'pairing-revoke', link: null, proof: { mode: 'webauthn', payload: JSON.stringify({ bind: 'AQ', rpId: 'localhost', timeout: 60000 }) }, parameters: [{ name: 'id', value: 'inv-0001' }] }) },
+    })
+    renderApp('/machines')
+    const list = await screen.findByRole('list', { name: 'Invitations' })
+    expect(within(list).getByText('pending')).toBeInTheDocument()
+    expect(document.body.textContent).not.toContain(BUNDLE)
+    expect(JSON.stringify({ ...sessionStorage, ...localStorage })).not.toContain(BUNDLE)
+
+    await user.click(within(list).getByRole('button', { name: /revoke/i }))
+    const dialog = await screen.findByRole('dialog')
+    expect(await within(dialog).findByRole('button', { name: 'Revoke invitation' })).toBeInTheDocument()
+    expect(opened).not.toHaveBeenCalled()
+  })
+
+  it('creates an invitation in one step and shows the bundle once, never keeping it in storage or the address', async () => {
+    const user = userEvent.setup()
+    let proved = false
+    const fake = signedIn({
+      ...createReplies,
+      'GET /api/v1/authorizations/auth-id-0001': (call) => ({ body: authorization({ operation: 'pairing-create', state: proved ? 'consumed' : 'pending', parameters: [], result: proved ? call.query.get('collect') === 'invitation' ? invitationResult() : invitationResult({ invitation: null }) : null }) }),
+      'POST /api/v1/authorizations/inline': { status: 201, body: authorization({ operation: 'pairing-create', link: null, proof: { mode: 'webauthn', payload: JSON.stringify({ bind: 'AQ', rpId: 'localhost', timeout: 60000 }) }, parameters: [] }) },
+      'POST /api/v1/authorizations/auth-id-0001/proof': () => { proved = true; return { body: { ok: true } } },
+    })
+    renderApp('/machines')
+    await user.click(await screen.findByRole('button', { name: 'Add a machine' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(await within(dialog).findByRole('button', { name: 'Create invitation' }))
+
+    expect(await within(dialog).findByText(BUNDLE)).toBeInTheDocument()
+    expect(fake.calls.filter((call) => call.method !== 'GET').map((call) => call.method + ' ' + call.path)).toEqual(['POST /api/v1/authorizations/inline', 'POST /api/v1/authorizations/auth-id-0001/proof'])
+    expect(JSON.stringify({ ...sessionStorage, ...localStorage })).not.toContain(BUNDLE)
+    expect(window.location.href).not.toContain(BUNDLE)
+    expect(pendingAuthorization()).toBeNull()
+    expect(await violations(dialog)).toEqual([])
+  })
+
+  it('says an invitation that was not collected cannot be shown again', async () => {
+    const user = userEvent.setup()
+    let proved = false
+    signedIn({
+      ...createReplies,
+      'GET /api/v1/authorizations/auth-id-0001': () => ({ body: authorization({ operation: 'pairing-create', state: proved ? 'consumed' : 'pending', parameters: [], result: proved ? invitationResult({ invitation: null, invitationGone: true }) : null }) }),
+      'POST /api/v1/authorizations/inline': { status: 201, body: authorization({ operation: 'pairing-create', link: null, proof: { mode: 'webauthn', payload: JSON.stringify({ bind: 'AQ', rpId: 'localhost', timeout: 60000 }) }, parameters: [] }) },
+      'POST /api/v1/authorizations/auth-id-0001/proof': () => { proved = true; return { body: { ok: true } } },
+    })
+    renderApp('/machines')
+    await user.click(await screen.findByRole('button', { name: 'Add a machine' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(await within(dialog).findByRole('button', { name: 'Create invitation' }))
+
+    expect(await within(dialog).findByText(/cannot be shown again/)).toBeInTheDocument()
+  })
+})
+
+describe('machines: recoverable errors', () => {
+  it('shows a machine-list error with a retry instead of an empty list', async () => {
+    const user = userEvent.setup()
+    let fail = true
+    signedIn({
+      'GET /api/v1/machines': () => {
+        if (!fail) return { body: { items: [machine()] } }
+        fail = false
+
+        return problem(400, 'machines-unavailable', 'machines are unavailable')
+      },
+    })
+    renderApp('/machines')
+
+    expect(await screen.findByText(/The machines could not be listed/)).toBeInTheDocument()
+    expect(screen.queryByText('No machine has enrolled yet.')).toBeNull()
+    await user.click(screen.getByRole('button', { name: /try again loading machines/i }))
+    expect(await screen.findByRole('heading', { name: 'build-host' })).toBeInTheDocument()
+  })
+
+  it('shows an invitation-list error with a retry instead of an empty list', async () => {
+    const user = userEvent.setup()
+    let fail = true
+    signedIn({
+      'GET /api/v1/machines': { body: { items: [] } },
+      'GET /api/v1/pairing/invitations': () => {
+        if (!fail) return { body: { items: [] } }
+        fail = false
+
+        return problem(400, 'invitations-unavailable', 'invitations are unavailable')
+      },
+    })
+    renderApp('/machines')
+
+    expect(await screen.findByText(/The invitations could not be listed/)).toBeInTheDocument()
+    expect(screen.queryByText('No invitation has been created.')).toBeNull()
+    await user.click(screen.getByRole('button', { name: /try again loading invitations/i }))
+    expect(await screen.findByText('No invitation has been created.')).toBeInTheDocument()
+  })
+})
+
+describe('machines: fingerprint inspection and copy', () => {
+  it('copies the complete fingerprint, not the abbreviated display', async () => {
+    const user = userEvent.setup()
+    const writeText = vi.fn(async () => undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    signedIn()
+    renderApp('/machines')
+    await screen.findByRole('heading', { name: 'build-host' })
+
+    await user.click(screen.getByRole('button', { name: /copy full fingerprint for build-host/i }))
+
+    expect(machine().fingerprint).toHaveLength(64)
+    expect(writeText).toHaveBeenCalledWith(machine().fingerprint)
+    expect(screen.getByText('Copied.')).toBeInTheDocument()
+  })
+
+  it('keeps the complete fingerprint readable when copying is not possible', async () => {
+    const user = userEvent.setup()
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn(async () => { throw new Error('copy refused') }) },
+    })
+    signedIn()
+    renderApp('/machines')
+    const card = (await screen.findByRole('heading', { name: 'build-host' })).closest('li') as HTMLElement
+
+    await user.click(within(card).getByText('Show full fingerprint'))
+    expect(within(card).getByText(machine().fingerprint)).toBeInTheDocument()
+    await user.click(within(card).getByRole('button', { name: /copy full fingerprint/i }))
+
+    expect(await within(card).findByText(/select the fingerprint and copy it/i)).toBeInTheDocument()
+    expect(within(card).getByText(machine().fingerprint)).toBeInTheDocument()
+  })
+})

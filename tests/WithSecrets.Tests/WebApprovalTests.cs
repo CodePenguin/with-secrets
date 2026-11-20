@@ -140,9 +140,9 @@ internal static partial class WebApprovalTests
         check(!RequestBinding.Compute("n", "t").AsSpan().SequenceEqual(RequestBinding.Compute("m", "t")), "binding: nonce changes it");
         check(!RequestBinding.Compute("n", "t").AsSpan().SequenceEqual(RequestBinding.Compute("n", "u")), "binding: text changes it");
 
-        ApprovalSettings set = new("passkey", "https://ws.example.com/path", 8123, TimeSpan.FromMinutes(30));
+        ApprovalSettings set = new("https://ws.example.com/path", 8123, TimeSpan.FromMinutes(30));
         check(set.PageOrigin(1) == "https://ws.example.com", "approval settings: origin from baseUrl");
-        check(new ApprovalSettings("passkey", null, 0, TimeSpan.FromMinutes(5)).PageOrigin(5123) == "http://localhost:5123", "approval settings: localhost origin");
+        check(new ApprovalSettings(null, 0, TimeSpan.FromMinutes(5)).PageOrigin(5123) == "http://localhost:5123", "approval settings: localhost origin");
 
         string passkeyFolder = Path.Combine(Path.GetTempPath(), "ws-pk-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(passkeyFolder);
@@ -205,36 +205,44 @@ internal static partial class WebApprovalTests
         await PasskeyMethodTests(check);
 
         // Enrollment: the commands, the generic flow, and the passkey page.
-        EnrollmentCliTests(check);
+        RemovedCliTests(check);
         await EnrollmentTests(check);
         await PasskeyEnrollTests(check);
 
         // Where enroll and unenroll are approved and made: --local and the two targets.
-        LocalCliTests(check);
         await FakeTargetTests(check);
         await PasskeyTargetTests(check);
 
         // Setting and removing secrets through the web page.
-        SecretCliTests(check);
         SecretCryptoTests(check);
-        await SecretEntryTests(check);
+        SecretEntryTests(check);
+        SecretFlowsTests(check);
+        SecretFlowsExpiryTests(check);
+        PageSettingsFlowTests(check);
 
         // A run through the real chain with a real child process.
         await RunChainTests(check);
     }
 
-    private static void LocalCliTests(Action<bool, string> check)
+    /// <summary>The commands that moved into the admin web app are gone from the command line: they are refused, and the help does not list them.</summary>
+    private static void RemovedCliTests(Action<bool, string> check)
     {
-        check(CliArgs.Parse(["--enroll", "--local"], out _) is CliCommand.Enroll { Local: true }, "cli: --enroll --local");
-        check(CliArgs.Parse(["--local", "--enroll"], out _) is CliCommand.Enroll { Local: true }, "cli: --local may come first");
-        check(CliArgs.Parse(["--unenroll", "a", "--local"], out _) is CliCommand.Unenroll { Name: "a", Local: true }, "cli: --unenroll NAME --local");
-        check(CliArgs.Parse(["--enroll"], out _) is CliCommand.Enroll { Local: false } && CliArgs.Parse(["--unenroll", "a"], out _) is CliCommand.Unenroll { Local: false }, "cli: --local is off by default");
-        foreach (string[] args in new[] { new[] { "--local" }, ["--list", "--local"], ["--enrolled", "--local"], ["--revoke", "--local"], ["--set", "A", "--local"], ["--secrets", "A", "--reason", "x", "--local", "--", "p"] })
+        string[][] gone =
+        [
+            ["--set", "A"], ["--remove", "A"], ["--list"], ["-List"], ["--enroll"], ["--enrolled"], ["--unenroll", "a"], ["--rotate-key"], ["--local"], ["--config"], ["--revoke"],
+            ["--enroll", "--local"], ["--set", "A", "--port", "9000"],
+        ];
+        foreach (string[] args in gone)
         {
-            check(CliArgs.Parse(args, out string error) is null && error.Length > 0 && error.Length < 80, "cli: " + string.Join(' ', args) + " is a parse error (" + error + ")");
+            check(CliArgs.Parse(args, out string error) is null && error.Length > 0, "cli: " + string.Join(' ', args) + " is refused (" + error + ")");
         }
 
-        check(CliArgs.Parse(["--help"], out _) is CliCommand.Help { Text: var help } && help.Contains("--local", StringComparison.Ordinal), "cli: --help lists --local");
+        check(CliArgs.Parse(["--help"], out _) is CliCommand.Help { Text: var help }
+            && new[] { "--set", "--remove", "--list", "--enroll", "--unenroll", "--rotate-key", "--local", "--config", "--revoke" }.All(word => !help.Contains(word, StringComparison.Ordinal))
+            && help.Contains("--recover", StringComparison.Ordinal) && help.Contains("--needs", StringComparison.Ordinal) && help.Contains("admin web app", StringComparison.Ordinal), "cli: --help names only what is left, and sends the rest to the admin web app");
+        check(CliArgs.Parse(["--secrets", ""], out string nothing) is null && nothing.StartsWith("Nothing to do.", StringComparison.Ordinal) && nothing.Contains("--recover", StringComparison.Ordinal) && !nothing.Contains("--enroll", StringComparison.Ordinal), "cli: 'Nothing to do' names what is left");
+        check(CliArgs.Parse(["--recover", "--needs"], out string two) is null && two.Contains("one command at a time", StringComparison.Ordinal), "cli: two commands are one too many");
+        check(CliArgs.Parse(["--recover", "--port", "9000"], out _) is CliCommand.Recover { Port: 9000 } && CliArgs.Parse(["--needs", "--port", "9000"], out _) is null, "cli: --port goes with --recover and a run, not with --needs");
     }
 
     /// <summary>The generic Enrollment with fake targets: no passkeys, only host names and CanProve.</summary>
@@ -283,7 +291,7 @@ internal static partial class WebApprovalTests
             FakeEnrollMethod a = new();
             FakeEnrollMethod b = new();
             (ApprovalDecision? decision, _, int announced) = await TargetRun(client, a, b, "a.example", "b.example", item => item.Enroll());
-            check(decision is { Approved: false } && decision.Detail.Contains("--config", StringComparison.Ordinal) && announced == 0 && a.Calls().Length == 0, "targets: with nothing enrolled, Enroll is refused and points to --config (" + decision?.Detail + ")");
+            check(decision is { Approved: false } && decision.Detail.Contains("with-secrets admin", StringComparison.Ordinal) && announced == 0 && a.Calls().Length == 0, "targets: with nothing enrolled, Enroll is refused and points to --config (" + decision?.Detail + ")");
         }
     }
 
@@ -292,7 +300,7 @@ internal static partial class WebApprovalTests
     {
         TaskCompletionSource<string> line = new(TaskCreationOptions.RunContinuationsAsynchronously);
         int announced = 0;
-        ApprovalSettings settings = new("passkey", null, 0, TimeSpan.FromSeconds(20));
+        ApprovalSettings settings = new(null, 0, TimeSpan.FromSeconds(20));
         void Announce(string text)
         {
             Interlocked.Increment(ref announced);
@@ -341,7 +349,7 @@ internal static partial class WebApprovalTests
             using HttpClient client = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false });
             client.Timeout = TimeSpan.FromSeconds(20);
             int port = FreePort();
-            ApprovalSettings remote = new("passkey", "https://ws.example.com:" + port, port, TimeSpan.FromSeconds(20));
+            ApprovalSettings remote = new("https://ws.example.com:" + port, port, TimeSpan.FromSeconds(20));
             ApprovalSettings localOnly = remote with { BaseUrl = null };
 
             // Keys only for localhost, baseUrl set. --enroll: approved at localhost, enrolled at the baseUrl host.
@@ -516,43 +524,6 @@ internal static partial class WebApprovalTests
 
     private const string EnrollPrefix = "To add the passkey, open this link: ";
 
-    private static void EnrollmentCliTests(Action<bool, string> check)
-    {
-        check(CliArgs.Parse(["--enroll"], out _) is CliCommand.Enroll { Local: false }, "cli: --enroll");
-        check(CliArgs.Parse(["--enroll", "--name", "iPhone"], out _) is null && CliArgs.Parse(["--name", "iPhone", "--enroll"], out _) is null, "cli: --name no longer exists (the name is chosen on the page)");
-        check(CliArgs.Parse(["--enrolled"], out _) is CliCommand.Enrolled, "cli: --enrolled");
-        check(CliArgs.Parse(["--unenroll", "iPhone"], out _) is CliCommand.Unenroll { Name: "iPhone" }, "cli: --unenroll NAME");
-        check(CliArgs.Parse(["--unenroll"], out _) is null, "cli: --unenroll needs a name");
-
-        string[][] mixed =
-        [
-            ["--enroll", "--enrolled"],
-            ["--enroll", "--list"],
-            ["--unenroll", "a", "--enrolled"],
-            ["--enroll", "--unenroll", "a"],
-            ["--enrolled", "--revoke"],
-            ["--enroll", "--secrets", "A", "--reason", "x", "--", "p"],
-            ["--enrolled", "--", "p"],
-        ];
-        foreach (string[] args in mixed)
-        {
-            check(CliArgs.Parse(args, out string error) is null && error.Contains("one command at a time", StringComparison.Ordinal), "cli: " + string.Join(' ', args) + " is one command too many (" + error + ")");
-        }
-
-        foreach (string[] args in new[] { new[] { "--name", "x" }, ["--list", "--name", "x"], ["--unenroll", "a", "--name", "b"], ["--enrolled", "--name", "b"] })
-        {
-            check(CliArgs.Parse(args, out string error) is null && error.Contains("--name", StringComparison.Ordinal), "cli: " + string.Join(' ', args) + " is refused: there is no --name (" + error + ")");
-        }
-
-        check(CliArgs.Parse(["--help"], out _) is CliCommand.Help { Text: var help }
-            && help.Contains("--enroll", StringComparison.Ordinal) && help.Contains("--enrolled", StringComparison.Ordinal)
-            && help.Contains("--unenroll", StringComparison.Ordinal) && !help.Contains("--name", StringComparison.Ordinal), "cli: --help lists --enroll, --enrolled and --unenroll, and no --name");
-        check(CliArgs.Parse(["--help"], out _) is CliCommand.Help { Text: var described }
-            && described.Contains("A person adds a passkey with --enroll (its name, and whether it is also an admin, are chosen on the page)", StringComparison.Ordinal), "cli: the description names --enroll, --enrolled and --unenroll");
-        check(CliArgs.Parse(["--secrets", ""], out string nothing) is null && nothing.StartsWith("Nothing to do.", StringComparison.Ordinal)
-            && nothing.Contains("--enroll,", StringComparison.Ordinal) && nothing.Contains("--enrolled", StringComparison.Ordinal) && nothing.Contains("--unenroll", StringComparison.Ordinal), "cli: 'Nothing to do' names --enroll, --enrolled and --unenroll (" + nothing + ")");
-    }
-
     /// <summary>
     /// Runs one <see cref="Enrollment" /> call with the fake. When it asks, the page is read and <paramref name="answer" /> is
     /// posted: "deny", or a proof for /proof. Returns the decision, the approval page and how many links were announced.
@@ -561,7 +532,7 @@ internal static partial class WebApprovalTests
     {
         TaskCompletionSource<string> line = new(TaskCreationOptions.RunContinuationsAsynchronously);
         int announced = 0;
-        ApprovalSettings settings = new("passkey", null, 0, TimeSpan.FromSeconds(20));
+        ApprovalSettings settings = new(null, 0, TimeSpan.FromSeconds(20));
         WebApprover approver = new(method, settings, text =>
         {
             Interlocked.Increment(ref announced);
@@ -596,7 +567,7 @@ internal static partial class WebApprovalTests
         // Nothing enrolled: refused without asking. The first entry (the admin) comes with the settings: with-secrets --config.
         FakeEnrollMethod empty = new();
         (ApprovalDecision? decision, string page, int announced) = await EnrollRun(client, empty, item => item.Enroll());
-        check(decision is { Approved: false } && decision.Detail.Contains("with-secrets --config", StringComparison.Ordinal) && announced == 0 && empty.Calls().Length == 0, "enrollment: with nothing enrolled, Enroll is refused and points to --config (" + decision?.Detail + ")");
+        check(decision is { Approved: false } && decision.Detail.Contains("with-secrets admin", StringComparison.Ordinal) && announced == 0 && empty.Calls().Length == 0, "enrollment: with nothing enrolled, Enroll is refused and points to --config (" + decision?.Detail + ")");
 
         // Something enrolled: ask first; approval then enrolls. The name is chosen on the method's page; it suggests one not taken.
         FakeEnrollMethod one = new() { Entries = Two(when) };
@@ -650,7 +621,7 @@ internal static partial class WebApprovalTests
         FakeEnrollMethod admin = new() { Entries = [new("laptop", "localhost", when, true), new("phone", "localhost", when)] };
         (decision, _, announced) = await EnrollRun(client, admin, item => item.Unenroll("LAPTOP"), FakeProofMethod.Good);
         check(decision is { Approved: false, Detail: Enrollment.LastAdmin } && announced == 0 && admin.Calls().Length == 0, "enrollment: the last admin entry is never removed, and nothing is asked (" + decision?.Detail + ")");
-        check(Enrollment.LastAdmin.Contains("delete state.db", StringComparison.Ordinal) && Enrollment.LastAdmin.Contains("--config", StringComparison.Ordinal) && Enrollment.LastAdmin.Contains("Also make this key an admin", StringComparison.Ordinal), "enrollment: the message says how to add another admin or start over");
+        check(Enrollment.LastAdmin.Contains("delete state.db", StringComparison.Ordinal) && Enrollment.LastAdmin.Contains("with-secrets admin", StringComparison.Ordinal) && Enrollment.LastAdmin.Contains("Also make this key an admin", StringComparison.Ordinal), "enrollment: the message says how to add another admin or start over");
         FakeEnrollMethod twoAdmins = new() { Entries = [new("laptop", "localhost", when, true), new("phone", "localhost", when, true)] };
         (decision, page, _) = await EnrollRun(client, twoAdmins, item => item.Unenroll("laptop"), FakeProofMethod.Good);
         check(decision is { Approved: true } && twoAdmins.Calls().SequenceEqual(["ask", "unenroll:laptop"]), "enrollment: an admin entry is removed when another admin stays (" + decision?.Detail + "; " + string.Join(",", twoAdmins.Calls()) + ")");
@@ -806,7 +777,7 @@ internal static partial class WebApprovalTests
             using HttpClient other = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false });
             other.Timeout = TimeSpan.FromSeconds(20);
             PasskeyStore store = new(Path.Combine(folder, "passkeys.db"));
-            ApprovalSettings settings = new("passkey", null, 0, TimeSpan.FromSeconds(20));
+            ApprovalSettings settings = new(null, 0, TimeSpan.FromSeconds(20));
             TypedCodes codes = new();
             PasskeyMethod method = new(store, settings, codes.Read);
             using TestAuthenticator admin = TestAuthenticator.ES256();
@@ -815,7 +786,7 @@ internal static partial class WebApprovalTests
             {
                 (Task<ApprovalDecision> task, Uri? link, _, int announced) = await StartEnroll(method, "laptop");
                 ApprovalDecision? decision = await Within(task);
-                check(link is null && announced == 0 && decision is { Approved: false } && decision.Detail.Contains("with-secrets --config", StringComparison.Ordinal), "enroll: with nothing enrolled the page does not open and points to --config (" + decision?.Detail + ")");
+                check(link is null && announced == 0 && decision is { Approved: false } && decision.Detail.Contains("with-secrets admin", StringComparison.Ordinal), "enroll: with nothing enrolled the page does not open and points to --config (" + decision?.Detail + ")");
             }
 
             check(store.Add(admin.Record("localhost", "admin")), "enroll: the admin key is enrolled first");
@@ -846,7 +817,7 @@ internal static partial class WebApprovalTests
                 check(!script.Contains('\r') && csp.Contains("default-src 'none'", StringComparison.Ordinal) && csp.Contains("frame-ancestors 'none'", StringComparison.Ordinal) && csp.Contains("connect-src 'self'", StringComparison.Ordinal) && !csp.Contains("unsafe", StringComparison.Ordinal), "enroll: CSP is strict and the script has LF line ends");
                 check(body.Split("<script").Length - 1 == 2, "enroll: page has one data block and one inline script");
                 check(script.Contains("navigator.credentials.create", StringComparison.Ordinal) && body.Contains("id=\"deny\"", StringComparison.Ordinal) && body.Contains("id=\"create\"", StringComparison.Ordinal), "enroll: page creates a passkey and can cancel");
-                check(body.Contains("Works on: localhost", StringComparison.Ordinal) && body.Contains("<label for=\"f-key-name\">Name for this passkey</label>", StringComparison.Ordinal)
+                check(body.Contains("Works on: localhost", StringComparison.Ordinal) && body.Contains("<label for=\"f-key-name\">Passkey name</label>", StringComparison.Ordinal)
                     && body.Contains("maxlength=\"40\" value=\"laptop\" data-default=\"laptop\" data-taken=\"[&quot;admin&quot;]\"", StringComparison.Ordinal), "enroll: page shows the site and the name field, prefilled, with the names already enrolled (" + Between(body, "<input id=\"f-key-name\"", ">") + ")");
                 check(!System.Text.RegularExpressions.Regex.IsMatch(body, "\\son[a-z]+=", System.Text.RegularExpressions.RegexOptions.IgnoreCase), "enroll: no inline event attributes");
                 check(body.Contains("<input id=\"make-admin\" type=\"checkbox\">", StringComparison.Ordinal) && body.Contains("<label for=\"make-admin\">Also make this key an admin</label>", StringComparison.Ordinal)
@@ -1009,7 +980,7 @@ internal static partial class WebApprovalTests
             // The time limit runs out while the terminal waits for the code.
             {
                 TypedCodes slow = new();
-                PasskeyMethod quick = new(store, new ApprovalSettings("passkey", null, 0, TimeSpan.FromSeconds(3)), slow.Read);
+                PasskeyMethod quick = new(store, new ApprovalSettings(null, 0, TimeSpan.FromSeconds(3)), slow.Read);
                 (Task<ApprovalDecision> task, Uri? link, _, _) = await StartEnroll(quick, "phone");
                 string code = PostRegistration(client, link, phone, "phone");
                 ApprovalDecision? decision = await Within(task);
@@ -1112,7 +1083,7 @@ internal static partial class WebApprovalTests
 
             // No answer.
             {
-                PasskeyMethod quick = new(store, new ApprovalSettings("passkey", null, 0, TimeSpan.FromMilliseconds(300)), codes.Read);
+                PasskeyMethod quick = new(store, new ApprovalSettings(null, 0, TimeSpan.FromMilliseconds(300)), codes.Read);
                 (Task<ApprovalDecision> task, Uri? link, _, _) = await StartEnroll(quick, "phone");
                 ApprovalDecision? decision = await Within(task);
                 check(link is not null && decision is { Approved: false, Detail: "no answer before the time limit" } && RefusesBoth(link.Port), "enroll: no answer denies and releases the port (" + decision?.Detail + ")");
@@ -1151,7 +1122,7 @@ internal static partial class WebApprovalTests
 
                 foreach (string url in new[] { "http://ws.example.com", "http://localhost.evil.example", "http://127.0.0.1:8080" })
                 {
-                    PasskeyMethod insecure = new(store, new ApprovalSettings("passkey", url, 0, TimeSpan.FromSeconds(20)), codes.Read);
+                    PasskeyMethod insecure = new(store, new ApprovalSettings(url, 0, TimeSpan.FromSeconds(20)), codes.Read);
                     (task, link, _, announced) = await StartEnroll(insecure, "phone");
                     decision = await Within(task);
                     check(link is null && announced == 0 && decision is { Approved: false } && decision.Detail.Contains("https", StringComparison.Ordinal), "enroll: baseUrl " + url + " is refused before the page opens (" + decision?.Detail + ")");
@@ -1257,7 +1228,7 @@ internal static partial class WebApprovalTests
     private static async Task<(ApprovalDecision? Decision, int Status)> PasskeyRun(HttpClient client, PasskeyStore store, Func<byte[], string, string> respond)
     {
         TaskCompletionSource<string> line = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        ApprovalSettings settings = new("passkey", null, 0, TimeSpan.FromSeconds(20));
+        ApprovalSettings settings = new(null, 0, TimeSpan.FromSeconds(20));
         WebApprover approver = new(new PasskeyMethod(store, settings), settings, text => line.TrySetResult(text));
         Task<ApprovalDecision> ask = Task.Run(() => approver.Ask(new ApprovalPrompt("h", "t")));
         Task first = await Task.WhenAny(line.Task, ask, Task.Delay(TimeSpan.FromSeconds(20)));
@@ -1299,7 +1270,7 @@ internal static partial class WebApprovalTests
         {
             using HttpClient client = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false });
             client.Timeout = TimeSpan.FromSeconds(20);
-            ApprovalSettings settings = new("passkey", null, 0, TimeSpan.FromSeconds(90));
+            ApprovalSettings settings = new(null, 0, TimeSpan.FromSeconds(90));
             byte[] bind = RequestBinding.Compute("n", "t");
             using TestAuthenticator laptop = TestAuthenticator.ES256();
             using TestAuthenticator other = TestAuthenticator.RS256();
@@ -1309,7 +1280,7 @@ internal static partial class WebApprovalTests
             PasskeyMethod none = new(empty, settings);
             check(none.Id == "passkey", "passkey: Id is passkey");
             ProofUnavailableException? noKey = Throws<ProofUnavailableException>(() => none.Start(new ProofContext(bind, "http://localhost:5123")));
-            check(noKey is not null && noKey.Message.Contains("with-secrets --config (with-secrets --enroll adds more)", StringComparison.Ordinal), "passkey: Start with no key names --config (" + noKey?.Message + ")");
+            check(noKey is not null && noKey.Message.Contains("with-secrets admin (more are added in the admin web app)", StringComparison.Ordinal), "passkey: Start with no key names --config (" + noKey?.Message + ")");
 
             PasskeyStore store = new(Path.Combine(folder, "passkeys.db"));
             PasskeyRecord key = laptop.Record("localhost", "laptop");
@@ -1374,7 +1345,7 @@ internal static partial class WebApprovalTests
             check(web.All()[0].SignCount == 7, "passkey: denied web proofs leave the sign count alone");
 
             (decision, _) = await PasskeyRun(client, new PasskeyStore(Path.Combine(folder, "nothing.json")), (_, _) => "");
-            check(decision is { Approved: false } && decision.Detail.Contains("with-secrets --config (with-secrets --enroll adds more)", StringComparison.Ordinal), "passkey: web request with no key is denied and says how to enroll (" + decision?.Detail + ")");
+            check(decision is { Approved: false } && decision.Detail.Contains("with-secrets admin (more are added in the admin web app)", StringComparison.Ordinal), "passkey: web request with no key is denied and says how to enroll (" + decision?.Detail + ")");
         }
         finally
         {
@@ -1390,7 +1361,7 @@ internal static partial class WebApprovalTests
             check(error is not null && error.Contains("baseUrl", StringComparison.Ordinal), "approval settings: baseUrl with userinfo '" + url + "' is refused");
         }
 
-        static string Origin(string url) => new ApprovalSettings("passkey", url, 0, TimeSpan.FromMinutes(5)).PageOrigin(1);
+        static string Origin(string url) => new ApprovalSettings(url, 0, TimeSpan.FromMinutes(5)).PageOrigin(1);
 
         check(Origin("https://user:pw@ws.example.com/x") == "https://ws.example.com", "approval settings: origin drops userinfo");
         check(Origin("https://ws.example.com:8443/x?y#z") == "https://ws.example.com:8443", "approval settings: origin keeps a non-default port");
@@ -1420,13 +1391,13 @@ internal static partial class WebApprovalTests
             else
             {
                 string path = Path.Combine(folder, name);
-                File.WriteAllText(path, "#!/bin/sh\necho \"$MY_SECRET\"\necho ran > \"$(dirname \"$0\")/ran.txt\"\n");
+                File.WriteAllText(path, "#!/bin/sh\necho \"$MY_SECRET\"\necho ran > \"" + marker + "\"\n");
                 File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
             }
 
             using HttpClient client = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false });
             client.Timeout = TimeSpan.FromSeconds(20);
-            ApprovalSettings settings = new("passkey", null, 0, TimeSpan.FromSeconds(20));
+            ApprovalSettings settings = new(null, 0, TimeSpan.FromSeconds(20));
 
             async Task<(int Code, string Out, string Err, int Announced, string Audit)> Drive(PasskeyStore passkeys, string auditName, Func<string, byte[], string, (string Verb, string Body)>? answer)
             {
@@ -1443,9 +1414,9 @@ internal static partial class WebApprovalTests
                     errors.WriteLine(line);
                     link.TrySetResult(line);
                 });
-                RunCommand run = new(new MemoryStore(new Dictionary<string, string> { ["MY_SECRET"] = Secret }), approver, new AuditLog(new StateDatabase(auditPath)), TextWriter.Synchronized(stdout), errors);
+                RunCommand run = new(new MemoryStore(new Dictionary<string, string> { ["MY_SECRET"] = Secret }), approver, TextWriter.Synchronized(stdout), errors);
                 RunArgs args = CliArgs.ParseRun(["--secrets", "MY_SECRET", "--reason", "chain test", "--", "./" + name], out _)!;
-                Task<int> running = Task.Run(() => run.ExecuteAsync(args, folder));
+                Task<int> running = Task.Run(() => run.ExecuteAsync(args, folder, TestAudit.Sink(new StateDatabase(auditPath))));
                 if (answer is not null)
                 {
                     Task first = await Task.WhenAny(link.Task, running, Task.Delay(TimeSpan.FromSeconds(20)));
@@ -1475,15 +1446,15 @@ internal static partial class WebApprovalTests
             check(code == 0, "run chain: approved with a passkey, exit code 0 (" + code + "; " + stderr + ")");
             check(stdout.Contains("[REDACTED]", StringComparison.Ordinal) && !stdout.Contains(Secret, StringComparison.Ordinal) && !stderr.Contains(Secret, StringComparison.Ordinal), "run chain: the child printed the secret and the output is redacted");
             check(File.Exists(marker) && announced == 1 && stderr.Contains(AnnouncePrefix, StringComparison.Ordinal), "run chain: the child ran and one link was announced on stderr");
-            check(audit.Contains("\"event\":\"approved\"", StringComparison.Ordinal) && audit.Contains("passkey chain-key verified", StringComparison.Ordinal) && audit.Contains("MY_SECRET", StringComparison.Ordinal) && !audit.Contains(Secret, StringComparison.Ordinal), "run chain: audit has approved, the key name and the secret name, no value");
+            check(audit.Contains("\"outcome\":\"approved\"", StringComparison.Ordinal) && !audit.Contains(Secret, StringComparison.Ordinal), "run chain: the signed audit has the approval and no value");
 
             // (2) Deny on the page: exit 3, the child never ran
             (code, stdout, stderr, announced, audit) = await Drive(enrolled, "audit-deny.log", (_, _, _) => ("deny", ""));
-            check(code == RunCommand.Denied && !File.Exists(marker) && !stdout.Contains(Secret, StringComparison.Ordinal) && audit.Contains("\"event\":\"denied\"", StringComparison.Ordinal), "run chain: Deny on the page exits 3 and the child never ran (" + code + ")");
+            check(code == RunCommand.Denied && !File.Exists(marker) && !stdout.Contains(Secret, StringComparison.Ordinal) && audit.Contains("\"outcome\":\"denied\"", StringComparison.Ordinal), "run chain: Deny on the page exits 3 and the child never ran (" + code + ")");
 
             // (3) nothing enrolled: exit 3, a message that names --enroll, no link, the child never ran
             (code, stdout, stderr, announced, audit) = await Drive(new PasskeyStore(Path.Combine(folder, "empty.json")), "audit-none.log", null);
-            check(code == RunCommand.Denied && stderr.Contains("with-secrets --config (with-secrets --enroll adds more)", StringComparison.Ordinal) && announced == 0 && !File.Exists(marker), "run chain: no passkey enrolled exits 3, names --config, announces no link, the child never ran (" + code + "; " + stderr + ")");
+            check(code == RunCommand.Denied && stderr.Contains("with-secrets admin (more are added in the admin web app)", StringComparison.Ordinal) && announced == 0 && !File.Exists(marker), "run chain: no passkey enrolled exits 3, names --config, announces no link, the child never ran (" + code + "; " + stderr + ")");
         }
         finally
         {
@@ -1499,7 +1470,7 @@ internal static partial class WebApprovalTests
         public WebRun(FakeProofMethod fake, Func<WebApprover, ApprovalDecision> ask, TimeSpan? timeout = null, TimeSpan? approveDelay = null)
         {
             Fake = fake;
-            ApprovalSettings settings = new("passkey", null, 0, timeout ?? TimeSpan.FromSeconds(20));
+            ApprovalSettings settings = new(null, 0, timeout ?? TimeSpan.FromSeconds(20));
             WebApprover approver = new(fake, settings, line =>
             {
                 Announced++;
@@ -1829,7 +1800,7 @@ internal static partial class WebApprovalTests
             int port = ((IPEndPoint)taken.LocalEndpoint).Port;
             FakeProofMethod fake = new();
             int announced = 0;
-            WebApprover approver = new(fake, new ApprovalSettings("passkey", null, port, TimeSpan.FromSeconds(5)), _ => announced++);
+            WebApprover approver = new(fake, new ApprovalSettings(null, port, TimeSpan.FromSeconds(5)), _ => announced++);
             ApprovalDecision decision = approver.Ask(new ApprovalPrompt("h", "t"));
             check(!decision.Approved && announced == 0 && fake.Started is null, "web: a port in use denies before Start (" + decision.Detail + ")");
         }
@@ -1842,7 +1813,7 @@ internal static partial class WebApprovalTests
             int port = ((IPEndPoint)taken.LocalEndpoint).Port;
             FakeProofMethod fake = new();
             int announced = 0;
-            WebApprover approver = new(fake, new ApprovalSettings("passkey", null, port, TimeSpan.FromSeconds(5)), _ => announced++);
+            WebApprover approver = new(fake, new ApprovalSettings(null, port, TimeSpan.FromSeconds(5)), _ => announced++);
             ApprovalDecision decision = approver.Ask(new ApprovalPrompt("h", "t"));
             check(!decision.Approved && announced == 0 && fake.Started is null, "web: [::1] held by another program denies before Start, not announced (" + decision.Detail + ")");
             check(Refuses(port), "web: 127.0.0.1 is released after the [::1] bind failed");
@@ -1854,13 +1825,30 @@ internal static partial class WebApprovalTests
 
         // The CSP hashes cover exactly what is served, whatever line endings the source had.
         {
-            OneShotResponse built = ApprovalPage.Build(new ApprovalPrompt("h", "t"), new ProofStart("webauthn", "{}"), "n", [1], TimeSpan.Zero, "var a = 1;\r\nvar b = 2;\r\n", "p { }\r\nh1 { }\r\n");
+            OneShotResponse built = ApprovalPage.BuildWith(new ApprovalPrompt("h", "t"), new ProofStart("webauthn", "{}"), "n", [1], TimeSpan.Zero, "var a = 1;\r\nvar b = 2;\r\n", "p { }\r\nh1 { }\r\n");
             string served = Between(built.Body, "<script>", "</script>");
             string servedStyle = Between(built.Body, "<style>", "</style>");
             string csp = built.ContentSecurityPolicy ?? "";
             static string Hash(string text) => "'sha256-" + Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(text))) + "'";
             check(served == "var a = 1;\nvar b = 2;\n" && servedStyle == "p { }\nh1 { }\n", "web: CRLF script and style are served with LF");
             check(csp.Contains("script-src " + Hash(served) + ";", StringComparison.Ordinal) && csp.Contains("style-src " + Hash(servedStyle) + ";", StringComparison.Ordinal), "web: CSP hashes match the LF text served from CRLF source");
+
+            OneShotResponse runPrompt = ApprovalPage.Build(
+                new ApprovalPrompt("Run this program", "Program: example"),
+                new ProofStart("webauthn", "{}"), "n", [1], TimeSpan.Zero);
+            Dictionary<string, string> runData = JsonSerializer.Deserialize<Dictionary<string, string>>(Between(runPrompt.Body, "<script type=" + (char)34 + "application/json" + (char)34 + " id=" + (char)34 + "start" + (char)34 + ">", "</script>"))!;
+            check(runPrompt.Body.Contains(">Approve once</button>", StringComparison.Ordinal)
+                && !runData.ContainsKey("confirmedMessage")
+                && Between(runPrompt.Body, "<script>", "</script>").Contains("Approved once. You can close this page.", StringComparison.Ordinal),
+                "web: ordinary agent approval retains its original action and completion wording");
+
+            OneShotResponse adminPrompt = ApprovalPage.BuildWith(
+                new ApprovalPrompt("Check this change", "Action: change a setting", "Confirm this change", "Change confirmed. The change was made."),
+                new ProofStart("webauthn", "{}"), "n", [1], TimeSpan.Zero, "var a = 1;", "p { }");
+            Dictionary<string, string> adminData = JsonSerializer.Deserialize<Dictionary<string, string>>(Between(adminPrompt.Body, "<script type=" + (char)34 + "application/json" + (char)34 + " id=" + (char)34 + "start" + (char)34 + ">", "</script>"))!;
+            check(adminPrompt.Body.Contains(">Confirm this change</button>", StringComparison.Ordinal)
+                && adminData.GetValueOrDefault("confirmedMessage") == "Change confirmed. The change was made.",
+                "web: administrator passkey prompt has its own confirm action and completion wording");
         }
 
         // Ask cleans what it shows, line by line, and binds the proof to that text.
@@ -1887,7 +1875,7 @@ internal static partial class WebApprovalTests
             check(await run.Opened(), "web: Request run opens");
             string body = Text(Send(client, HttpMethod.Get, run.Base));
             string message = ApprovalSummary.BuildMessage(request);
-            check(body.Contains("An agent wants to run a program with these secrets. Read all of it before you approve.", StringComparison.Ordinal), "web: Request uses the request heading");
+            check(body.Contains("An agent wants to run a program with these secrets.", StringComparison.Ordinal), "web: Request uses the request heading");
             check(body.Contains(WebUtility.HtmlEncode(message), StringComparison.Ordinal), "web: Request shows BuildMessage, encoded");
             check(body.Contains("&lt;script&gt;alert(1)&lt;/script&gt; \\&quot;&gt;&lt;img src=x onerror=y&gt;", StringComparison.Ordinal), "web: script and img in the command are encoded");
             check(!body.Contains("<script>alert", StringComparison.Ordinal) && !body.Contains("<img", StringComparison.Ordinal), "web: raw <script>alert and <img are absent");
@@ -2246,35 +2234,7 @@ internal static partial class WebApprovalTests
         return JsonSerializer.Serialize(values);
     }
 
-    // ---- Setting and removing secrets through the web page (SecretEntry, SecretCrypto, --set and --remove).
-
-    private const string SetPrefix = "To store the secrets, open this link: ";
-
-    private static void SecretCliTests(Action<bool, string> check)
-    {
-        check(CliArgs.Parse(["--set", "A,B"], out _) is CliCommand.Set { Names: ["A", "B"] }, "cli: --set A,B");
-        check(CliArgs.Parse(["--set", " A , B ,A,"], out _) is CliCommand.Set { Names: ["A", "B"] }, "cli: --set trims, drops empty and repeated names");
-        check(CliArgs.Parse(["--remove", "A"], out _) is CliCommand.Remove { Names: ["A"] }, "cli: --remove A");
-        check(CliArgs.Parse(["--remove", "A,B_2"], out _) is CliCommand.Remove { Names: ["A", "B_2"] }, "cli: --remove A,B_2");
-        string twenty = string.Join(",", Enumerable.Range(0, 20).Select(index => "N" + index));
-        check(CliArgs.Parse(["--set", twenty], out _) is CliCommand.Set { Names.Count: 20 }, "cli: --set takes 20 names");
-        string[][] refused =
-        [
-            ["--set"], ["--set", ","], ["--set", " "], ["--set", "A,DOTENV_KEY"], ["--set", "DOTENV_PUBLIC_KEY"], ["--set", "lower"],
-            ["--set", twenty + ",N20"], ["--remove"], ["--remove", ","], ["--remove", "DOTENV_PRIVATE_KEY"], ["--remove", "A-B"],
-            ["--remove", "A", "--local"], ["--set", "A", "--local"],
-        ];
-        foreach (string[] args in refused)
-        {
-            check(CliArgs.Parse(args, out string error) is null && error.Length > 0, "cli: " + string.Join(' ', args) + " is refused (" + error + ")");
-        }
-
-        check(CliArgs.Parse(["--set", "A", "--remove", "B"], out string both) is null && both.Contains("one command at a time", StringComparison.Ordinal), "cli: --set and --remove together are one command too many");
-        check(CliArgs.Parse(["--set", "A", "--list"], out string mixed) is null && mixed.Contains("one command at a time", StringComparison.Ordinal), "cli: --set and --list together are one command too many");
-        check(CliArgs.Parse(["--help"], out _) is CliCommand.Help { Text: var help } && help.Contains("--set", StringComparison.Ordinal)
-            && help.Contains("--remove", StringComparison.Ordinal) && help.Contains("NAME[,NAME...]", StringComparison.Ordinal)
-            && help.Contains("web page", StringComparison.Ordinal) && !help.Contains("hidden prompt", StringComparison.Ordinal), "cli: --help describes --set and --remove on the web page");
-    }
+    // ---- Setting and removing secrets in the admin app (SecretFlows, SecretEntry.Session, SecretCrypto).
 
     /// <summary>The browser's side of the encryption, with .NET crypto: ECDH P-256, HKDF-SHA-256, AES-256-GCM with the tag appended.</summary>
     private static (byte[] Epk, byte[] Ct) BrowserEncrypt(byte[] serverKey, byte[] bind, byte[] iv, byte[] associated, byte[] plaintext)
@@ -2383,25 +2343,22 @@ internal static partial class WebApprovalTests
         NoSignature,
         NoCt,
         Cancel,
-        Ignore,
     }
 
-    /// <summary>What one SecretEntry call did, as the test client saw it.</summary>
+    /// <summary>What one entry or removal did in the web app's secret flow, as the test browser saw it.</summary>
     internal sealed class EntryRun
     {
         public SecretChange? Result { get; set; }
 
-        /// <summary>Every announced line.</summary>
-        public List<string> Lines { get; } = [];
-
-        /// <summary>Every announced line, every HTTP body and the result: where a value must never be.</summary>
+        /// <summary>Every text the flow showed or answered: where a value must never be.</summary>
         public List<string> Seen { get; } = [];
 
-        public Uri? Link { get; set; }
+        public SecretEntryDto? Entry { get; set; }
 
-        public string Page { get; set; } = "";
+        public SecretRemovalDto? Removal { get; set; }
 
-        public string Policy { get; set; } = "";
+        /// <summary>The entry or removal was cancelled (the person pressed Cancel, or did not use the passkey).</summary>
+        public bool Cancelled { get; set; }
 
         public int SealStatus { get; set; }
 
@@ -2414,69 +2371,51 @@ internal static partial class WebApprovalTests
 
         public string SaveReply { get; set; } = "";
 
-        /// <summary>How many approval pages were announced before the set page (none: a set needs only the set page).</summary>
-        public int Approvals { get; set; }
-
         /// <summary>A GET of the page and a second POST after the outcome were both 404 (or found no server).</summary>
         public bool AgainGone { get; set; }
     }
 
-    /// <summary>A SecretEntry built like Program.cs builds it: two targets on one passkey store, the secret store and the audit in its state.db.</summary>
-    private static SecretEntry Entry(PasskeyStore passkeys, ApprovalSettings primary, ApprovalSettings local, SecretStore store, Action<string> announce)
+    /// <summary>The address the test browser is "at" in the web app's secret flows (the passkey signs for it).</summary>
+    private const string FlowOrigin = "http://localhost:1";
+
+    private static SecretFlows NewFlows(PasskeyStore passkeys, SecretStore store)
     {
-        EnrollmentTarget Target(ApprovalSettings forPage)
-        {
-            PasskeyMethod method = new(passkeys, forPage);
-
-            return EnrollmentTarget.For(method, new WebApprover(method, forPage, announce, TimeSpan.Zero));
-        }
-
-        return new SecretEntry(Target(primary), Target(local), store, new AuditLog(store.Database), announce);
-    }
-
-    /// <summary>Runs the call on its own task. Each announced line goes to <paramref name="answer" />, which plays the person.</summary>
-    private static async Task<EntryRun> EntryDrive(Func<Action<string>, SecretChange> call, Action<EntryRun, string> answer)
-    {
-        EntryRun run = new();
-        System.Collections.Concurrent.BlockingCollection<string> queue = [];
-        Task<SecretChange> task = Task.Run(() => call(queue.Add));
-        DateTime stop = DateTime.UtcNow.AddSeconds(25);
-        while (!task.IsCompleted && DateTime.UtcNow < stop)
-        {
-            if (queue.TryTake(out string? text, 200))
-            {
-                run.Lines.Add(text);
-                run.Seen.Add(text);
-                answer(run, text);
-            }
-        }
-
-        Task done = await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(20)));
-        while (queue.TryTake(out string? rest))
-        {
-            run.Lines.Add(rest);
-            run.Seen.Add(rest);
-        }
-
-        run.Result = done == task ? task.Result : null;
-        if (run.Result is not null)
-        {
-            run.Seen.Add(run.Result.Detail);
-        }
-
-        return run;
+        return new SecretFlows(store, store.Database.Audit, () => new PasskeyMethod(passkeys, new ApprovalSettings(null, 0, TimeSpan.FromSeconds(20))), new FlowClock());
     }
 
     /// <summary>
-    /// Plays the set page as its script does: encrypt the values to the server key, post them to /seal (as they are typed),
-    /// take the manifest it returns, then sign SHA-256(bind || SHA-256(ct) || SHA-256(manifest)) and post /save. One thing is
-    /// wrong when asked.
+    /// Plays the browser against the web app's entry of values, as its script does: encrypt the values to the entry's key, post them to
+    /// seal (as they are typed), take the manifest it returns, then sign SHA-256(bind || SHA-256(ct) || SHA-256(manifest)) and post the
+    /// save. One thing is wrong when asked. <paramref name="between" /> runs after the entry started and before anything is sent.
     /// </summary>
-    private static void PlaySetPage(EntryRun run, HttpClient client, string baseUrl, string origin, string rpId, TestAuthenticator key, string plaintext, Twist twist)
+    internal static EntryRun SetRun(PasskeyStore passkeys, SecretStore store, IReadOnlyList<string> names, TestAuthenticator key, string plaintext, Twist twist = Twist.None, Action? between = null)
     {
-        Dictionary<string, string> start = JsonSerializer.Deserialize<Dictionary<string, string>>(Between(run.Page, "<script type=\"application/json\" id=\"start\">", "</script>"))!;
-        byte[] bind = Base64Url.DecodeFromChars(start["bind"]);
-        byte[] serverKey = Base64Url.DecodeFromChars(start["serverKey"]);
+        EntryRun run = new();
+        SecretFlows flows = NewFlows(passkeys, store);
+        (SecretEntryDto? entry, string? problem) = flows.StartSet(names, "s1", FlowOrigin);
+        if (entry is null)
+        {
+            run.Result = new SecretChange(problem!.Contains("failed verification", StringComparison.Ordinal) || problem.StartsWith("cannot use the secret store", StringComparison.Ordinal) ? RunCommand.StoreError : RunCommand.Denied, problem);
+            run.Seen.Add(problem);
+
+            return run;
+        }
+
+        run.Entry = entry;
+        run.Seen.Add(entry.Text);
+        run.Seen.Add(entry.Payload.GetRawText());
+        between?.Invoke();
+        if (twist == Twist.Cancel)
+        {
+            run.Cancelled = flows.Cancel(entry.Id, "s1");
+            run.AgainGone = flows.Seal(entry.Id, "s1", "{}") is null && flows.SaveSet(entry.Id, "s1", "{}") is null;
+            run.Result = new SecretChange(RunCommand.Denied, "cancelled; nothing was stored");
+
+            return run;
+        }
+
+        byte[] bind = Base64Url.DecodeFromChars(entry.Payload.GetProperty("bind").GetString()!);
+        byte[] serverKey = Base64Url.DecodeFromChars(entry.PublicKey);
         byte[] iv = RandomNumberGenerator.GetBytes(12);
         (byte[] epk, byte[] ct) = BrowserEncrypt(serverKey, bind, iv, twist == Twist.WrongAad ? RandomNumberGenerator.GetBytes(32) : bind, Encoding.UTF8.GetBytes(plaintext));
         if (twist == Twist.TamperCt)
@@ -2499,9 +2438,9 @@ internal static partial class WebApprovalTests
         string manifest = "";
         if (twist != Twist.NoSeal)
         {
-            using HttpResponseMessage? sealedReply = Send(client, HttpMethod.Post, baseUrl + "/seal", JsonSerializer.Serialize(sealedBody));
-            run.SealStatus = (int?)sealedReply?.StatusCode ?? 0;
-            run.SealReply = Text(sealedReply);
+            (int Status, string Body)? sealedReply = flows.Seal(entry.Id, "s1", JsonSerializer.Serialize(sealedBody));
+            run.SealStatus = sealedReply?.Status ?? 0;
+            run.SealReply = sealedReply?.Body ?? "";
             run.Seen.Add(run.SealReply);
             if (run.SealStatus == 200)
             {
@@ -2512,15 +2451,14 @@ internal static partial class WebApprovalTests
             if (twist == Twist.SealTwice)
             {
                 // The same ct again (a retried request): the program must answer with the first manifest, which is signed below.
-                using HttpResponseMessage? resealed = Send(client, HttpMethod.Post, baseUrl + "/seal", JsonSerializer.Serialize(sealedBody));
-                run.SecondSealReply = Text(resealed);
+                run.SecondSealReply = flows.Seal(entry.Id, "s1", JsonSerializer.Serialize(sealedBody))?.Body ?? "";
             }
         }
 
         byte[] signedCt = twist == Twist.SignOtherCt ? [.. ct, 0] : ct;
         string signedManifest = twist == Twist.SignOtherManifest ? manifest.Replace("\"v\":", "\"v\":1", StringComparison.Ordinal) : manifest;
         byte[] challenge = Manifest.Challenge([.. bind, .. SHA256.HashData(signedCt)], signedManifest);
-        Dictionary<string, string> body = JsonSerializer.Deserialize<Dictionary<string, string>>(key.Assert(challenge, origin, rpId, TestState.NextCount()))!;
+        Dictionary<string, string> body = JsonSerializer.Deserialize<Dictionary<string, string>>(key.Assert(challenge, FlowOrigin, "localhost", TestState.NextCount()))!;
         foreach ((string name, string value) in sealedBody)
         {
             body[name] = value;
@@ -2537,85 +2475,55 @@ internal static partial class WebApprovalTests
         }
 
         string json = JsonSerializer.Serialize(body);
-        using HttpResponseMessage? saved = Send(client, HttpMethod.Post, baseUrl + "/save", json);
-        run.SaveStatus = (int?)saved?.StatusCode ?? 0;
-        run.SaveReply = Text(saved);
+        (int Status, string Body)? saved = flows.SaveSet(entry.Id, "s1", json);
+        run.SaveStatus = saved?.Status ?? 0;
+        run.SaveReply = saved?.Body ?? "";
         run.Seen.Add(run.SaveReply);
-        using HttpResponseMessage? again = Send(client, HttpMethod.Get, baseUrl);
-        using HttpResponseMessage? againSave = Send(client, HttpMethod.Post, baseUrl + "/save", json);
-        using HttpResponseMessage? againSeal = Send(client, HttpMethod.Post, baseUrl + "/seal", JsonSerializer.Serialize(sealedBody));
-        run.Seen.Add(Text(again));
-        run.Seen.Add(Text(againSave));
-        run.AgainGone = Gone(again) && Gone(againSave) && Gone(againSeal);
+        run.AgainGone = flows.SaveSet(entry.Id, "s1", json) is null && flows.Seal(entry.Id, "s1", JsonSerializer.Serialize(sealedBody)) is null;
+        run.Result = run.SaveStatus == 200
+            ? new SecretChange(0, "Stored " + string.Join(", ", names) + ".")
+            : new SecretChange(run.SaveStatus == 500 ? RunCommand.StoreError : RunCommand.Denied, run.SaveReply);
+
+        return run;
     }
 
-    /// <summary>Runs SecretEntry.Set and plays the browser on the set page.</summary>
-    internal static Task<EntryRun> SetRun(HttpClient client, PasskeyStore passkeys, ApprovalSettings primary, ApprovalSettings local, SecretStore store, IReadOnlyList<string> names, TestAuthenticator key, string plaintext, Twist twist = Twist.None)
+    /// <summary>Starts the removal in the web app's flow and answers as the person does: the passkey signs the new manifest, or the removal is cancelled.</summary>
+    private static EntryRun RemoveRun(PasskeyStore passkeys, SecretStore store, IReadOnlyList<string> names, TestAuthenticator key, bool approve)
     {
-        return EntryDrive(announce => Entry(passkeys, primary, local, store, announce).Set(names), (run, text) =>
+        EntryRun run = new();
+        SecretFlows flows = NewFlows(passkeys, store);
+        (SecretRemovalDto? removal, string? problem) = flows.StartRemove(names, "s1", FlowOrigin);
+        if (removal is null)
         {
-            if (text.StartsWith(AnnouncePrefix, StringComparison.Ordinal))
-            {
-                // An approval page before the set page would be a second link (never answered here, so the set would time out).
-                run.Approvals++;
+            run.Result = new SecretChange(problem!.Contains("failed verification", StringComparison.Ordinal) || problem.StartsWith("cannot use the secret store", StringComparison.Ordinal) ? RunCommand.StoreError : RunCommand.Denied, problem);
+            run.Seen.Add(problem);
 
-                return;
-            }
+            return run;
+        }
 
-            if (!text.StartsWith(SetPrefix, StringComparison.Ordinal))
-            {
-                return;
-            }
+        run.Removal = removal;
+        run.Seen.Add(removal.Text);
+        if (!approve)
+        {
+            run.Cancelled = flows.Cancel(removal.Id, "s1");
+            run.Result = new SecretChange(RunCommand.Denied, "cancelled; nothing was removed");
 
-            Uri link = new(text[SetPrefix.Length..]);
-            run.Link = link;
-            string baseUrl = "http://127.0.0.1:" + link.Port + link.AbsolutePath;
-            using HttpResponseMessage? page = Send(client, HttpMethod.Get, baseUrl);
-            run.Page = Text(page);
-            run.Seen.Add(run.Page);
-            run.Policy = page is not null && page.Headers.TryGetValues("Content-Security-Policy", out IEnumerable<string>? policy) ? string.Join(",", policy) : "";
-            if (twist == Twist.Ignore)
-            {
-                return;
-            }
+            return run;
+        }
 
-            if (twist == Twist.Cancel)
-            {
-                using HttpResponseMessage? denied = Send(client, HttpMethod.Post, baseUrl + "/deny", "");
-                run.SaveStatus = (int?)denied?.StatusCode ?? 0;
-                using HttpResponseMessage? again = Send(client, HttpMethod.Get, baseUrl);
-                run.AgainGone = Gone(again);
+        byte[] bind = Base64Url.DecodeFromChars(removal.Payload.GetProperty("bind").GetString()!);
+        string proof = key.Assert(Manifest.Challenge(bind, removal.Manifest), FlowOrigin, "localhost", TestState.NextCount());
+        (int Status, string Detail)? saved = flows.SaveRemove(removal.Id, "s1", proof);
+        run.SaveStatus = saved?.Status ?? 0;
+        run.SaveReply = saved?.Detail ?? "";
+        run.Seen.Add(run.SaveReply);
+        run.Result = run.SaveStatus == 200
+            ? new SecretChange(0, "Removed " + string.Join(", ", names) + ".")
+            : new SecretChange(run.SaveStatus == 500 ? RunCommand.StoreError : RunCommand.Denied, run.SaveReply);
 
-                return;
-            }
-
-            PlaySetPage(run, client, baseUrl, link.GetLeftPart(UriPartial.Authority), link.IdnHost, key, plaintext, twist);
-        });
+        return run;
     }
 
-    /// <summary>Runs SecretEntry.Remove and answers its approval page: the passkey signs the new manifest, or Deny.</summary>
-    private static Task<EntryRun> RemoveRun(HttpClient client, PasskeyStore passkeys, ApprovalSettings settings, SecretStore store, IReadOnlyList<string> names, TestAuthenticator key, bool approve)
-    {
-        return EntryDrive(announce => Entry(passkeys, settings, settings, store, announce).Remove(names), (run, text) =>
-        {
-            if (!text.StartsWith(AnnouncePrefix, StringComparison.Ordinal))
-            {
-                return;
-            }
-
-            Uri link = new(text[AnnouncePrefix.Length..]);
-            run.Link = link;
-            string baseUrl = "http://127.0.0.1:" + link.Port + link.AbsolutePath;
-            run.Page = Text(Send(client, HttpMethod.Get, baseUrl));
-            run.Seen.Add(run.Page);
-            (int status, string reply) = approve
-                ? TestState.Approve(client, baseUrl, link.GetLeftPart(UriPartial.Authority), link.IdnHost, key)
-                : TestState.Post(client, baseUrl + "/deny", "");
-            run.SaveStatus = status;
-            run.SaveReply = reply;
-            run.Seen.Add(run.SaveReply);
-        });
-    }
 
     private static string Values(params (string Name, string Value)[] items)
     {
@@ -2625,7 +2533,7 @@ internal static partial class WebApprovalTests
     /// <summary>The audit rows of an event in the store's state.db.</summary>
     private static int AuditCount(SecretStore store, string eventName)
     {
-        return new AuditLog(store.Database).TryRead(1000, null, out IReadOnlyList<AuditRecord> rows, out _) ? rows.Count(row => row.Event == eventName) : -1;
+        return TestAudit.TryRead(store.Database, 1000, null, out IReadOnlyList<AuditRow> rows, out _) ? rows.Count(row => row.Event == eventName) : -1;
     }
 
     /// <summary>The values in the store, read back (and verified) the way a run reads them.</summary>
@@ -2642,20 +2550,307 @@ internal static partial class WebApprovalTests
         return names.ToDictionary(name => name, values.Text);
     }
 
-    private static async Task SecretEntryTests(Action<bool, string> check)
+    private sealed class FlowClock : TimeProvider
+    {
+        private DateTimeOffset _now = new(2026, 11, 1, 10, 0, 0, TimeSpan.Zero);
+
+        public List<FlowTimer> Timers { get; } = [];
+
+        public override DateTimeOffset GetUtcNow() => _now;
+
+        public void Advance(TimeSpan by) => _now += by;
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            FlowTimer timer = new(callback, state, period);
+            Timers.Add(timer);
+
+            return timer;
+        }
+
+        /// <summary>Runs every timer that is still on, as its period would.</summary>
+        public void Tick()
+        {
+            foreach (FlowTimer timer in Timers.Where(item => !item.Disposed).ToList())
+            {
+                timer.Callback(timer.State);
+            }
+        }
+    }
+
+    private sealed class FlowTimer(TimerCallback callback, object? state, TimeSpan period) : ITimer
+    {
+        public TimerCallback Callback { get; } = callback;
+
+        public object? State { get; } = state;
+
+        public TimeSpan Period { get; } = period;
+
+        public bool Disposed { get; private set; }
+
+        public bool Change(TimeSpan dueTime, TimeSpan period) => true;
+
+        public void Dispose() => Disposed = true;
+
+        public ValueTask DisposeAsync()
+        {
+            Dispose();
+
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    /// <summary>The web app's secret flows: who may continue an entry, how many may be open, and that nothing is stored by starting one.</summary>
+    private static void SecretFlowsTests(Action<bool, string> check)
+    {
+        string folder = Path.Combine(Path.GetTempPath(), "ws-flows-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        try
+        {
+            using TestAuthenticator laptop = TestAuthenticator.ES256();
+            StateDatabase db = StateDatabase.InFolder(folder);
+            TestState.Add(db, laptop.Record("localhost", "laptop"), withStore: true);
+            SecretStore store = new(db);
+            ApprovalSettings settings = new(null, 0, TimeSpan.FromSeconds(20));
+            FlowClock clock = new();
+            SecretFlows flows = new(store, db.Audit, () => new PasskeyMethod(new PasskeyStore(db), settings), clock);
+            const string Origin = "http://localhost:1";
+
+            check(flows.List() is { Names: { Count: 0 }, Problem: null }, "secret flows: an empty store lists no names");
+            check(flows.StartSet(["bad-name"], "s1", Origin).Entry is null, "secret flows: a name that is not valid starts nothing");
+            check(flows.StartSet([], "s1", Origin).Entry is null, "secret flows: no names start nothing");
+            check(flows.StartRemove(["NOT_STORED"], "s1", Origin) is { Removal: null, Problem: var unknown } && unknown!.Contains("Unknown secret", StringComparison.Ordinal), "secret flows: removing a name that is not stored is refused");
+
+            (SecretEntryDto? entry, _) = flows.StartSet(["A_NEW"], "s1", Origin);
+            check(entry is { Fields: [{ Name: "A_NEW", Replace: false }] } && entry.Text.Contains("A_NEW", StringComparison.Ordinal), "secret flows: an entry names the secret and says it is new");
+            check(store.ListNames().Count == 0, "secret flows: starting an entry stores nothing");
+            check(flows.Seal(entry!.Id, "s2", "{}") is null && flows.SaveSet(entry.Id, "s2", "{}") is null && !flows.Cancel(entry.Id, "s2"), "secret flows: another session cannot continue, save or cancel the entry");
+            check(flows.Seal(entry.Id, "s1", "{}") is { Status: 400 }, "secret flows: a malformed seal is refused and the entry stays open");
+            check(flows.Cancel(entry.Id, "s1") && flows.Seal(entry.Id, "s1", "{}") is null, "secret flows: cancelling ends the entry");
+
+            List<string> ids = [];
+            for (int index = 0; index < SecretFlows.MaxOpen; index++)
+            {
+                ids.Add(flows.StartSet(["N" + index], "s1", Origin).Entry!.Id);
+            }
+
+            check(flows.StartSet(["ONE_MORE"], "s1", Origin).Entry is null, "secret flows: only a few entries are open at once");
+            clock.Advance(SecretFlows.Lifetime + TimeSpan.FromSeconds(1));
+            check(flows.Seal(ids[0], "s1", "{}") is null, "secret flows: an entry ends after its lifetime");
+            check(flows.StartSet(["ONE_MORE"], "s1", Origin).Entry is not null, "secret flows: expired entries free their place");
+            flows.CancelAll();
+            check(flows.Cancel(ids[1], "s1") == false, "secret flows: cancelling all ends every entry");
+            check(store.ListNames().Count == 0, "secret flows: nothing was stored by any of it");
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(folder, true);
+            }
+            catch (IOException)
+            {
+            }
+        }
+    }
+
+    /// <summary>An entry that nobody finishes loses its server key and sealed values on its own: the sweep, the session ending, the lock and the shutdown all close it, once.</summary>
+    private static void SecretFlowsExpiryTests(Action<bool, string> check)
+    {
+        string folder = Path.Combine(Path.GetTempPath(), "ws-flows-expiry-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        try
+        {
+            using TestAuthenticator laptop = TestAuthenticator.ES256();
+            StateDatabase db = StateDatabase.InFolder(folder);
+            TestState.Add(db, laptop.Record("localhost", "laptop"), withStore: true);
+            SecretStore store = new(db);
+            ApprovalSettings settings = new(null, 0, TimeSpan.FromSeconds(20));
+            FlowClock clock = new();
+            SecretFlows flows = new(store, db.Audit, () => new PasskeyMethod(new PasskeyStore(db), settings), clock);
+            const string Origin = "http://localhost:1";
+
+            // Seals real values, so that there is something to clear.
+            SecretEntryDto Start(string name, string session)
+            {
+                SecretEntryDto entry = flows.StartSet([name], session, Origin).Entry!;
+                byte[] bind = Base64Url.DecodeFromChars(entry.Payload.GetProperty("bind").GetString()!);
+                byte[] iv = RandomNumberGenerator.GetBytes(12);
+                (byte[] epk, byte[] ct) = BrowserEncrypt(Base64Url.DecodeFromChars(entry.PublicKey), bind, iv, bind, Encoding.UTF8.GetBytes(Values((name, "a-long-enough-secret-value"))));
+                Dictionary<string, string> body = new() { ["epk"] = Encode(epk), ["iv"] = Encode(iv), ["ct"] = Encode(ct) };
+                (int Status, string Body)? sealedReply = flows.Seal(entry.Id, session, JsonSerializer.Serialize(body));
+                check(sealedReply is { Status: 200 }, "secret flow expiry: the values of " + name + " are sealed (" + sealedReply?.Status + ")");
+
+                return entry;
+            }
+
+            check(clock.Timers.Count == 0, "secret flow expiry: with nothing open there is no timer");
+            SecretEntryDto abandoned = Start("ABANDONED", "s1");
+            SecretEntry.Session abandonedPage = flows.SessionOf(abandoned.Id)!;
+            check(clock.Timers.Count == 1 && clock.Timers[0].Period == SecretFlows.SweepEvery, "secret flow expiry: the first entry starts one sweep, every " + SecretFlows.SweepEvery.TotalSeconds + " seconds");
+            check(!abandonedPage.IsErased, "secret flow expiry: an open entry holds its key and sealed values");
+
+            // A tick before the lifetime ends closes nothing.
+            clock.Advance(SecretFlows.Lifetime - TimeSpan.FromSeconds(1));
+            clock.Tick();
+            check(flows.OpenCount == 1 && !abandonedPage.IsErased, "secret flow expiry: an entry that is still in its time is not closed by the sweep");
+
+            // Nobody calls the service again: the timer alone ends it.
+            clock.Advance(TimeSpan.FromSeconds(1));
+            clock.Tick();
+            check(flows.OpenCount == 0 && abandonedPage.IsErased, "secret flow expiry: the sweep closes an expired entry with no request, zeroing its key and clearing what was sealed");
+            check(flows.Seal(abandoned.Id, "s1", "{}") is null && flows.SaveSet(abandoned.Id, "s1", "{}") is null, "secret flow expiry: a closed entry answers nothing");
+            flows.Sweep();
+            clock.Tick();
+            check(flows.OpenCount == 0, "secret flow expiry: sweeping again is harmless");
+
+            // The session that made an entry ends: its entries end, another session's stay.
+            SecretEntryDto mine = Start("MINE", "s1");
+            SecretEntryDto theirs = Start("THEIRS", "s2");
+            SecretEntry.Session minePage = flows.SessionOf(mine.Id)!;
+            SecretEntry.Session theirsPage = flows.SessionOf(theirs.Id)!;
+            flows.CancelSession("s1");
+            check(minePage.IsErased && flows.SessionOf(mine.Id) is null && !theirsPage.IsErased && flows.OpenCount == 1, "secret flow expiry: when a session ends, its entries are closed and another session's are not");
+
+            // The shutdown closes everything that is left.
+            SecretEntryDto third = Start("THIRD", "s2");
+            SecretEntry.Session thirdPage = flows.SessionOf(third.Id)!;
+            flows.Dispose();
+            check(flows.OpenCount == 0 && theirsPage.IsErased && thirdPage.IsErased && clock.Timers.All(timer => timer.Disposed), "secret flow expiry: shutting down closes every remaining entry and stops the sweep");
+            flows.Dispose();
+            check(flows.OpenCount == 0, "secret flow expiry: shutting down twice is harmless");
+
+            // A sweep racing with requests on the same entry: nothing throws, nothing is stored, the key is gone at the end.
+            SecretFlows racing = new(store, db.Audit, () => new PasskeyMethod(new PasskeyStore(db), settings), clock);
+            int faults = 0;
+            void Guard(Action call)
+            {
+                try
+                {
+                    call();
+                }
+                catch (Exception)
+                {
+                    Interlocked.Increment(ref faults);
+                }
+            }
+
+            for (int round = 0; round < 40; round++)
+            {
+                SecretEntryDto entry = racing.StartSet(["RACE" + round], "s1", Origin).Entry!;
+                SecretEntry.Session page = racing.SessionOf(entry.Id)!;
+                clock.Advance(SecretFlows.Lifetime);
+                Task[] callers =
+                [
+                    Task.Run(() => Guard(() => racing.Seal(entry.Id, "s1", "{}"))),
+                    Task.Run(() => Guard(() => racing.SaveSet(entry.Id, "s1", "{}"))),
+                    Task.Run(() => Guard(() => racing.Sweep())),
+                    Task.Run(() => Guard(() => racing.Cancel(entry.Id, "s1"))),
+                ];
+                Task.WaitAll(callers);
+                if (!page.IsErased || racing.OpenCount != 0)
+                {
+                    Interlocked.Increment(ref faults);
+                }
+            }
+
+            racing.Dispose();
+            check(faults == 0 && store.ListNames().Count == 0, "secret flow expiry: a sweep racing a seal, a save and a cancel leaves no open entry, no kept key and nothing stored (" + faults + " faults)");
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(folder, true);
+            }
+            catch (IOException)
+            {
+            }
+        }
+    }
+
+    private static void PageSettingsFlowTests(Action<bool, string> check)
+    {
+        string folder = Path.Combine(Path.GetTempPath(), "ws-pageset-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        try
+        {
+            using TestAuthenticator laptop = TestAuthenticator.ES256();
+            using TestAuthenticator stranger = TestAuthenticator.ES256();
+            StateDatabase db = StateDatabase.InFolder(folder);
+            TestState.Add(db, laptop.Record("localhost", "laptop"), withStore: true);
+            SecretStore store = new(db);
+            ApprovalSettings settings = new(null, 0, TimeSpan.FromSeconds(20));
+            FlowClock clock = new();
+            SecretFlows flows = new(store, db.Audit, () => new PasskeyMethod(new PasskeyStore(db), settings), clock);
+            const string Origin = "http://localhost:1";
+            ToolSettings wanted = ToolSettings.Defaults with { Port = 8765, BaseUrl = "https://ws.example.com", TimeoutMinutes = 12 };
+
+            string Proof(SettingsChangeDto change, TestAuthenticator key)
+            {
+                byte[] bind = Base64Url.DecodeFromChars(change.Payload.GetProperty("bind").GetString()!);
+
+                return key.Assert(Manifest.Challenge(bind, change.Manifest), Origin, "localhost", TestState.NextCount());
+            }
+
+            check(flows.PageSettings() is { Settings: { } read, Problem: null } && read == ToolSettings.Defaults, "page settings: the stored settings are read (the defaults at first)");
+            check(flows.StartSettings(ToolSettings.Defaults, "s1", Origin) is { Change: null, Problem: "Nothing is changed." }, "page settings: a change to the same values starts nothing");
+            check(flows.StartSettings(ToolSettings.Defaults with { TimeoutMinutes = 99 }, "s1", Origin) is { Change: null, Problem: var invalid } && invalid!.Contains("'timeoutMinutes'", StringComparison.Ordinal), "page settings: a value out of its limits starts nothing");
+
+            long version = TestState.Current(db)!.Version;
+            (SettingsChangeDto? change, _) = flows.StartSettings(wanted, "s1", Origin);
+            check(change is not null && change.Text.Contains("port 0 -> 8765", StringComparison.Ordinal) && change.Text.Contains("baseUrl none -> https://ws.example.com", StringComparison.Ordinal), "page settings: the text names every change");
+            check(Manifest.Parse(change!.Manifest, out _) is { } next && next.Settings == wanted && next.Version == version + 1, "page settings: the state to sign has the new values and the next version");
+            check(ToolSettings.Load(db, out _) == ToolSettings.Defaults, "page settings: starting a change stores nothing");
+            check(flows.SaveSettings(change.Id, "s2", Proof(change, laptop)) is null && flows.Cancel(change.Id, "s2") == false, "page settings: another session cannot save or cancel the change");
+            check(flows.SaveSettings(change.Id, "s1", Proof(change, stranger)) is { Status: 403 } && ToolSettings.Load(db, out _) == ToolSettings.Defaults, "page settings: a key that is not enrolled changes nothing");
+            check(flows.SaveSettings(change.Id, "s1", Proof(change, laptop)) is null, "page settings: a refused proof ends the change");
+
+            (SettingsChangeDto? again, _) = flows.StartSettings(wanted, "s1", Origin);
+            check(flows.SaveSettings(again!.Id, "s1", Proof(again, laptop)) is { Status: 200 }, "page settings: an admin passkey over the next state saves it");
+            check(ToolSettings.Load(db, out _) == wanted && TestState.Current(db)!.Version == version + 1 && db.TryCheck(out _), "page settings: the new values are in the signed state (version + 1)");
+            check(TestAudit.Rows(db).Any(row => row.Event == SecretFlows.SettingsCommand && row.KeyName == "laptop" && row.Detail.Contains("port 0 -> 8765", StringComparison.Ordinal)), "page settings: one audit event names the changes and the key");
+            check(flows.SaveSettings(again.Id, "s1", Proof(again, laptop)) is null, "page settings: a saved change cannot be saved again");
+
+            // A removal and a settings change are different flows: neither id works at the other's save.
+            (SettingsChangeDto? mixed, _) = flows.StartSettings(ToolSettings.Defaults with { Port = 7000 }, "s1", Origin);
+            check(mixed is not null && flows.SaveRemove(mixed.Id, "s1", Proof(mixed, laptop)) is null && flows.SaveSettings(mixed.Id, "s1", Proof(mixed, laptop)) is { Status: 200 }, "page settings: a settings change cannot be saved as a removal");
+            (SecretRemovalDto? removal, _) = flows.StartRemove(["ANY"], "s1", Origin);
+            if (removal is not null)
+            {
+                byte[] bindRemoval = Base64Url.DecodeFromChars(removal.Payload.GetProperty("bind").GetString()!);
+                string proofRemoval = laptop.Assert(Manifest.Challenge(bindRemoval, removal.Manifest), Origin, "localhost", TestState.NextCount());
+                check(flows.SaveSettings(removal.Id, "s1", proofRemoval) is null, "page settings: a removal cannot be saved as a settings change");
+            }
+
+            (SettingsChangeDto? stale, _) = flows.StartSettings(ToolSettings.Defaults, "s1", Origin);
+            TestState.Setting(db, "port", "5555");
+            check(flows.SaveSettings(stale!.Id, "s1", Proof(stale, laptop)) is { Status: 500 } && ToolSettings.Load(db, out _).Port == 5555, "page settings: a state that changed meanwhile is not overwritten");
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(folder, true);
+            }
+            catch (IOException)
+            {
+            }
+        }
+    }
+
+    /// <summary>Entering and removing secrets in the web app's flows: the values are sealed in the browser, one passkey assertion covers them and the new state, and any doubt stores nothing.</summary>
+    private static void SecretEntryTests(Action<bool, string> check)
     {
         string folder = Path.Combine(Path.GetTempPath(), "ws-secrets-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
         try
         {
-            using HttpClient client = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false });
-            client.Timeout = TimeSpan.FromSeconds(20);
             using TestAuthenticator laptop = TestAuthenticator.ES256();
-            ApprovalSettings local = new("passkey", null, 0, TimeSpan.FromSeconds(20));
             int stores = 0;
 
-            // A state.db as --config leaves it (the laptop as the admin, the store key and vault in the first manifest), and these secrets stored (signed by the laptop).
-            (PasskeyStore Passkeys, SecretStore Store, TestAuthenticator Key) Fresh(IReadOnlyDictionary<string, string>? data = null)
+            // A state.db as the first-time setup leaves it (the laptop as the admin, the store key and vault in the first manifest), and these secrets stored (signed by the laptop).
+            (PasskeyStore Passkeys, SecretStore Store) Fresh(IReadOnlyDictionary<string, string>? data = null)
             {
                 StateDatabase db = StateDatabase.InFolder(Path.Combine(folder, "state-" + Interlocked.Increment(ref stores)));
                 PasskeyStore passkeys = new(db);
@@ -2666,7 +2861,7 @@ internal static partial class WebApprovalTests
                     throw new InvalidOperationException(problem);
                 }
 
-                return (passkeys, store, laptop);
+                return (passkeys, store);
             }
 
             // Values that must never show up anywhere the test can see. Short values are not listed: they could match a port.
@@ -2679,108 +2874,93 @@ internal static partial class WebApprovalTests
             string goodValues = Values(("A_NEW", ValueA), ("B_OLD", ValueB));
             Dictionary<string, string> oldData = new() { ["B_OLD"] = OldB };
 
-            // The first set ever: --config already made the store key, so the first set is one page and one assertion from an admin
-            // passkey (no PRF, no approval page first); the store key and vault stay as they were and the hash of the value is added.
+            // The first set ever: the first-time setup already made the store key, so the first set is one assertion from an admin passkey
+            // (no PRF); the store key and vault stay as they were and the hash of the value is added.
             {
-                (PasskeyStore passkeys, SecretStore store, _) = Fresh();
+                (PasskeyStore passkeys, SecretStore store) = Fresh();
                 Manifest before = TestState.Current(store.Database)!;
-                EntryRun run = await SetRun(client, passkeys, local, local, store, ["A_NEW"], laptop, Values(("A_NEW", ValueA)));
+                EntryRun run = SetRun(passkeys, store, ["A_NEW"], laptop, Values(("A_NEW", ValueA)));
                 seen.AddRange(run.Seen);
                 Manifest? after = TestState.Current(store.Database);
-                check(run.Result is { Code: 0, Detail: "Stored A_NEW." } && run.Approvals == 0 && run.Link is not null && after is { Version: 2 } && after.Store == before.Store && after.Vault == before.Vault && Stored(store)["A_NEW"] == ValueA, "secrets: the first set is one page and works without any PRF; the store key and vault are unchanged (" + run.Result?.Detail + ")");
+                check(run.Result is { Code: 0, Detail: "Stored A_NEW." } && after is { Version: 2 } && after.Store == before.Store && after.Vault == before.Vault && Stored(store)["A_NEW"] == ValueA, "secrets: the first set is one assertion; the store key and vault stay (" + run.Result?.Detail + ")");
 
-                (passkeys, store, _) = Fresh();
-                run = await SetRun(client, passkeys, local, local, store, ["A_NEW"], laptop, Values(("A_NEW", ValueA)), Twist.Cancel);
-                check(run.Result is { Code: RunCommand.Denied } && TestState.Current(store.Database) is { Version: 1, Secrets.Count: 0 } && store.ListNames().Count == 0, "secrets: a cancelled first set changes nothing (" + run.Result?.Detail + ")");
+                (passkeys, store) = Fresh();
+                run = SetRun(passkeys, store, ["A_NEW"], laptop, Values(("A_NEW", ValueA)), Twist.Cancel);
+                check(run.Cancelled && run.AgainGone && run.Result is { Code: RunCommand.Denied } && TestState.Current(store.Database) is { Version: 1, Secrets.Count: 0 } && store.ListNames().Count == 0, "secrets: a cancelled first set changes nothing (" + run.Result?.Detail + ")");
 
-                // A state without a store key (not made by --config) cannot take a set.
+                // A state without a store key (not made by the first-time setup) cannot take a set.
                 StateDatabase bare = StateDatabase.InFolder(Path.Combine(folder, "state-bare"));
                 PasskeyStore barePasskeys = new(bare);
                 barePasskeys.Add(laptop.Record("localhost", "laptop"));
-                run = await SetRun(client, barePasskeys, local, local, new SecretStore(bare), ["A_NEW"], laptop, Values(("A_NEW", ValueA)));
-                check(run.Result is { Code: RunCommand.Denied } && run.Link is null && TestState.Current(bare) is { Version: 1, Store: "" }, "secrets: a state without a store key is refused before any page (" + run.Result?.Detail + ")");
+                run = SetRun(barePasskeys, new SecretStore(bare), ["A_NEW"], laptop, Values(("A_NEW", ValueA)));
+                check(run.Result is { Code: RunCommand.Denied } && run.Entry is null && TestState.Current(bare) is { Version: 1, Store: "" }, "secrets: a state without a store key is refused before any entry (" + run.Result?.Detail + ")");
             }
 
             // The same values sealed twice: the second answer is the first one (same manifest), and signing it stores them.
             {
-                (PasskeyStore passkeys, SecretStore store, _) = Fresh(oldData);
-                EntryRun run = await SetRun(client, passkeys, local, local, store, good, laptop, goodValues, Twist.SealTwice);
+                (PasskeyStore passkeys, SecretStore store) = Fresh(oldData);
+                EntryRun run = SetRun(passkeys, store, good, laptop, goodValues, Twist.SealTwice);
                 check(run.SealStatus == 200 && run.SecondSealReply == run.SealReply, "secrets: sealing the same values twice returns the first manifest again");
                 check(run.Result is { Code: 0 } && Stored(store)["A_NEW"] == ValueA, "secrets: the first manifest, signed after a second seal, is stored (" + run.Result?.Detail + ")");
             }
 
-            // A first set whose write fails changes nothing: the manifest stays as --config left it.
+            // A first set whose write fails changes nothing: the manifest stays as the first-time setup left it.
             {
-                (PasskeyStore passkeys, SecretStore store, _) = Fresh();
+                (PasskeyStore passkeys, SecretStore store) = Fresh();
                 store.BeforeCommit = () => throw new IOException("the test write failed");
-                EntryRun run = await SetRun(client, passkeys, local, local, store, ["A_NEW"], laptop, Values(("A_NEW", ValueA)));
-                check(run.Result is { Code: RunCommand.StoreError } && TestState.Current(store.Database) is { Version: 1, Secrets.Count: 0 } && store.ListNames().Count == 0, "secrets: a failed first set leaves the manifest and the rows as they were (" + run.Result?.Detail + ")");
+                EntryRun run = SetRun(passkeys, store, ["A_NEW"], laptop, Values(("A_NEW", ValueA)));
+                store.BeforeCommit = null;
+                check(run.Result is { Code: not 0 } && TestState.Current(store.Database) is { Version: 1, Secrets.Count: 0 } && store.ListNames().Count == 0, "secrets: a failed first set leaves the manifest and the rows as they were (" + run.Result?.Detail + ")");
             }
 
             // A good set of two: one new, one replaced.
             {
-                (PasskeyStore passkeys, SecretStore store, _) = Fresh(oldData);
+                (PasskeyStore passkeys, SecretStore store) = Fresh(oldData);
                 Manifest before = TestState.Current(store.Database)!;
-                EntryRun run = await SetRun(client, passkeys, local, local, store, good, laptop, goodValues);
+                EntryRun run = SetRun(passkeys, store, good, laptop, goodValues);
                 seen.AddRange(run.Seen);
                 check(run.Result is { Code: 0, Detail: "Stored A_NEW, B_OLD." }, "secrets: a good set stores both (" + run.Result?.Detail + ")");
                 Dictionary<string, string> data = Stored(store);
                 check(data.Count == 2 && data["A_NEW"] == ValueA && data["B_OLD"] == ValueB, "secrets: the values read back from the store, verified against the signed hashes");
                 Manifest after = TestState.Current(store.Database)!;
-                check(after.Version == before.Version + 1 && after.Store == before.Store && after.Vault == before.Vault && after.Secrets.Keys.SequenceEqual(good) && after.Secrets["B_OLD"] != before.Secrets["B_OLD"], "secrets: one new manifest (v+1) with the same store key and the new hashes");
-                check(run.SealStatus == 200 && run.SealReply.Contains("\"manifest\":", StringComparison.Ordinal) && JsonDocument.Parse(run.SealReply).RootElement.GetProperty("manifest").GetString() == TestState.Current(store.Database)!.Canonical(), "secrets: /seal returns the next manifest, which is exactly what was signed and stored");
+                check(after.Version == before.Version + 1 && after.Store == before.Store && after.Vault == before.Vault && after.Secrets.Keys.SequenceEqual(good) && after.Secrets["B_OLD"] != before.Secrets["B_OLD"], "secrets: one new manifest (v+1) with the same store key and vault, both hashes, the replaced one changed");
+                check(run.SealStatus == 200 && JsonDocument.Parse(run.SealReply).RootElement.GetProperty("manifest").GetString() == TestState.Current(store.Database)!.Canonical(), "secrets: the manifest /seal answered is the one that is stored");
                 check(run.SaveStatus == 200 && run.SaveReply == "{\"ok\":true,\"stored\":[\"A_NEW\",\"B_OLD\"]}", "secrets: the save reply has only the names (" + run.SaveReply + ")");
-                string token = run.Link?.AbsolutePath.Split('/')[^1] ?? "";
-                check(run.Lines.Count == 1 && run.Link is not null && run.Lines[0] == SetPrefix + "http://localhost:" + run.Link.Port + "/s/" + token && token.Length == 22, "secrets: the terminal gets only the link /s/<token> (" + string.Join(" | ", run.Lines) + ")");
-                check(run.Page.Contains("<label for=\"v0\">A_NEW (new)</label>", StringComparison.Ordinal) && run.Page.Contains("<label for=\"v1\">B_OLD (replace)</label>", StringComparison.Ordinal), "secrets: labels say new and replace");
-                int passwords = run.Page.Split("type=\"password\"").Length - 1;
-                int offs = run.Page.Split("autocomplete=\"off\"").Length - 1;
-                check(passwords == 2 && offs == 2 && run.Page.Contains("data-name=\"A_NEW\"", StringComparison.Ordinal) && run.Page.Contains("data-name=\"B_OLD\"", StringComparison.Ordinal), "secrets: one password input per name, autocomplete off (" + passwords + ", " + offs + ")");
-                check(run.Page.Contains(">Save</button>", StringComparison.Ordinal) && run.Page.Contains(">Cancel</button>", StringComparison.Ordinal), "secrets: the page has Save and Cancel");
-                string script = Between(run.Page, "<script>", "</script>");
-                string style = Between(run.Page, "<style>", "</style>");
-                check(script.Length > 0 && run.Policy.Contains("script-src " + ApprovalPage.Hash(script), StringComparison.Ordinal) && style.Length > 0 && run.Policy.Contains("style-src " + ApprovalPage.Hash(style), StringComparison.Ordinal), "secrets: CSP allows the script and style by hash");
-                check(run.Policy.Contains("default-src 'none'", StringComparison.Ordinal) && run.Policy.Contains("connect-src 'self'", StringComparison.Ordinal) && run.Policy.Contains("frame-ancestors 'none'", StringComparison.Ordinal) && !run.Policy.Contains("unsafe", StringComparison.Ordinal), "secrets: CSP is strict (" + run.Policy + ")");
-                check(!script.Contains('\r') && !style.Contains('\r'), "secrets: script and style are served with LF line endings");
-                check(run.Page.Split("<script").Length - 1 == 2, "secrets: one data block and one script");
-                Dictionary<string, string>? start = JsonSerializer.Deserialize<Dictionary<string, string>>(Between(run.Page, "<script type=\"application/json\" id=\"start\">", "</script>"));
-                check(start is not null && start.Keys.SequenceEqual(["mode", "payload", "bind", "nonce", "serverKey"]) && start["mode"] == "webauthn", "secrets: start JSON is mode, payload, bind, nonce, serverKey");
-                byte[] serverKey = start is null ? [] : Base64Url.DecodeFromChars(start["serverKey"]);
-                check(serverKey.Length == 65 && serverKey[0] == 0x04, "secrets: serverKey is a 65-byte uncompressed point");
-                check(new AuditLog(store.Database).TryRead(100, null, out IReadOnlyList<AuditRecord> rows, out _) && rows.Count(row => row.Event == "secrets-set") == 1
+                check(run.Entry is { Fields: [{ Name: "A_NEW", Replace: false }, { Name: "B_OLD", Replace: true }] } && run.Entry.Text.Contains("A_NEW (new)", StringComparison.Ordinal) && run.Entry.Text.Contains("B_OLD (replace)", StringComparison.Ordinal), "secrets: the entry says new and replace");
+                check(run.Entry is not null && Base64Url.DecodeFromChars(run.Entry.PublicKey) is { Length: 65 } point && point[0] == 0x04, "secrets: the entry's key is a 65-byte uncompressed point");
+                check(TestAudit.TryRead(store.Database, 100, null, out IReadOnlyList<AuditRow> rows, out _) && rows.Count(row => row.Event == "secrets-set") == 1
                     && rows.Single(row => row.Event == "secrets-set") is { } line && line.Secrets.SequenceEqual(good) && line.Detail == "admin passkey laptop verified" && line.KeyName == "laptop", "secrets: one audit row with the names, the detail and the key");
-                check(run.AgainGone, "secrets: after the outcome the page, /seal and a second /save get 404");
-                check(run.Link is not null && RefusesBoth(run.Link.Port), "secrets: the server and both ports are released");
+                check(run.AgainGone, "secrets: after the outcome, /seal and a second /save find no entry");
             }
 
             // Boundaries: 6 and 4096 characters are accepted.
             {
-                (PasskeyStore passkeys, SecretStore store, _) = Fresh();
-                EntryRun run = await SetRun(client, passkeys, local, local, store, good, laptop, Values(("A_NEW", "abcdef"), ("B_OLD", longest)));
+                (PasskeyStore passkeys, SecretStore store) = Fresh();
+                EntryRun run = SetRun(passkeys, store, good, laptop, Values(("A_NEW", "abcdef"), ("B_OLD", longest)));
                 seen.AddRange(run.Seen);
                 Dictionary<string, string> data = Stored(store);
                 check(run.Result is { Code: 0 } && data["A_NEW"] == "abcdef" && data["B_OLD"] == longest, "secrets: values of 6 and 4096 characters are stored (" + run.Result?.Detail + ")");
             }
 
-            // Anything wrong with the crypto or the proof: deny, nothing stored, nothing audited, the page is gone.
-            (Twist Twist, string Label, string Why, int Status)[] twists =
+            // Anything wrong with the crypto or the proof: nothing stored, nothing audited as stored, the entry is gone.
+            (Twist Twist, string Label, int Status)[] twists =
             [
-                (Twist.TamperCt, "a tampered ct", "decrypted", 400), (Twist.WrongIv, "a wrong iv", "decrypted", 400),
-                (Twist.WrongAad, "wrong associated data", "decrypted", 400), (Twist.SignOtherCt, "an assertion signed over another ct", "proof was not accepted", 403),
-                (Twist.SignOtherManifest, "an assertion signed over another manifest", "proof was not accepted", 403),
-                (Twist.NoSeal, "a save of values the page never sealed", "not prepared", 400),
-                (Twist.PointOffCurve, "an epk that is not a valid point", "decrypted", 400), (Twist.ShortEpk, "an epk of the wrong length", "decrypted", 400),
-                (Twist.NoSignature, "a body without a signature", "not valid", 400), (Twist.NoCt, "a body without ct", "not valid", 400),
+                (Twist.TamperCt, "a tampered ct", 400), (Twist.WrongIv, "a wrong iv", 400),
+                (Twist.WrongAad, "wrong associated data", 400), (Twist.SignOtherCt, "an assertion signed over another ct", 403),
+                (Twist.SignOtherManifest, "an assertion signed over another manifest", 403),
+                (Twist.NoSeal, "a save of values never sealed", 400),
+                (Twist.PointOffCurve, "an epk that is not a valid point", 400), (Twist.ShortEpk, "an epk of the wrong length", 400),
+                (Twist.NoSignature, "a body without a signature", 400), (Twist.NoCt, "a body without ct", 400),
             ];
-            foreach ((Twist twist, string label, string why, int status) in twists)
+            foreach ((Twist twist, string label, int status) in twists)
             {
-                (PasskeyStore passkeys, SecretStore store, _) = Fresh(oldData);
+                (PasskeyStore passkeys, SecretStore store) = Fresh(oldData);
                 long version = TestState.Current(store.Database)!.Version;
-                EntryRun run = await SetRun(client, passkeys, local, local, store, good, laptop, goodValues, twist);
+                EntryRun run = SetRun(passkeys, store, good, laptop, goodValues, twist);
                 seen.AddRange(run.Seen);
                 Dictionary<string, string> data = Stored(store);
-                check(run.Result is { Code: RunCommand.Denied } && run.Result.Detail.Contains(why, StringComparison.Ordinal) && data.Count == 1 && data["B_OLD"] == OldB && TestState.Current(store.Database)!.Version == version && AuditCount(store, "secrets-set") == 0, "secrets: " + label + " denies and stores nothing (" + run.Result?.Detail + ")");
-                check(run.SaveStatus == status && run.SaveReply == "{\"ok\":false}" && run.AgainGone, "secrets: " + label + " gets a generic failure, then 404 (" + run.SaveStatus + " " + run.SaveReply + ")");
+                check(run.Result is { Code: RunCommand.Denied } && data.Count == 1 && data["B_OLD"] == OldB && TestState.Current(store.Database)!.Version == version && AuditCount(store, "secrets-set") == 0, "secrets: " + label + " is denied and stores nothing (" + run.SaveStatus + " " + run.SaveReply + ")");
+                check(run.SaveStatus == status && run.SaveReply == "{\"ok\":false}" && run.AgainGone, "secrets: " + label + " gets a generic failure, then no entry (" + run.SaveStatus + " " + run.SaveReply + ")");
             }
 
             // A valid proof with a bad payload: /seal refuses it with the reason (names only); the save is denied, nothing stored.
@@ -2798,96 +2978,77 @@ internal static partial class WebApprovalTests
             ];
             foreach ((string[] names, string plain, string label, string why) in payloads)
             {
-                (PasskeyStore passkeys, SecretStore store, _) = Fresh(oldData);
-                EntryRun run = await SetRun(client, passkeys, local, local, store, names, laptop, plain);
+                (PasskeyStore passkeys, SecretStore store) = Fresh(oldData);
+                EntryRun run = SetRun(passkeys, store, names, laptop, plain);
                 seen.AddRange(run.Seen);
                 Dictionary<string, string> data = Stored(store);
                 check(run.SealStatus == 400 && run.SealReply.Contains(why, StringComparison.Ordinal), "secrets: " + label + ": /seal refuses it and says why (" + run.SealReply + ")");
-                check(run.Result is { Code: RunCommand.Denied } && run.Result.Detail.Contains(why, StringComparison.Ordinal) && data.Count == 1 && data["B_OLD"] == OldB && AuditCount(store, "secrets-set") == 0, "secrets: " + label + " is refused before any write (" + run.Result?.Detail + ")");
-                check(run.SaveStatus == 400 && run.SaveReply == "{\"ok\":false}" && run.AgainGone, "secrets: " + label + " gets a generic failure, then 404 (" + run.SaveStatus + ")");
+                check(run.Result is { Code: RunCommand.Denied } && data.Count == 1 && data["B_OLD"] == OldB && AuditCount(store, "secrets-set") == 0, "secrets: " + label + " is refused before anything is stored (" + run.Result?.Detail + ")");
+                check(run.SaveStatus == 400 && run.SaveReply == "{\"ok\":false}" && run.AgainGone, "secrets: " + label + " gets a generic failure, then no entry (" + run.SaveStatus + ")");
             }
 
-            // Names that cannot be stored: refused before any page opens.
+            // Names that cannot be stored: refused before any entry starts.
             string[] tooMany = [.. Enumerable.Range(0, 21).Select(index => "N" + index)];
-            foreach (string[] names in new[] { new[] { "bad" }, ["DOTENV_PRIVATE_KEY"], ["A_NEW", "DOTENV_PUBLIC_KEY"], ["A_NEW", "A_NEW"], [], tooMany, ["A-B"] })
+            foreach (string[] names in new[] { new[] { "1bad" }, ["DOTENV_X"], ["A_NEW", "DOTENV_PUBLIC_KEY"], ["A_NEW", "A_NEW"], [], tooMany, ["A-B"] })
             {
-                (PasskeyStore passkeys, SecretStore store, _) = Fresh(oldData);
+                (PasskeyStore passkeys, SecretStore store) = Fresh(oldData);
                 long version = TestState.Current(store.Database)!.Version;
-                EntryRun set = await SetRun(client, passkeys, local, local, store, names, laptop, "{}");
-                EntryRun removed = await RemoveRun(client, passkeys, local, store, names, laptop, true);
-                check(set.Result is { Code: RunCommand.Denied } && set.Lines.Count == 0 && removed.Result is { Code: RunCommand.Denied } && removed.Lines.Count == 0 && Stored(store).Count == 1 && TestState.Current(store.Database)!.Version == version, "secrets: names [" + string.Join(",", names) + "] are refused before anything starts (" + set.Result?.Detail + " | " + removed.Result?.Detail + ")");
+                EntryRun set = SetRun(passkeys, store, names, laptop, "{}");
+                EntryRun removed = RemoveRun(passkeys, store, names, laptop, true);
+                check(set.Result is { Code: RunCommand.Denied } && set.Entry is null && removed.Result is { Code: RunCommand.Denied } && removed.Removal is null && Stored(store).Count == 1 && TestState.Current(store.Database)!.Version == version, "secrets: the names " + string.Join(",", names.Take(3)) + " are refused before anything starts (" + set.Result?.Detail + ")");
             }
 
-            // Cancel on the page.
+            // Cancel in the app.
             {
-                (PasskeyStore passkeys, SecretStore store, _) = Fresh();
-                EntryRun run = await SetRun(client, passkeys, local, local, store, good, laptop, goodValues, Twist.Cancel);
-                check(run.Result is { Code: RunCommand.Denied } && run.Result.Detail.Contains("cancel", StringComparison.Ordinal) && Stored(store).Count == 0 && AuditCount(store, "secrets-set") == 0 && run.SaveStatus == 200 && run.AgainGone, "secrets: Cancel stores nothing and ends the page (" + run.Result?.Detail + ")");
-            }
-
-            // No answer: the time limit denies and releases the ports.
-            {
-                (PasskeyStore passkeys, SecretStore store, _) = Fresh();
-                EntryRun run = await SetRun(client, passkeys, local with { Timeout = TimeSpan.FromSeconds(2) }, local, store, good, laptop, goodValues, Twist.Ignore);
-                check(run.Result is { Code: RunCommand.Denied } && run.Result.Detail.Contains("time limit", StringComparison.Ordinal) && Stored(store).Count == 0 && run.Link is not null && RefusesBoth(run.Link.Port), "secrets: the time limit denies and releases the ports (" + run.Result?.Detail + ")");
+                (PasskeyStore passkeys, SecretStore store) = Fresh();
+                EntryRun run = SetRun(passkeys, store, good, laptop, goodValues, Twist.Cancel);
+                check(run.Cancelled && run.AgainGone && Stored(store).Count == 0 && AuditCount(store, "secrets-set") == 0, "secrets: cancelling the entry stores nothing and ends it");
             }
 
             // The write fails inside its transaction (rows, manifest and audit row are one transaction): nothing is stored.
             {
-                (PasskeyStore passkeys, SecretStore store, _) = Fresh(oldData);
+                (PasskeyStore passkeys, SecretStore store) = Fresh(oldData);
                 long version = TestState.Current(store.Database)!.Version;
                 store.BeforeCommit = () => throw new IOException("the test write failed");
-                EntryRun run = await SetRun(client, passkeys, local, local, store, good, laptop, goodValues);
+                EntryRun run = SetRun(passkeys, store, good, laptop, goodValues);
                 store.BeforeCommit = null;
                 seen.AddRange(run.Seen);
                 Dictionary<string, string> data = Stored(store);
-                check(run.Result is { Code: RunCommand.StoreError } && run.Result.Detail.Contains("nothing was stored", StringComparison.Ordinal) && data.Count == 1 && data["B_OLD"] == OldB && TestState.Current(store.Database)!.Version == version && AuditCount(store, "secrets-set") == 0 && run.SaveReply == "{\"ok\":false}", "secrets: a failed write stores nothing at all: no row, no manifest, no audit row (" + run.Result?.Detail + ")");
+                check(run.Result is { Code: not 0 } && data.Count == 1 && data["B_OLD"] == OldB && TestState.Current(store.Database)!.Version == version && AuditCount(store, "secrets-set") == 0, "secrets: a write that fails stores nothing and changes no state (" + run.Result?.Detail + ")");
             }
 
-            // The state changes while the page is open (another change signed in between): nothing is stored.
+            // The state changes while the entry is open (another change signed in between): nothing is stored.
             {
-                (PasskeyStore passkeys, SecretStore store, _) = Fresh(oldData);
-                EntryRun run = await EntryDrive(announce => Entry(passkeys, local, local, store, announce).Set(good), (run, text) =>
-                {
-                    if (!text.StartsWith(SetPrefix, StringComparison.Ordinal))
-                    {
-                        return;
-                    }
-
-                    Uri link = new(text[SetPrefix.Length..]);
-                    string baseUrl = "http://127.0.0.1:" + link.Port + link.AbsolutePath;
-                    run.Page = Text(Send(client, HttpMethod.Get, baseUrl));
-                    TestState.Settings(store.Database, ToolSettings.Defaults with { Port = 8766 });
-                    PlaySetPage(run, client, baseUrl, link.GetLeftPart(UriPartial.Authority), link.IdnHost, laptop, goodValues, Twist.None);
-                });
-                check(run.Result is { Code: not 0 } && run.Result.Detail.Contains("changed while the page was open", StringComparison.Ordinal) && Stored(store)["B_OLD"] == OldB, "secrets: a state that changed while the page was open stores nothing (" + run.Result?.Detail + ")");
+                (PasskeyStore passkeys, SecretStore store) = Fresh(oldData);
+                EntryRun run = SetRun(passkeys, store, good, laptop, goodValues, Twist.None, () => TestState.Settings(store.Database, ToolSettings.Defaults with { Port = 8766 }));
+                check(run.Result is { Code: not 0 } && Stored(store)["B_OLD"] == OldB && !Stored(store).ContainsKey("A_NEW"), "secrets: a state that changed while the entry was open stores nothing (" + run.Result?.Detail + ")");
             }
 
-            // A key that is not an admin cannot store or remove secrets: the page asks only for the admin key.
+            // A key that is not an admin cannot store or remove secrets.
             {
                 using TestAuthenticator tablet = TestAuthenticator.ES256();
-                (PasskeyStore two, SecretStore store, _) = Fresh(new Dictionary<string, string> { ["A_NEW"] = ValueA });
+                (PasskeyStore two, SecretStore store) = Fresh(new Dictionary<string, string> { ["A_NEW"] = ValueA });
                 check(two.Add(tablet.Record("localhost", "tablet")), "secrets: an admin and a second key are enrolled");
                 long version = TestState.Current(store.Database)!.Version;
-                EntryRun set = await SetRun(client, two, local, local, store, good, tablet, goodValues);
-                check(set.Result is { Code: RunCommand.Denied } && set.SaveStatus == 403 && TestState.Current(store.Database)!.Version == version, "secrets: --set approved by a non-admin key is denied and stores nothing (" + set.Result?.Detail + ")");
-                check(!set.Page.Contains("allowCredentials", StringComparison.Ordinal) && !set.Page.Contains(TestAuthenticator.Encode(tablet.CredentialId), StringComparison.Ordinal), "secrets: the set page names no credential (the server decides who may sign)");
+                EntryRun set = SetRun(two, store, good, tablet, goodValues);
+                check(set.Result is { Code: RunCommand.Denied } && set.SaveStatus == 403 && TestState.Current(store.Database)!.Version == version, "secrets: a set approved by a non-admin key is denied and stores nothing (" + set.Result?.Detail + ")");
+                check(set.Entry is not null && !set.Entry.Payload.GetRawText().Contains("allowCredentials", StringComparison.Ordinal) && !set.Entry.Payload.GetRawText().Contains(TestAuthenticator.Encode(tablet.CredentialId), StringComparison.Ordinal), "secrets: the entry names no credential (the server decides who may sign)");
                 using TestAuthenticator stranger = TestAuthenticator.ES256();
-                EntryRun unknownSet = await SetRun(client, two, local, local, store, good, stranger, goodValues);
-                check(unknownSet.Result is { Code: RunCommand.Denied } && unknownSet.SaveStatus == 403 && TestState.Current(store.Database)!.Version == version, "secrets: --set signed by a credential that is not in the manifest is denied and stores nothing (" + unknownSet.Result?.Detail + ")");
-                EntryRun removed = await RemoveRun(client, two, local, store, ["A_NEW"], tablet, true);
-                check(removed.Result is { Code: RunCommand.Denied } && removed.SaveStatus == 403 && Stored(store).ContainsKey("A_NEW") && TestState.Current(store.Database)!.Version == version, "secrets: --remove approved by a non-admin key is denied and removes nothing (" + removed.Result?.Detail + ")");
+                EntryRun unknownSet = SetRun(two, store, good, stranger, goodValues);
+                check(unknownSet.Result is { Code: RunCommand.Denied } && unknownSet.SaveStatus == 403 && TestState.Current(store.Database)!.Version == version, "secrets: a set signed by a credential that is not in the manifest is denied and stores nothing (" + unknownSet.Result?.Detail + ")");
+                EntryRun removed = RemoveRun(two, store, ["A_NEW"], tablet, true);
+                check(removed.Result is { Code: RunCommand.Denied } && removed.SaveStatus == 403 && Stored(store).ContainsKey("A_NEW") && TestState.Current(store.Database)!.Version == version, "secrets: a removal approved by a non-admin key is denied and removes nothing (" + removed.Result?.Detail + ")");
             }
 
-            // Nothing enrolled, or a state.db that cannot be read: refuse before anything starts.
+            // Nothing enrolled, or a state.db that cannot be read: refused before anything starts.
             {
                 StateDatabase emptyDb = StateDatabase.InFolder(Path.Combine(folder, "none"));
                 PasskeyStore none = new(emptyDb);
                 SecretStore store = new(emptyDb);
-                EntryRun set = await SetRun(client, none, local, local, store, good, laptop, goodValues);
-                EntryRun removed = await RemoveRun(client, none, local, store, ["A_NEW"], laptop, true);
-                check(set.Result is { Code: RunCommand.Denied } && set.Result.Detail.Contains("with-secrets --config (with-secrets --enroll adds more)", StringComparison.Ordinal) && set.Lines.Count == 0 && !File.Exists(emptyDb.FilePath), "secrets: Set with nothing enrolled says to run --config (" + set.Result?.Detail + ")");
-                check(removed.Result is { Code: RunCommand.Denied } && removed.Result.Detail.Contains("with-secrets --config (with-secrets --enroll adds more)", StringComparison.Ordinal) && removed.Lines.Count == 0, "secrets: Remove with nothing enrolled says to run --config (" + removed.Result?.Detail + ")");
+                EntryRun set = SetRun(none, store, good, laptop, goodValues);
+                EntryRun removed = RemoveRun(none, store, ["A_NEW"], laptop, true);
+                check(set.Result is { Code: RunCommand.Denied } && set.Result.Detail.Contains("with-secrets admin", StringComparison.Ordinal) && set.Entry is null && !File.Exists(emptyDb.FilePath), "secrets: a set with nothing enrolled says to run admin (" + set.Result?.Detail + ")");
+                check(removed.Result is { Code: RunCommand.Denied } && removed.Result.Detail.Contains("with-secrets admin", StringComparison.Ordinal) && removed.Removal is null, "secrets: a removal with nothing enrolled says to run admin (" + removed.Result?.Detail + ")");
 
                 string badPath = Path.Combine(folder, "bad", "passkeys.db");
                 Directory.CreateDirectory(Path.GetDirectoryName(badPath)!);
@@ -2895,84 +3056,49 @@ internal static partial class WebApprovalTests
                 StateDatabase badDb = new(badPath);
                 PasskeyStore unreadable = new(badDb);
                 SecretStore badStore = new(badDb);
-                set = await SetRun(client, unreadable, local, local, badStore, good, laptop, goodValues);
-                removed = await RemoveRun(client, unreadable, local, badStore, ["A_NEW"], laptop, true);
-                check(set.Result is { Code: RunCommand.Denied, Detail: "cannot read passkeys.db; fix or delete it" } && removed.Result is { Code: RunCommand.Denied, Detail: "cannot read passkeys.db; fix or delete it" }, "secrets: an unreadable state.db is a denial (" + set.Result?.Detail + " | " + removed.Result?.Detail + ")");
+                set = SetRun(unreadable, badStore, good, laptop, goodValues);
+                removed = RemoveRun(unreadable, badStore, ["A_NEW"], laptop, true);
+                check(set.Result is { Code: not 0 } && set.Entry is null && removed.Result is { Code: not 0 } && removed.Removal is null, "secrets: an unreadable state.db is a denial before anything starts (" + set.Result?.Detail + ")");
             }
 
-            // A store that fails verification (a row swapped for another valid ciphertext): --set and --remove refuse, exit 4.
+            // A store that fails verification (a row swapped for another valid ciphertext): a set and a removal refuse, exit 4.
             {
-                (PasskeyStore passkeys, SecretStore store, _) = Fresh(new Dictionary<string, string> { ["A_NEW"] = ValueA });
+                (PasskeyStore passkeys, SecretStore store) = Fresh(new Dictionary<string, string> { ["A_NEW"] = ValueA });
                 StateDatabase db = store.Database;
                 db.Write((connection, transaction) => StateDatabase.Execute(connection, transaction, "UPDATE secrets SET ciphertext = $c WHERE name = 'A_NEW'", ("$c", DotenvxCipher.Instance.Encrypt("Attacker-Value-1", TestState.Current(db)!.Store))));
-                EntryRun set = await SetRun(client, passkeys, local, local, store, ["B_OLD"], laptop, Values(("B_OLD", ValueB)));
-                EntryRun removed = await RemoveRun(client, passkeys, local, store, ["A_NEW"], laptop, true);
-                check(set.Result is { Code: RunCommand.StoreError } && set.Lines.Count == 0 && removed.Result is { Code: RunCommand.StoreError } && removed.Lines.Count == 0 && set.Result.Detail.Contains("failed verification", StringComparison.Ordinal), "secrets: a tampered store refuses --set and --remove with exit 4 before any page (" + set.Result?.Detail + " | " + removed.Result?.Detail + ")");
-            }
-
-            // The page target: the first of primary and local where a passkey works.
-            {
-                int port = FreePort();
-                ApprovalSettings remote = new("passkey", "https://ws.example.com:" + port, port, TimeSpan.FromSeconds(20));
-                ApprovalSettings localOnly = remote with { BaseUrl = null, Port = 0 };
-
-                (PasskeyStore passkeys, SecretStore store, _) = Fresh();
-                EntryRun run = await SetRun(client, passkeys, remote, localOnly, store, good, laptop, goodValues);
-                check(run.Result is { Code: 0 } && run.Lines.Count == 1 && run.Lines[0].StartsWith(SetPrefix + "http://localhost:", StringComparison.Ordinal), "secrets: with the key only at localhost, the local page is used (" + run.Result?.Detail + "; " + string.Join(" | ", run.Lines) + ")");
-
-                using TestAuthenticator phone = TestAuthenticator.ES256();
-                StateDatabase remoteDb = StateDatabase.InFolder(Path.Combine(folder, "remote"));
-                PasskeyStore remoteKeys = new(remoteDb);
-                check(TestState.Add(remoteDb, phone.Record("ws.example.com", "phone"), withStore: true), "secrets: a ws.example.com passkey is enrolled");
-                SecretStore remoteStore = new(remoteDb);
-                run = await SetRun(client, remoteKeys, remote, localOnly, remoteStore, good, phone, goodValues);
-                check(run.Result is { Code: 0 } && run.Lines.Count == 1 && run.Lines[0].StartsWith(SetPrefix + "https://ws.example.com:" + port + "/s/", StringComparison.Ordinal), "secrets: with the key only at the baseUrl host, the primary page is used (" + run.Result?.Detail + "; " + string.Join(" | ", run.Lines) + ")");
-
-                using TestAuthenticator stranger = TestAuthenticator.ES256();
-                StateDatabase strangerDb = StateDatabase.InFolder(Path.Combine(folder, "strangers"));
-                PasskeyStore strangers = new(strangerDb);
-                check(strangers.Add(stranger.Record("other.example.com", "stranger")), "secrets: an unrelated passkey is enrolled");
-                SecretStore strangerStore = new(strangerDb);
-                EntryRun set = await SetRun(client, strangers, remote, localOnly, strangerStore, good, stranger, goodValues);
-                EntryRun removed = await RemoveRun(client, strangers, remote, strangerStore, ["A_NEW"], stranger, true);
-                check(set.Result is { Code: RunCommand.Denied } && set.Result.Detail.Contains("localhost", StringComparison.Ordinal) && set.Result.Detail.Contains("ws.example.com", StringComparison.Ordinal) && set.Lines.Count == 0, "secrets: no working passkey names both hosts (" + set.Result?.Detail + ")");
-                check(removed.Result is { Code: RunCommand.Denied } && removed.Lines.Count == 0, "secrets: Remove with no working passkey is denied (" + removed.Result?.Detail + ")");
-
-                // A plain http page on another host: refused before anything listens.
-                ApprovalSettings plain = remote with { BaseUrl = "http://ws.example.com:" + port };
-                long version = TestState.Current(remoteDb)!.Version;
-                set = await SetRun(client, remoteKeys, plain, plain with { BaseUrl = null, Port = 0 }, remoteStore, good, phone, goodValues);
-                check(set.Result is { Code: RunCommand.Denied } && set.Result.Detail.Contains("https", StringComparison.Ordinal) && set.Lines.Count == 0 && TestState.Current(remoteDb)!.Version == version, "secrets: an http page that is not localhost is refused (" + set.Result?.Detail + ")");
+                EntryRun set = SetRun(passkeys, store, ["B_OLD"], laptop, Values(("B_OLD", ValueB)));
+                EntryRun removed = RemoveRun(passkeys, store, ["A_NEW"], laptop, true);
+                check(set.Result is { Code: RunCommand.StoreError } && set.Entry is null && removed.Result is { Code: RunCommand.StoreError } && removed.Removal is null && set.Result.Detail.Contains("failed verification", StringComparison.Ordinal), "secrets: a store that fails verification refuses a set and a removal (" + set.Result?.Detail + ")");
             }
 
             // Remove: asks with a new manifest to sign, deletes only on approval, re-signed in the same transaction.
             {
-                (PasskeyStore passkeys, SecretStore store, _) = Fresh(new Dictionary<string, string> { ["A_NEW"] = ValueA, ["B_OLD"] = ValueB, ["C_KEEP"] = "Charlie-Keep-Value" });
+                (PasskeyStore passkeys, SecretStore store) = Fresh(new Dictionary<string, string> { ["A_NEW"] = ValueA, ["B_OLD"] = ValueB, ["C_KEEP"] = "Charlie-Keep-Value" });
                 Manifest before = TestState.Current(store.Database)!;
-                EntryRun run = await RemoveRun(client, passkeys, local, store, good, laptop, false);
+                EntryRun run = RemoveRun(passkeys, store, good, laptop, false);
                 seen.AddRange(run.Seen);
-                check(run.Result is { Code: RunCommand.Denied } && Stored(store).Count == 3 && TestState.Current(store.Database)!.Version == before.Version && AuditCount(store, "secrets-removed") == 0, "secrets: a denied Remove deletes nothing (" + run.Result?.Detail + ")");
-                check(run.Lines.Count == 1 && run.Page.Contains(">Remove these secrets: A_NEW, B_OLD. They will be deleted.\nAdmins: ", StringComparison.Ordinal), "secrets: Remove asks with the names in the text");
-                check(run.Page.Contains("\"manifest\":", StringComparison.Ordinal), "secrets: the Remove page signs a new manifest");
+                check(run.Cancelled && run.Result is { Code: RunCommand.Denied } && Stored(store).Count == 3 && TestState.Current(store.Database)!.Version == before.Version && AuditCount(store, "secrets-removed") == 0, "secrets: a cancelled removal deletes nothing (" + run.Result?.Detail + ")");
+                check(run.Removal is not null && run.Removal.Text.StartsWith("Remove these secrets: A_NEW, B_OLD. They will be deleted.", StringComparison.Ordinal), "secrets: the removal asks with the names in the text");
+                check(run.Removal is not null && Manifest.Parse(run.Removal.Manifest, out _) is { } next && next.Version == before.Version + 1 && next.Secrets.Keys.SequenceEqual(["C_KEEP"]), "secrets: the removal signs a new manifest without the removed hashes");
 
-                run = await RemoveRun(client, passkeys, local, store, good, laptop, true);
+                run = RemoveRun(passkeys, store, good, laptop, true);
                 seen.AddRange(run.Seen);
                 Manifest after = TestState.Current(store.Database)!;
-                check(run.Result is { Code: 0, Detail: "Removed A_NEW, B_OLD." } && Stored(store).Keys.SequenceEqual(["C_KEEP"]), "secrets: an approved Remove deletes the names (" + run.Result?.Detail + ")");
-                check(after.Version == before.Version + 1 && after.Secrets.Keys.SequenceEqual(["C_KEEP"]) && after.Secrets["C_KEEP"] == before.Secrets["C_KEEP"] && after.Store == before.Store, "secrets: --remove re-signs: v+1 with only the kept hash");
-                check(new AuditLog(store.Database).TryRead(100, null, out IReadOnlyList<AuditRecord> rows, out _) && rows.SingleOrDefault(row => row.Event == "secrets-removed") is { } line
+                check(run.Result is { Code: 0, Detail: "Removed A_NEW, B_OLD." } && Stored(store).Keys.SequenceEqual(["C_KEEP"]), "secrets: an approved removal deletes the names (" + run.Result?.Detail + ")");
+                check(after.Version == before.Version + 1 && after.Secrets.Keys.SequenceEqual(["C_KEEP"]) && after.Secrets["C_KEEP"] == before.Secrets["C_KEEP"] && after.Store == before.Store, "secrets: a removal re-signs: v+1 with only the kept hash");
+                check(TestAudit.TryRead(store.Database, 100, null, out IReadOnlyList<AuditRow> rows, out _) && rows.SingleOrDefault(row => row.Event == "secrets-removed") is { } line
                     && line.Secrets.SequenceEqual(good) && line.Detail.Contains("admin passkey laptop verified", StringComparison.Ordinal), "secrets: the removal is audited with names only");
 
-                run = await RemoveRun(client, passkeys, local, store, ["C_KEEP", "NOPE"], laptop, true);
-                check(run.Result is { Code: RunCommand.Denied, Detail: "Unknown secret: NOPE" } && run.Lines.Count == 0 && Stored(store).ContainsKey("C_KEEP"), "secrets: Remove of an unknown name is refused before asking (" + run.Result?.Detail + ")");
+                run = RemoveRun(passkeys, store, ["C_KEEP", "NOPE"], laptop, true);
+                check(run.Result is { Code: RunCommand.Denied, Detail: "Unknown secret: NOPE" } && run.Removal is null && Stored(store).ContainsKey("C_KEEP"), "secrets: a removal of an unknown name is refused before asking (" + run.Result?.Detail + ")");
 
                 store.BeforeCommit = () => throw new IOException("the test write failed");
-                run = await RemoveRun(client, passkeys, local, store, ["C_KEEP"], laptop, true);
+                run = RemoveRun(passkeys, store, ["C_KEEP"], laptop, true);
                 store.BeforeCommit = null;
-                check(run.Result is { Code: RunCommand.StoreError } && Stored(store).ContainsKey("C_KEEP") && TestState.Current(store.Database)!.Version == after.Version && AuditCount(store, "secrets-removed") == 1, "secrets: a Remove whose write fails deletes nothing and audits nothing (" + run.Result?.Detail + ")");
+                check(run.Result is { Code: not 0 } && Stored(store).ContainsKey("C_KEEP") && TestState.Current(store.Database)!.Version == after.Version && AuditCount(store, "secrets-removed") == 1, "secrets: a removal whose write fails deletes nothing (" + run.Result?.Detail + ")");
             }
 
-            // No value anywhere: not announced, not in any HTTP body or page, not in any result, not in any state.db.
+            // No value anywhere: not in any text the flow showed or answered, not in any result, not in any state.db.
             foreach (string file in Directory.GetFiles(folder, StateDatabase.FileName, SearchOption.AllDirectories))
             {
                 seen.Add(StateDatabaseTests.AuditText(file));
@@ -2981,7 +3107,7 @@ internal static partial class WebApprovalTests
 
             foreach (string value in new[] { ValueA, ValueB, OldB, longest, "Extra-Value-3" })
             {
-                check(seen.Count > 20 && !seen.Any(item => item.Contains(value, StringComparison.Ordinal)), "secrets: the value " + value[..5] + "... appears in no line, body, page, result or state.db");
+                check(seen.Count > 20 && !seen.Any(item => item.Contains(value, StringComparison.Ordinal)), "secrets: the value " + value[..5] + "... appears in no text, answer, result or state.db");
             }
         }
         finally

@@ -12,12 +12,12 @@ internal static class ScenariosH
         Ctx c = await Ctx.NewAsync(host);
         await Flows.Configure(rig, c);
         await Scenarios3.SeedSecret(rig, c);
-        File.WriteAllLines(Path.Combine(rig.Work, "show.cmd"), ["@echo off", "echo got=%E2E_SECRET%"]);
+        rig.WriteScript("show", "got");
 
         return (rig, c);
     }
 
-    private static Cmd<int> ShowRun(Rig rig) => Cmds.Run(rig, "E2E_SECRET", ["cmd", "/d", "/c", "show.cmd"]);
+    private static Cmd<int> ShowRun(Rig rig) => Cmds.Run(rig, "E2E_SECRET", Rig.ScriptCommand("show"));
 
     /// <summary>Cancel while the passkey prompt is pending, a refused passkey (NotAllowedError), and a retry that works.</summary>
     public static async Task CancelAndRetry(Host host, S s)
@@ -56,7 +56,7 @@ internal static class ScenariosH
         await c.StatusContains("Cancelled");
         s.Check((await c.Text("#approve")).StartsWith("Approve", StringComparison.Ordinal), "after Cancel the button is Approve again");
         await c.Presence(true);
-        await Task.Delay(1000);
+        await c.QuietAsync();
         s.Check(!second.Result.IsCompleted && !(await c.Text("#status")).Contains("Approved"), "the abandoned attempt, once it ended, sent nothing to the program");
         await c.Click("#deny");
         s.Check(await second.Result.WaitAsync(TimeSpan.FromSeconds(30)) == RunCommand.Denied && second.Out.Text.Length == 0, "Deny after a Cancel ends the run with nothing run");
@@ -120,7 +120,7 @@ internal static class ScenariosH
 
             await route.FulfillAsync(new() { Response = response, Body = body });
         });
-        using Cmd<int> cmd = new((port, o, e) => CommandWiring.Config(rig.State, port));
+        using Cmd<int> cmd = new((port, o, e) => CommandWiring.Setup(rig.State, port));
         await c.Page.GotoAsync(await cmd.LinkAsync());
         await c.Click("#save");
         await c.Click("#confirm");
@@ -128,9 +128,7 @@ internal static class ScenariosH
         s.Check(withCode >= 2 && droppedCode is not null, "the first reply with the code was dropped and the page asked again");
         s.Check(code == droppedCode, "the identical resend returned the same code");
         s.Check((await c.TextAppears("#recovery")).Length > 10, "and the recovery code");
-        await cmd.WaitPromptAsync();
-        cmd.Type(code);
-        s.Check(await cmd.Result.WaitAsync(TimeSpan.FromSeconds(30)) == 0, "the code typed in the terminal finished the command");
+        s.Check(await c.TypeCodeAsync(cmd, code) == 0, "the code typed in the terminal finished the command");
         s.Check(rig.State.TryManifest(out Manifest? m, out _) && m!.Keys.Count == 1, "state has the key");
         s.NoProblems(c);
     }
@@ -140,7 +138,7 @@ internal static class ScenariosH
     {
         (Rig rig, Ctx c) = await Fixture(host);
         using Rig _ = rig;
-        using Cmd<int> cmd = new((port, o, e) => CommandWiring.RotateKey(rig.State, rig.Store, port));
+        using Cmd<int> cmd = Cmds.Rotate(rig);
         string link = await cmd.LinkAsync();
         c.Ignore("net::ERR");
         // The navigation is blocked the way a page can block one: a beforeunload prompt that the person (here the test) declines.
@@ -186,7 +184,8 @@ internal static class ScenariosH
         async Task Idle(string what, Cmd<int> cmd)
         {
             await c.Page.GotoAsync(await cmd.LinkAsync());
-            await Task.Delay(1000);
+            await c.Page.Locator("#deny").WaitForAsync();
+            await c.QuietAsync();
             s.Check(await c.PasskeyCalls() == 0 && await c.AuthOps() == baseline, "no passkey operation on load of the " + what + " page");
             await c.Click("#deny");
             await cmd.Result.WaitAsync(TimeSpan.FromSeconds(30));
@@ -197,24 +196,9 @@ internal static class ScenariosH
             await Idle("run approval", run);
         }
 
-        using (Cmd<int> set = Cmds.Set(rig, "E2E_OTHER"))
-        {
-            await Idle("set", set);
-        }
-
-        using (Cmd<int> remove = Cmds.Remove(rig, "E2E_SECRET"))
-        {
-            await Idle("remove", remove);
-        }
-
-        using (Cmd<int> rotate = new((port, o, e) => CommandWiring.RotateKey(rig.State, rig.Store, port)))
+        using (Cmd<int> rotate = Cmds.Rotate(rig))
         {
             await Idle("rotate-key", rotate);
-        }
-
-        using (Cmd<int> config = new((port, o, e) => CommandWiring.Config(rig.State, port)))
-        {
-            await Idle("settings", config);
         }
 
         s.NoProblems(c);

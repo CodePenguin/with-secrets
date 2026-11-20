@@ -33,7 +33,7 @@ internal static class HandleFaultTests
         {
             using HttpClient client = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false });
             client.Timeout = TimeSpan.FromSeconds(20);
-            ApprovalSettings settings = new("passkey", null, 0, TimeSpan.FromSeconds(30));
+            ApprovalSettings settings = new(null, 0, TimeSpan.FromSeconds(30));
 
             (EnrollmentTarget, EnrollmentTarget) Targets(StateDatabase db, Action<string> announce)
             {
@@ -46,13 +46,9 @@ internal static class HandleFaultTests
             Kind[] kinds =
             [
                 new("run approval", (announce, db, _) => Targets(db, announce).Item1.Approver.Request(new ApprovalRequest("tool", "/bin/tool", [], "/work", "r", ["OLD_NAME"], null, null, null, "REQ")), 0, null),
-                new("enroll approval", (announce, db, _) => new Enrollment(Targets(db, announce).Item1, Targets(db, announce).Item2, announce, new AuditLog(db)).Enroll(), 0, "--enroll: "),
-                new("enroll page", (announce, db, _) => new Enrollment(Targets(db, announce).Item1, Targets(db, announce).Item2, announce, new AuditLog(db)).Enroll(), 1, "--enroll: "),
-                new("unenroll", (announce, db, _) => new Enrollment(Targets(db, announce).Item1, Targets(db, announce).Item2, announce, new AuditLog(db)).Unenroll("phone"), 0, "--unenroll: "),
-                new("set", (announce, db, secrets) => new SecretEntry(Targets(db, announce).Item1, Targets(db, announce).Item2, secrets, new AuditLog(db), announce).Set(["NEW_NAME"]), 0, "--set: "),
-                new("remove", (announce, db, secrets) => new SecretEntry(Targets(db, announce).Item1, Targets(db, announce).Item2, secrets, new AuditLog(db), announce).Remove(["OLD_NAME"]), 0, "--remove: "),
-                new("config", (announce, db, _) => new SettingsPage(db, Targets(db, announce).Item1, Targets(db, announce).Item2, announce, () => null).Run(), 0, "--config: "),
-                new("revoke", (announce, db, _) => Revocation.Run(db, Targets(db, announce).Item1, Targets(db, announce).Item2, new GrantStore(db)), 0, "--revoke: "),
+                new("enroll approval", (announce, db, _) => new Enrollment(Targets(db, announce).Item1, Targets(db, announce).Item2, announce, db.Audit).Enroll(), 0, "enroll-passkey: "),
+                new("enroll page", (announce, db, _) => new Enrollment(Targets(db, announce).Item1, Targets(db, announce).Item2, announce, db.Audit).Enroll(), 1, "enroll-passkey: "),
+                new("unenroll", (announce, db, _) => new Enrollment(Targets(db, announce).Item1, Targets(db, announce).Item2, announce, db.Audit).Unenroll("phone"), 0, "unenroll-passkey: "),
             ];
 
             foreach (Kind kind in kinds)
@@ -77,12 +73,10 @@ internal static class HandleFaultTests
         TestState.Add(db, phone.Record("localhost", "phone"));
         SecretStore secrets = new(db);
         SecretStoreTests.Put(secrets, new Dictionary<string, string> { ["OLD_NAME"] = "Fault-Secret-1" });
-        new GrantStore(db).Add("K", 10, "laptop");
 
         long version = TestState.Current(db)?.Version ?? 0;
         int keys = new PasskeyStore(db).All().Count;
         string[] names = [.. secrets.ListNames()];
-        int grants = new GrantStore(db).Entries().Count;
         int auditBefore = Rows(db).Count;
 
         _armed = false;
@@ -161,13 +155,13 @@ internal static class HandleFaultTests
         check(failed && detail.Contains(HandleGuard.Reason, StringComparison.Ordinal), label + "the outcome is a denial that says internal error (" + detail + ")");
         check(code is null || code == RunCommand.Denied, label + "the exit code is the existing denied code (" + code + ")");
         check(!detail.Contains(Boom, StringComparison.Ordinal) && !lines.Any(item => item.Contains(Boom, StringComparison.Ordinal)), label + "no exception text in the outcome or the terminal lines");
-        check((TestState.Current(db)?.Version ?? 0) == version && new PasskeyStore(db).All().Count == keys && secrets.ListNames().SequenceEqual(names) && new GrantStore(db).Entries().Count == grants, label + "nothing is stored or changed");
+        check((TestState.Current(db)?.Version ?? 0) == version && new PasskeyStore(db).All().Count == keys && secrets.ListNames().SequenceEqual(names), label + "nothing is stored or changed");
         if (kind.Audit is not null)
         {
-            IReadOnlyList<AuditRecord> rows = Rows(db);
-            check(rows.Count == auditBefore + 1 && rows[^1].Event == AuditLog.ChangeDenied && rows[^1].Detail.StartsWith(kind.Audit, StringComparison.Ordinal) && !rows[^1].Detail.Contains(Boom, StringComparison.Ordinal), label + "the audit row is change-denied (" + (rows.Count > 0 ? rows[^1].Event + " " + rows[^1].Detail : "none") + ")");
+            IReadOnlyList<AuditRow> rows = Rows(db);
+            check(rows.Count == auditBefore + 1 && rows[^1].Event == AdminEvent.ChangeDenied && rows[^1].Detail.StartsWith(kind.Audit, StringComparison.Ordinal) && !rows[^1].Detail.Contains(Boom, StringComparison.Ordinal), label + "the audit row is change-denied (" + (rows.Count > 0 ? rows[^1].Event + " " + rows[^1].Detail : "none") + ")");
         }
     }
 
-    private static IReadOnlyList<AuditRecord> Rows(StateDatabase db) => new AuditLog(db).TryRead(100, null, out IReadOnlyList<AuditRecord> rows, out _) ? rows : [];
+    private static IReadOnlyList<AuditRow> Rows(StateDatabase db) => TestAudit.TryRead(db, 100, null, out IReadOnlyList<AuditRow> rows, out _) ? rows : [];
 }

@@ -9,7 +9,11 @@ public sealed record ProofContext(byte[] Bind, string Origin);
 /// <summary>What the page needs to start a proof. Mode "webauthn"; Payload is JSON.</summary>
 public sealed record ProofStart(string Mode, string Payload);
 
-public sealed record ProofResult(bool Ok, string Detail);
+/// <summary>The enrolled credential that verified a passkey assertion: identity and trusted admin flag from the store record, never from client input.</summary>
+public sealed record VerifiedCredential(string Name, bool Admin);
+
+/// <summary>What a proof check came to. When <see cref="Ok" />, <see cref="Credential" /> is the trusted enrolled record that verified.</summary>
+public sealed record ProofResult(bool Ok, string Detail, VerifiedCredential? Credential = null);
 
 /// <summary>This proof method cannot run now (for example, nothing is enrolled).</summary>
 public sealed class ProofUnavailableException(string message) : Exception(message);

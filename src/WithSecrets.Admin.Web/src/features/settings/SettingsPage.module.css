@@ -1,0 +1,16 @@
+.fingerprint {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.copyStatus {
+  font-weight: 400;
+  color: var(--muted);
+}

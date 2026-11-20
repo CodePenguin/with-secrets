@@ -91,10 +91,24 @@ public static class ApprovalSummary
             text.Append('\n').Append(ScriptBlock(script));
         }
 
+        if (request.ProgramFile is not null || request.Script is not null)
+        {
+            text.Append('\n').Append(ScriptBoundary);
+        }
+
+        if (InlineCredentialWarning(request) is { } inlineWarning)
+        {
+            text.Append('\n').Append(inlineWarning);
+        }
+
+        // Ordinary variables that change which code runs, where data is sent or how git behaves: one block, before the long .env lists. The approval
+        // page shows it as its own section above the text and the approve control (the program gets these values as written; the page is the only control).
+        AppendCodeChanges(text, request, showValues);
+
         // The .env block comes after the command and the code, so a long .env cannot push them out of sight. Every pair is on its own
         // line; every ordinary value is shown (the page is the control for variables the program may treat as code); the terminal
         // echo (showValues false) lists names only.
-        if (request.EnvFiles is { Count: > 0 } || request.Mappings is { } mapped && mapped.Any(pair => pair.Variable != pair.Secret))
+        if (request.EnvFiles is { Count: > 0 } || request.Decrypts is { Count: > 0 } || request.Mappings is { } mapped && mapped.Any(pair => pair.Variable != pair.Secret))
         {
             foreach (string file in request.EnvFiles ?? [])
             {
@@ -105,24 +119,45 @@ public static class ApprovalSummary
             {
                 text.Append('\n').Append("Pair: ").Append(Clean(pair.Display)).Append(pair.Variable != pair.Secret ? " (renamed)" : "");
             }
+
+            AppendDecrypts(text, request);
         }
 
-        if (showValues && request.EnvValues is { Count: > 0 } values)
+        if (request.InheritedEnvironment is { } inherited)
         {
-            text.Append('\n').Append("Other variables from .env (values shown):");
-            foreach ((string name, string value) in values.OrderBy(item => item.Key, StringComparer.Ordinal))
+            text.Append((char)10).Append(EnvironmentBinding.Line(inherited));
+        }
+
+        // The variables of the warning block above are not listed again.
+        HashSet<string> warned = [.. CodeChanges(request).Select(item => item.Name)];
+        if (showValues && request.EnvValues?.Where(item => !warned.Contains(item.Key)).OrderBy(item => item.Key, StringComparer.Ordinal).ToList() is { Count: > 0 } values)
+        {
+            text.Append('\n').Append("Other variables from .env (values shown, credentials hidden):");
+            foreach ((string name, string value) in values)
             {
-                text.Append('\n').Append(CodeMarker).Append(Clean(name + "=" + value));
+                text.Append('\n').Append(CodeMarker).Append(Clean(name + "=" + CredentialHeuristics.Display(name, value)));
             }
         }
-        else if (request.EnvNames is { Count: > 0 } others)
+        else if (request.EnvNames?.Where(name => !warned.Contains(name)).ToList() is { Count: > 0 } others)
         {
             text.Append('\n').Append("Other variables from .env (names only): ").Append(string.Join(", ", others.Select(Clean)));
         }
 
-        if (request.Reuse is { IsOn: true } reuse)
+        if (CredentialHeuristics.PlaintextEnvNames(request) is { Count: > 0 } plaintext)
         {
-            text.Append('\n').Append($"Approve for a time (up to {reuse.Choices[^1]} min) also covers the same program, script, folder, and secrets until it ends, whatever the other arguments. Approve once covers only this run.");
+            // A warning only: names and files, never a value. The run is not stopped, and nothing is decrypted or read again to make this line.
+            text.Append('\n').Append("Warning: plaintext credentials in .env: ").Append(string.Join(", ", plaintext.Select(Clean)));
+            if (request.EnvFiles is { Count: > 0 } files)
+            {
+                text.Append(" (in ").Append(string.Join(", ", files.Select(Clean))).Append(')');
+            }
+
+            text.Append(". They are stored unencrypted and go to the program as they are. Keep them in with-secrets and name them with secret://NAME, or encrypt them.");
+        }
+
+        foreach (string extra in request.ExtraLines ?? [])
+        {
+            text.Append((char)10).Append(Clean(extra));
         }
 
         if (request.RequestId is { Length: > 0 } id)
@@ -133,6 +168,31 @@ public static class ApprovalSummary
         return text.ToString();
     }
 
+    /// <summary>
+    /// A warning (never a block) when a credential is written into the command line, the inline code or a script: what kind and where, never the credential, and the
+    /// text is not rewritten. The person sees the command as it is; the warning says to use a secret instead.
+    /// </summary>
+    internal static string? InlineCredentialWarning(ApprovalRequest request)
+    {
+        List<string> where = [];
+        List<string> kinds = [];
+        void Look(string place, string? code)
+        {
+            if (code is not null && CredentialHeuristics.InlineCredentialKinds(code) is { Count: > 0 } found)
+            {
+                where.Add(place);
+                kinds.AddRange(found.Where(kind => !kinds.Contains(kind)));
+            }
+        }
+
+        Look("the command line", CommandLine(request.ResolvedProgram, request.Arguments));
+        Look("the inline code", Policy.InlineCode(request.Program, request.Arguments));
+        Look("the program file", request.ProgramFile?.Text);
+        Look("the script", request.Script?.Text);
+
+        return kinds.Count == 0 ? null : "Warning: a credential is written in " + string.Join(" and ", where) + " (" + string.Join(", ", kinds.Select(Clean)) + "). It is shown here as written, in the audit it is masked, and it is part of what you approve. Keep it in with-secrets and use --secrets or secret://NAME instead.";
+    }
+
     /// <summary>The most inline code characters the text shows.</summary>
     public const int MaxInlineCharacters = 4000;
 
@@ -141,6 +201,71 @@ public static class ApprovalSummary
 
     /// <summary>The most script bytes (UTF-8) the text shows.</summary>
     public const int MaxScriptBytes = 16 * 1024;
+
+    /// <summary>The heading of the warning block (the page shows the block, from its "Warning:" line to <see cref="CodeChangesCover" />, as its own section).</summary>
+    public const string CodeChangesHeading = "This run changes how the program loads code or where it sends data";
+
+    /// <summary>The last line of the warning block.</summary>
+    public const string CodeChangesCover = "Your approval covers exactly these values.";
+
+    /// <summary>The start of the line that gives the reason for the variable above it in the warning block.</summary>
+    public const string CodeChangesWhy = "  Why: ";
+
+    private const string LoadsCodeReason = "loads code: the program, or a tool it starts, loads or runs code that the variable names.";
+    private const string LibraryPathReason = "changes the library path: the program may load libraries or modules from the places the variable names.";
+    private const string NetworkReason = "routes network traffic: requests may go through the address the variable names.";
+    private const string GitReason = "changes git behaviour: it can change which settings or program git uses, or who a commit is by.";
+
+    /// <summary>
+    /// The ordinary variables of the request that change which code runs, where data is sent or how git behaves, by name (ordinal order), with
+    /// the one-line reason for the class of each. A Dotenvx private key is never given to the program, so it is not listed.
+    /// </summary>
+    public static IReadOnlyList<(string Name, string Reason)> CodeChanges(ApprovalRequest request)
+    {
+        return [.. (request.EnvValues?.Keys ?? request.EnvNames ?? []).Where(name => !name.StartsWith("DOTENV_PRIVATE_KEY", StringComparison.OrdinalIgnoreCase) && EnvDeclarations.IsProtectedVariable(name))
+            .Order(StringComparer.Ordinal).Select(name => (name, ReasonFor(name)))];
+    }
+
+    private static string ReasonFor(string name)
+    {
+        string upper = name.ToUpperInvariant();
+        if (upper.StartsWith("GIT_", StringComparison.Ordinal))
+        {
+            return GitReason;
+        }
+
+        if (upper.EndsWith("_PROXY", StringComparison.Ordinal))
+        {
+            return NetworkReason;
+        }
+
+        if (upper is "LD_LIBRARY_PATH" or "NODE_PATH" or "PYTHONPATH" or "PYTHONHOME" or "PYTHONUSERBASE" or "PERL5LIB" or "PERLLIB" or "RUBYLIB"
+            || upper.StartsWith("DYLD_", StringComparison.Ordinal) && upper != "DYLD_INSERT_LIBRARIES")
+        {
+            return LibraryPathReason;
+        }
+
+        return LoadsCodeReason;
+    }
+
+    private static void AppendCodeChanges(StringBuilder text, ApprovalRequest request, bool showValues)
+    {
+        IReadOnlyList<(string Name, string Reason)> changes = CodeChanges(request);
+        if (changes.Count == 0)
+        {
+            return;
+        }
+
+        text.Append('\n').Append("Warning: ").Append(CodeChangesHeading).Append('.');
+        foreach ((string name, string reason) in changes)
+        {
+            string shown = showValues && request.EnvValues is { } values && values.TryGetValue(name, out string? value) ? name + "=" + CredentialHeuristics.Display(name, value) : name;
+            text.Append('\n').Append(CodeMarker).Append(Clean(shown));
+            text.Append('\n').Append(CodeChangesWhy).Append(reason);
+        }
+
+        text.Append('\n').Append(CodeChangesCover);
+    }
 
     /// <summary>
     /// Starts every line of agent-written code in the text. No line the agent writes can start a page line (such as
@@ -172,6 +297,57 @@ public static class ApprovalSummary
 
         return text.ToString();
     }
+
+    /// <summary>
+    /// The encrypted values: names, the key secret and a short fingerprint of each ciphertext, never a value or a ciphertext. The key comes first and the
+    /// file (whose folders the agent chooses) last, so a path cannot pose as the rest of the line. The page also says that anyone with the public key can
+    /// write such a value, and warns for each value whose file is not the project's own.
+    /// </summary>
+    private static void AppendDecrypts(StringBuilder text, ApprovalRequest request)
+    {
+        if (request.Decrypts is not { Count: > 0 } decrypts)
+        {
+            return;
+        }
+
+        foreach (DecryptItem item in decrypts)
+        {
+            text.Append('\n').Append("decrypt with secret ").Append(Clean(item.KeySecret)).Append(": ").Append(Clean(item.Variable)).Append(" (cipher sha256 ").Append(Clean(item.Short)).Append(") from ").Append(Clean(item.File));
+        }
+
+        text.Append('\n').Append("Encrypted values are not shown. Anyone who has the public key in a .env file can write one, so a value is not proof that you made it: compare each cipher fingerprint with the committed file.");
+        foreach (DecryptItem item in decrypts)
+        {
+            if (!IsProjectsOwnEnvFile(item.File, request.WorkingDirectory))
+            {
+                text.Append('\n').Append("Warning: ").Append(Clean(item.Variable)).Append(" is decrypted from a file that is not this project's own .env file (a .env or .env.NAME directly in the working folder): ").Append(Clean(item.File)).Append(". A value copied from another file or project decrypts with the same key.");
+            }
+        }
+    }
+
+    /// <summary>True when the file is a <c>.env</c> or <c>.env.NAME</c> directly in the working folder.</summary>
+    internal static bool IsProjectsOwnEnvFile(string file, string workingDirectory)
+    {
+        try
+        {
+            string name = Path.GetFileName(file);
+            string folder = Path.GetDirectoryName(Path.GetFullPath(file)) ?? "";
+            string work = Path.GetFullPath(workingDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            StringComparison comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
+            return (name.Equals(".env", comparison) || name.StartsWith(".env.", comparison) && name.Length > 5) && string.Equals(folder.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), work, comparison);
+        }
+        catch (Exception error) when (error is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// What an approval of a script covers, said on every page that shows one: the files shown (and so the fingerprint), nothing they load. A file a script
+    /// sources, imports or dot-sourced, or reads from beside itself, is not shown, hashed or held; it is read as it is when the script runs, on every system.
+    /// </summary>
+    internal const string ScriptBoundary = "Approved: the file above only. Not approved: any file it loads or runs (source, import, dot-sourcing, files beside it). They are read as they are when it runs.";
 
     internal static string ScriptBlock(ScriptView script)
     {
@@ -249,7 +425,7 @@ public static class ApprovalSummary
     }
 
     /// <summary>Tabs become 4 spaces; line breaks (LF, CRLF, CR) split lines; one final line break does not add an empty line.</summary>
-    private static List<string> Lines(string value)
+    internal static List<string> Lines(string value)
     {
         List<string> lines = [.. value.Replace("\t", "    ", StringComparison.Ordinal).Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n').Split('\n')];
         if (lines.Count > 0 && lines[^1].Length == 0)
@@ -316,7 +492,7 @@ public static class ApprovalSummary
         };
     }
 
-    private static string Truncate(string value, int length)
+    internal static string Truncate(string value, int length)
     {
         return value.Length <= length ? value : value[..length] + "…";
     }

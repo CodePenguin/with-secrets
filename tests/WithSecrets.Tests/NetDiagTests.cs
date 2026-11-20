@@ -29,9 +29,8 @@ internal static class NetDiagTests
         (string Name, string Script)[] pages =
         [
             ("approval", approval),
-            ("settings", Source("SettingsPage.cs")),
+            ("setup", Source("FirstRunPage.cs")),
             ("enroll", Source("PasskeyRegistration.cs")),
-            ("set", Source("SecretEntry.cs")),
             ("recovery", Source("StoreRecovery.cs")),
         ];
         foreach ((string name, string script) in pages)
