@@ -918,7 +918,7 @@ internal static class RemoteLaunchTests
             await running.WaitAsync(TimeSpan.FromSeconds(30));
             late.Release.Set();
             bool noted = await HostServiceTests.WaitFor(() => auth.Machine.Deployment.Store.Audit(500).Any(item => item.Event == "approved-not-delivered"), 15);
-            check(noted && auth.Store.Reads == 0 && !auth.Machine.Deployment.Store.Audit(500).Any(item => item.Event == "delivery-sent"), "audit: approval given but the session ended before delivery is recorded as approved-not-delivered, nothing was decrypted");
+            check(noted && auth.Store.Reads == 0 && !auth.Machine.Deployment.Store.Audit(500).Any(item => item.Event == "delivery-sent"), "audit: approval given but the session ended before delivery is recorded as approved-not-delivered, nothing was decrypted (noted " + noted + ", reads " + auth.Store.Reads + ", events " + string.Join(",", auth.Machine.Deployment.Store.Audit(500).Select(item => item.Event)) + ")");
         }
 
         // The authority goes away entirely.

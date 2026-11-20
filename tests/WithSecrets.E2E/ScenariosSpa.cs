@@ -535,7 +535,6 @@ internal static class ScenariosSpa
         // At the server: a script in the page (as a compromised page would) with the session, its secret and the right Origin, but no tap.
         c.Ignore("403");
         c.Ignore("400");
-        c.Ignore("Content Security Policy");
         string result = await c.Page.EvaluateAsync<string>("""
             async (fingerprint) => {
               const secret = sessionStorage.getItem('ws.session-secret');
@@ -556,6 +555,13 @@ internal static class ScenariosSpa
         s.Check(store.Find(fp)!.Status == MachineStatus.Pending && !app.Service.Lock.IsLocked, "nothing was changed by those attempts");
 
         // And a change from another origin is refused whatever it carries.
+        // The console reports this step is meant to cause, only for the other-origin address it sends to: the browser's own lines (their wording differs between Chromium versions) and the harness's securitypolicyviolation
+        // echo. Any other CSP violation (another directive or another target) is still a problem.
+        string blocked = "http://127.0.0.1:" + new Uri(app.Url).Port + "/api/v1/lock";
+        c.Ignore("Connecting to '" + blocked + "' violates the following Content Security Policy directive: \"connect-src 'self'\"");
+        c.Ignore("Fetch API cannot load " + blocked + ". Refused to connect because it violates the document's Content Security Policy.");
+        c.Ignore("Refused to connect to '" + blocked + "' because it violates the following Content Security Policy directive: \"connect-src 'self'\"");
+        c.Ignore("CSP violation: connect-src " + blocked);
         string cross = await c.Page.EvaluateAsync<string>("""
             async () => {
               try {

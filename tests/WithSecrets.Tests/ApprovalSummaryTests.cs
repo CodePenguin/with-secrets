@@ -566,6 +566,24 @@ internal static class ApprovalSummaryTests
 
             static string Line(string output, string name) => output.Split('\n').Select(line => line.TrimEnd('\r')).FirstOrDefault(line => line.StartsWith(name + "=", StringComparison.Ordinal))?[(name.Length + 1)..] ?? "(missing)";
 
+            // The same folder however it is spelled: on macOS the temporary folder is /var/..., a link to /private/var/..., and a shell's $PWD or Python's resolve() reports the real one.
+            static string RealFolder(string path)
+            {
+                string real = Path.GetPathRoot(path) ?? "";
+                foreach (string part in path[real.Length..].Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    real = Path.Combine(real, part);
+                    if (new DirectoryInfo(real).ResolveLinkTarget(true) is { } target)
+                    {
+                        real = target.FullName;
+                    }
+                }
+
+                return real;
+            }
+
+            static bool SameFolder(string reported, string expected) => reported.Length > 0 && string.Equals(RealFolder(reported), RealFolder(expected), StringComparison.Ordinal);
+
             async Task<bool> Works(string program, params string[] probe)
             {
                 string? path = ProgramResolver.Resolve(program, folder);
@@ -617,7 +635,7 @@ internal static class ApprovalSummaryTests
                 string bashZero = Line(bashOutput, "ZERO");
                 check(bashCode == 0 && Line(bashOutput, "COMMON") == "common-mark" && Line(bashOutput, "LIB") == "lib-mark", "neighbours (bash): a script that sources a sibling and reads a sub-folder by BASH_SOURCE finds them (" + bashCode + ": " + bashOutput.Trim().Replace('\n', ' ') + " " + bashErrors.Trim() + ")");
                 check(bashZero.EndsWith("/main.sh", StringComparison.Ordinal) && bashZero != bashPath && !bashZero.StartsWith(home, StringComparison.Ordinal) && Line(bashOutput, "SOURCE") == bashZero && Line(bashOutput, "DIR") == Path.GetDirectoryName(bashZero), "neighbours (bash): $0 and BASH_SOURCE are the private copy's path, the same as each other, with the script's own name (" + bashZero + ")");
-                check(Line(bashOutput, "PWD") == folder && Line(bashOutput, "REL") == "RELATIVE_MARK" && Line(bashOutput, "ARGS") == "a b|c|2" && Line(bashOutput, "SECRET") == "set", "neighbours (bash): the working folder, a relative path, the arguments and the secret are as they were");
+                check(SameFolder(Line(bashOutput, "PWD"), folder) && Line(bashOutput, "REL") == "RELATIVE_MARK" && Line(bashOutput, "ARGS") == "a b|c|2" && Line(bashOutput, "SECRET") == "set", "neighbours (bash): the working folder, a relative path, the arguments and the secret are as they were (PWD " + Line(bashOutput, "PWD") + " for " + folder + ")");
                 check(bashApprover.Requests[0].Script is { } shownBash && shownBash.Path.EndsWith("main.sh", StringComparison.Ordinal) && !(shownBash.Text ?? "").Contains("common-mark", StringComparison.Ordinal), "neighbours (bash): the approval shows the script and not the file it sources");
             }
 
@@ -649,7 +667,7 @@ internal static class ApprovalSummaryTests
                 }
                 else
                 {
-                    check(pyFile.EndsWith("/main.py", StringComparison.Ordinal) && !pyFile.StartsWith(home, StringComparison.Ordinal) && Line(pyOutput, "DIR") == Path.GetDirectoryName(pyFile), "neighbours (python): __file__ is the private copy's path and its folder is where the modules are found (" + pyFile + ")");
+                    check(pyFile.EndsWith("/main.py", StringComparison.Ordinal) && !pyFile.StartsWith(home, StringComparison.Ordinal) && SameFolder(Line(pyOutput, "DIR"), Path.GetDirectoryName(pyFile)!), "neighbours (python): __file__ is the private copy's path and its folder is where the modules are found (" + pyFile + ", DIR " + Line(pyOutput, "DIR") + ")");
                 }
             }
             else

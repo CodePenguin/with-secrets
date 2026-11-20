@@ -181,7 +181,7 @@ internal static class ApiTapTimeTests
         app.Clock.Advance(AdminService.BundleHold + TimeSpan.FromSeconds(10));
         await b.GetAsync("/api/v1/machines");
         string late = await Read(b, second.AuthorizationId!, collect: true);
-        check(Inner(late, "result", "outcome") == "applied" && Inner(late, "result", "invitation") is null or "null" && Inner(late, "result", "invitationGone") == "true", "bundle: one that was not collected within " + AdminService.BundleHold.TotalMinutes + " minutes is gone (the invitation can be revoked and made again)");
+        check(Inner(late, "result", "outcome") == "applied" && Inner(late, "result", "invitation") is null or "null" && Inner(late, "result", "invitationGone") == "true", "bundle: one that was not collected within " + AdminService.BundleHold.TotalMinutes + " minutes is gone (the invitation can be revoked and made again) (" + late + ")");
         (int badQuery, _) = await b.SendAsync(HttpMethod.Get, "/api/v1/authorizations/" + created.AuthorizationId + "?collect=other", null);
         check(badQuery == 400, "bundle: an unknown value of collect is refused (400)");
     }

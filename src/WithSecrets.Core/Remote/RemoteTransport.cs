@@ -89,7 +89,7 @@ public static class TransportFailure
                 text.Append(" (0x").Append(current.HResult.ToString("X8", CultureInfo.InvariantCulture)).Append(')');
             }
 
-            if (current is AuthenticationException or SocketException or IOException)
+            if (current is AuthenticationException or SocketException or IOException or PlatformNotSupportedException)
             {
                 text.Append(": ").Append(current.Message.ReplaceLineEndings(" "));
             }
