@@ -441,6 +441,11 @@ internal static class HardeningTests
 
     private static async Task CopiedIdentityEndToEnd(Action<bool, string> check, string parent)
     {
+        if (PlatformSkip.NoServerTls13("a copied machine identity seen over real handshakes from two addresses"))
+        {
+            return;
+        }
+
         string root = Path.Combine(parent, "copied");
         Directory.CreateDirectory(root);
         using AdminApp app = new(root, machineEndpoint: true);
