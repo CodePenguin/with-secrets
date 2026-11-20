@@ -1,4 +1,8 @@
+using System.Globalization;
 using System.Net;
+using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Text;
 
 namespace WithSecrets;
 
@@ -50,4 +54,47 @@ public static class RemoteTarget
     }
 
     public static bool IsLoopback(Uri uri) => uri.IsLoopback || string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase) || IPAddress.TryParse(uri.Host.Trim('[', ']'), out IPAddress? address) && IPAddress.IsLoopback(address);
+}
+
+/// <summary>
+/// A description of why a connection to the authority failed that is safe to show and log: the chain of exception TYPES, the socket or HTTP error code, the HRESULT, and for the platform's own TLS, socket and
+/// I/O exceptions their message (the text the TLS stack writes, such as which handshake step failed; it holds no key, token or secret, and nothing this program put in it). Never a request or a response.
+/// </summary>
+public static class TransportFailure
+{
+    public static string Describe(Exception error)
+    {
+        StringBuilder text = new();
+        int depth = 0;
+        for (Exception? current = error; current is not null && depth < 6; current = current.InnerException, depth++)
+        {
+            if (depth > 0)
+            {
+                text.Append(" <- ");
+            }
+
+            text.Append(current.GetType().Name);
+            switch (current)
+            {
+                case SocketException socket:
+                    text.Append(" [").Append(socket.SocketErrorCode).Append(']');
+                    break;
+                case HttpRequestException http:
+                    text.Append(" [").Append(http.HttpRequestError).Append(']');
+                    break;
+            }
+
+            if (current.HResult != 0)
+            {
+                text.Append(" (0x").Append(current.HResult.ToString("X8", CultureInfo.InvariantCulture)).Append(')');
+            }
+
+            if (current is AuthenticationException or SocketException or IOException)
+            {
+                text.Append(": ").Append(current.Message.ReplaceLineEndings(" "));
+            }
+        }
+
+        return text.ToString();
+    }
 }
