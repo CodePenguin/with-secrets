@@ -579,6 +579,30 @@ internal static class AuthorityTests
         MachineRequestEnvelope forged = MachineRequestEnvelope.Create(strange, fx.Machine.HostName, fx.Machine.MachineKey) with { Signature = stranger.Sign([1, 2, 3]) };
         AuthorityResponse bad = await fx.Machine.Deployment.Authority.DecideAsync(forged);
         check(unknown.ReasonCode == ReasonCodes.UnknownMachine && bad.ReasonCode == ReasonCodes.BadSignature && fx.Store.GetProcessed("idem-7") is null && fx.Store.Machines().Count == 1, "decide: an unknown machine or a bad signature is denied and nothing is stored for it");
+
+        // The same id while the first answer is still being made: only an identical message shares it. A forged copy is judged on its own (denied at once) and never receives the genuine answer, and the genuine one is unaffected.
+        LaunchRequest shared = IdentityTests.Sample("idem-8b", now);
+        using ManualResetEventSlim shown = new(false);
+        using ManualResetEventSlim release = new(false);
+        using (fx.Machine.Deployment.Authority.Offer(shared.RequestId, shared.Digest(), () =>
+        {
+            shown.Set();
+            release.Wait(TimeSpan.FromSeconds(30));
+
+            return ApprovalDecision.Allow();
+        }))
+        {
+            MachineRequestEnvelope genuine = MachineRequestEnvelope.Create(shared, fx.Machine.HostName, fx.Machine.MachineKey);
+            Task<AuthorityResponse> pending = fx.Machine.Deployment.Authority.DecideAsync(genuine);
+            shown.Wait(TimeSpan.FromSeconds(30));
+            AuthorityResponse forgedAnswer = await fx.Machine.Deployment.Authority.DecideAsync(genuine with { Signature = stranger.Sign([1, 2, 3]) }).WaitAsync(TimeSpan.FromSeconds(10));
+            AuthorityResponse sameAgain = default!;
+            Task<AuthorityResponse> identical = fx.Machine.Deployment.Authority.DecideAsync(genuine);
+            release.Set();
+            sameAgain = await identical;
+            AuthorityResponse genuineAnswer = await pending;
+            check(forgedAnswer.ReasonCode == ReasonCodes.BadSignature && genuineAnswer.Decision == AuthorityDecision.Approved && sameAgain.ToJson() == genuineAnswer.ToJson(), "decide: a forged copy of a request that is being decided gets its own denial, the identical message shares the one answer");
+        }
         LaunchRequest expired = IdentityTests.Sample("idem-8", now.AddHours(-1));
         AuthorityResponse old = await fx.Machine.Deployment.Authority.DecideAsync(MachineRequestEnvelope.Create(expired, fx.Machine.HostName, fx.Machine.MachineKey));
         check(old.ReasonCode == ReasonCodes.InvalidRequest, "decide: an expired request is denied as invalid");

@@ -13,6 +13,11 @@ internal static class ScenariosPairing
 
     public static async Task PairMachine(Host host, S s)
     {
+        if (PlatformSkip.NoServerTls13("a second host pairing with the authority"))
+        {
+            return;
+        }
+
         using Rig rig = new();
         await using Ctx c = await Ctx.NewAsync(host);
         await Flows.Configure(rig, c);

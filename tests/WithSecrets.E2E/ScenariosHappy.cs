@@ -12,6 +12,11 @@ internal static class ScenariosHappy
 
     public static async Task HappyPath(Host host, S s)
     {
+        if (PlatformSkip.NoServerTls13("a second host pairing with the authority"))
+        {
+            return;
+        }
+
         using Rig rig = new();
         await using Ctx c = await Ctx.NewAsync(host);
         AuthorityStore store = rig.Machine.Deployment.Store;

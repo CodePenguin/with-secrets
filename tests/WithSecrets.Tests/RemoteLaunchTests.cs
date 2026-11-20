@@ -334,6 +334,11 @@ internal static class RemoteLaunchTests
 
     public static async Task Run(Action<bool, string> check)
     {
+        if (PlatformSkip.NoServerTls13("remote launches over the machine connection"))
+        {
+            return;
+        }
+
         string root = Path.Combine(Path.GetTempPath(), "ws-rlaunch-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(root);
         string logs = Path.Combine(root, "logs");

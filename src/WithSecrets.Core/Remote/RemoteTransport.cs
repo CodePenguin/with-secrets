@@ -98,3 +98,27 @@ public static class TransportFailure
         return text.ToString();
     }
 }
+
+/// <summary>
+/// What the platform's TLS stack can do for machine-to-machine transport, which is TLS 1.3 only (never weaker). On macOS .NET's server-side <c>SslStream</c> has no TLS 1.3 at all, so a macOS machine cannot be an
+/// authority (it cannot serve the machine listener); its client side can speak TLS 1.3 only with the opt-in Network.framework backend, which is switched on here before the first connection, so a macOS machine can be a host.
+/// </summary>
+public static class PlatformTls
+{
+    /// <summary>The AppContext switch that makes the client side of <c>SslStream</c> on macOS use the TLS 1.3 capable backend (.NET 10; the server side is not affected).</summary>
+    private const string NetworkFrameworkSwitch = "System.Net.Security.UseNetworkFramework";
+
+    /// <summary>Called before the first machine connection is made (idempotent): on macOS it switches on the TLS 1.3 capable client backend.</summary>
+    public static void EnableClientTls13()
+    {
+        if (OperatingSystem.IsMacOS())
+        {
+            AppContext.SetSwitch(NetworkFrameworkSwitch, true);
+        }
+    }
+
+    /// <summary>Why this machine cannot serve the machine listener (the authority role), or null when it can.</summary>
+    public static string? ListenerUnsupported => OperatingSystem.IsMacOS()
+        ? "this machine cannot be an authority: the machine listener needs TLS 1.3 on the server side, which .NET does not provide on macOS. Run the authority on Windows or Linux; this machine can still be a host (pair it with an authority elsewhere)"
+        : null;
+}

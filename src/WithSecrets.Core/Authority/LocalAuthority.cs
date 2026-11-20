@@ -183,7 +183,8 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
 
     public Task<AuthorityResponse> DecideAsync(MachineRequestEnvelope envelope, CancellationToken cancel = default)
     {
-        string id = envelope.Request.RequestId;
+        // Only the SAME message (same machine, host name, request and signature) shares an answer in flight: another request, or a forged copy, under the same id must be judged on its own, even in the instant after the first finished.
+        string id = string.Join('\n', envelope.Request.RequestId, envelope.MachineFingerprint, envelope.HostName, envelope.Request.Digest(), Convert.ToBase64String(envelope.Signature));
         Lazy<Task<AuthorityResponse>> shared = _inflight.GetOrAdd(id, _ => new Lazy<Task<AuthorityResponse>>(() => Task.Run(() => Decide(envelope, cancel))));
         Task<AuthorityResponse> task = shared.Value;
         _ = task.ContinueWith(_ => _inflight.TryRemove(new KeyValuePair<string, Lazy<Task<AuthorityResponse>>>(id, shared)), TaskScheduler.Default);
@@ -323,7 +324,7 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
 
     public Task<GrantResponse> GrantAsync(GrantEnvelope envelope, CancellationToken cancel = default)
     {
-        string id = envelope.Request.RequestId;
+        string id = string.Join('\n', envelope.Request.RequestId, envelope.Operation, envelope.MachineFingerprint, envelope.HostName, envelope.ScopeKey, envelope.Request.Digest(), Convert.ToBase64String(envelope.Signature));
         Lazy<Task<GrantResponse>> shared = _grantInflight.GetOrAdd(id, _ => new Lazy<Task<GrantResponse>>(() => Task.Run(() => Grant(envelope, cancel))));
         Task<GrantResponse> task = shared.Value;
         _ = task.ContinueWith(_ => _grantInflight.TryRemove(new KeyValuePair<string, Lazy<Task<GrantResponse>>>(id, shared)), TaskScheduler.Default);

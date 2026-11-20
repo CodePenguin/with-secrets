@@ -10,7 +10,7 @@ The agent runs a command and names the secrets it wants. A person reads the exac
 with-secrets --secrets DB_URL --reason "list tables in the staging database" -- psql "$DB_URL" -c "\dt"
 ```
 
-> **Status: early (0.1.0), pre-release software.** Hand-tested on Windows. The unit suite and the single-file build run on Linux (including WSL); macOS builds in CI but has not been tried by hand. Read [What it does not protect against](#what-it-does-not-protect-against) before you rely on it.
+> **Status: early (0.1.0), pre-release software.** Hand-tested on Windows. The unit suite and the single-file build run on Linux (including WSL); macOS builds in CI and runs the unit suite, but it has not been tried by hand and it cannot be an authority (no server-side TLS 1.3 in .NET on macOS; see the reference). Read [What it does not protect against](#what-it-does-not-protect-against) before you rely on it.
 
 ## How a run works
 

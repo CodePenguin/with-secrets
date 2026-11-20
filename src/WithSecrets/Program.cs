@@ -228,6 +228,13 @@ internal static class Program
         MachineListenerOptions? machineEndpoint = null;
         if (command is CliCommand.Service { MachinePort: { } machinePort } machineCommand)
         {
+            if (PlatformTls.ListenerUnsupported is { } unsupported)
+            {
+                TerminalPrompt.Final("with-secrets: " + unsupported);
+
+                return RunCommand.Usage;
+            }
+
             machineEndpoint = new MachineListenerOptions { Bind = System.Net.IPAddress.Parse(machineCommand.MachineBind), Port = machinePort };
             if (machineEndpoint.Problem() is { } endpointProblem)
             {

@@ -246,6 +246,7 @@ public static class PairingClient
 
     public static async Task<PairingResult> RunAsync(PairingClientOptions options, CancellationToken cancel = default)
     {
+        PlatformTls.EnableClientTls13();
         string machineFingerprint = KeyIdentity.Fingerprint(options.MachineKey.PublicKey);
         PairingResult Fail(string message, string authority = "") => new(false, message, machineFingerprint, options.HostName, authority);
         if (WireText.HostNameProblem(options.HostName) is { } hostProblem)

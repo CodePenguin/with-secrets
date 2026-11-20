@@ -67,6 +67,11 @@ internal static class PairingAdminTests
         Tapped unknown = await b.OpAsync("pairing-revoke", app.Laptop, true, null, true, ("id", PairingProtocol.NewToken(16)));
         check(Refused(again) && Refused(unknown) && app.Store.Invitation(id)!.Status == "revoked", "pairing api: a revoked or unknown invitation cannot be revoked");
 
+        if (PlatformSkip.NoServerTls13("an invitation made through the API pairing a machine"))
+        {
+            return;
+        }
+
         // The whole way: the invitation made through the API pairs a machine, which then shows as Pending in the machine list.
         Tapped second = await b.OpAsync("pairing-create", app.Laptop, true, null, true);
         PairingBundle real = PairingBundle.TryParse(JsonDocument.Parse(second.MutationBody).RootElement.GetProperty("invitation").GetProperty("bundle").GetString()!)!;
