@@ -363,6 +363,11 @@ internal static class Program
             RemoteAuthorityTests.Run(Check).GetAwaiter().GetResult();
         }
 
+        if (Wants("ClientTls"))
+        {
+            ClientTlsProbeTests.Run(Check).GetAwaiter().GetResult();
+        }
+
         if (Wants("RemoteLaunch"))
         {
             RemoteLaunchTests.Run(Check).GetAwaiter().GetResult();
