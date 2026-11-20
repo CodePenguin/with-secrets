@@ -25,9 +25,9 @@ internal static class HardeningTests
         Directory.CreateDirectory(parent);
         try
         {
-            if (OperatingSystem.IsWindows())
+            if (!OperatingSystem.IsLinux())
             {
-                check(LinuxHardening.MakeNonDumpable() is null && !LinuxHardening.IsDumpable() && LinuxHardening.CurrentUserId() is null, "key file checks and process hardening: skipped on Windows (CNG keys; no prctl or mlock), nothing is attempted");
+                check(LinuxHardening.MakeNonDumpable() is null && !LinuxHardening.IsDumpable() && LinuxHardening.CurrentUserId() is null, "key file checks and process hardening: skipped off Linux (Windows has CNG keys; macOS has no statx, prctl or mlock use here), nothing is attempted");
                 using IDisposable none = LinuxHardening.TryLock(new byte[16]);
             }
             else
