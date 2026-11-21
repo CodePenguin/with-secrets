@@ -149,7 +149,7 @@ internal static class AuthorityLockTests
         using HostServiceTests.Rig rig = new(root, startLocked: true);
         HostService service = rig.Service;
         string status = await rig.Http.GetStringAsync(rig.Url("/v1/status"));
-        check(service.Lock.IsLocked && status == "{\"protocolVersion\":1,\"running\":true,\"locked\":true}", "lock: a service starts LOCKED and /v1/status says running and locked, nothing else (" + status + ")");
+        check(service.Lock.IsLocked && status == "{\"protocolVersion\":1,\"running\":true,\"locked\":true,\"adminPort\":" + service.Port + "}", "lock: a service starts LOCKED and /v1/status says running and locked, nothing else (" + status + ")");
 
         HostServiceTests.Raw refused = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, rig.Script("never", "echo never", "echo never")));
         check(refused.Status == HttpStatusCode.Locked && refused.Body.Contains("/admin", StringComparison.Ordinal) && refused.Body.Contains("locked", StringComparison.Ordinal) && rig.Store.Reads == 0 && rig.Approvers.IsEmpty, "lock: a run while locked is refused (423) with one line naming the admin page; nothing is asked or decrypted (" + refused.Body + ")");
@@ -157,7 +157,7 @@ internal static class AuthorityLockTests
         check(approve.Status == HttpStatusCode.Locked && rig.Approvers.IsEmpty && rig.Machine.Deployment.Store.Grants().Count == 0, "lock: approve while locked is refused too and makes no grant");
 
         StringWriter errText = new();
-        int exit = await LaunchClient.RunAsync(CliArgs.ParseRun(["--secrets", "TOKEN", "--reason", "locked", "--", "anything"], out _)!, rig.Work, service.Port, null, new StringWriter(), errText, rig.Machine.Trust);
+        int exit = await LaunchClient.RunAsync(CliArgs.ParseRun(["--secrets", "TOKEN", "--reason", "locked", "--", "anything"], out _)!, rig.Work, service.Endpoint, null, new StringWriter(), errText, rig.Machine.Trust);
         string[] lines = errText.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         check(exit == LaunchClient.AuthorityLocked && LaunchClient.AuthorityLocked == 8 && lines.Length == 1 && lines[0].StartsWith("with-secrets: the authority is locked", StringComparison.Ordinal) && lines[0].Contains(service.Admin.PageUrl, StringComparison.Ordinal),
             "lock: the client prints one clear line with the admin page link and exits 8 (" + exit + ": " + errText + ")");
@@ -226,6 +226,7 @@ internal static class AuthorityLockTests
         (TestAuthenticator laptop, TestAuthenticator phone) = Keys(rig.State);
         using HostService service = HostService.Start(new HostServiceOptions
         {
+            CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(),
             State = rig.State,
             Store = rig.Store,
             Deployment = rig.Machine.Restart(),
@@ -249,7 +250,7 @@ internal static class AuthorityLockTests
 
         // A page that is never tapped times out: fail closed. (Short limit on a second asker.)
         Asks quick = new();
-        using (HostService timed = HostService.Start(new HostServiceOptions { State = rig.State, Store = rig.Store, Deployment = rig.Machine.Restart(), Port = 0, AdminAskerFactory = quick.Factory(rig.State, TimeSpan.FromSeconds(1)) }))
+        using (HostService timed = HostService.Start(new HostServiceOptions { CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), State = rig.State, Store = rig.Store, Deployment = rig.Machine.Restart(), Port = 0, AdminAskerFactory = quick.Factory(rig.State, TimeSpan.FromSeconds(1)) }))
         {
             Tapped silent = await TapOn(timed, http, AdminService.OpUnlock, null);
             await Task.Delay(TimeSpan.FromSeconds(3));
@@ -257,7 +258,7 @@ internal static class AuthorityLockTests
         }
 
         service.Dispose();
-        using HostService live = HostService.Start(new HostServiceOptions { State = rig.State, Store = rig.Store, Deployment = rig.Machine.Restart(), Port = 0, AdminAskerFactory = asks.Factory(rig.State, TimeSpan.FromSeconds(3)) });
+        using HostService live = HostService.Start(new HostServiceOptions { CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), State = rig.State, Store = rig.Store, Deployment = rig.Machine.Restart(), Port = 0, AdminAskerFactory = asks.Factory(rig.State, TimeSpan.FromSeconds(3)) });
         store = rig.Machine.Deployment.Store;
         check(live.Lock.IsLocked, "unlock: a new service is locked again");
         Tapped unlock = await TapOn(live, http, AdminService.OpUnlock, laptop);
@@ -298,7 +299,7 @@ internal static class AuthorityLockTests
         using HostServiceTests.Rig empty = new(root, startLocked: true);
         empty.Service.Dispose();
         Asks emptyAsks = new();
-        using HostService noKeys = HostService.Start(new HostServiceOptions { State = empty.State, Store = empty.Store, Deployment = empty.Machine.Restart(), Port = 0, AdminAskerFactory = emptyAsks.Factory(empty.State, TimeSpan.FromSeconds(5)) });
+        using HostService noKeys = HostService.Start(new HostServiceOptions { CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), State = empty.State, Store = empty.Store, Deployment = empty.Machine.Restart(), Port = 0, AdminAskerFactory = emptyAsks.Factory(empty.State, TimeSpan.FromSeconds(5)) });
         Tapped none = await TapOn(noKeys, http, AdminService.OpUnlock, laptop);
         check(none.Link is null && none.Error is not null && noKeys.Lock.IsLocked, "fail closed: with no admin passkey enrolled the unlock gets no page and the authority stays locked (" + none.Error + ")");
     }
@@ -320,7 +321,7 @@ internal static class AuthorityLockTests
         using HostServiceTests.Rig rig = new(root, startLocked: true);
         rig.Service.Dispose();
         (TestAuthenticator laptop, TestAuthenticator phone) = Keys(rig.State);
-        HostService Start(IUnlockProtection use) => HostService.Start(new HostServiceOptions { State = rig.State, Store = rig.Store, Deployment = rig.Machine.Restart(), Port = 0, UnlockProtection = use, AdminAskerFactory = asks.Factory(rig.State, TimeSpan.FromSeconds(3)) });
+        HostService Start(IUnlockProtection use) => HostService.Start(new HostServiceOptions { CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), State = rig.State, Store = rig.Store, Deployment = rig.Machine.Restart(), Port = 0, UnlockProtection = use, AdminAskerFactory = asks.Factory(rig.State, TimeSpan.FromSeconds(3)) });
         using HttpClient http = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(60) };
 
         HostService first = Start(protection);
@@ -364,8 +365,9 @@ internal static class AuthorityLockTests
         using HostService second = Start(protection);
         check(!second.Lock.IsLocked && second.Lock.How == UnlockMethod.Unattended && second.StartupUnlockNote is { } note && note.Contains("unattended", StringComparison.Ordinal) && await HostServiceTests.WaitFor(() => second.Ready), "unattended: a restart under the policy unlocks and checks in (locked=" + second.Lock.IsLocked + "; how=" + second.Lock.How + "; note=" + second.StartupUnlockNote + "; ready=" + second.Ready + ")");
         check(store.Grants().Count == grantsBefore && second.Authorization.SyncedGrants.Count == 0 && !second.Authorization.Keys.IsHeld, "unattended: unlocking creates no grant, widens none and holds no key");
-        string status = await http.GetStringAsync("http://127.0.0.1:" + second.Port + "/v1/status");
-        check(status == "{\"protocolVersion\":1,\"running\":true,\"locked\":false}", "unattended: status reports unlocked and nothing else");
+        using HttpClient commandLine = new(second.Endpoint.CreateHandler());
+        string status = await commandLine.GetStringAsync(new Uri(second.Endpoint.BaseUri, "v1/status"));
+        check(status == "{\"protocolVersion\":1,\"running\":true,\"locked\":false,\"adminPort\":" + second.Port + "}", "unattended: status reports unlocked and nothing else");
 
         // It never replaces a passkey: a sensitive operation still taps, with the service unlocked unattended.
         await Login(second, http);
@@ -409,7 +411,7 @@ internal static class AuthorityLockTests
             other.Service.Dispose();
             (TestAuthenticator otherLaptop, _) = Keys(other.State);
             Asks otherAsks = new();
-            using HostService refusing = HostService.Start(new HostServiceOptions { State = other.State, Store = other.Store, Deployment = other.Machine.Restart(), Port = 0, UnlockProtection = none, AdminAskerFactory = otherAsks.Factory(other.State, TimeSpan.FromSeconds(5)) });
+            using HostService refusing = HostService.Start(new HostServiceOptions { CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), State = other.State, Store = other.Store, Deployment = other.Machine.Restart(), Port = 0, UnlockProtection = none, AdminAskerFactory = otherAsks.Factory(other.State, TimeSpan.FromSeconds(5)) });
             refusing.Lock.Unlock(UnlockMethod.Seam);
             await Login(refusing, http);
             int askedBefore = otherAsks.Count;
@@ -446,8 +448,9 @@ internal static class AuthorityLockTests
     private static async Task Origins(Action<bool, string> check, string root)
     {
         using HostServiceTests.Rig rig = new(root, startLocked: true);
-        HttpClient http = rig.Http;
-        string baseUrl = rig.Url("");
+        // The browser surface is on the loopback port.
+        using HttpClient http = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false });
+        string baseUrl = "http://127.0.0.1:" + rig.Service.Port;
         HttpStatusCode Send(HttpMethod method, string path, string? origin, string? body = null, string contentType = "application/json")
         {
             using HttpRequestMessage message = new(method, baseUrl + path);
@@ -479,7 +482,7 @@ internal static class AuthorityLockTests
         check((await page.PostAsync("/api/v1/unlock", unlock)).Status == 403, "api: a change with an authorization that was never made is refused (403)");
         check(Send(HttpMethod.Get, "/api/v1/unlock", null) == HttpStatusCode.MethodNotAllowed, "api: a change is not a GET");
         check(Send(HttpMethod.Get, "/api/v1/unknown", null) == HttpStatusCode.NotFound, "api: an unknown route is 404");
-        check(Send(HttpMethod.Post, "/v1/launch", "http://localhost:1", "{}") == HttpStatusCode.Forbidden, "api: the run API still refuses any request with an Origin");
+        check(Send(HttpMethod.Post, "/v1/launch", "http://localhost:1", "{}") == HttpStatusCode.NotFound, "api: the run API is not on this port at all (404, whatever the Origin); on its own endpoint it still refuses any request with an Origin");
 
         string status = await http.GetStringAsync(baseUrl + "/api/v1/status");
         using HttpResponseMessage head = await http.GetAsync(baseUrl + "/api/v1/status");

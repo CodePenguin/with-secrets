@@ -299,7 +299,7 @@ internal static class ScenariosSpa
         await Scenarios3.SeedSecret(rig, c, app);
         rig.WriteScript("check", "script-value");
         CliCommand.Run run = (CliCommand.Run)Cmds.Parse(["--secrets", "E2E_SECRET", "--reason", "e2e grant", "--", ..Rig.ScriptCommand("check")]);
-        using Cmd<int> approve = new((port, o, e) => LaunchClient.RunAsync(run.Args, rig.Work, app.Service.Port, null, o, e, rig.Machine.Trust, approve: true).GetAwaiter().GetResult());
+        using Cmd<int> approve = new((port, o, e) => LaunchClient.RunAsync(run.Args, rig.Work, app.Service.Endpoint, null, o, e, rig.Machine.Trust, approve: true).GetAwaiter().GetResult());
 
         // The pre-approval waits in the Approvals queue like any request; the person picks how long it lasts and taps once.
         await Spa.OpenRequest(c, approve, app, s, "Run request from");
@@ -372,7 +372,9 @@ internal static class ScenariosSpa
             try
             {
                 await results.GetByText(Rig.ScriptFile("check")).First.WaitForAsync(new() { Timeout = 1500 });
-                found = true;
+                // The events arrive one after the other: the run's first event is not all of them. Done when the authorization and the start have both come.
+                string seen = await results.TextContentAsync() ?? "";
+                found = seen.Contains("approved", StringComparison.Ordinal) && seen.Contains("started", StringComparison.Ordinal);
             }
             catch (Exception)
             {
@@ -380,7 +382,7 @@ internal static class ScenariosSpa
             }
         }
 
-        s.Check(found, "the audit view shows the run's events once the host has uploaded them");
+        s.Check(found, "the audit view shows the run's events (the authorization and the start) once the host has uploaded them");
         string all = await results.TextContentAsync() ?? "";
         s.Check(all.Contains("approved", StringComparison.Ordinal) && all.Contains("started", StringComparison.Ordinal) && !all.Contains(SecretValue, StringComparison.Ordinal), "it shows the authorization and launch outcomes and no secret value");
         s.Check(c.Page.Url.Contains("text=" + Rig.ScriptFile("check"), StringComparison.Ordinal), "the search is in the address");
@@ -640,6 +642,9 @@ internal static class ScenariosSpa
         foreach (string view in new[] { "Overview", "Machines", "Settings" })
         {
             await Spa.GoTo(c, view, view);
+            // The scheme has just changed: wait until the page has painted it and nothing is still animating, so that axe never sees the text colour of one scheme on the background of the other (seen once on macOS: 1.03:1).
+            await c.Page.EvaluateAsync("() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))");
+            await c.Page.WaitForFunctionAsync("() => document.getAnimations().length === 0 && matchMedia('(prefers-color-scheme: dark)').matches");
             await Spa.Axe(c, s, $"{view} in the dark scheme");
             await c.DemoSnapAsync($"{view} in the dark scheme.");
         }

@@ -546,7 +546,7 @@ internal static class RecoveryTests
     }
 
     /// <summary>The files of the folder, not counting the signed audit outbox (an administrative change writes its event there).</summary>
-    internal static string[] Files(string folder) => [.. Directory.EnumerateFiles(folder).Select(Path.GetFileName).OfType<string>().Where(name => !name.StartsWith("audit-outbox.db", StringComparison.Ordinal)).Order(StringComparer.Ordinal)];
+    internal static string[] Files(string folder) => [.. Directory.EnumerateFiles(folder).Select(Path.GetFileName).OfType<string>().Where(name => !name.StartsWith("audit-outbox.db", StringComparison.Ordinal) && name != "state.db.lock").Order(StringComparer.Ordinal)];
 
     private static async Task Recover(Action<bool, string> check, string root)
     {

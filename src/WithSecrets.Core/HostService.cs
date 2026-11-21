@@ -12,8 +12,8 @@ using Microsoft.Extensions.Logging;
 
 namespace WithSecrets;
 
-/// <summary>The default port and the way a client or the service finds the port: --service-port / --port, then WITH_SECRETS_PORT, then the default.</summary>
-public static class ServiceEndpoint
+/// <summary>The loopback port of the admin web app (where a browser reaches it) and the way the service and the admin command find it: --port, then WITH_SECRETS_PORT, then the default. The command line's runs do not use a port.</summary>
+public static class AdminPort
 {
     public const int DefaultPort = 8765;
     public const string PortVariable = "WITH_SECRETS_PORT";
@@ -65,7 +65,10 @@ public sealed class HostServiceOptions
     public TimeSpan AuditMaxBackoff { get; init; } = TimeSpan.FromSeconds(60);
 
     /// <summary>The port on 127.0.0.1 and [::1]. 0 picks a free one (tests).</summary>
-    public int Port { get; init; } = ServiceEndpoint.DefaultPort;
+    public int Port { get; init; } = AdminPort.DefaultPort;
+
+    /// <summary>The endpoint the command line connects to besides the loopback port (the program passes <see cref="LocalEndpoint.ForCommandLine" />). Null leaves only the loopback port.</summary>
+    public LocalEndpoint? CommandLineEndpoint { get; init; }
 
     /// <summary>For tests: replaces the approval time limit setting.</summary>
     public TimeSpan? TimeLimit { get; init; }
@@ -153,6 +156,7 @@ public sealed class HostService : IDisposable
     private readonly CancellationTokenSource _stop = new();
     private Task _pump = Task.CompletedTask;
     private string? _startupUnlockNote;
+    private bool _endpointStarted;
 
     /// <summary>The most launches in progress at once; each holds an approval page and a thread.</summary>
     public const int MaxConcurrentLaunches = 8;
@@ -272,7 +276,11 @@ public sealed class HostService : IDisposable
     /// <summary>The host's side of the authority protocol: signs requests, verifies answers, applies invalidations.</summary>
     public HostAuthorization Authorization { get; }
 
+    /// <summary>The loopback port of the browser administration. The command line does not use it: it has its own endpoint (<see cref="Endpoint" />).</summary>
     public int Port { get; }
+
+    /// <summary>Where the command line reaches this service.</summary>
+    public LocalEndpoint Endpoint => _options.CommandLineEndpoint ?? throw new InvalidOperationException("this service has no command line endpoint");
 
     public LaunchGate Gate => _options.Gate;
 
@@ -305,7 +313,8 @@ public sealed class HostService : IDisposable
             HostService? service = null;
             try
             {
-                WebApplication app = Build(options, port, withIpv6);
+                LocalEndpoint endpoint = LocalEndpoint.Loopback(port, withIpv6);
+                WebApplication app = Build(options, endpoint);
                 service = new HostService(options, app, port);
                 // Locked by default; unattended unlock applies only when the administrator chose it. Before any request is accepted: check machine status, host name binding and security
                 // revision with the authority (it also vouches for the machine), which needs the authority unlocked.
@@ -317,6 +326,8 @@ public sealed class HostService : IDisposable
 
                 app.Run(service.Handle);
                 app.StartAsync().GetAwaiter().GetResult();
+                service._endpointStarted = true;
+                options.CommandLineEndpoint?.Started();
                 service._pump = Task.Run(service.PumpLoop);
                 if (options.MachineEndpoint is { } machineEndpoint)
                 {
@@ -486,7 +497,7 @@ public sealed class HostService : IDisposable
         }
     }
 
-    private static WebApplication Build(HostServiceOptions options, int port, bool withIpv6)
+    private static WebApplication Build(HostServiceOptions options, LocalEndpoint endpoint)
     {
         WebApplicationBuilder builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions
         {
@@ -499,6 +510,7 @@ public sealed class HostService : IDisposable
         builder.Configuration.Sources.Clear();
         builder.Logging.ClearProviders();
         builder.Services.AddSingleton<IHostLifetime, QuietLifetime>();
+        options.CommandLineEndpoint?.Configure(builder.WebHost);
         builder.WebHost.ConfigureKestrel(kestrel =>
         {
             kestrel.AddServerHeader = false;
@@ -506,11 +518,8 @@ public sealed class HostService : IDisposable
             kestrel.Limits.MaxRequestLineSize = 4096;
             kestrel.Limits.MaxRequestHeadersTotalSize = 16 * 1024;
             kestrel.Limits.RequestHeadersTimeout = options.BodyTimeout;
-            kestrel.Listen(IPAddress.Loopback, port);
-            if (withIpv6)
-            {
-                kestrel.Listen(IPAddress.IPv6Loopback, port);
-            }
+            endpoint.Listen(kestrel);
+            options.CommandLineEndpoint?.Listen(kestrel);
         });
 
         return builder.Build();
@@ -542,7 +551,33 @@ public sealed class HostService : IDisposable
             return;
         }
 
-        // The administration API (JSON, under /api): sessions are read-only, every change carries its own passkey authorization (see AdminApi). Nothing under /api is anything but JSON.
+        // Two surfaces: the browser administration (/api and the /admin application) and the command line's routes (/v1). Each is handled apart.
+        // A connection may use only the surface of the listener it came on: the command line's endpoint answers /v1 and nothing of the browser administration; the loopback port answers the browser administration and nothing
+        // of /v1. A connection that carries no surface (it cannot happen with the listeners made here) is answered nothing.
+        string? surface = context.Features.Get<Microsoft.AspNetCore.Connections.Features.IConnectionItemsFeature>()?.Items.TryGetValue(LocalEndpoint.SurfaceItem, out object? marked) == true ? marked as string : null;
+        bool browserRoute = IsBrowserSurface(path);
+        if (surface != (browserRoute ? LocalEndpoint.BrowserSurface : LocalEndpoint.CommandLineSurface))
+        {
+            await Refuse(response, 404, "not found");
+
+            return;
+        }
+
+        if (browserRoute)
+        {
+            await HandleBrowser(context, path);
+
+            return;
+        }
+
+        await HandleCli(context, path);
+    }
+
+    private static bool IsBrowserSurface(string path) => path == "/api" || path.StartsWith("/api/", StringComparison.Ordinal) || AdminWebAssets.IsApplicationPath(path);
+
+    /// <summary>The browser administration: the JSON API under /api and the single-page application under /admin. Every change needs its own passkey authorization (see AdminApi); sessions are read-only.</summary>
+    private async Task HandleBrowser(HttpContext context, string path)
+    {
         if (path == "/api" || path.StartsWith("/api/", StringComparison.Ordinal))
         {
             await Admin.Api.HandleAsync(context);
@@ -550,15 +585,15 @@ public sealed class HostService : IDisposable
             return;
         }
 
-        // The administration web application (the single-page application) under /admin: its built files from this assembly, the page for an application route, never for /api.
-        // Built without the frontend, its address answers a JSON 404 that says where the API is.
-        if (AdminWebAssets.IsApplicationPath(path))
-        {
-            await _web.ServeAsync(context, Admin.Api.NotBuiltAsync);
+        // The page for an application route, never for /api. Built without the frontend, its address answers a JSON 404 that says where the API is.
+        await _web.ServeAsync(context, Admin.Api.NotBuiltAsync);
+    }
 
-            return;
-        }
-
+    /// <summary>The command line's routes under /v1 (the application protocol: status, identity, launch, approve, cancel). Programs only.</summary>
+    private async Task HandleCli(HttpContext context, string path)
+    {
+        HttpResponse response = context.Response;
+        HttpRequest request = context.Request;
         // A browser page sends Origin on a cross-site request. This API is for programs, not pages.
         if (request.Headers.ContainsKey("Origin"))
         {
@@ -577,7 +612,7 @@ public sealed class HostService : IDisposable
             }
 
             response.ContentType = "application/json";
-            await response.WriteAsync("{\"protocolVersion\":" + LaunchProtocol.Version + ",\"running\":true,\"locked\":" + (Lock.IsLocked ? "true" : "false") + "}");
+            await response.WriteAsync("{\"protocolVersion\":" + LaunchProtocol.Version + ",\"running\":true,\"locked\":" + (Lock.IsLocked ? "true" : "false") + ",\"adminPort\":" + Port.ToString(System.Globalization.CultureInfo.InvariantCulture) + "}");
 
             return;
         }
@@ -1226,6 +1261,11 @@ public sealed class HostService : IDisposable
         finally
         {
             _app.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            if (_endpointStarted)
+            {
+                // Only an endpoint this service made is cleaned up: a service that failed to start (another one holds the endpoint) must never remove it.
+                _options.CommandLineEndpoint?.Stopped();
+            }
         }
     }
 

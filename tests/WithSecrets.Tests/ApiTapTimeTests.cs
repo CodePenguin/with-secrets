@@ -88,7 +88,7 @@ internal static class ApiTapTimeTests
         Tapped lost = await idler.OpAsyncWithoutMutation("set-audit-retention", null, ("days", "21"));
         app.Clock.Advance(TimeSpan.FromSeconds(31));
         Tap(app, lost, app.Laptop);
-        await HostServiceTests.WaitFor(() => app.Store.AuditRetentionDays() == 21);
+        await HostServiceTests.WaitFor(() => app.Store.AuditRetentionDays() == 21 && AuditText(app.Store).Contains("set-audit-retention; applied", StringComparison.Ordinal));
         app.Clock.Advance(TimeSpan.FromMinutes(16));
         (int expiredRead, _) = await idler.SendAsync(HttpMethod.Get, "/api/v1/authorizations/" + lost.AuthorizationId, null);
         check(app.Store.AuditRetentionDays() == 21 && expiredRead == 404 && AuditText(app.Store).Contains("set-audit-retention; applied", StringComparison.Ordinal), "tap time: a session that idled out after the tap keeps the change (it was made and audited at the tap); the ended session can read nothing more (404)");

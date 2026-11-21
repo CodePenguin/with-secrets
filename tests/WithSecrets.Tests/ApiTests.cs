@@ -1295,7 +1295,7 @@ internal static class ApiTests
         ];
         check(verbs.All(args => CliArgs.Parse(args, out string error) is null && error.Length > 0), "verbs: every old admin verb (machines, approve, disable, enable, untrust, trust, rename, approve-host-change, grant ..., audit, rotate-authority-key, recover-authority) is refused");
         check(CliArgs.Parse(["admin"], out _) is { } bare && !CliArgs.NeedsTerminal(bare), "admin: with no words it is the one form (the app link and the public status)");
-        check(CliArgs.Parse(["admin", "--service-port", "4000", "--debug"], out _) is { }, "admin: --service-port and --debug are still accepted");
+        check(CliArgs.Parse(["admin", "--port", "4000", "--debug"], out _) is CliCommand.AdminApp { AdminPort: 4000, Debug: true } && CliArgs.Parse(["admin", "--service-port", "4000"], out _) is null, "admin: --port (the admin web app's port) and --debug are accepted; the old --service-port is gone");
         check(CliArgs.Parse(["--help"], out _) is CliCommand.Help { Text: var help } && help.Contains("admin web app", StringComparison.Ordinal) && !help.Contains("approve-host-change", StringComparison.Ordinal) && !help.Contains("rotate-authority-key", StringComparison.Ordinal), "help: it describes the admin web app, not the removed verbs");
 
         return Task.CompletedTask;

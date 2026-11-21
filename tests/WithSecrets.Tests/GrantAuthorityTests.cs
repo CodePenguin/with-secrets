@@ -291,7 +291,7 @@ internal static class GrantAuthorityTests
         CliCommand? Parse(params string[] args) => CliArgs.Parse(args, out _);
         CliCommand.Approve? approve = Parse("approve", "--secrets", "A,B", "--reason", "why", "--", "node", "x.js") as CliCommand.Approve;
         check(approve is { Args: { Program: "node", Reason: "why" } } && approve.Args.Secrets.SequenceEqual(["A", "B"]) && approve.Args.Arguments.SequenceEqual(["x.js"]), "approve parse: the grammar of a run (secrets, reason, -- program and arguments)");
-        check(Parse("approve", "--service-port", "9000", "--port", "8000", "--secrets", "A", "--reason", "r", "--", "p") is CliCommand.Approve { ServicePort: 9000, Port: 8000 }, "approve parse: --service-port and --port are accepted as for a run");
+        check(Parse("approve", "--port", "8000", "--secrets", "A", "--reason", "r", "--", "p") is CliCommand.Approve { Port: 8000 } && Parse("approve", "--service-port", "9000", "--secrets", "A", "--reason", "r", "--", "p") is null, "approve parse: --port (the approval page) is accepted as for a run; there is no service port option");
         check(CliArgs.Parse(["approve", "--secrets", "A", "--", "p"], out string noReason) is null && noReason.Contains("--reason", StringComparison.Ordinal), "approve parse: --reason is required as for a run (" + noReason + ")");
         check(CliArgs.Parse(["approve", "--needs"], out string notRun) is null && notRun.Contains("approve takes", StringComparison.Ordinal), "approve parse: only the arguments of a run (" + notRun + ")");
         check(Parse("approve") is CliCommand.Help && Parse("approve", "--help") is CliCommand.Help, "approve parse: nothing to approve shows the help; --help still works");
@@ -992,6 +992,7 @@ internal static class GrantAuthorityTests
         string id = made.GrantId!;
         using HostService service = HostService.Start(new HostServiceOptions
         {
+            CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(),
             Lock = AuthorityLock.UnlockedForTests(),
             State = fx.Db,
             Store = new HostServiceTests.CountingStore(new Dictionary<string, string> { ["TOKEN"] = "x" }),
@@ -1434,7 +1435,7 @@ internal static class GrantAuthorityTests
             HostServiceTests.Raw refusedApprove = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, Show(rig)), path: "/v1/approve");
             check(refused.Status == HttpStatusCode.ServiceUnavailable && refusedApprove.Status == HttpStatusCode.ServiceUnavailable && rig.Store.Reads == 0 && !File.Exists(Marker(rig)), "startup: until it has reconciled the service refuses runs and approvals with 503 and decrypts nothing");
             StringWriter notReadyErr = new();
-            int notReady = await LaunchClient.RunAsync(CliArgs.ParseRun(["--secrets", "TOKEN", "--reason", "early", "--", Show(rig)], out _)!, rig.Work, rig.Service.Port, null, new StringWriter(), notReadyErr, rig.Machine.Trust);
+            int notReady = await LaunchClient.RunAsync(CliArgs.ParseRun(["--secrets", "TOKEN", "--reason", "early", "--", Show(rig)], out _)!, rig.Work, rig.Service.Endpoint, null, new StringWriter(), notReadyErr, rig.Machine.Trust);
             check(notReady == LaunchClient.ServiceUnavailable && notReadyErr.ToString().Contains("not ready", StringComparison.Ordinal), "startup: a client told 503 exits " + LaunchClient.ServiceUnavailable + " with a line that says to ask again, not 4 (store error) (" + notReady + ")");
             link.Offline = false;
             check(await HostServiceTests.WaitFor(() => rig.Service.Ready, 30), "startup: it keeps trying and becomes ready when the authority answers");

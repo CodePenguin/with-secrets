@@ -61,12 +61,12 @@ internal static class Cmds
             E2EMachine machine = rig.Machine;
             if (app is not null)
             {
-                return LaunchClient.RunAsync(run.Args, rig.Work, app.Service.Port, null, o, e, machine.Trust).GetAwaiter().GetResult();
+                return LaunchClient.RunAsync(run.Args, rig.Work, app.Service.Endpoint, null, o, e, machine.Trust).GetAwaiter().GetResult();
             }
 
-            using HostService service = HostService.Start(new HostServiceOptions { Lock = AuthorityLock.UnlockedForTests(), State = rig.State, Store = rig.Store, Deployment = machine.Deployment, Port = 0, TimeLimit = timeLimit, ApproverFactory = (settings, announce) => CommandWiring.RunApprover(rig.State, settings, announce) });
+            using HostService service = HostService.Start(new HostServiceOptions { CommandLineEndpoint = E2EEndpoint.Make(), Lock = AuthorityLock.UnlockedForTests(), State = rig.State, Store = rig.Store, Deployment = machine.Deployment, Port = 0, TimeLimit = timeLimit, ApproverFactory = (settings, announce) => CommandWiring.RunApprover(rig.State, settings, announce) });
 
-            return LaunchClient.RunAsync(run.Args, rig.Work, service.Port, port, o, e, machine.Trust).GetAwaiter().GetResult();
+            return LaunchClient.RunAsync(run.Args, rig.Work, service.Endpoint, port, o, e, machine.Trust).GetAwaiter().GetResult();
         });
     }
 

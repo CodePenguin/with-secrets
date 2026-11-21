@@ -215,6 +215,7 @@ internal sealed class AdminApp : IDisposable
         Service?.Dispose();
         Service = HostService.Start(new HostServiceOptions
         {
+            CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(),
             Lock = unlocked ? AuthorityLock.UnlockedForTests() : null,
             State = State,
             Store = _rig.Store,

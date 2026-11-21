@@ -162,7 +162,7 @@ internal static class AdminTests
     {
         StringWriter err = new();
         RunArgs args = CliArgs.ParseRun(["--secrets", "TOKEN", "--reason", "impostor test", "--", "anything"], out _)!;
-        int code = await LaunchClient.RunAsync(args, work, port, null, new StringWriter(), err, trust);
+        int code = await LaunchClient.RunAsync(args, work, LocalEndpoint.Loopback(port), null, new StringWriter(), err, trust);
 
         return (code, err.ToString());
     }
@@ -186,7 +186,7 @@ internal static class AdminTests
         {
             StringWriter outText = new();
             StringWriter errText = new();
-            int ok = await AdminAppCommand.RunAsync(genuine.Port, outText, errText, pinned);
+            int ok = await AdminAppCommand.RunAsync(genuine.Port, outText, errText, pinned, endpoint: LocalEndpoint.Loopback(genuine.Port));
             check(ok == 0 && outText.ToString().Contains($"http://localhost:{genuine.Port}/admin", StringComparison.Ordinal) && errText.ToString().Length == 0, "admin: a service that proves the pinned key gets its link printed (" + outText.ToString().Trim().Replace('\n', ' ') + ")");
         }
 
@@ -195,14 +195,14 @@ internal static class AdminTests
             StringWriter outText = new();
             StringWriter errText = new();
             string? opened = null;
-            int code = await AdminAppCommand.RunAsync(imposter.Port, outText, errText, pinned, link => opened = link);
+            int code = await AdminAppCommand.RunAsync(imposter.Port, outText, errText, pinned, link => opened = link, endpoint: LocalEndpoint.Loopback(imposter.Port));
             check(code == LaunchClient.ServiceNotAuthenticated && outText.ToString().Length == 0 && opened is null && errText.ToString().Length > 0, "admin: a program that merely holds the port is refused (exit 7): no link, no status, nothing opened (" + errText.ToString().Trim() + ")");
         }
 
         using (Impostor garbage = new(_ => "{\"locked\":false}"))
         {
             StringWriter outText = new();
-            int code = await AdminAppCommand.RunAsync(garbage.Port, outText, new StringWriter(), pinned);
+            int code = await AdminAppCommand.RunAsync(garbage.Port, outText, new StringWriter(), pinned, endpoint: LocalEndpoint.Loopback(garbage.Port));
             check(code == 7 && !outText.ToString().Contains("unlocked", StringComparison.Ordinal), "admin: an impostor's own status answer is not reported");
         }
 
@@ -212,11 +212,11 @@ internal static class AdminTests
             StringWriter outText = new();
             StringWriter errText = new();
             string? opened = null;
-            int code = await AdminAppCommand.RunAsync(firstRun.Port, outText, errText, new ServiceTrust(null), link => opened = link);
+            int code = await AdminAppCommand.RunAsync(firstRun.Port, outText, errText, new ServiceTrust(null), link => opened = link, endpoint: LocalEndpoint.Loopback(firstRun.Port));
             string printed = outText.ToString();
             check(code == 0 && printed.Contains($"http://localhost:{firstRun.Port}/admin", StringComparison.Ordinal) && printed.Contains("Not verified", StringComparison.Ordinal) && opened is null && errText.ToString().Length == 0, "admin: with no identity pinned yet (first run) it prints the link, says it is not verified, opens nothing and exits 0 (" + printed.Trim().Replace((char)10, ' ') + ")");
             StringWriter unreadable = new();
-            int broken = await AdminAppCommand.RunAsync(firstRun.Port, new StringWriter(), unreadable, new ServiceTrust(null, "host.json cannot be read"));
+            int broken = await AdminAppCommand.RunAsync(firstRun.Port, new StringWriter(), unreadable, new ServiceTrust(null, "host.json cannot be read"), endpoint: LocalEndpoint.Loopback(firstRun.Port));
             check(broken == 7 && unreadable.ToString().Contains("host.json cannot be read", StringComparison.Ordinal), "admin: an unreadable host.json is still a refusal, never 'nothing pinned'");
         }
 

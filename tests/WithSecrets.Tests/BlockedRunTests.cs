@@ -64,12 +64,12 @@ internal static class BlockedRunTests
             throw new InvalidOperationException(problem);
         }
 
-        using HostService service = HostService.Start(new HostServiceOptions { Lock = AuthorityLock.UnlockedForTests(), State = db, Store = store, Deployment = machine.Deployment, Port = 0, TimeLimit = limit, ApproverFactory = (settings, announce) => CommandWiring.RunApprover(db, settings, announce) });
+        using HostService service = HostService.Start(new HostServiceOptions { CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), Lock = AuthorityLock.UnlockedForTests(), State = db, Store = store, Deployment = machine.Deployment, Port = 0, TimeLimit = limit, ApproverFactory = (settings, announce) => CommandWiring.RunApprover(db, settings, announce) });
         using HttpClient browser = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(30) };
         StringWriter stdout = new();
         StringWriter stderr = new();
         RunArgs args = CliArgs.ParseRun(["--secrets", "TOKEN", "--reason", "a blocked run", "--", "./" + program], out _)!;
-        Task<int> client = LaunchClient.RunAsync(args, work, service.Port, null, stdout, stderr, machine.Trust);
+        Task<int> client = LaunchClient.RunAsync(args, work, service.Endpoint, null, stdout, stderr, machine.Trust);
 
         // The person: finds the link the command line printed and answers it (or does nothing).
         DateTime end = DateTime.UtcNow.AddSeconds(20);
