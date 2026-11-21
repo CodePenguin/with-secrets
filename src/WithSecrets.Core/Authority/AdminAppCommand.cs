@@ -91,6 +91,11 @@ public static class AdminAppCommand
         }
         catch (Exception error) when (error is HttpRequestException or TaskCanceledException or JsonException or IOException)
         {
+            if (LocalChannelException.Find(error) is { } unusable)
+            {
+                return ("not reachable: the channel cannot be used (" + unusable.Message + ")", null);
+            }
+
             return ("not running (start it with: with-secrets service)", null);
         }
     }

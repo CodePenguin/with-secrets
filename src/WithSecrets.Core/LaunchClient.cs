@@ -124,6 +124,11 @@ public static class LaunchClient
         {
             response = await client.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancel);
         }
+        catch (HttpRequestException unreachable) when (LocalChannelException.Find(unreachable) is { } unusable)
+        {
+            // The channel is there but is not safe to use or was refused: that is not "the service is not running", and nothing was sent.
+            return await Fail(stderr, ServiceNotAuthenticated, "with-secrets: the channel to the host service cannot be used: " + unusable.Message);
+        }
         catch (HttpRequestException)
         {
             await stderr.WriteLineAsync(NotRunningMessage + " (nothing answers on " + endpoint.Describe() + "; the service and this command must run as the same user" + (OperatingSystem.IsWindows() ? "" : ", with the same XDG_RUNTIME_DIR or TMPDIR") + ")");
@@ -258,6 +263,11 @@ public static class LaunchClient
             }
 
             return null;
+        }
+        catch (HttpRequestException unreachable) when (LocalChannelException.Find(unreachable) is { } unusable)
+        {
+            // The channel is there but is not safe to use or was refused: that is not "the service is not running", and nothing was sent.
+            return await Fail(stderr, ServiceNotAuthenticated, "with-secrets: the channel to the host service cannot be used: " + unusable.Message);
         }
         catch (HttpRequestException)
         {

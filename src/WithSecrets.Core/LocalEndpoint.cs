@@ -7,6 +7,27 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 namespace WithSecrets;
 
 /// <summary>
+/// The command line's channel to the service exists but cannot be used safely, or was refused (a directory that is not private to this user, a socket or pipe that another user or another elevation level made, a path that is
+/// not a socket). Its message names the place and the rule, never request content. Nothing is sent. It is not "the service is not running": that is a plain I/O error of the connection.
+/// </summary>
+public sealed class LocalChannelException(string message, Exception? inner = null) : IOException(message, inner)
+{
+    /// <summary>The channel problem in <paramref name="failure" /> or what it wraps (the HTTP client wraps what the connection throws), or null.</summary>
+    public static LocalChannelException? Find(Exception? failure)
+    {
+        for (Exception? current = failure; current is not null; current = current.InnerException)
+        {
+            if (current is LocalChannelException found)
+            {
+                return found;
+            }
+        }
+
+        return null;
+    }
+}
+
+/// <summary>
 /// How the command line reaches the host service of this machine, and where the service listens for it. Only the way requests and answers are carried differs between endpoints: the routes, the models, the request digest,
 /// the identity challenge and the streamed answers are the application protocol and are the same over every endpoint. Every endpoint is a plain HTTP/1.1 carrier (<see cref="BaseUri" /> names no host that is looked up).
 /// </summary>
@@ -152,6 +173,13 @@ internal sealed class NamedPipeEndpoint(string name) : LocalEndpoint
             await pipe.DisposeAsync();
             throw new IOException("no service answers on the pipe");
         }
+        catch (UnauthorizedAccessException refusal)
+        {
+            // The client's own check (CurrentUserOnly) found the pipe is not owned by this process's token owner, or the access list refused it. The owner of an elevated process is the Administrators group and of a normal one the
+            // user, so a service and a command at different elevation levels (under the same account) refuse each other. Neither is relaxed: the pipe is the access control.
+            await pipe.DisposeAsync();
+            throw new LocalChannelException("the pipe " + Name + " was made by a process the command may not talk to: it is owned by another user, or the service and this command run at different elevation levels (one as administrator, one not). Run both at the same elevation level, as the same user.", refusal);
+        }
         catch
         {
             await pipe.DisposeAsync();
@@ -204,7 +232,7 @@ internal sealed class UnixSocketEndpoint : LocalEndpoint
         SocketPath = Path.Combine(directory, "service.sock");
         if (System.Text.Encoding.UTF8.GetByteCount(SocketPath) > MaxPathBytes)
         {
-            throw new IOException("the socket path is too long for this platform (" + MaxPathBytes + " bytes at most): " + SocketPath);
+            throw new LocalChannelException("the socket path is too long for this platform (" + MaxPathBytes + " bytes at most): " + SocketPath);
         }
     }
 
@@ -216,21 +244,42 @@ internal sealed class UnixSocketEndpoint : LocalEndpoint
 
     public override string Describe() => "the socket " + SocketPath;
 
+    /// <summary>Directories every user can write to: a socket directory is never made directly inside one of them under a shared name.</summary>
+    private static readonly string[] SharedDirectories = ["/", "/tmp", "/var/tmp", "/usr/tmp", "/private/tmp", "/private/var/tmp", "/dev/shm", "/run", "/var/run"];
+
     /// <summary>
-    /// The directory of the current user's service. Linux: <c>$XDG_RUNTIME_DIR/with-secrets</c> (the per-user runtime directory, owner-only, removed at logout) when it is set, else <c>/tmp/with-secrets-UID</c>.
-    /// macOS: <c>with-secrets</c> in the per-user temporary directory (<c>$TMPDIR</c>, owner-only), else <c>/tmp/with-secrets-UID</c>. The fallback sits in a shared directory, which is why the permissions are checked.
+    /// The directory of the current user's service. Linux: <c>$XDG_RUNTIME_DIR/with-secrets</c>. macOS: <c>$TMPDIR/with-secrets</c>. Each only when the variable is set to a directory that is private to this user (owned by it,
+    /// not writable by anyone else) and is not one of the shared system directories; otherwise <c>/tmp/with-secrets-UID</c>, a name that is different for every user. (.NET's own temporary-directory function answers
+    /// <c>/tmp</c> when TMPDIR is unset, which is shared, so it is not used.) The directory is then checked as strictly as any other: owned by this user, mode 700, not a link; one that is not is refused, never repaired.
     /// </summary>
     public static string DefaultDirectory()
     {
-        string? runtime = OperatingSystem.IsLinux() ? Environment.GetEnvironmentVariable("XDG_RUNTIME_DIR") : OperatingSystem.IsMacOS() ? Path.GetTempPath().TrimEnd('/') : null;
-        if (!string.IsNullOrEmpty(runtime) && Path.IsPathRooted(runtime))
-        {
-            return Path.Combine(runtime, "with-secrets");
-        }
-
-        return "/tmp/with-secrets-" + GetEffectiveUserId().ToString(System.Globalization.CultureInfo.InvariantCulture);
+        return ResolveDirectory(OperatingSystem.IsLinux(), OperatingSystem.IsMacOS(), Environment.GetEnvironmentVariable, GetEffectiveUserId(), IsPrivateRuntimeParent);
     }
 
+    /// <summary>The choice of directory, with everything it depends on given (so that every case can be tested): the platform, the environment, the user id and whether a place is private to this user.</summary>
+    internal static string ResolveDirectory(bool linux, bool macos, Func<string, string?> environment, uint userId, Func<string, bool> isPrivateToUser)
+    {
+        string? runtime = linux ? environment("XDG_RUNTIME_DIR") : macos ? environment("TMPDIR") : null;
+        if (!string.IsNullOrEmpty(runtime) && Path.IsPathRooted(runtime))
+        {
+            string full = Path.GetFullPath(runtime).TrimEnd('/');
+            if (full.Length > 0 && !SharedDirectories.Contains(full, StringComparer.Ordinal) && isPrivateToUser(full))
+            {
+                return Path.Combine(full, "with-secrets");
+            }
+        }
+
+        return "/tmp/with-secrets-" + userId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>A real directory (not a link) that this user owns and that no one else can write to: a place only this user can put a name in.</summary>
+    internal static bool IsPrivateRuntimeParent(string path)
+    {
+        UnixFileInfo? info = UnixFileInfo.Of(path);
+
+        return info is { IsDirectory: true } && info.Owner == GetEffectiveUserId() && (info.Permissions & 0x12) == 0;
+    }
     [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "geteuid")]
     private static extern uint GetEffectiveUserId();
 
@@ -243,7 +292,7 @@ internal sealed class UnixSocketEndpoint : LocalEndpoint
         CheckDirectory(create: false);
         if (new FileInfo(SocketPath).LinkTarget is not null)
         {
-            throw new IOException("the service socket is a link: " + SocketPath);
+            throw new LocalChannelException("the service socket is a link: " + SocketPath);
         }
 
         Socket socket = new(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
@@ -270,6 +319,9 @@ internal sealed class UnixSocketEndpoint : LocalEndpoint
 
     /// <summary>For tests: the user id a peer must have (default: this process's effective user id).</summary>
     internal uint? ExpectedPeerUserId { get; init; }
+
+    /// <summary>For tests: the user id that must own the directory (default: this process's effective user id). A directory owned by anyone else is refused.</summary>
+    internal uint? ExpectedOwnerUserId { get; init; }
 
     private bool PeerIsThisUser(Microsoft.AspNetCore.Connections.ConnectionContext context)
     {
@@ -343,7 +395,7 @@ internal sealed class UnixSocketEndpoint : LocalEndpoint
             string? parent = Path.GetDirectoryName(Directory);
             if (parent is null || !System.IO.Directory.Exists(parent))
             {
-                throw new IOException("the directory for the service socket does not exist: " + parent);
+                throw new LocalChannelException("the directory for the service socket does not exist: " + parent);
             }
 
             System.IO.Directory.CreateDirectory(Directory, OwnerOnlyDirectory);
@@ -352,13 +404,25 @@ internal sealed class UnixSocketEndpoint : LocalEndpoint
         DirectoryInfo info = new(Directory);
         if (info.LinkTarget is not null || info.Attributes.HasFlag(FileAttributes.ReparsePoint))
         {
-            throw new IOException("the service directory is a link, which is not accepted: " + Directory);
+            throw new LocalChannelException("the service directory is a link, which is not accepted: " + Directory);
+        }
+
+        UnixFileInfo? directoryInfo = UnixFileInfo.Of(Directory);
+        if (directoryInfo is null)
+        {
+            // Fail closed: what cannot be checked is not trusted.
+            throw new LocalChannelException("the owner of the service directory cannot be determined: " + Directory);
+        }
+
+        if (!directoryInfo.IsDirectory || directoryInfo.Owner != (ExpectedOwnerUserId ?? GetEffectiveUserId()))
+        {
+            throw new LocalChannelException("the service directory is not owned by this user (it is owned by user " + directoryInfo.Owner.ToString(System.Globalization.CultureInfo.InvariantCulture) + "): " + Directory);
         }
 
         UnixFileMode mode = File.GetUnixFileMode(Directory);
         if (mode != OwnerOnlyDirectory)
         {
-            throw new IOException("the service directory is not private to this user (mode " + Convert.ToString((int)mode, 8) + ", it must be 700): " + Directory);
+            throw new LocalChannelException("the service directory is not private to this user (mode " + Convert.ToString((int)mode, 8) + ", it must be 700): " + Directory);
         }
 
         if (!create)
@@ -375,22 +439,54 @@ internal sealed class UnixSocketEndpoint : LocalEndpoint
         }
         catch (UnauthorizedAccessException)
         {
-            throw new IOException("the service directory cannot be used by this user: " + Directory);
+            throw new LocalChannelException("the service directory cannot be used by this user: " + Directory);
         }
     }
 
-    /// <summary>A socket file nobody answers on is from a service that is gone: removed. One that answers is a running service: nothing is touched and the start fails. A link is never followed or removed.</summary>
+    /// <summary>What a failed probe connection to an existing socket file says about the service behind it.</summary>
+    internal enum ProbeVerdict
+    {
+        /// <summary>The kernel says nothing is listening on the socket: it is from a service that is gone.</summary>
+        Stale,
+
+        /// <summary>Anything else (no permission, a busy or interrupted probe, an unexpected error): not known that nothing answers, so nothing is touched.</summary>
+        Unknown,
+    }
+
+    /// <summary>Only a refused connection (ECONNREFUSED: the file is a socket and nothing listens on it) proves a socket stale. Access, address, timeout and every other error do not.</summary>
+    internal static ProbeVerdict ClassifyProbeFailure(SocketError error) => error == SocketError.ConnectionRefused ? ProbeVerdict.Stale : ProbeVerdict.Unknown;
+
+    /// <summary>
+    /// A socket file nobody answers on is from a service that is gone: removed. One that answers is a running service: nothing is touched and the start fails. Only a socket that this user owns is ever removed: a link, a
+    /// file or directory that is not a socket, a socket of anyone else, and a socket whose state cannot be told are left as they are and the start fails with the reason.
+    /// </summary>
     private void RemoveStaleSocket()
     {
         FileInfo file = new(SocketPath);
         if (file.LinkTarget is not null)
         {
-            throw new IOException("the service socket path is a link, which is not accepted: " + SocketPath);
+            throw new LocalChannelException("the service socket path is a link, which is not accepted: " + SocketPath);
         }
 
-        if (!file.Exists)
+        UnixFileInfo? entry = UnixFileInfo.Of(SocketPath);
+        if (entry is null)
         {
-            return;
+            if (!file.Exists && !System.IO.Directory.Exists(SocketPath))
+            {
+                return;
+            }
+
+            throw new LocalChannelException("cannot tell what is at the socket path, so it is not touched: " + SocketPath);
+        }
+
+        if (!entry.IsSocket)
+        {
+            throw new LocalChannelException("the socket path holds something that is not a socket, so it is not touched: " + SocketPath);
+        }
+
+        if (entry.Owner != (ExpectedOwnerUserId ?? GetEffectiveUserId()))
+        {
+            throw new LocalChannelException("the socket at the socket path is not this user's, so it is not touched: " + SocketPath);
         }
 
         using Socket probe = new(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
@@ -398,19 +494,101 @@ internal sealed class UnixSocketEndpoint : LocalEndpoint
         {
             probe.Connect(new UnixDomainSocketEndPoint(SocketPath));
         }
-        catch (SocketException failure) when (failure.SocketErrorCode is not SocketError.ConnectionRefused)
+        catch (SocketException failure) when (ClassifyProbeFailure(failure.SocketErrorCode) == ProbeVerdict.Unknown)
         {
-            // Not a refusal (a busy or interrupted probe): it is not known that nothing answers, so the file is not touched.
-            throw new IOException("cannot tell whether a service answers on " + SocketPath + " (" + failure.SocketErrorCode + ")");
+            throw new LocalChannelException("cannot tell whether a service answers on " + SocketPath + " (" + failure.SocketErrorCode + "), so it is not touched");
         }
         catch (SocketException)
         {
-            // Refused: nothing answers, left over.
-            File.Delete(SocketPath);
+            // Refused: nothing listens, left over.
+            try
+            {
+                File.Delete(SocketPath);
+            }
+            catch (Exception failure) when (failure is IOException or UnauthorizedAccessException)
+            {
+                throw new LocalChannelException("the socket left by a service that is gone cannot be removed (" + failure.GetType().Name + "): " + SocketPath, failure);
+            }
 
             return;
         }
 
-        throw new IOException("a service is already running for this user (it answers on " + SocketPath + ")");
+        throw new LocalChannelException("a service is already running for this user (it answers on " + SocketPath + ")");
     }
+}
+
+/// <summary>What the file system says about a path itself (a link is not followed): its owner, its permission bits and what kind of entry it is. Linux: statx; macOS: lstat. Null where it cannot be asked (the caller then does not trust the path).</summary>
+[System.Runtime.Versioning.UnsupportedOSPlatform("windows")]
+internal sealed class UnixFileInfo
+{
+    private const uint FileTypeMask = 0xF000;
+    private const uint DirectoryType = 0x4000;
+    private const uint SocketType = 0xC000;
+
+    private UnixFileInfo(uint owner, uint mode)
+    {
+        Owner = owner;
+        Mode = mode;
+    }
+
+    public uint Owner { get; }
+
+    /// <summary>The file type and permission bits (st_mode).</summary>
+    public uint Mode { get; }
+
+    /// <summary>The permission bits only (rwx for user, group and other).</summary>
+    public uint Permissions => Mode & 0xFFF;
+
+    public bool IsDirectory => (Mode & FileTypeMask) == DirectoryType;
+
+    public bool IsSocket => (Mode & FileTypeMask) == SocketType;
+
+    public static UnixFileInfo? Of(string path)
+    {
+        try
+        {
+            byte[] buffer = new byte[512];
+            if (OperatingSystem.IsLinux())
+            {
+                // struct statx: stx_mask u32 at 0, stx_uid u32 at 20, stx_mode u16 at 28. AT_FDCWD = -100, AT_SYMLINK_NOFOLLOW = 0x100, STATX_TYPE | STATX_MODE | STATX_UID = 0x7.
+                if (StatX(-100, path, 0x100, 0x7, buffer) != 0)
+                {
+                    return null;
+                }
+
+                return (BitConverter.ToUInt32(buffer, 0) & 0x7) == 0x7 ? new UnixFileInfo(BitConverter.ToUInt32(buffer, 20), BitConverter.ToUInt16(buffer, 28)) : null;
+            }
+
+            if (OperatingSystem.IsMacOS())
+            {
+                // struct stat (64-bit inodes): st_mode u16 at 4, st_uid u32 at 16. The Intel build of the system library names that variant lstat$INODE64.
+                int result;
+                try
+                {
+                    result = System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture == System.Runtime.InteropServices.Architecture.X64 ? LStat64(path, buffer) : LStat(path, buffer);
+                }
+                catch (EntryPointNotFoundException)
+                {
+                    result = LStat(path, buffer);
+                }
+
+                return result == 0 ? new UnixFileInfo(BitConverter.ToUInt32(buffer, 16), BitConverter.ToUInt16(buffer, 4)) : null;
+            }
+
+            return null;
+        }
+        catch (Exception failure) when (failure is DllNotFoundException or EntryPointNotFoundException or System.Runtime.InteropServices.MarshalDirectiveException)
+        {
+            return null;
+        }
+    }
+
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "statx")]
+    private static extern int StatX(int directory, [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)] string path, int flags, uint mask, byte[] buffer);
+
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "lstat")]
+    private static extern int LStat([System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)] string path, byte[] buffer);
+
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "lstat$INODE64")]
+    private static extern int LStat64([System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)] string path, byte[] buffer);
 }

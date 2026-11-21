@@ -21,6 +21,7 @@ internal static class StateDatabaseTests
         {
             RoundTrips(check, folder);
             Concurrency(check, folder);
+            FirstCreationRace(check, folder);
             Unusable(check, folder);
             Locked(check, folder);
             StaleWal(check, folder);
@@ -126,11 +127,62 @@ internal static class StateDatabaseTests
         two.Join();
         StateDatabase check1 = StateDatabase.InFolder(folder);
         check(failure is null && refused == 0, "db parallel: no write was refused (" + failure?.Message + ", " + refused + ")");
-        IReadOnlyList<PasskeyRecord> stored = new PasskeyStore(check1).All(); string[] expectedIds = [.. Enumerable.Range(0, Each).SelectMany(index => new[] { Id("a" + index), Id("b" + index) })]; string missing = string.Join(",", expectedIds.Except(stored.Select(item => item.Id)).Select(id => id[..Math.Min(8, id.Length)])); string distinct = expectedIds.Distinct().Count() + " distinct ids"; check(stored.Count == 2 * Each && TestState.Current(check1)!.Version == 2 * Each, "db parallel: no passkey was lost; one manifest version per key (" + stored.Count + " keys, version " + TestState.Current(check1)?.Version + ", expected " + 2 * Each + "; missing [" + missing + "]; " + distinct + ")");
+        IReadOnlyList<PasskeyRecord> stored = new PasskeyStore(check1).All(); string[] expectedIds = [.. Enumerable.Range(0, Each).SelectMany(index => new[] { Id("a" + index), Id("b" + index) })]; string missing = string.Join(",", expectedIds.Except(stored.Select(item => item.Id)).Select(id => Enumerable.Range(0, Each).SelectMany(index => new[] { "a" + index, "b" + index }).First(label => Id(label) == id) + "=" + id[..Math.Min(8, id.Length)])); string distinct = expectedIds.Distinct().Count() + " distinct ids"; check(stored.Count == 2 * Each && TestState.Current(check1)!.Version == 2 * Each, "db parallel: no passkey was lost; one manifest version per key (" + stored.Count + " keys, version " + TestState.Current(check1)?.Version + ", expected " + 2 * Each + "; missing [" + missing + "]; " + distinct + ")");
         IReadOnlyList<AuditEvent> written = TestAudit.Events(check1);
         check(written.Count == 2 * Each && written.Select(item => item.Sequence).OrderBy(n => n).SequenceEqual(Enumerable.Range(1, 2 * Each).Select(n => (long)n)) && written.Select(item => item.EventId).Distinct().Count() == 2 * Each, "db parallel: every audit event is there, numbered without a gap or a repeat, by two writers");
     }
 
+    /// <summary>
+    /// Several writers reach a folder with no state.db at the same moment (the first run of two commands). Each writes one key. Every key must be there and the versions must run 1..N: the one that creates the file must not
+    /// remove the journal files of the one that created it a moment before, and no write may be lost to it.
+    /// </summary>
+    private static void FirstCreationRace(Action<bool, string> check, string root)
+    {
+        const int Rounds = 40;
+        const int Writers = 6;
+        int bad = 0;
+        string firstBad = "";
+        for (int round = 0; round < Rounds; round++)
+        {
+            string folder = Path.Combine(root, "first-" + round);
+            using Barrier start = new(Writers);
+            Exception? failure = null;
+            int refused = 0;
+            Thread[] threads = [.. Enumerable.Range(0, Writers).Select(writer => new Thread(() =>
+            {
+                try
+                {
+                    start.SignalAndWait();
+                    if (!AddRetrying(folder, Key("first-" + round + "-" + writer)))
+                    {
+                        Interlocked.Increment(ref refused);
+                    }
+                }
+                catch (Exception error)
+                {
+                    failure = error;
+                }
+            }))];
+            foreach (Thread thread in threads)
+            {
+                thread.Start();
+            }
+
+            foreach (Thread thread in threads)
+            {
+                thread.Join();
+            }
+
+            IReadOnlyList<PasskeyRecord> stored = new PasskeyStore(StateDatabase.InFolder(folder)).All();
+            if (failure is not null || refused != 0 || stored.Count != Writers)
+            {
+                bad++;
+                firstBad = firstBad.Length == 0 ? $"round {round}: {stored.Count} of {Writers} keys, {refused} refused, {failure?.Message}" : firstBad;
+            }
+        }
+
+        check(bad == 0, "db first creation: " + Rounds + " rounds of " + Writers + " writers reaching an empty folder together lose no key and refuse none (" + (bad == 0 ? "all kept" : bad + " rounds bad; " + firstBad) + ")");
+    }
     private static void Unusable(Action<bool, string> check, string root)
     {
         string folder = Path.Combine(root, "garbage");

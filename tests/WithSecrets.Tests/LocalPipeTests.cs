@@ -21,6 +21,7 @@ internal static class LocalPipeTests
         }
 
         await PipeChecks(check);
+        await ElevationChecks(check);
     }
 
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
@@ -109,4 +110,56 @@ internal static class LocalPipeTests
             }
         }
     }
-}
+
+    /// <summary>
+    /// The supported contract: the service and the command run as the same user at the same elevation level. .NET's own client check (CurrentUserOnly) compares the owner of the pipe with the owner of the client's token,
+    /// and that owner is the user for a normal process and the Administrators group for an elevated one, so a pipe made at one level is refused at the other. The pipe's access list is not relaxed to change that; the refusal is
+    /// explained instead. Here the pipe is made the way a normal process makes it (owned by the user) and the client is the elevated test process, which expects Administrators: the real .NET behavior, shown where the
+    /// machine is elevated (the CI runners are). A normal developer machine cannot make that case (it cannot give a pipe to Administrators), so there it is stated as skipped.
+    /// </summary>
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static async Task ElevationChecks(Action<bool, string> check)
+    {
+        WindowsIdentity identity = WindowsIdentity.GetCurrent();
+        SecurityIdentifier user = identity.User!;
+        SecurityIdentifier owner = identity.Owner!;
+        check(owner.Equals(user) || owner.IsWellKnown(WellKnownSidType.BuiltinAdministratorsSid), "pipe: the owner of this process's token is the user (normal) or the Administrators group (elevated), the two cases the contract names (" + owner.Value + ")");
+        if (owner.Equals(user))
+        {
+            Console.WriteLine("  SKIP pipe made at another elevation level: this process is not elevated; the refusal between levels is shown on an elevated machine (the CI runners)");
+
+            return;
+        }
+
+        string name = "ws-test-" + Guid.NewGuid().ToString("N")[..12];
+        PipeSecurity security = new();
+        security.AddAccessRule(new PipeAccessRule(user, PipeAccessRights.ReadWrite | PipeAccessRights.CreateNewInstance, AccessControlType.Allow));
+        security.SetOwner(user);
+        using NamedPipeServerStream server = NamedPipeServerStreamAcl.Create(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 0, 0, security);
+        NamedPipeEndpoint endpoint = new(name);
+        LocalChannelException? refused = null;
+        try
+        {
+            using Stream stream = await endpoint.ConnectAsync(CancellationToken.None);
+        }
+        catch (LocalChannelException error)
+        {
+            refused = error;
+        }
+
+        check(refused is not null && refused.Message.Contains("elevation", StringComparison.Ordinal), "pipe: an elevated client does not talk to a pipe a normal process made, and says why (different elevation levels)");
+
+        // Through the HTTP client the command line uses: the same explanation arrives, and it is not "not running".
+        using HttpClient commandLine = new(endpoint.CreateHandler()) { Timeout = TimeSpan.FromSeconds(10) };
+        Exception? seen = null;
+        try
+        {
+            await commandLine.GetAsync("http://localhost/v1/status");
+        }
+        catch (Exception error)
+        {
+            seen = error;
+        }
+
+        check(LocalChannelException.Find(seen) is not null, "pipe: the explanation of the refusal reaches the command line through the HTTP client");
+    }}

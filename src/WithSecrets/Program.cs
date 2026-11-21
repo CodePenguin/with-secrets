@@ -14,7 +14,7 @@ internal static class Program
     {
         for (Exception? current = failure; current is not null; current = current.InnerException)
         {
-            if (current.GetType() == typeof(IOException))
+            if (current is LocalChannelException)
             {
                 return current.Message;
             }
