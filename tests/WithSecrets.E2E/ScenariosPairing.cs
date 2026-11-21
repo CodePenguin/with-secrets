@@ -13,6 +13,11 @@ internal static class ScenariosPairing
 
     public static async Task PairMachine(Host host, S s)
     {
+        if (PlatformSkip.NoServerTls13("a second host pairing with the authority"))
+        {
+            return;
+        }
+
         using Rig rig = new();
         await using Ctx c = await Ctx.NewAsync(host);
         await Flows.Configure(rig, c);
@@ -63,7 +68,7 @@ internal static class ScenariosPairing
             MachineTls = hostDeployment.Tls,
         });
         string fp = KeyIdentity.Fingerprint(machineKey.PublicKey);
-        s.Check(paired.Ok && paired.MachineFingerprint == fp && store.Find(fp) is { Status: MachineStatus.Pending, HostName: "paired-host" } && store.Invitation(bundle!.InvitationId) is { Status: "consumed" }, "the second host pairs: it is Pending at the authority with its host name and the invitation is consumed");
+        s.Check(paired.Ok && paired.MachineFingerprint == fp && store.Find(fp) is { Status: MachineStatus.Pending, HostName: "paired-host" } && store.Invitation(bundle!.InvitationId) is { Status: "consumed" }, "the second host pairs: it is Pending at the authority with its host name and the invitation is consumed (" + (paired.Ok ? "paired" : paired.Message) + ")");
 
         // 3. The administrator sees it Pending with the fingerprint and host name and approves it (the existing operation, its own tap).
         ILocator row = c.Page.GetByRole(AriaRole.Region, new() { Name = "A machine paired and is waiting for you" }).GetByRole(AriaRole.Listitem).Filter(new() { HasText = KeyIdentity.Display(fp) });
@@ -139,14 +144,14 @@ internal static class ScenariosPairing
         }
 
         // 4a. A person denies the request on the Approvals page.
-        (LaunchEvent? denied, string deniedOutput, string deniedAll) = await Launch("e2e paired host", () => DecideOnApprovalsPage(c, s, approve: false));
+        (LaunchEvent? denied, string deniedOutput, string deniedAll) = await Launch("e2e paired host", () => DecideOnApprovalsPage(c, s, approve: false, "e2e paired host"));
         s.Check(denied is { Outcome: LaunchOutcome.Denied, ExitCode: RunCommand.Denied }
             && !deniedOutput.Contains(SecretValue, StringComparison.Ordinal)
             && deniedAll.Contains("user-denied", StringComparison.Ordinal),
             "the paired host's request reached the Approvals page and Deny ended it (nothing ran)");
 
         // 4b. A person approves a second request with their passkey; the sealed PRF output opens the secret for exactly this run.
-        (LaunchEvent? approved, string approvedOutput, _) = await Launch("e2e paired host, approved", () => DecideOnApprovalsPage(c, s, approve: true));
+        (LaunchEvent? approved, string approvedOutput, _) = await Launch("e2e paired host, approved", () => DecideOnApprovalsPage(c, s, approve: true, "e2e paired host, approved"));
         s.Check(approved is { Outcome: LaunchOutcome.Exited, ExitCode: 0 } && approvedOutput.Contains("remote-value=[REDACTED]", StringComparison.Ordinal) && !approvedOutput.Contains(SecretValue, StringComparison.Ordinal),
             "Approve on the Access screen, with one passkey tap, let the paired host's command run, its output redacted (" + approved?.Outcome + ", " + approved?.ExitCode + ", output: " + approvedOutput.Replace(SecretValue, "<secret>").Trim() + ")");
         s.Check(!(await c.Page.ContentAsync()).Contains(SecretValue, StringComparison.Ordinal), "the secret value is nowhere in the Approvals page");
@@ -180,11 +185,12 @@ internal static class ScenariosPairing
             throw new InvalidOperationException("The Approvals queue belongs to the live authority SPA at " + app.Url + ", but the page is at " + page.Url);
     }
 
-    /// <summary>Decides the oldest waiting request the way a person does: Approvals in the navigation, Review, then Deny or Approve once.</summary>
-    private static async Task DecideOnApprovalsPage(Ctx c, S s, bool approve)
+    /// <summary>Decides the waiting request with this reason the way a person does: Access in the navigation, Review, then Deny or Approve once.</summary>
+    private static async Task DecideOnApprovalsPage(Ctx c, S s, bool approve, string reason)
     {
         await Spa.GoTo(c, "Access", "Access");
-        ILocator review = c.Page.GetByRole(AriaRole.Link, new() { Name = "Review" }).First;
+        // This request, by its reason: the list is polled, so a request that was decided a moment ago can still be listed, and Review for that one opens a request that is already over.
+        ILocator review = c.Page.GetByRole(AriaRole.Listitem).Filter(new() { HasText = reason }).GetByRole(AriaRole.Link, new() { Name = "Review" }).First;
         await review.WaitForAsync(new() { Timeout = 60000 });
         await Spa.Shot(c, "approvals-list");
         await Spa.Axe(c, s, "approvals (a request is waiting)");

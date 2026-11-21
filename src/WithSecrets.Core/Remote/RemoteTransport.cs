@@ -1,4 +1,8 @@
+using System.Globalization;
 using System.Net;
+using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Text;
 
 namespace WithSecrets;
 
@@ -50,4 +54,62 @@ public static class RemoteTarget
     }
 
     public static bool IsLoopback(Uri uri) => uri.IsLoopback || string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase) || IPAddress.TryParse(uri.Host.Trim('[', ']'), out IPAddress? address) && IPAddress.IsLoopback(address);
+}
+
+/// <summary>
+/// A description of why a connection to the authority failed that is safe to show and log: the chain of exception TYPES, the socket or HTTP error code, the HRESULT, and for the platform's own TLS, socket and
+/// I/O exceptions their message (the text the TLS stack writes, such as which handshake step failed; it holds no key, token or secret, and nothing this program put in it). Never a request or a response.
+/// </summary>
+public static class TransportFailure
+{
+    public static string Describe(Exception error)
+    {
+        StringBuilder text = new();
+        int depth = 0;
+        for (Exception? current = error; current is not null && depth < 6; current = current.InnerException, depth++)
+        {
+            if (depth > 0)
+            {
+                text.Append(" <- ");
+            }
+
+            text.Append(current.GetType().Name);
+            switch (current)
+            {
+                case SocketException socket:
+                    text.Append(" [").Append(socket.SocketErrorCode).Append(']');
+                    break;
+                case HttpRequestException http:
+                    text.Append(" [").Append(http.HttpRequestError).Append(']');
+                    break;
+            }
+
+            if (current.HResult != 0)
+            {
+                text.Append(" (0x").Append(current.HResult.ToString("X8", CultureInfo.InvariantCulture)).Append(')');
+            }
+
+            if (current is AuthenticationException or SocketException or IOException or PlatformNotSupportedException)
+            {
+                text.Append(": ").Append(current.Message.ReplaceLineEndings(" "));
+            }
+        }
+
+        return text.ToString();
+    }
+}
+
+/// <summary>
+/// Where machine-to-machine transport (TLS 1.3 mutual authentication, HTTP/2) cannot run. macOS: .NET's server-side <c>SslStream</c> has no TLS 1.3 at all, so a macOS machine cannot be an authority; its client side has TLS 1.3
+/// only behind an opt-in Network.framework backend (<c>System.Net.Security.UseNetworkFramework</c>) that aborts the whole process, uncatchably, when the peer closes a connection while the client is writing (dotnet/runtime#136439,
+/// open in 10.0.13; a fix is in progress in dotnet/runtime#134260), which is what a rejected client certificate does. So macOS takes no part in machine transport at all, as authority or as host, and says so: nothing falls back to
+/// an older protocol and the opt-in backend is not switched on. Revisit when the runtime fix ships.
+/// </summary>
+public static class PlatformTls
+{
+    /// <summary>Why this machine cannot take part in machine transport (the authority role or the host role), or null when it can.</summary>
+    public static string? MachineTransportUnsupported => OperatingSystem.IsMacOS()
+        ? "machine transport (TLS 1.3 mutual authentication) is not available on macOS: .NET has no server-side TLS 1.3 there, and its opt-in client-side TLS 1.3 can abort the whole process when a peer closes a connection (dotnet/runtime#136439). "
+            + "This machine can use with-secrets locally, but it cannot be an authority or pair with one. Use Windows or Linux for that"
+        : null;
 }

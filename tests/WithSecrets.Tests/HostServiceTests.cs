@@ -1036,7 +1036,7 @@ internal static class HostServiceTests
             Raw ninth = await Post(rig, Req(rig, ran));
             check(ninth.Status == HttpStatusCode.ServiceUnavailable && ninth.Body.Contains("too many launches", StringComparison.Ordinal), "concurrency: the ninth is refused with a clear message (" + ninth.Status + ")");
             await leaveAll.CancelAsync();
-            check(await WaitFor(() => rig.Service.ActiveLaunches == 0, 10) && rig.Approvers.OfType<CancelAwareApprover>().All(item => item.SawCancel.IsSet), "concurrency: clients that left close their approvals at once, the approvers saw the token");
+            check(await WaitFor(() => rig.Service.ActiveLaunches == 0, 10) && rig.Approvers.OfType<CancelAwareApprover>().All(item => item.SawCancel.IsSet), "concurrency: clients that left close their approvals at once, the approvers saw the token (active " + rig.Service.ActiveLaunches + ", approvers " + rig.Approvers.Count + ", saw " + rig.Approvers.OfType<CancelAwareApprover>().Count(item => item.SawCancel.IsSet) + ")");
             foreach (Task<Raw> task in held)
             {
                 try

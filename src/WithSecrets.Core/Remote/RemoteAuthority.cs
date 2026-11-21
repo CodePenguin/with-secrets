@@ -59,6 +59,11 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, ILaunchAuthority, 
 
     public RemoteAuthority(RemoteAuthorityConfig config, TemporaryCertificate tls, HostConfigFile hostConfig, TimeProvider? clock = null)
     {
+        if (PlatformTls.MachineTransportUnsupported is { } unsupported)
+        {
+            throw new PlatformNotSupportedException(unsupported);
+        }
+
         if (RemoteTarget.Problem(config) is { } problem)
         {
             throw new ArgumentException(problem);
@@ -508,7 +513,7 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, ILaunchAuthority, 
                 // A message that must not be repeated (a launch: a second one could show a second page or deliver twice) is never sent again once its send began.
                 if (attempt >= Retries || sent && !repeatAfterSend || error is RemoteTransportException)
                 {
-                    throw error as RemoteTransportException ?? new RemoteTransportException("the authority could not be reached (" + error.GetType().Name + ")");
+                    throw error as RemoteTransportException ?? new RemoteTransportException("the authority could not be reached (" + TransportFailure.Describe(error) + ")");
                 }
 
                 await Task.Delay(Jitter(pause), _clock, cancel);
@@ -694,7 +699,7 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, ILaunchAuthority, 
             }
             catch (Exception error) when (error is System.Security.Cryptography.CryptographicException or AuthenticationException)
             {
-                throw new RemoteTransportException("the authority link could not be made (" + error.GetType().Name + ")");
+                throw new RemoteTransportException("the authority link could not be made (" + TransportFailure.Describe(error) + ")");
             }
 
             pool.Enter();
@@ -749,7 +754,7 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, ILaunchAuthority, 
             }
             catch (Exception error) when (error is HttpRequestException or IOException or AuthenticationException or ObjectDisposedException)
             {
-                throw new RemoteTransportException("the authority could not be reached (" + error.GetType().Name + ")");
+                throw new RemoteTransportException("the authority could not be reached (" + TransportFailure.Describe(error) + ")");
             }
             finally
             {

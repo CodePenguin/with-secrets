@@ -374,6 +374,16 @@ internal static partial class RemoteAuthorityTests
         {
             IdentityCertificates(check);
             TemporaryCertificates(check);
+            // The failure text names the chain of types and the platform's own TLS text, and nothing a program put in another exception's message.
+            string described = TransportFailure.Describe(new HttpRequestException(HttpRequestError.SecureConnectionError, "token=SECRET-VALUE", new System.Security.Authentication.AuthenticationException("Authentication failed", new PlatformNotSupportedException("The requested security protocol is not supported."))));
+            check(described.Contains("HttpRequestException [SecureConnectionError]", StringComparison.Ordinal) && described.Contains("AuthenticationException", StringComparison.Ordinal) && described.Contains("PlatformNotSupportedException", StringComparison.Ordinal)
+                && described.Contains("security protocol is not supported", StringComparison.Ordinal) && !described.Contains("SECRET-VALUE", StringComparison.Ordinal), "transport failure: the text names the exception chain and the platform's TLS message, never another exception's message (" + described + ")");
+
+            if (PlatformSkip.NoServerTls13("remote transport (rotation, operations, downgrades, revocation, long poll)"))
+            {
+                return;
+            }
+
             await Rotation(check, root);
             await Operations(check, root);
             await CustomRoot(check, root);

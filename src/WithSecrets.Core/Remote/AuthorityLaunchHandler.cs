@@ -65,6 +65,9 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
         _sweeper = Task.Run(() => SweepLoopAsync(sweepInterval ?? TimeSpan.FromSeconds(1)));
     }
 
+    /// <summary>TEST ONLY: runs once an approval from the approval page is committed durably and before it is checked for delivery, with the session's token (a test ends the session here to put the end exactly between the two).</summary>
+    internal static Action<CancellationToken>? AfterApprovalCommitted { get; set; }
+
     /// <summary>How many secret reads this handler made for launches (for tests and status; a count only).</summary>
     public int Decryptions => Volatile.Read(ref _decryptions);
 
@@ -376,6 +379,8 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
             {
                 return deny(ReasonCodes.RequestIdReused, response.SecurityRevision);
             }
+
+            AfterApprovalCommitted?.Invoke(cancel);
 
             if (cancel.IsCancellationRequested)
             {

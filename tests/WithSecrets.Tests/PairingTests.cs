@@ -358,6 +358,11 @@ internal static partial class PairingTests
         {
             Protocol(check);
             await Store(check, root);
+            if (PlatformSkip.NoServerTls13("pairing over the machine listener"))
+            {
+                return;
+            }
+
             await HappyPath(check, root);
             await Substitution(check, root);
             await Invitations(check, root);

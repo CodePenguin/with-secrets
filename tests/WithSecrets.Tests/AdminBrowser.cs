@@ -264,7 +264,7 @@ internal sealed class AdminBrowser(HostService service, HttpClient http)
     public async Task<string> WaitAuthorizationAsync(string id)
     {
         string state = "pending";
-        for (int i = 0; i < 100 && state is "pending" or "verified"; i++)
+        for (int i = 0; i < 200; i++)
         {
             (int status, string body) = await SendAsync(HttpMethod.Get, "/api/v1/authorizations/" + id, null);
             if (status != 200)
@@ -274,10 +274,14 @@ internal sealed class AdminBrowser(HostService service, HttpClient http)
 
             using JsonDocument doc = JsonDocument.Parse(body);
             state = doc.RootElement.GetProperty("state").GetString()!;
-            if (state is "pending" or "verified")
+            // Consumed is a state before it is a result: the plan is applied just after the state changes, so a reader can see consumed with no result for a moment. Wait for the result too.
+            bool resultThere = doc.RootElement.TryGetProperty("result", out JsonElement result) && result.ValueKind == JsonValueKind.Object;
+            if (state is not ("pending" or "verified") && (state != "consumed" || resultThere))
             {
-                await Task.Delay(50);
+                return state;
             }
+
+            await Task.Delay(50);
         }
 
         return state;
