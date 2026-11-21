@@ -50,7 +50,7 @@ internal static class LocalPipeTests
             bool refusesNetwork = rules.Any(rule => rule.AccessControlType == AccessControlType.Deny && rule.IdentityReference.Equals(network));
             string who = string.Join(", ", rules.Select(rule => rule.AccessControlType + " " + rule.IdentityReference.Value));
             check(onlyMe && refusesNetwork, "pipe: the access list allows only the current user and refuses network (remote) clients (" + who + ")");
-            check(security.GetOwner(typeof(SecurityIdentifier))?.Equals(me) == true, "pipe: the pipe is owned by the current user");
+            check(security.GetOwner(typeof(SecurityIdentifier))?.Equals(WindowsIdentity.GetCurrent().Owner) == true, "pipe: the pipe is owned by the current token's owner (the user, or Administrators when elevated: what the client's current-user check expects)");
 
             // Nobody can take the name over: a pipe of this name, made first-instance, cannot be made while the service holds it; a second service of this user cannot share it either.
             bool squatted = true;

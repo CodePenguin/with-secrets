@@ -142,7 +142,8 @@ internal sealed class NamedPipeEndpoint(string name) : LocalEndpoint
         System.Security.Principal.SecurityIdentifier me = System.Security.Principal.WindowsIdentity.GetCurrent().User!;
         security.AddAccessRule(new System.IO.Pipes.PipeAccessRule(new System.Security.Principal.SecurityIdentifier(System.Security.Principal.WellKnownSidType.NetworkSid, null), System.IO.Pipes.PipeAccessRights.FullControl, System.Security.AccessControl.AccessControlType.Deny));
         security.AddAccessRule(new System.IO.Pipes.PipeAccessRule(me, System.IO.Pipes.PipeAccessRights.ReadWrite | System.IO.Pipes.PipeAccessRights.CreateNewInstance, System.Security.AccessControl.AccessControlType.Allow));
-        security.SetOwner(me);
+        // The owner is the token's default owner, which is what the client's CurrentUserOnly check compares with: the user's own SID, or the Administrators group for an elevated process. Only the access list above decides who may open the pipe.
+        security.SetOwner(System.Security.Principal.WindowsIdentity.GetCurrent().Owner!);
 
         return security;
     }
