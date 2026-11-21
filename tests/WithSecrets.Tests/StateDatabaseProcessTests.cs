@@ -110,6 +110,7 @@ internal static class StateDatabaseProcessTests
         await WritersWaitBehindAnotherProcess(check, root);
         await GateIsReleasedWhenItsHolderDies(check, root);
         await UntrustedGateFile(check, root);
+        LockVerification(check, root);
     }
 
     /// <summary>Writer processes for one folder, all started and ready (each holds its own passkey), none released yet.</summary>
@@ -389,4 +390,81 @@ internal static class StateDatabaseProcessTests
 
         check(linkRefused is StateDatabaseException && File.ReadAllText(victim) == "keep" && !File.Exists(Path.Combine(linked, "state.db")), "db gate: a lock file that is a link is refused and what it points to is untouched (" + linkRefused?.Message + ")");
     }
-}
+
+    /// <summary>
+    /// The creation lock is trusted only when a second exclusive open of the held lock file is refused because the file is locked. The real refusal of this operating system is recognized; every other failure, and a second open that
+    /// works, is not proof; and when locking cannot be verified nothing is created.
+    /// </summary>
+    private static void LockVerification(Action<bool, string> check, string root)
+    {
+        // The real thing, on whichever operating system this runs on: a second share-none open of a held file.
+        string folder = Path.Combine(root, "verify");
+        Directory.CreateDirectory(folder);
+        StateDatabase db = StateDatabase.InFolder(folder);
+        IOException? contention = null;
+        using (db.HoldCreationGateForTests())
+        {
+            try
+            {
+                using FileStream second = new(Path.Combine(folder, "state.db.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1);
+            }
+            catch (IOException error)
+            {
+                contention = error;
+            }
+        }
+
+        check(contention is not null && StateDatabase.ClassifyFailure(contention) == StateDatabase.GateProbe.Excluded, "db gate verification: the refusal of a second open of a held lock file is recognized as the lock working (" + (contention is null ? "it opened" : "HRESULT 0x" + contention.HResult.ToString("X8", System.Globalization.CultureInfo.InvariantCulture)) + ")");
+
+        // Anything else is not proof. Failures that are not about the lock, made by hand: handle and memory exhaustion, a full disk, a plain I/O error, a lock violation (a byte range), no permission.
+        Exception[] unrelated =
+        [
+            new IOException("too many open files (process)", OperatingSystem.IsWindows() ? unchecked((int)0x80070004) : 24),
+            new IOException("too many open files (system)", OperatingSystem.IsWindows() ? unchecked((int)0x80070004) : 23),
+            new IOException("no space left on device", OperatingSystem.IsWindows() ? unchecked((int)0x80070070) : 28),
+            new IOException("an I/O error"),
+            new IOException("a byte range is locked", unchecked((int)0x80070021)),
+            new IOException("an input/output error", 5),
+            new UnauthorizedAccessException("no permission"),
+            new OutOfMemoryException(),
+            new InvalidOperationException("anything else"),
+        ];
+        check(unrelated.All(error => StateDatabase.ClassifyFailure(error) == StateDatabase.GateProbe.Unverified), "db gate verification: handle exhaustion, a full disk, memory, permission, a byte-range lock and any other failure are not taken as proof that the lock works");
+
+        // The other operating systems' answers are not this one's: each platform recognizes exactly its own.
+        IOException otherPlatform = new("locked", OperatingSystem.IsWindows() ? 11 : OperatingSystem.IsMacOS() ? 11 : 35);
+        check(StateDatabase.ClassifyFailure(otherPlatform) == StateDatabase.GateProbe.Unverified, "db gate verification: the contention answer of another platform is not accepted here");
+
+        // When locking cannot be verified, the creation stops: no database, no change. A second open that fails for another reason, and one that wrongly works.
+        string failing = Path.Combine(root, "verify-fail");
+        Directory.CreateDirectory(failing);
+        StateDatabase unverifiable = new(Path.Combine(failing, "state.db"), TimeSpan.FromSeconds(2)) { SecondGateOpen = () => throw new IOException("too many open files", OperatingSystem.IsWindows() ? unchecked((int)0x80070004) : 24) };
+        Exception? refused = null;
+        try
+        {
+            unverifiable.Write((_, _) => 0);
+        }
+        catch (Exception error)
+        {
+            refused = error;
+        }
+
+        string[] after = [.. Directory.GetFileSystemEntries(failing).Select(Path.GetFileName)!];
+        check(refused is StateDatabaseException && refused.Message.Contains("could not be verified", StringComparison.Ordinal) && !File.Exists(Path.Combine(failing, "state.db")) && after.All(name => name == "state.db.lock"), "db gate verification: when the check fails for a reason other than the lock, creation stops with that diagnostic and no database or temporary file is made (" + refused?.Message + "; " + string.Join(",", after) + ")");
+
+        string working = Path.Combine(root, "verify-open");
+        Directory.CreateDirectory(working);
+        string workingLock = Path.Combine(working, "state.db.lock");
+        StateDatabase excludesNobody = new(Path.Combine(working, "state.db"), TimeSpan.FromSeconds(2)) { SecondGateOpen = () => new FileStream(Path.Combine(root, "verify-open-other.tmp"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite, 1, FileOptions.DeleteOnClose) };
+        Exception? allowed = null;
+        try
+        {
+            excludesNobody.Write((_, _) => 0);
+        }
+        catch (Exception error)
+        {
+            allowed = error;
+        }
+
+        check(allowed is StateDatabaseException && allowed.Message.Contains("does not exclude", StringComparison.Ordinal) && !File.Exists(Path.Combine(working, "state.db")) && File.Exists(workingLock), "db gate verification: a second open that works means the lock excludes nobody, and creation stops with that diagnostic (" + allowed?.Message + ")");
+    }}
