@@ -161,13 +161,12 @@ public sealed class HostService : IDisposable
     /// <summary>The most launches in progress at once; each holds an approval page and a thread.</summary>
     public const int MaxConcurrentLaunches = 8;
 
-    private HostService(HostServiceOptions options, WebApplication app, int port, LocalEndpoint endpoint)
+    private HostService(HostServiceOptions options, WebApplication app, int port)
     {
         _options = options;
         _web = options.WebAssets ?? AdminWebAssets.FromAssembly();
         _app = app;
         Port = port;
-        Endpoint = options.CommandLineEndpoint ?? endpoint;
         // The authority believes a grant only when a person's passkey assertion backs it: it checks those against the keys of the signed manifest.
         options.Deployment.Authority.Verifier ??= options.State is { } verifierState ? new ManifestApprovalVerifier(verifierState) : null;
         Authorization = options.Deployment.CreateAuthorization(options.Gate, options.Monotonic);
@@ -277,11 +276,11 @@ public sealed class HostService : IDisposable
     /// <summary>The host's side of the authority protocol: signs requests, verifies answers, applies invalidations.</summary>
     public HostAuthorization Authorization { get; }
 
-    /// <summary>The loopback port: where the browser administration is served (and, until the command line has its own endpoint, the command line).</summary>
+    /// <summary>The loopback port of the browser administration. The command line does not use it: it has its own endpoint (<see cref="Endpoint" />).</summary>
     public int Port { get; }
 
     /// <summary>Where the command line reaches this service.</summary>
-    public LocalEndpoint Endpoint { get; }
+    public LocalEndpoint Endpoint => _options.CommandLineEndpoint ?? throw new InvalidOperationException("this service has no command line endpoint");
 
     public LaunchGate Gate => _options.Gate;
 
@@ -316,7 +315,7 @@ public sealed class HostService : IDisposable
             {
                 LocalEndpoint endpoint = LocalEndpoint.Loopback(port, withIpv6);
                 WebApplication app = Build(options, endpoint);
-                service = new HostService(options, app, port, endpoint);
+                service = new HostService(options, app, port);
                 // Locked by default; unattended unlock applies only when the administrator chose it. Before any request is accepted: check machine status, host name binding and security
                 // revision with the authority (it also vouches for the machine), which needs the authority unlocked.
                 service._startupUnlockNote = service.Lock.IsLocked ? UnattendedUnlock.TryUnlock(options.Deployment.Store, options.Deployment.Keys, service.Lock, options.UnlockProtection ?? UnlockProtections.ForThisPlatform()) : null;
@@ -554,7 +553,18 @@ public sealed class HostService : IDisposable
 
         // Two surfaces share this listener until the command line has its own endpoint: the browser administration (/api and the /admin application) and the command line's routes (/v1).
         // Each is handled apart, and nothing under /v1 is reachable from the browser's handler or the other way round.
-        if (IsBrowserSurface(path))
+        // A connection may use only the surface of the listener it came on: the command line's endpoint answers /v1 and nothing of the browser administration; the loopback port answers the browser administration and nothing
+        // of /v1. A connection that carries no surface (it cannot happen with the listeners made here) is answered nothing.
+        string? surface = context.Features.Get<Microsoft.AspNetCore.Connections.Features.IConnectionItemsFeature>()?.Items.TryGetValue(LocalEndpoint.SurfaceItem, out object? marked) == true ? marked as string : null;
+        bool browserRoute = IsBrowserSurface(path);
+        if (surface != (browserRoute ? LocalEndpoint.BrowserSurface : LocalEndpoint.CommandLineSurface))
+        {
+            await Refuse(response, 404, "not found");
+
+            return;
+        }
+
+        if (browserRoute)
         {
             await HandleBrowser(context, path);
 

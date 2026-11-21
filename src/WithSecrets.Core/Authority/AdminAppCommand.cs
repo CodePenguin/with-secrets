@@ -11,7 +11,7 @@ namespace WithSecrets;
 /// </summary>
 public static class AdminAppCommand
 {
-    public static async Task<int> RunAsync(int? chosenPort, TextWriter output, TextWriter error, ServiceTrust trust, Action<string>? open = null)
+    public static async Task<int> RunAsync(int? chosenPort, TextWriter output, TextWriter error, ServiceTrust trust, Action<string>? open = null, LocalEndpoint? endpoint = null)
     {
         int? port = ServiceEndpoint.Resolve(chosenPort, Environment.GetEnvironmentVariable, out string? problem);
         if (port is null)
@@ -22,20 +22,22 @@ public static class AdminAppCommand
         }
 
         string link = $"http://localhost:{port}/admin";
-        using HttpClient client = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(3) };
+        // The service is asked through the command line's endpoint (who it is, whether it runs); the port is only where the browser finds the app.
+        endpoint ??= LocalEndpoint.ForCommandLine();
+        using HttpClient client = new(endpoint.CreateHandler()) { Timeout = TimeSpan.FromSeconds(3) };
         if (trust is { PinnedFingerprint: null, Problem: null })
         {
             // First run: this machine is not approved yet, so no identity is pinned and the program on the port cannot be checked. The link is public and carries nothing; it is offered
             // as unverified (and not opened), and the person compares the fingerprint the service printed in its own window before approving anything.
             await output.WriteLineAsync("Admin web app: " + link);
-            await output.WriteLineAsync("Service: " + await StatusAsync(client, port.Value));
+            await output.WriteLineAsync("Service: " + await StatusAsync(client, endpoint));
             await output.WriteLineAsync("Not verified: this machine is not approved yet, so no identity is pinned and the program on the port cannot be checked. Open the link only if the service you started printed this port, and compare its fingerprint with the one shown in the app before you approve.");
 
             return 0;
         }
 
         StringWriter refusal = new();
-        int? refused = await LaunchClient.AuthenticateService(client, LocalEndpoint.Loopback(port.Value), trust, refusal, CancellationToken.None);
+        int? refused = await LaunchClient.AuthenticateService(client, endpoint, trust, refusal, CancellationToken.None);
         if (refused == LaunchClient.ServiceNotAuthenticated)
         {
             // Not this machine's service: nothing is trusted, and the link is not offered as the authority's.
@@ -44,7 +46,7 @@ public static class AdminAppCommand
             return LaunchClient.ServiceNotAuthenticated;
         }
 
-        string status = refused is null ? await StatusAsync(client, port.Value) : "not running (start it with: with-secrets service)";
+        string status = refused is null ? await StatusAsync(client, endpoint) : "not running (start it with: with-secrets service)";
         await output.WriteLineAsync("Admin web app: " + link);
         await output.WriteLineAsync("Service: " + status);
         if (open is not null && refused is null)
@@ -56,18 +58,18 @@ public static class AdminAppCommand
         return 0;
     }
 
-    /// <summary>The public status line of the service on the port: not running, or running with its lock state.</summary>
-    public static async Task<string> StatusAsync(HttpClient client, int port)
+    /// <summary>The public status line of the service at its command line endpoint: not running, or running with its lock state.</summary>
+    public static async Task<string> StatusAsync(HttpClient client, LocalEndpoint endpoint)
     {
         try
         {
             client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-            using JsonDocument doc = JsonDocument.Parse(await client.GetStringAsync($"http://127.0.0.1:{port}/v1/status"));
+            using JsonDocument doc = JsonDocument.Parse(await client.GetStringAsync(new Uri(endpoint.BaseUri, "v1/status")));
             bool locked = doc.RootElement.TryGetProperty("locked", out JsonElement value) && value.ValueKind != JsonValueKind.False;
 
             return locked ? "running, LOCKED (unlock it in the app)" : "running, unlocked";
         }
-        catch (Exception error) when (error is HttpRequestException or TaskCanceledException or JsonException)
+        catch (Exception error) when (error is HttpRequestException or TaskCanceledException or JsonException or IOException)
         {
             return "not running (start it with: with-secrets service)";
         }

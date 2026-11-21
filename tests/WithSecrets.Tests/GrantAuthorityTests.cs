@@ -992,6 +992,7 @@ internal static class GrantAuthorityTests
         string id = made.GrantId!;
         using HostService service = HostService.Start(new HostServiceOptions
         {
+            CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(),
             Lock = AuthorityLock.UnlockedForTests(),
             State = fx.Db,
             Store = new HostServiceTests.CountingStore(new Dictionary<string, string> { ["TOKEN"] = "x" }),

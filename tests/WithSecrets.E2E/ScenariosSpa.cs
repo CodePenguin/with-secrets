@@ -372,7 +372,9 @@ internal static class ScenariosSpa
             try
             {
                 await results.GetByText(Rig.ScriptFile("check")).First.WaitForAsync(new() { Timeout = 1500 });
-                found = true;
+                // The events arrive one after the other: the run's first event is not all of them. Done when the authorization and the start have both come.
+                string seen = await results.TextContentAsync() ?? "";
+                found = seen.Contains("approved", StringComparison.Ordinal) && seen.Contains("started", StringComparison.Ordinal);
             }
             catch (Exception)
             {
@@ -380,7 +382,7 @@ internal static class ScenariosSpa
             }
         }
 
-        s.Check(found, "the audit view shows the run's events once the host has uploaded them");
+        s.Check(found, "the audit view shows the run's events (the authorization and the start) once the host has uploaded them");
         string all = await results.TextContentAsync() ?? "";
         s.Check(all.Contains("approved", StringComparison.Ordinal) && all.Contains("started", StringComparison.Ordinal) && !all.Contains(SecretValue, StringComparison.Ordinal), "it shows the authorization and launch outcomes and no secret value");
         s.Check(c.Page.Url.Contains("text=" + Rig.ScriptFile("check"), StringComparison.Ordinal), "the search is in the address");

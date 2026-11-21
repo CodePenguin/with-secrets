@@ -126,7 +126,7 @@ internal static class StateDatabaseTests
         two.Join();
         StateDatabase check1 = StateDatabase.InFolder(folder);
         check(failure is null && refused == 0, "db parallel: no write was refused (" + failure?.Message + ", " + refused + ")");
-        check(new PasskeyStore(check1).All().Count == 2 * Each && TestState.Current(check1)!.Version == 2 * Each, "db parallel: no passkey was lost; one manifest version per key (" + new PasskeyStore(check1).All().Count + " keys, version " + TestState.Current(check1)?.Version + ", expected " + 2 * Each + ")");
+        IReadOnlyList<PasskeyRecord> stored = new PasskeyStore(check1).All(); string[] expectedIds = [.. Enumerable.Range(0, Each).SelectMany(index => new[] { Id("a" + index), Id("b" + index) })]; string missing = string.Join(",", expectedIds.Except(stored.Select(item => item.Id)).Select(id => id[..Math.Min(8, id.Length)])); string distinct = expectedIds.Distinct().Count() + " distinct ids"; check(stored.Count == 2 * Each && TestState.Current(check1)!.Version == 2 * Each, "db parallel: no passkey was lost; one manifest version per key (" + stored.Count + " keys, version " + TestState.Current(check1)?.Version + ", expected " + 2 * Each + "; missing [" + missing + "]; " + distinct + ")");
         IReadOnlyList<AuditEvent> written = TestAudit.Events(check1);
         check(written.Count == 2 * Each && written.Select(item => item.Sequence).OrderBy(n => n).SequenceEqual(Enumerable.Range(1, 2 * Each).Select(n => (long)n)) && written.Select(item => item.EventId).Distinct().Count() == 2 * Each, "db parallel: every audit event is there, numbered without a gap or a repeat, by two writers");
     }

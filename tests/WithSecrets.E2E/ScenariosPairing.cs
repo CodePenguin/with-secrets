@@ -104,15 +104,15 @@ internal static class ScenariosPairing
 
         string script = rig.WriteScript("remote", "remote-value", runnable: true);
         StateDatabase hostState = StateDatabase.InFolder(folder);
-        using HostService hostService = HostService.Start(new HostServiceOptions { Lock = AuthorityLock.UnlockedForTests(), State = hostState, Store = new SecretStore(hostState), Deployment = hostDeployment, Port = 0, TimeLimit = TimeSpan.FromSeconds(60) });
+        using HostService hostService = HostService.Start(new HostServiceOptions { CommandLineEndpoint = E2EEndpoint.Make(), Lock = AuthorityLock.UnlockedForTests(), State = hostState, Store = new SecretStore(hostState), Deployment = hostDeployment, Port = 0, TimeLimit = TimeSpan.FromSeconds(60) });
         Dictionary<string, string> environment = Environment.GetEnvironmentVariables().Cast<System.Collections.DictionaryEntry>().ToDictionary(entry => (string)entry.Key, entry => (string)(entry.Value ?? ""), StringComparer.OrdinalIgnoreCase);
-        using HttpClient http = new() { Timeout = TimeSpan.FromSeconds(120) };
+        using HttpClient http = new(hostService.Endpoint.CreateHandler()) { Timeout = TimeSpan.FromSeconds(120) };
 
         // The paired host asks to run the script. Its request waits in the authority's Approvals queue; a person decides it on the Approvals page.
         async Task<(LaunchEvent? Result, string Output, string All)> Launch(string reason, Func<Task> decide)
         {
             LaunchRequest request = new(LaunchProtocol.Version, "e2e-" + Guid.NewGuid().ToString("N")[..8], DateTimeOffset.UtcNow, DateTimeOffset.UtcNow.AddMinutes(5), "bm9uY2UtMDAwMDAwMDE" + Guid.NewGuid().ToString("N")[..6], ["E2E_SECRET"], [new LaunchMapping("E2E_SECRET", "E2E_SECRET")], reason, script, [], rig.Work, [], [], new Dictionary<string, string>(), environment, []);
-            using HttpRequestMessage message = new(HttpMethod.Post, $"http://127.0.0.1:{hostService.Port}/v1/launch") { Content = new StringContent(request.Canonical(), new UTF8Encoding(false), new MediaTypeHeaderValue("application/json")) };
+            using HttpRequestMessage message = new(HttpMethod.Post, new Uri(hostService.Endpoint.BaseUri, "v1/launch")) { Content = new StringContent(request.Canonical(), new UTF8Encoding(false), new MediaTypeHeaderValue("application/json")) };
             message.Headers.Add(HostService.DigestHeader, request.Digest());
             using HttpResponseMessage response = await http.SendAsync(message, HttpCompletionOption.ResponseHeadersRead);
             using StreamReader reader = new(await response.Content.ReadAsStreamAsync(), new UTF8Encoding(false));

@@ -119,6 +119,7 @@ internal static class RemoteLaunchTests
 
             auth.Service = HostService.Start(new HostServiceOptions
             {
+                CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(),
                 Lock = auth.Gate,
                 UnlockProtection = new ReversibleProtection(),
                 State = auth.State,

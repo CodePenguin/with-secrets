@@ -129,6 +129,7 @@ internal static class HostServiceTests
             Approvers = [];
             Service = HostService.Start(new HostServiceOptions
             {
+                CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(),
                 Lock = startLocked ? null : AuthorityLock.UnlockedForTests(),
                 UnlockProtection = protection,
                 AdminAskerFactory = adminAskers,
@@ -136,7 +137,6 @@ internal static class HostServiceTests
                 Store = Store,
                 Deployment = Machine.Deployment,
                 Port = 0,
-                CommandLineEndpoint = TestEndpoint(),
                 BodyTimeout = bodyTimeout ?? TimeSpan.FromSeconds(15),
                 ApproverFactory = (_, _) =>
                 {
@@ -154,8 +154,8 @@ internal static class HostServiceTests
             });
         }
 
-        /// <summary>The command line's endpoint of a test service: Windows, a named pipe of its own; Linux and macOS, a socket in a private directory of its own. WS_TEST_TRANSPORT=loopback leaves only the loopback port.</summary>
-        internal static LocalEndpoint? TestEndpoint() => Environment.GetEnvironmentVariable("WS_TEST_TRANSPORT") == "loopback" ? null : OperatingSystem.IsWindows() ? LocalEndpoint.NamedPipe("ws-test-" + Guid.NewGuid().ToString("N")) : LocalEndpoint.UnixSocket(NewSocketDirectory());
+        /// <summary>The command line's endpoint of a test service: Windows, a named pipe of its own; Linux and macOS, a socket in a private directory of its own.</summary>
+        internal static LocalEndpoint TestEndpoint() => OperatingSystem.IsWindows() ? LocalEndpoint.NamedPipe("ws-test-" + Guid.NewGuid().ToString("N")) : LocalEndpoint.UnixSocket(NewSocketDirectory());
 
         /// <summary>A private socket directory of its own for one test service (short, because socket paths are limited to about 100 bytes).</summary>
         internal static string NewSocketDirectory()
@@ -327,35 +327,72 @@ internal static class HostServiceTests
     }
 
     /// <summary>
-    /// The two surfaces of the service are handled apart: the command line's routes (/v1, the application protocol) and the browser administration (/api, /admin). The request goes through the rig's endpoint, so this same
-    /// check runs over every transport the command line has.
+    /// The two surfaces of the service are on separate listeners and each answers only its own routes: the command line's endpoint (the pipe or the socket) answers /v1 and nothing of the browser administration; the loopback
+    /// port answers the browser administration (/api, /admin) and nothing of /v1. The browser administration is therefore no way around the command line's access control, and the command line's routes are no longer
+    /// reachable by any process that can merely open a loopback port.
     /// </summary>
     private static async Task Surfaces(Action<bool, string> check, string parent)
     {
         using Rig rig = new(parent);
-        async Task<(HttpStatusCode Status, string Body, string? Type)> Get(string path)
-        {
-            using HttpResponseMessage response = await rig.Http.GetAsync(rig.Url(path));
+        using HttpClient web = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(30) };
+        string loopback = "http://127.0.0.1:" + rig.Service.Port;
 
-            return (response.StatusCode, await response.Content.ReadAsStringAsync(), response.Content.Headers.ContentType?.MediaType);
+        async Task<(HttpStatusCode Status, string Body)> OverEndpoint(HttpMethod method, string path, string? body = null)
+        {
+            using HttpRequestMessage message = new(method, rig.Url(path));
+            if (body is not null)
+            {
+                message.Content = new StringContent(body, new UTF8Encoding(false), new MediaTypeHeaderValue("application/json"));
+            }
+
+            using HttpResponseMessage response = await rig.Http.SendAsync(message);
+
+            return (response.StatusCode, await response.Content.ReadAsStringAsync());
         }
 
-        (HttpStatusCode Status, string Body, string? Type) cli = await Get("/v1/status");
-        (HttpStatusCode Status, string Body, string? Type) browser = await Get("/api/v1/status");
-        (HttpStatusCode Status, string Body, string? Type) unknownCli = await Get("/v1/nothing");
-        (HttpStatusCode Status, string Body, string? Type) browserUnderCli = await Get("/v1/api/v1/status");
-        check(cli.Status == HttpStatusCode.OK && cli.Body.Contains("\"protocolVersion\"", StringComparison.Ordinal) && cli.Body.Contains("\"running\":true", StringComparison.Ordinal), "surfaces: the command line's status route answers with the protocol's own document");
-        check(browser.Body.Contains("apiVersion", StringComparison.Ordinal) && !cli.Body.Contains("apiVersion", StringComparison.Ordinal), "surfaces: the same name under /api is the browser administration's own document, not the command line's (" + (int)browser.Status + ")");
-        check(unknownCli.Status == HttpStatusCode.NotFound && browserUnderCli.Status == HttpStatusCode.NotFound, "surfaces: an unknown command line route, and an administration route placed under /v1, are 404 (" + (int)unknownCli.Status + ", " + (int)browserUnderCli.Status + ")");
+        async Task<(HttpStatusCode Status, string Body)> OverLoopback(HttpMethod method, string path, string? body = null)
+        {
+            using HttpRequestMessage message = new(method, loopback + path);
+            if (body is not null)
+            {
+                message.Content = new StringContent(body, new UTF8Encoding(false), new MediaTypeHeaderValue("application/json"));
+            }
 
+            using HttpResponseMessage response = await web.SendAsync(message);
+
+            return (response.StatusCode, await response.Content.ReadAsStringAsync());
+        }
+
+        const string Challenge = "{\"challenge\":\"AAAAAAAAAAAAAAAAAAAAAA\"}";
+        (HttpStatusCode Status, string Body) cli = await OverEndpoint(HttpMethod.Get, "/v1/status");
+        (HttpStatusCode Status, string Body) browser = await OverLoopback(HttpMethod.Get, "/api/v1/status");
+        check(cli.Status == HttpStatusCode.OK && cli.Body.Contains("\"running\":true", StringComparison.Ordinal) && !cli.Body.Contains("apiVersion", StringComparison.Ordinal), "surfaces: the command line's endpoint answers the command line's own status document");
+        check(browser.Status == HttpStatusCode.OK && browser.Body.Contains("apiVersion", StringComparison.Ordinal), "surfaces: the loopback port answers the browser administration's API");
+
+        // The browser administration is not on the command line's endpoint.
+        (HttpStatusCode Status, string Body) apiOnCli = await OverEndpoint(HttpMethod.Get, "/api/v1/status");
+        (HttpStatusCode Status, string Body) adminOnCli = await OverEndpoint(HttpMethod.Get, "/admin/");
+        (HttpStatusCode Status, string Body) changeOnCli = await OverEndpoint(HttpMethod.Post, "/api/v1/unlock", "{\"authorization\":\"AAAAAAAAAAAA\"}");
+        check(apiOnCli.Status == HttpStatusCode.NotFound && adminOnCli.Status == HttpStatusCode.NotFound && changeOnCli.Status == HttpStatusCode.NotFound && !apiOnCli.Body.Contains("apiVersion", StringComparison.Ordinal), "surfaces: /api and /admin are not answered on the command line's endpoint (" + (int)apiOnCli.Status + ", " + (int)adminOnCli.Status + ", " + (int)changeOnCli.Status + ")");
+
+        // The command line's routes are not on the loopback port: no process that can open a port can reach them.
+        (HttpStatusCode Status, string Body) statusOnLoopback = await OverLoopback(HttpMethod.Get, "/v1/status");
+        (HttpStatusCode Status, string Body) identityOnLoopback = await OverLoopback(HttpMethod.Post, "/v1/identity", Challenge);
+        (HttpStatusCode Status, string Body) launchOnLoopback = await OverLoopback(HttpMethod.Post, "/v1/launch", "{}");
+        (HttpStatusCode Status, string Body) approveOnLoopback = await OverLoopback(HttpMethod.Post, "/v1/approve", "{}");
+        (HttpStatusCode Status, string Body) cancelOnLoopback = await OverLoopback(HttpMethod.Post, "/v1/launch/req-x/cancel", "{}");
+        check(new[] { statusOnLoopback, identityOnLoopback, launchOnLoopback, approveOnLoopback, cancelOnLoopback }.All(answer => answer.Status == HttpStatusCode.NotFound) && !statusOnLoopback.Body.Contains("protocolVersion", StringComparison.Ordinal) && rig.Approvers.IsEmpty, "surfaces: /v1 (status, identity, launch, approve, cancel) is not answered on the loopback port, and nothing reached an approver");
+
+        // The same refusals hold on the command line's own routes.
         using HttpRequestMessage fromPage = new(HttpMethod.Post, rig.Url("/v1/identity"));
         fromPage.Headers.Add("Origin", "http://example.test");
-        fromPage.Content = new StringContent("{\"challenge\":\"AAAAAAAAAAAAAAAAAAAAAA\"}", new UTF8Encoding(false), new MediaTypeHeaderValue("application/json"));
+        fromPage.Content = new StringContent(Challenge, new UTF8Encoding(false), new MediaTypeHeaderValue("application/json"));
         using HttpResponseMessage pageResponse = await rig.Http.SendAsync(fromPage);
         using HttpRequestMessage badHost = new(HttpMethod.Get, rig.Url("/v1/status"));
         badHost.Headers.Host = "evil.example";
         using HttpResponseMessage badHostResponse = await rig.Http.SendAsync(badHost);
-        check(pageResponse.StatusCode == HttpStatusCode.Forbidden && badHostResponse.StatusCode == (HttpStatusCode)421, "surfaces: a request with an Origin (a web page) and one with a Host that is not a local name are refused on the command line's routes");
+        (HttpStatusCode Status, string Body) unknownCli = await OverEndpoint(HttpMethod.Get, "/v1/nothing");
+        check(pageResponse.StatusCode == HttpStatusCode.Forbidden && badHostResponse.StatusCode == (HttpStatusCode)421 && unknownCli.Status == HttpStatusCode.NotFound, "surfaces: on the command line's routes, a request with an Origin (a web page) and one with a Host that is not a local name are refused, and an unknown route is 404");
     }
     public static async Task Run(Action<bool, string> check)
     {
@@ -546,10 +583,8 @@ internal static class HostServiceTests
 
         // A body that stalls (headers, then one byte of a hundred): answered 408 after the read timeout, nothing is started.
         using Rig slow = new(parent, bodyTimeout: TimeSpan.FromMilliseconds(500));
-        using TcpClient raw = new();
-        await raw.ConnectAsync(IPAddress.Loopback, slow.Service.Port);
-        NetworkStream wire = raw.GetStream();
-        string head = string.Join("\r\n", "POST /v1/launch HTTP/1.1", "Host: 127.0.0.1:" + slow.Service.Port, "Content-Type: application/json", HostService.DigestHeader + ": " + new string((char)48, 64), "Content-Length: 100", "", "{");
+        using Stream wire = await slow.Service.Endpoint.ConnectAsync(CancellationToken.None);
+        string head = string.Join("\r\n", "POST /v1/launch HTTP/1.1", "Host: localhost", "Content-Type: application/json", HostService.DigestHeader + ": " + new string((char)48, 64), "Content-Length: 100", "", "{");
         await wire.WriteAsync(Encoding.ASCII.GetBytes(head));
         using CancellationTokenSource limit = new(TimeSpan.FromSeconds(8));
         byte[] buffer = new byte[512];
@@ -930,13 +965,13 @@ internal static class HostServiceTests
                 throw new InvalidOperationException(problem);
             }
 
-            using HostService service = HostService.Start(new HostServiceOptions { Lock = AuthorityLock.UnlockedForTests(), State = db, Store = store, Deployment = machine.Deployment, Port = 0, TimeLimit = TimeSpan.FromSeconds(30), ApproverFactory = (settings, announce) => CommandWiring.RunApprover(db, settings, announce) });
-            using HttpClient client = new(new SocketsHttpHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(60) };
+            using HostService service = HostService.Start(new HostServiceOptions { CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), Lock = AuthorityLock.UnlockedForTests(), State = db, Store = store, Deployment = machine.Deployment, Port = 0, TimeLimit = TimeSpan.FromSeconds(30), ApproverFactory = (settings, announce) => CommandWiring.RunApprover(db, settings, announce) });
+            using HttpClient client = new(service.Endpoint.CreateHandler()) { Timeout = TimeSpan.FromSeconds(60) };
             DateTimeOffset now = DateTimeOffset.UtcNow;
             LaunchRequest request = new(LaunchProtocol.Version, "http-" + Guid.NewGuid().ToString("N")[..8], now, now.AddMinutes(5), "bm9uY2UtMDAwMDAwMDEx" + Guid.NewGuid().ToString("N")[..6], ["TOKEN"], [new LaunchMapping("TOKEN", "TOKEN")], "approval over http", "./" + program, [], work, [], [], new Dictionary<string, string>(), Env(), []);
             string page = "";
             int status = 0;
-            using HttpRequestMessage message = new(HttpMethod.Post, "http://127.0.0.1:" + service.Port + "/v1/launch") { Content = new StringContent(request.Canonical(), new UTF8Encoding(false), new MediaTypeHeaderValue("application/json")) };
+            using HttpRequestMessage message = new(HttpMethod.Post, new Uri(service.Endpoint.BaseUri, "v1/launch")) { Content = new StringContent(request.Canonical(), new UTF8Encoding(false), new MediaTypeHeaderValue("application/json")) };
             message.Headers.Add(HostService.DigestHeader, request.Digest());
             using HttpResponseMessage response = await client.SendAsync(message, HttpCompletionOption.ResponseHeadersRead);
             using StreamReader reader = new(await response.Content.ReadAsStreamAsync(), new UTF8Encoding(false));
@@ -1145,8 +1180,8 @@ internal static class HostServiceTests
             SecretStore store = new(db, new CountingCipher());
             SecretStoreTests.Put(store, new Dictionary<string, string> { ["TOKEN"] = Value });
             using TestMachine machine = new(Path.GetDirectoryName(db.FilePath)!);
-            using HostService service = HostService.Start(new HostServiceOptions { Lock = AuthorityLock.UnlockedForTests(), State = db, Store = store, Deployment = machine.Deployment, Port = 0, TimeLimit = TimeSpan.FromSeconds(60), ApproverFactory = (settings, announce) => CommandWiring.RunApprover(db, settings, announce) });
-            using HttpClient client = new(new SocketsHttpHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(60) };
+            using HostService service = HostService.Start(new HostServiceOptions { CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), Lock = AuthorityLock.UnlockedForTests(), State = db, Store = store, Deployment = machine.Deployment, Port = 0, TimeLimit = TimeSpan.FromSeconds(60), ApproverFactory = (settings, announce) => CommandWiring.RunApprover(db, settings, announce) });
+            using HttpClient client = new(service.Endpoint.CreateHandler()) { Timeout = TimeSpan.FromSeconds(60) };
             string program = OperatingSystem.IsWindows() ? "p.cmd" : "p.sh";
             File.WriteAllText(Path.Combine(folder, "work", program), OperatingSystem.IsWindows() ? "@echo off\r\necho hi\r\n" : "#!/bin/sh\necho hi\n");
             if (!OperatingSystem.IsWindows())
@@ -1156,7 +1191,7 @@ internal static class HostServiceTests
 
             DateTimeOffset now = DateTimeOffset.UtcNow;
             LaunchRequest request = new(LaunchProtocol.Version, "page-" + Guid.NewGuid().ToString("N")[..8], now, now.AddMinutes(5), "bm9uY2UtMDAwMDAwMDEx" + Guid.NewGuid().ToString("N")[..6], ["TOKEN"], [new LaunchMapping("TOKEN", "TOKEN")], "page cancel", "./" + program, [], Path.Combine(folder, "work"), [], [], new Dictionary<string, string>(), Env(), []);
-            using HttpRequestMessage message = new(HttpMethod.Post, "http://127.0.0.1:" + service.Port + "/v1/launch") { Content = new StringContent(request.Canonical(), new UTF8Encoding(false), new MediaTypeHeaderValue("application/json")) };
+            using HttpRequestMessage message = new(HttpMethod.Post, new Uri(service.Endpoint.BaseUri, "v1/launch")) { Content = new StringContent(request.Canonical(), new UTF8Encoding(false), new MediaTypeHeaderValue("application/json")) };
             message.Headers.Add(HostService.DigestHeader, request.Digest());
             using CancellationTokenSource leave = new();
             string? link = null;
