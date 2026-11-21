@@ -154,8 +154,21 @@ internal static class HostServiceTests
             });
         }
 
-        /// <summary>The command line's endpoint of a test service: Windows, a named pipe of its own; elsewhere the loopback port (until the Unix socket exists). WS_TEST_TRANSPORT=loopback forces the loopback port.</summary>
-        internal static LocalEndpoint? TestEndpoint() => OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable("WS_TEST_TRANSPORT") != "loopback" ? LocalEndpoint.NamedPipe("ws-test-" + Guid.NewGuid().ToString("N")) : null;
+        /// <summary>The command line's endpoint of a test service: Windows, a named pipe of its own; Linux and macOS, a socket in a private directory of its own. WS_TEST_TRANSPORT=loopback leaves only the loopback port.</summary>
+        internal static LocalEndpoint? TestEndpoint() => Environment.GetEnvironmentVariable("WS_TEST_TRANSPORT") == "loopback" ? null : OperatingSystem.IsWindows() ? LocalEndpoint.NamedPipe("ws-test-" + Guid.NewGuid().ToString("N")) : LocalEndpoint.UnixSocket(NewSocketDirectory());
+
+        /// <summary>A private socket directory of its own for one test service (short, because socket paths are limited to about 100 bytes).</summary>
+        internal static string NewSocketDirectory()
+        {
+            string directory = Path.Combine(Path.GetTempPath(), "ws-" + Guid.NewGuid().ToString("N")[..8]);
+            Directory.CreateDirectory(directory);
+            if (!OperatingSystem.IsWindows())
+            {
+                File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            }
+
+            return directory;
+        }
 
         public string Work { get; }
 

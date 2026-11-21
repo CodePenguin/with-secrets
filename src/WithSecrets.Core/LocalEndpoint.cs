@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Sockets;
 using Microsoft.Extensions.DependencyInjection;
 
 using Microsoft.AspNetCore.Server.Kestrel.Core;
@@ -28,11 +29,25 @@ public abstract class LocalEndpoint
     {
     }
 
+    /// <summary>The service is listening: what can only be done once the endpoint exists.</summary>
+    internal virtual void Started()
+    {
+    }
+
+    /// <summary>The service stopped: what the endpoint leaves behind is removed.</summary>
+    internal virtual void Stopped()
+    {
+    }
+
     /// <summary>The loopback TCP endpoint on <paramref name="port" />: 127.0.0.1 and, where the host has IPv6, [::1].</summary>
     public static LocalEndpoint Loopback(int port, bool ipv6 = true) => new LoopbackEndpoint(port, ipv6);
 
-    /// <summary>The endpoint the command line of this user uses on this platform. Windows: the user's named pipe. Elsewhere, until the Unix socket exists, the loopback port.</summary>
-    public static LocalEndpoint ForCommandLine(int port) => OperatingSystem.IsWindows() ? new NamedPipeEndpoint(NamedPipeEndpoint.DefaultName()) : Loopback(port);
+    /// <summary>The endpoint the command line of this user uses on this platform. Windows: the user's named pipe. Linux and macOS: the user's Unix-domain socket.</summary>
+    public static LocalEndpoint ForCommandLine() => OperatingSystem.IsWindows() ? new NamedPipeEndpoint(NamedPipeEndpoint.DefaultName()) : new UnixSocketEndpoint(UnixSocketEndpoint.DefaultDirectory());
+
+    /// <summary>A Unix-domain socket in <paramref name="directory" /> (Linux and macOS; tests use a directory of their own).</summary>
+    [System.Runtime.Versioning.UnsupportedOSPlatform("windows")]
+    public static LocalEndpoint UnixSocket(string directory) => new UnixSocketEndpoint(directory);
 
     /// <summary>A named pipe of the given name (Windows only; tests use a name of their own).</summary>
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
@@ -132,4 +147,192 @@ internal sealed class NamedPipeEndpoint(string name) : LocalEndpoint
         return security;
     }
     internal override void Listen(KestrelServerOptions kestrel) => kestrel.ListenNamedPipe(Name);
+}
+
+/// <summary>
+/// Linux and macOS: a Unix-domain socket in a directory that only the current user can enter. The directory is the access control (a path through it needs the owner's permission), the socket itself is owner-only as well.
+/// The directory must be a real directory (never a link) with exactly the owner's permissions: anything else is refused, never repaired, because a directory somebody else could have prepared is not one to put the socket in.
+/// A socket file that is left over from a service that is gone is replaced; one that something answers on is never touched.
+/// </summary>
+[System.Runtime.Versioning.UnsupportedOSPlatform("windows")]
+internal sealed class UnixSocketEndpoint : LocalEndpoint
+{
+    private const UnixFileMode OwnerOnlyDirectory = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+    private const UnixFileMode OwnerOnlyFile = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+
+    /// <summary>The longest socket path that is accepted: the platforms' own limit is 104 (macOS) or 108 (Linux) bytes including the end.</summary>
+    internal const int MaxPathBytes = 100;
+
+    public UnixSocketEndpoint(string directory)
+    {
+        Directory = directory;
+        SocketPath = Path.Combine(directory, "service.sock");
+        if (System.Text.Encoding.UTF8.GetByteCount(SocketPath) > MaxPathBytes)
+        {
+            throw new IOException("the socket path is too long for this platform (" + MaxPathBytes + " bytes at most): " + SocketPath);
+        }
+    }
+
+    public string Directory { get; }
+
+    public string SocketPath { get; }
+
+    public override Uri BaseUri { get; } = new("http://localhost/");
+
+    public override string Describe() => "the socket " + SocketPath;
+
+    /// <summary>
+    /// The directory of the current user's service. Linux: <c>$XDG_RUNTIME_DIR/with-secrets</c> (the per-user runtime directory, owner-only, removed at logout) when it is set, else <c>/tmp/with-secrets-UID</c>.
+    /// macOS: <c>with-secrets</c> in the per-user temporary directory (<c>$TMPDIR</c>, owner-only), else <c>/tmp/with-secrets-UID</c>. The fallback sits in a shared directory, which is why the permissions are checked.
+    /// </summary>
+    public static string DefaultDirectory()
+    {
+        string? runtime = OperatingSystem.IsLinux() ? Environment.GetEnvironmentVariable("XDG_RUNTIME_DIR") : OperatingSystem.IsMacOS() ? Path.GetTempPath().TrimEnd('/') : null;
+        if (!string.IsNullOrEmpty(runtime) && Path.IsPathRooted(runtime))
+        {
+            return Path.Combine(runtime, "with-secrets");
+        }
+
+        return "/tmp/with-secrets-" + UserId().ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "geteuid")]
+    private static extern uint GetEffectiveUserId();
+
+    private static uint UserId() => GetEffectiveUserId();
+
+    public override SocketsHttpHandler CreateHandler() => new()
+    {
+        UseProxy = false,
+        AllowAutoRedirect = false,
+        ConnectCallback = async (_, cancel) =>
+        {
+            // Before connecting: the directory is private to this user and the socket path is not a link. A different directory is not this user's service.
+            CheckDirectory(create: false);
+            if (new FileInfo(SocketPath).LinkTarget is not null)
+            {
+                throw new IOException("the service socket is a link: " + SocketPath);
+            }
+
+            Socket socket = new(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+            try
+            {
+                await socket.ConnectAsync(new UnixDomainSocketEndPoint(SocketPath), cancel);
+            }
+            catch
+            {
+                socket.Dispose();
+                throw;
+            }
+
+            return new NetworkStream(socket, ownsSocket: true);
+        },
+    };
+
+    internal override void Listen(KestrelServerOptions kestrel)
+    {
+        CheckDirectory(create: true);
+        RemoveStaleSocket();
+        kestrel.ListenUnixSocket(SocketPath);
+    }
+
+    /// <summary>The socket exists now: owner-only (the directory already keeps everyone else out; this is the second lock).</summary>
+    internal override void Started()
+    {
+        File.SetUnixFileMode(SocketPath, OwnerOnlyFile);
+    }
+
+    internal override void Stopped()
+    {
+        try
+        {
+            if (File.Exists(SocketPath) && new FileInfo(SocketPath).LinkTarget is null)
+            {
+                File.Delete(SocketPath);
+            }
+        }
+        catch (IOException)
+        {
+            // Left behind: the next start sees it is stale and replaces it.
+        }
+    }
+
+    /// <summary>Makes the directory (owner-only) or checks the one that is there: a real directory, owner-only permissions. Throws with the reason otherwise.</summary>
+    private void CheckDirectory(bool create)
+    {
+        if (!System.IO.Directory.Exists(Directory))
+        {
+            if (!create)
+            {
+                throw new IOException("no service directory: " + Directory);
+            }
+
+            string? parent = Path.GetDirectoryName(Directory);
+            if (parent is null || !System.IO.Directory.Exists(parent))
+            {
+                throw new IOException("the directory for the service socket does not exist: " + parent);
+            }
+
+            System.IO.Directory.CreateDirectory(Directory, OwnerOnlyDirectory);
+        }
+
+        DirectoryInfo info = new(Directory);
+        if (info.LinkTarget is not null || info.Attributes.HasFlag(FileAttributes.ReparsePoint))
+        {
+            throw new IOException("the service directory is a link, which is not accepted: " + Directory);
+        }
+
+        UnixFileMode mode = File.GetUnixFileMode(Directory);
+        if (mode != OwnerOnlyDirectory)
+        {
+            throw new IOException("the service directory is not private to this user (mode " + Convert.ToString((int)mode, 8) + ", it must be 700): " + Directory);
+        }
+
+        if (!create)
+        {
+            // The client only connects: a directory that another user owns cannot be entered with these permissions, so the connection would fail anyway.
+            return;
+        }
+
+        // The service makes a socket here: the directory is owner-only and this process can use it, so it is this user's (another user's 0700 directory cannot be entered; root's is root's).
+        string probe = Path.Combine(Directory, ".probe-" + Guid.NewGuid().ToString("N")[..8]);
+        try
+        {
+            using FileStream stream = new(probe, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.DeleteOnClose);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            throw new IOException("the service directory cannot be used by this user: " + Directory);
+        }
+    }
+
+    /// <summary>A socket file nobody answers on is from a service that is gone: removed. One that answers is a running service: nothing is touched and the start fails. A link is never followed or removed.</summary>
+    private void RemoveStaleSocket()
+    {
+        FileInfo file = new(SocketPath);
+        if (file.LinkTarget is not null)
+        {
+            throw new IOException("the service socket path is a link, which is not accepted: " + SocketPath);
+        }
+
+        if (!file.Exists)
+        {
+            return;
+        }
+
+        using Socket probe = new(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
+        try
+        {
+            probe.Connect(new UnixDomainSocketEndPoint(SocketPath));
+        }
+        catch (SocketException)
+        {
+            // Nothing answers: left over.
+            File.Delete(SocketPath);
+
+            return;
+        }
+
+        throw new IOException("a service is already running for this user (it answers on " + SocketPath + ")");
+    }
 }

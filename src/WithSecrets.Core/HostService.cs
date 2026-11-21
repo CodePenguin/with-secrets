@@ -156,6 +156,7 @@ public sealed class HostService : IDisposable
     private readonly CancellationTokenSource _stop = new();
     private Task _pump = Task.CompletedTask;
     private string? _startupUnlockNote;
+    private bool _endpointStarted;
 
     /// <summary>The most launches in progress at once; each holds an approval page and a thread.</summary>
     public const int MaxConcurrentLaunches = 8;
@@ -326,6 +327,8 @@ public sealed class HostService : IDisposable
 
                 app.Run(service.Handle);
                 app.StartAsync().GetAwaiter().GetResult();
+                options.CommandLineEndpoint?.Started();
+                service._endpointStarted = true;
                 service._pump = Task.Run(service.PumpLoop);
                 if (options.MachineEndpoint is { } machineEndpoint)
                 {
@@ -1249,6 +1252,11 @@ public sealed class HostService : IDisposable
         finally
         {
             _app.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            if (_endpointStarted)
+            {
+                // Only an endpoint this service made is cleaned up: a service that failed to start (another one holds the endpoint) must never remove it.
+                _options.CommandLineEndpoint?.Stopped();
+            }
         }
     }
 

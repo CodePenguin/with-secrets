@@ -328,6 +328,11 @@ internal static class Program
             LocalPipeTests.Run(Check).GetAwaiter().GetResult();
         }
 
+        if (Wants("LocalSocket"))
+        {
+            LocalSocketTests.Run(Check).GetAwaiter().GetResult();
+        }
+
         if (Wants("HostService"))
         {
             HostServiceTests.Run(Check).GetAwaiter().GetResult();

@@ -187,7 +187,7 @@ internal static class Program
         using StreamWriter outWriter = new(stdout, new UTF8Encoding(false)) { AutoFlush = true };
         using StreamWriter errWriter = new(stderr, new UTF8Encoding(false)) { AutoFlush = true };
 
-        return await LaunchClient.RunAsync(args, Directory.GetCurrentDirectory(), LocalEndpoint.ForCommandLine(port.Value), command.Port, outWriter, errWriter, trust, approve: approve);
+        return await LaunchClient.RunAsync(args, Directory.GetCurrentDirectory(), LocalEndpoint.ForCommandLine(), command.Port, outWriter, errWriter, trust, approve: approve);
     }
 
     /// <summary>The host service in the foreground, until Ctrl+C. Windows service installation and start at logon come later.</summary>
@@ -293,7 +293,7 @@ internal static class Program
         HostService service;
         try
         {
-            service = HostService.Start(new HostServiceOptions { State = state, Store = store, Port = port.Value, CommandLineEndpoint = OperatingSystem.IsWindows() ? LocalEndpoint.ForCommandLine(port.Value) : null, Deployment = deployment, MachineEndpoint = machineEndpoint, MachineListenerStarted = port => TerminalPrompt.Line($"with-secrets service: machine listener now on {machineEndpoint!.Bind}:{port} (the authority signing key was made by the first approval; no restart was needed)."), });
+            service = HostService.Start(new HostServiceOptions { State = state, Store = store, Port = port.Value, CommandLineEndpoint = LocalEndpoint.ForCommandLine(), Deployment = deployment, MachineEndpoint = machineEndpoint, MachineListenerStarted = port => TerminalPrompt.Line($"with-secrets service: machine listener now on {machineEndpoint!.Bind}:{port} (the authority signing key was made by the first approval; no restart was needed)."), });
         }
         catch (Exception failure)
         {
