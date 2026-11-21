@@ -12,8 +12,8 @@ using Microsoft.Extensions.Logging;
 
 namespace WithSecrets;
 
-/// <summary>The default port and the way a client or the service finds the port: --service-port / --port, then WITH_SECRETS_PORT, then the default.</summary>
-public static class ServiceEndpoint
+/// <summary>The loopback port of the admin web app (where a browser reaches it) and the way the service and the admin command find it: --port, then WITH_SECRETS_PORT, then the default. The command line's runs do not use a port.</summary>
+public static class AdminPort
 {
     public const int DefaultPort = 8765;
     public const string PortVariable = "WITH_SECRETS_PORT";
@@ -65,7 +65,7 @@ public sealed class HostServiceOptions
     public TimeSpan AuditMaxBackoff { get; init; } = TimeSpan.FromSeconds(60);
 
     /// <summary>The port on 127.0.0.1 and [::1]. 0 picks a free one (tests).</summary>
-    public int Port { get; init; } = ServiceEndpoint.DefaultPort;
+    public int Port { get; init; } = AdminPort.DefaultPort;
 
     /// <summary>The endpoint the command line connects to besides the loopback port (the program passes <see cref="LocalEndpoint.ForCommandLine" />). Null leaves only the loopback port.</summary>
     public LocalEndpoint? CommandLineEndpoint { get; init; }

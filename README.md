@@ -52,7 +52,7 @@ It is not on NuGet yet.
 Do these in your own terminal, never in the agent's.
 
 1. **Create the store and the first passkey.** Run `with-secrets admin`, open the link, create a passkey, confirm it, and type the code the page shows into the terminal. Write down the admin key fingerprints it prints; every page shows them again, so you can notice if they change. Add a second passkey later, so a lost phone does not lock you out.
-2. **Start the host service.** Run `with-secrets service` in a terminal of its own and leave it running. It starts locked and prints the admin app's link and this machine's fingerprint.
+2. **Start the host service.** Run `with-secrets service` in a terminal of its own and leave it running. It starts locked and prints the admin app's link and this machine's fingerprint. Runs reach it over a channel only your user can open (a named pipe on Windows, a Unix socket on Linux and macOS), not over a network port; the admin app is the only thing on a loopback port.
 3. **Unlock and approve this machine.** Open that link, unlock with one tap, then in **Machines** compare the fingerprint, name the machine and press **Approve**.
 4. **Store a secret.** In **Secrets**, type a name (`DB_URL`) and a value and save. The terminal never sees the value.
 5. **Tell the agent which names it may use** and how to run commands: see [Using with-secrets safely from an agent](docs/agent-usage.md).

@@ -13,7 +13,7 @@ public static class AdminAppCommand
 {
     public static async Task<int> RunAsync(int? chosenPort, TextWriter output, TextWriter error, ServiceTrust trust, Action<string>? open = null, LocalEndpoint? endpoint = null)
     {
-        int? port = ServiceEndpoint.Resolve(chosenPort, Environment.GetEnvironmentVariable, out string? problem);
+        int? port = AdminPort.Resolve(chosenPort, Environment.GetEnvironmentVariable, out string? problem);
         if (port is null)
         {
             await error.WriteLineAsync("with-secrets: " + problem);

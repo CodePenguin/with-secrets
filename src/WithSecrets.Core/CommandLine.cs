@@ -12,8 +12,8 @@ public abstract record CliCommand
     /// <summary>--debug (any command): diagnostic lines go to the terminal and the log file. Off by default.</summary>
     public bool Debug { get; init; }
 
-    /// <summary>--service-port N with a run, or --port N with <c>service</c>: the port of the host service. Null: WITH_SECRETS_PORT, then the default.</summary>
-    public int? ServicePort { get; init; }
+    /// <summary>--port N with <c>service</c> or <c>admin</c>: the loopback port of the admin web app (a browser reaches it there; the command line does not use a port). Null: WITH_SECRETS_PORT, then the default.</summary>
+    public int? AdminPort { get; init; }
 
     /// <summary>service [--port N] [--machine-port N [--machine-bind ADDRESS]]: run the host service in the foreground (loopback only for the API; the optional machine listener serves only the machine API, over TLS 1.3 mutual authentication and HTTP/2, for another machine's host service, such as the one in WSL).</summary>
     public sealed record Service(int? MachinePort = null, string MachineBind = "127.0.0.1") : CliCommand;
@@ -57,8 +57,8 @@ public static class CliArgs
         Every run is approved once. A grant (below) lets one exact command run again without asking, for a time; reuseMaxMinutes sets the longest time.
 
         To run a program: with-secrets [--secrets NAME[,NAME...]] --reason "why" [-f .env] -- PROGRAM [ARGS...]
-        A run goes through the host service, which must be running (with-secrets service, in a terminal of its own); it listens on
-        127.0.0.1 and [::1] only, port 8765 or WITH_SECRETS_PORT or --service-port N (service: --port N). Without it a run exits 6.
+        A run goes through the host service, which must be running (with-secrets service, in a terminal of its own). The run reaches it over
+        a channel only this user can open (Windows: a named pipe; Linux and macOS: a Unix socket), never over a network port. Without the service a run exits 6.
         The user approves the request. Then PROGRAM runs with only those secrets as environment variables, and its output is
         redacted. Write -- before the program. --needs shows what the project's .env asks for; the stored names are in the admin web app.
 
@@ -102,7 +102,7 @@ public static class CliArgs
         with-secrets admin (no words) prints its link (http://localhost:8765/admin) and the service's status. Sign in there with one passkey tap
         (a read-only session of 15 minutes idle, 8 hours at most); every change (approve, disable, enable, untrust, trust, rename or approve a host
         name change of a machine; extend, renew or revoke a grant; passkeys; settings; the authority key; lock and unlock) is its own fresh
-        passkey tap on a one-use page that names that change. Add --service-port N when the service is not on the default port.
+        passkey tap on a one-use page that names that change. Add --port N when the admin web app is not on the default port.
 
         Pairing a machine with an authority: an administrator creates a one-time pairing invitation in the authority's admin web app (Pairing:
         one passkey tap; the invitation is shown once and is valid for 10 minutes) and gives it to the new machine, which runs: with-secrets pair
@@ -173,19 +173,13 @@ public static class CliArgs
             return ParseApprove(args, out error);
         }
 
-        CliCommand? command = ParseCommand(args, out int? port, out bool debug, out error, out int? servicePort);
+        CliCommand? command = ParseCommand(args, out int? port, out bool debug, out error);
         if (command is null)
         {
             return null;
         }
 
-        command = command with { Debug = debug, ServicePort = servicePort };
-        if (servicePort is not null && command is not CliCommand.Run)
-        {
-            error = "--service-port goes only with a run or approve.";
-
-            return null;
-        }
+        command = command with { Debug = debug };
 
         if (port is null)
         {
@@ -213,7 +207,7 @@ public static class CliArgs
 
         if (inner is CliCommand.Run run)
         {
-            return new CliCommand.Approve(run.Args) { Port = run.Port, Debug = run.Debug, ServicePort = run.ServicePort };
+            return new CliCommand.Approve(run.Args) { Port = run.Port, Debug = run.Debug };
         }
 
         if (inner is null && error.Length > 0)
@@ -226,7 +220,7 @@ public static class CliArgs
         return null;
     }
 
-    /// <summary>admin [--service-port N] [--debug]: the admin web app has no verbs; the port is where the service listens.</summary>
+    /// <summary>admin [--port N] [--debug]: the admin web app has no verbs; the port is where the browser reaches the app.</summary>
     private static CliCommand? ParseAdminApp(IReadOnlyList<string> args, out string error)
     {
         int? port = null;
@@ -237,13 +231,13 @@ public static class CliArgs
             {
                 debug = true;
             }
-            else if (args[index] == "--service-port" && index + 1 < args.Count && int.TryParse(args[++index], NumberStyles.None, CultureInfo.InvariantCulture, out int parsed) && parsed is >= 1 and <= ToolSettings.MaxPort)
+            else if (args[index] == "--port" && index + 1 < args.Count && int.TryParse(args[++index], NumberStyles.None, CultureInfo.InvariantCulture, out int parsed) && parsed is >= 1 and <= ToolSettings.MaxPort)
             {
                 port = parsed;
             }
             else
             {
-                error = "Usage: with-secrets admin [--service-port N] [--debug]   (opens nothing itself: it prints the link of the authority's admin web app)";
+                error = "Usage: with-secrets admin [--port N] [--debug]   (opens nothing itself: it prints the link of the authority's admin web app)";
 
                 return null;
             }
@@ -251,7 +245,7 @@ public static class CliArgs
 
         error = "";
 
-        return new CliCommand.AdminApp { ServicePort = port, Debug = debug };
+        return new CliCommand.AdminApp { AdminPort = port, Debug = debug };
     }
 
     private const string PairUsage = "Usage: with-secrets pair [--debug]. It asks for the pairing invitation (hidden) that an administrator made in the authority's admin web app, or reads it from a secret file (WITH_SECRETS_PAIRING_FILE, or the Docker secret with-secrets-pairing) or from WITH_SECRETS_PAIRING. The invitation is never a command-line argument.";
@@ -287,7 +281,7 @@ public static class CliArgs
         string machineBind = "127.0.0.1";
         bool bindGiven = false;
         bool debug = false;
-        const string Usage = "Usage: with-secrets service [--port N] [--machine-port N [--machine-bind ADDRESS]]. The service listens on 127.0.0.1 and [::1] only; N is 1 to 65535 (default 8765, or WITH_SECRETS_PORT). --machine-port also serves the machine API (nothing else: no administration, no pages) over TLS 1.3 mutual authentication and HTTP/2 for another machine's host service such as the one in WSL; it listens on 127.0.0.1 unless --machine-bind names one address (never 0.0.0.0 or [::]).";
+        const string Usage = "Usage: with-secrets service [--port N] [--machine-port N [--machine-bind ADDRESS]]. N is the loopback port of the admin web app, 1 to 65535 (default 8765, or WITH_SECRETS_PORT); the command line reaches the service another way (a named pipe or a Unix socket of this user). --machine-port also serves the machine API (nothing else: no administration, no pages) over TLS 1.3 mutual authentication and HTTP/2 for another machine's host service such as the one in WSL; it listens on 127.0.0.1 unless --machine-bind names one address (never 0.0.0.0 or [::]).";
         int Number(string text) => int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out int parsed) && parsed >= 1 && parsed <= ToolSettings.MaxPort ? parsed : -1;
         for (int index = 1; index < args.Count; index++)
         {
@@ -337,12 +331,11 @@ public static class CliArgs
 
         error = "";
 
-        return new CliCommand.Service(machinePort, machineBind) { ServicePort = port, Debug = debug };
+        return new CliCommand.Service(machinePort, machineBind) { AdminPort = port, Debug = debug };
     }
 
-    private static CliCommand? ParseCommand(IReadOnlyList<string> args, out int? portNumber, out bool debugRequested, out string error, out int? servicePortNumber)
+    private static CliCommand? ParseCommand(IReadOnlyList<string> args, out int? portNumber, out bool debugRequested, out string error)
     {
-        servicePortNumber = null;
         portNumber = null;
         debugRequested = false;
         int separator = IndexOfSeparator(args);
@@ -351,7 +344,6 @@ public static class CliArgs
 
         Option<bool> recover = new("--recover") { Description = "When every passkey is lost: type the recovery code on a web page, make a new passkey and new keys, and carry the secrets over. The old file is renamed, never deleted (real terminal)." };
         Option<string?> port = new("--port") { Description = "Where the one-use web page listens for this call, 1 to 65535, in place of the port setting (nothing is saved). If it is in use, the call fails. For ssh -L.", HelpName = "N" };
-        Option<string?> servicePort = new("--service-port") { Description = "With a run: the port of the host service on this machine, 1 to 65535. Default: WITH_SECRETS_PORT, then 8765.", HelpName = "N" };
         Option<bool> debug = new("--debug") { Description = "With any command: show diagnostic lines on the terminal and write them to the log file (WITH_SECRETS_DEBUG=1 does it for every call). Warnings always go to the log file." };
         Option<string[]> secrets = new("--secrets")
         {
@@ -371,7 +363,6 @@ public static class CliArgs
         // default ones, an unknown directive such as [env:PATH=x] is an error. [suggest] only prints completions (shown as Help).
         root.Options.Add(recover);
         root.Options.Add(port);
-        root.Options.Add(servicePort);
         root.Options.Add(debug);
         root.Options.Add(secrets);
         root.Options.Add(reason);
@@ -418,18 +409,6 @@ public static class CliArgs
             }
 
             portNumber = parsed;
-        }
-
-        if (result.GetValue(servicePort) is { } serviceText)
-        {
-            if (!int.TryParse(serviceText, NumberStyles.None, CultureInfo.InvariantCulture, out int parsedService) || parsedService < 1 || parsedService > ToolSettings.MaxPort)
-            {
-                error = $"--service-port takes a number from 1 to {ToolSettings.MaxPort}.";
-
-                return null;
-            }
-
-            servicePortNumber = parsedService;
         }
 
         int modes = (needsRequested ? 1 : 0) + (result.GetValue(recover) ? 1 : 0) + (runRequested ? 1 : 0);

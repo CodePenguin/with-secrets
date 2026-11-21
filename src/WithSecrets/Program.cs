@@ -10,6 +10,20 @@ internal static class Program
     private const string StoreFolder = ".with-secrets";
 
     /// <summary>True when the failure (or one inside it) is a socket that could not be bound because the address is already in use.</summary>
+    /// <summary>The reason the command line's endpoint could not be made (a plain I/O error from the endpoint: a path and a rule), found in the chain of the start failure. Null when it is something else.</summary>
+    private static string? EndpointProblem(Exception failure)
+    {
+        for (Exception? current = failure; current is not null; current = current.InnerException)
+        {
+            if (current.GetType() == typeof(IOException))
+            {
+                return current.Message;
+            }
+        }
+
+        return null;
+    }
+
     private static bool PortInUse(Exception failure)
     {
         for (Exception? item = failure; item is not null; item = item.InnerException)
@@ -101,7 +115,7 @@ internal static class Program
                 }
             }
 
-            return await AdminAppCommand.RunAsync(app.ServicePort, Console.Out, Console.Error, ServiceTrust.From(HostConfigFile.InFolder(StorePath())), OpenInBrowser(app));
+            return await AdminAppCommand.RunAsync(app.AdminPort, Console.Out, Console.Error, ServiceTrust.From(HostConfigFile.InFolder(StorePath())), OpenInBrowser(app));
         }
 
         // pair: pairing this machine with an authority by a one-time invitation (hidden prompt, or unattended from a secret file or WITH_SECRETS_PAIRING). Opens no store and no state.db.
@@ -171,14 +185,6 @@ internal static class Program
 
     private static async Task<int> RunThroughService(CliCommand command, RunArgs args, bool approve)
     {
-        int? port = ServiceEndpoint.Resolve(command.ServicePort, Environment.GetEnvironmentVariable, out string? portError);
-        if (port is null)
-        {
-            TerminalPrompt.Final("with-secrets: " + portError);
-
-            return RunCommand.Usage;
-        }
-
         // The service must prove it is this machine's host service (the identity pinned in host.json) before anything is sent to it.
         ServiceTrust trust = ServiceTrust.From(HostConfigFile.InFolder(StorePath()));
 
@@ -216,7 +222,7 @@ internal static class Program
 
     private static int RunService(CliCommand command, StateDatabase state, SecretStore store, string folder)
     {
-        int? port = ServiceEndpoint.Resolve(command.ServicePort, Environment.GetEnvironmentVariable, out string? portError);
+        int? port = AdminPort.Resolve(command.AdminPort, Environment.GetEnvironmentVariable, out string? portError);
         if (port is null)
         {
             TerminalPrompt.Final("with-secrets: " + portError);
@@ -297,9 +303,12 @@ internal static class Program
         }
         catch (Exception failure)
         {
+            // The admin web app's port in use; or the command line's endpoint (the pipe or the socket) is unusable or taken: its reason is a path and a rule, nothing else, and is shown as it is.
             TerminalPrompt.Final(PortInUse(failure)
-                ? $"with-secrets: the host service cannot listen on port {port}: the port is in use. Is it already running? Use --port N for another port."
-                : $"with-secrets: the host service could not start ({failure.GetType().Name}). The port is not the problem as far as is known; run again with --debug and read the log.");
+                ? $"with-secrets: the host service cannot listen on port {port} (the admin web app's port): the port is in use. Is it already running? Use --port N for another port."
+                : EndpointProblem(failure) is { } endpointProblem
+                    ? "with-secrets: the host service could not make the channel the command line uses: " + endpointProblem
+                    : $"with-secrets: the host service could not start ({failure.GetType().Name}). The port is not the problem as far as is known; run again with --debug and read the log.");
 
             return RunCommand.StoreError;
         }
@@ -333,7 +342,7 @@ internal static class Program
                 TerminalPrompt.Line("with-secrets service: the machine listener starts as soon as the first approval makes the authority signing key (no restart needed); until then no machine can connect.");
             }
 
-            TerminalPrompt.Line($"with-secrets service: listening on 127.0.0.1 and [::1], port {service.Port} (this machine only). Press Ctrl+C to stop.");
+            TerminalPrompt.Line($"with-secrets service: the admin web app is on 127.0.0.1 and [::1], port {service.Port} (this machine only). The command line reaches this service over {service.Endpoint.Describe()}, which only this user can open. Press Ctrl+C to stop.");
             stop.Wait();
             Console.CancelKeyPress -= handler;
         }

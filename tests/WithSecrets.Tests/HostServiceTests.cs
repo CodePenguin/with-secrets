@@ -1279,15 +1279,13 @@ internal static class HostServiceTests
         check(usage == RunCommand.Usage && usageErr.ToString().Contains("Name the secrets with --secrets", StringComparison.Ordinal), "client: a run that names no secret fails as before");
 
         // Command line.
-        check(CliArgs.Parse(["service"], out _) is CliCommand.Service { ServicePort: null }, "command line: service takes no option");
-        check(CliArgs.Parse(["service", "--port", "9100"], out _) is CliCommand.Service { ServicePort: 9100 }, "command line: service --port N sets the service port");
+        check(CliArgs.Parse(["service"], out _) is CliCommand.Service { AdminPort: null }, "command line: service takes no option");
+        check(CliArgs.Parse(["service", "--port", "9100"], out _) is CliCommand.Service { AdminPort: 9100 }, "command line: service --port N sets the admin web app port");
         check(CliArgs.Parse(["service", "--port", "0"], out string portError) is null && portError.Contains("1 to 65535", StringComparison.Ordinal), "command line: service --port must be 1 to 65535");
         check(CliArgs.Parse(["service", "--frob"], out _) is null, "command line: service refuses other options");
-        check(CliArgs.Parse(["--service-port", "9100", "--reason", "x", "--secrets", "A", "--", "p"], out _) is CliCommand.Run { ServicePort: 9100 }, "command line: --service-port goes with a run");
-        check(CliArgs.Parse(["--service-port", "9100", "--list"], out _) is null, "command line: --service-port does not go with other commands");
-        check(CliArgs.Parse(["--service-port", "70000", "--reason", "x", "--secrets", "A", "--", "p"], out _) is null, "command line: --service-port must be a port");
-        check(ServiceEndpoint.Resolve(null, _ => null, out _) == 8765 && ServiceEndpoint.Resolve(null, name => name == "WITH_SECRETS_PORT" ? "9200" : null, out _) == 9200 && ServiceEndpoint.Resolve(9300, _ => "9200", out _) == 9300, "command line: the port is the option, else WITH_SECRETS_PORT, else 8765");
-        check(ServiceEndpoint.Resolve(null, _ => "nope", out string? envError) is null && envError is not null, "command line: a WITH_SECRETS_PORT that is not a port is refused");
+        check(CliArgs.Parse(["--service-port", "9100", "--reason", "x", "--secrets", "A", "--", "p"], out _) is null && CliArgs.Parse(["--service-port", "9100", "--list"], out _) is null, "command line: there is no --service-port: a run does not name a port, it reaches the service over its own channel");
+        check(AdminPort.Resolve(null, _ => null, out _) == 8765 && AdminPort.Resolve(null, name => name == "WITH_SECRETS_PORT" ? "9200" : null, out _) == 9200 && AdminPort.Resolve(9300, _ => "9200", out _) == 9300, "command line: the port is the option, else WITH_SECRETS_PORT, else 8765");
+        check(AdminPort.Resolve(null, _ => "nope", out string? envError) is null && envError is not null, "command line: a WITH_SECRETS_PORT that is not a port is refused");
 
         // Events: one strict reader and writer.
         check(LaunchEvent.TryParse(LaunchEvent.Output("stdout", "line\n\"quoted\"\u0001"), out LaunchEvent? roundTrip, out _) && roundTrip!.Text == "line\n\"quoted\"\u0001", "events: output text round-trips through JSON");

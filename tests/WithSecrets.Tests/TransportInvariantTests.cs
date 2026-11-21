@@ -22,6 +22,10 @@ internal static class TransportInvariantTests
             using HostServiceTests.Rig rig = new(parent);
             check(rig.Service.Endpoint is not LoopbackEndpoint, "invariants: the command line's endpoint of the test service is not the loopback port");
 
+            // What the program itself uses (not only what the tests start): the default endpoint of the command line is a channel of this user, never a port.
+            LocalEndpoint real = LocalEndpoint.ForCommandLine();
+            check(real is not LoopbackEndpoint && real.BaseUri.Host == "localhost" && real.BaseUri.IsDefaultPort && (OperatingSystem.IsWindows() ? real.Describe().Contains("pipe", StringComparison.Ordinal) : real.Describe().Contains("socket", StringComparison.Ordinal)), "invariants: the command line's default endpoint is the user's own channel (" + real.Describe() + "), with no port");
+
             string program = rig.Script("marker", "echo ran> \"%~dpn0.marker.txt\"", "echo ran > \"$0.marker.txt\"");
 
             // The right service, pinned: the run goes through.

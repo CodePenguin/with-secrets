@@ -272,7 +272,7 @@ public static class LaunchClient
     }
 
     private static string NotServiceMessage(LocalEndpoint endpoint, string why) =>
-        $"the program that answers at {endpoint.Describe()} is not this machine's host service ({why}). Nothing was sent. Stop that program, or start the service on another port (with-secrets service --port N, and --service-port N for a run).";
+        $"the program that answers at {endpoint.Describe()} is not this machine's host service ({why}). Nothing was sent. Stop that program (or remove what it made there) and start the service: with-secrets service.";
 
     /// <summary>The environment of this process, as a map.</summary>
     public static IReadOnlyDictionary<string, string> CurrentEnvironment()
