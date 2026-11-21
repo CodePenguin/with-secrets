@@ -16,12 +16,12 @@ internal sealed class TestAuthenticator : IDisposable
     private readonly ECDsa? _ec;
     private readonly RSA? _rsa;
 
-    private TestAuthenticator(ECDsa? ec, RSA? rsa, int alg)
+    private TestAuthenticator(ECDsa? ec, RSA? rsa, int alg, byte[]? credentialId = null)
     {
         _ec = ec;
         _rsa = rsa;
         Alg = alg;
-        CredentialId = RandomNumberGenerator.GetBytes(16);
+        CredentialId = credentialId ?? RandomNumberGenerator.GetBytes(16);
         Sequence = Interlocked.Increment(ref _made);
         Known[Encode(CredentialId)] = this;
     }
@@ -56,6 +56,18 @@ internal sealed class TestAuthenticator : IDisposable
     public byte[] CredentialId { get; }
 
     public static TestAuthenticator ES256(bool prf = true) => new(ECDsa.Create(ECCurve.NamedCurves.nistP256), null, -7) { SupportsPrf = prf };
+
+    /// <summary>An ES256 authenticator with a key and credential id made elsewhere (another process that must sign as the same admin).</summary>
+    public static TestAuthenticator ES256FromExport(byte[] pkcs8PrivateKey, byte[] credentialId)
+    {
+        ECDsa key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        key.ImportPkcs8PrivateKey(pkcs8PrivateKey, out _);
+
+        return new TestAuthenticator(key, null, -7, credentialId);
+    }
+
+    /// <summary>The private key (PKCS#8), for <see cref="ES256FromExport" /> in another process.</summary>
+    public byte[] ExportPrivate() => _ec!.ExportPkcs8PrivateKey();
 
     public static TestAuthenticator RS256(bool prf = true) => new(null, RSA.Create(2048), -257) { SupportsPrf = prf };
 

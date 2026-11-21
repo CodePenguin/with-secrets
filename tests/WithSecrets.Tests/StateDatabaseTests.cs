@@ -22,6 +22,7 @@ internal static class StateDatabaseTests
             RoundTrips(check, folder);
             Concurrency(check, folder);
             FirstCreationRace(check, folder);
+            await StateDatabaseProcessTests.Run(check, folder);
             Unusable(check, folder);
             Locked(check, folder);
             StaleWal(check, folder);

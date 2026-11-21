@@ -543,6 +543,7 @@ internal sealed class UnixFileInfo
     private const uint FileTypeMask = 0xF000;
     private const uint DirectoryType = 0x4000;
     private const uint SocketType = 0xC000;
+    private const uint RegularFileType = 0x8000;
 
     private UnixFileInfo(uint owner, uint mode)
     {
@@ -561,6 +562,8 @@ internal sealed class UnixFileInfo
     public bool IsDirectory => (Mode & FileTypeMask) == DirectoryType;
 
     public bool IsSocket => (Mode & FileTypeMask) == SocketType;
+
+    public bool IsRegularFile => (Mode & FileTypeMask) == RegularFileType;
 
     public static UnixFileInfo? Of(string path)
     {

@@ -470,8 +470,8 @@ public sealed class StateDatabase
     {
         Directory.CreateDirectory(Folder);
 
-        // One creator at a time. The files of an earlier state.db are removed below only while there is no state.db; without this, a writer that saw no state.db a moment ago could remove the journal files of the one that has just
-        // made it and written its first key (the key was lost, found by the parallel first-creation test). Under the gate that check and the removal cannot overlap with another creator.
+        // One creator at a time, across processes. The files of an earlier state.db are removed below only while there is no state.db; without this, a writer that saw no state.db a moment ago could remove the journal files of the
+        // one that has just made it and written its first key (the key was lost, found by the parallel first-creation test). Under the gate that check and the removal cannot overlap with another creator.
         using FileStream gate = AcquireCreationGate();
         if (File.Exists(FilePath))
         {
@@ -526,25 +526,109 @@ public sealed class StateDatabase
         }
     }
 
-    /// <summary>An exclusive lock on a small file beside state.db for the time of a creation. Waits as long as the busy timeout; a creator that finds the file already made after it gets the gate does nothing.</summary>
+    /// <summary>The lock file of the creation gate: one for the store folder, named for state.db whichever database file in the folder is being made (a recovery makes its new database under a temporary name; that must not leave a lock file of its own). It is coordination metadata (it holds nothing), lives in the same protected store folder and is never deleted or replaced.</summary>
+    private string GatePath => Path.Combine(Folder, FileName + ".lock");
+
+    /// <summary>
+    /// The creation gate: an exclusive lock, held by the operating system for as long as the returned stream is open, that serializes the first creation of state.db between independent processes (and threads). The lock file is
+    /// made once and never removed or replaced: a lock on a file that is unlinked while locked protects nothing, because the next process would make a new file at the same path and lock that one. The lock is a share-none open:
+    /// on Linux and macOS .NET takes flock(LOCK_EX) on the one file; on Windows it is the file's share mode. Either way the operating system releases it when the process ends, however it ends, so a crashed creator never blocks
+    /// the next. The gate is waited for as long as the busy timeout. What cannot be trusted is refused, not worked around: a lock file that is a link, is not a regular file, is not this user's, or is open to others (Unix),
+    /// and a lock that does not exclude (a file system or setting without locking: a second exclusive open of the file must be refused).
+    /// </summary>
     private FileStream AcquireCreationGate()
     {
-        string path = FilePath + ".creating";
+        Directory.CreateDirectory(Folder);
         DateTime deadline = DateTime.UtcNow + _busyTimeout;
+        string lastBusy = "";
         while (true)
         {
+            CheckGateFile();
+            FileStream? stream = null;
             try
             {
-                return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.DeleteOnClose);
+                stream = OpenGate();
+                if (OpenGateOrNull() is { } intruder)
+                {
+                    // A second exclusive open of the same file was allowed: this lock excludes nobody, so it must not be used as one.
+                    intruder.Dispose();
+                    throw new StateDatabaseException($"{FileLabel} cannot be created safely: the lock file {GatePath} does not exclude other processes on this file system (file locking is off or not supported there)");
+                }
+
+                CheckGateFile();
+
+                return stream;
             }
-            catch (IOException) when (DateTime.UtcNow < deadline)
+            catch (IOException busy)
             {
-                // Another creator holds it.
+                stream?.Dispose();
+                lastBusy = busy.Message;
+                if (DateTime.UtcNow >= deadline)
+                {
+                    throw new StateDatabaseException($"{FileLabel} cannot be created: another process holds the creation lock {GatePath} ({lastBusy}). Nothing was changed; run again once the other with-secrets command has finished.", busy);
+                }
+
                 Thread.Sleep(5);
+            }
+            catch
+            {
+                stream?.Dispose();
+                throw;
             }
         }
     }
 
+    private FileStream OpenGate()
+    {
+        FileStreamOptions options = new()
+        {
+            Mode = FileMode.OpenOrCreate,
+            Access = FileAccess.ReadWrite,
+            Share = FileShare.None,
+            BufferSize = 1,
+        };
+        if (!OperatingSystem.IsWindows())
+        {
+            options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        }
+
+        return new FileStream(GatePath, options);
+    }
+    /// <summary>A second exclusive open of the lock file while it is held: null when it is refused (what a working lock does).</summary>
+    private FileStream? OpenGateOrNull()
+    {
+        try
+        {
+            return OpenGate();
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>On Linux and macOS the lock file, when there is one, is a regular file of this user that nobody else can open. Throws otherwise (the file is not touched).</summary>
+    private void CheckGateFile()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        if (!File.Exists(GatePath) && !Directory.Exists(GatePath) && new FileInfo(GatePath).LinkTarget is null)
+        {
+            return;
+        }
+
+        UnixFileInfo? info = UnixFileInfo.Of(GatePath);
+        if (info is null || !info.IsRegularFile || info.Owner != UnixSocketEndpoint.EffectiveUserId() || (info.Permissions & 0x3F) != 0)
+        {
+            throw new StateDatabaseException($"{FileLabel} cannot be created safely: the lock file {GatePath} is not a regular file of this user that only this user can open, so it is not used (it is not changed either)");
+        }
+    }
+
+    /// <summary>For tests: takes the creation gate and holds it until the returned object is disposed (or the process ends).</summary>
+    internal IDisposable HoldCreationGateForTests() => AcquireCreationGate();
     private SqliteConnection Connect(string path, SqliteOpenMode mode)
     {
         return new SqliteConnection(new SqliteConnectionStringBuilder

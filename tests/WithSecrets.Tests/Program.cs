@@ -85,8 +85,14 @@ internal static class Program
         return output.Append(redactor.Finish()).ToString();
     }
 
-    private static int Main()
+    private static int Main(string[] args)
     {
+        // A child of the cross-process database tests: it does that one job and ends (see StateDatabaseProcessTests).
+        if (args.Length > 0 && args[0].StartsWith("--state-", StringComparison.Ordinal))
+        {
+            return StateDatabaseProcessTests.ChildMain(args);
+        }
+
         const string Secret = "S3cr3t-Value/with+chars==";
 
         // --- redaction: forms
