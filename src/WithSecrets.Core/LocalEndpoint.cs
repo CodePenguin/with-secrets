@@ -32,9 +32,6 @@ public abstract class LocalEndpoint
     /// <summary>Makes the service listen here.</summary>
     internal abstract void Listen(KestrelServerOptions kestrel);
 
-    /// <summary>The surface of the service a connection to this endpoint may use: the command line's routes (<see cref="CommandLineSurface" />) or the browser administration (<see cref="BrowserSurface" />).</summary>
-    internal abstract string Surface { get; }
-
     internal const string CommandLineSurface = "cli";
     internal const string BrowserSurface = "browser";
     internal const string SurfaceItem = "with-secrets.surface";
@@ -88,8 +85,6 @@ internal sealed class LoopbackEndpoint(int port, bool ipv6) : LocalEndpoint
 {
     public int Port { get; } = port;
 
-    internal override string Surface => BrowserSurface;
-
     public override Uri BaseUri { get; } = new("http://127.0.0.1:" + port.ToString(System.Globalization.CultureInfo.InvariantCulture) + "/");
 
     public override string Describe() => "port " + Port.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -128,7 +123,7 @@ internal sealed class LoopbackEndpoint(int port, bool ipv6) : LocalEndpoint
 internal sealed class NamedPipeEndpoint(string name) : LocalEndpoint
 {
     /// <summary>A service that is running accepts at once; this is only how long a busy one (every pipe instance in use for a moment) is waited for.</summary>
-    private const int ConnectTimeoutMilliseconds = 3000;
+    private const int ConnectTimeoutMilliseconds = 1500;
 
     public string Name { get; } = name;
 
@@ -149,7 +144,7 @@ internal sealed class NamedPipeEndpoint(string name) : LocalEndpoint
         System.IO.Pipes.NamedPipeClientStream pipe = new(".", Name, System.IO.Pipes.PipeDirection.InOut, System.IO.Pipes.PipeOptions.Asynchronous | System.IO.Pipes.PipeOptions.CurrentUserOnly, System.Security.Principal.TokenImpersonationLevel.Anonymous);
         try
         {
-            // A pipe that does not exist is a service that is not running: fail at once like a refused connection (the default is to wait for the pipe to appear, for ever).
+            // A pipe that does not exist is a service that is not running: the wait for it to appear is bounded (a short time, well under the 3 s limit of the admin command) and then fails like a refused connection.
             await pipe.ConnectAsync(ConnectTimeoutMilliseconds, cancel);
         }
         catch (TimeoutException)
@@ -186,8 +181,6 @@ internal sealed class NamedPipeEndpoint(string name) : LocalEndpoint
 
         return security;
     }
-    internal override string Surface => CommandLineSurface;
-
     internal override void Listen(KestrelServerOptions kestrel) => kestrel.ListenNamedPipe(Name, Tag(CommandLineSurface));
 }
 
@@ -276,8 +269,6 @@ internal sealed class UnixSocketEndpoint : LocalEndpoint
         // before a byte of it is read. When the peer cannot be determined the connection is refused as well.
         kestrel.ListenUnixSocket(SocketPath, Tag(CommandLineSurface, PeerIsThisUser));
     }
-
-    internal override string Surface => CommandLineSurface;
 
     /// <summary>For tests: the user id a peer must have (default: this process's effective user id).</summary>
     internal uint? ExpectedPeerUserId { get; init; }
@@ -409,9 +400,14 @@ internal sealed class UnixSocketEndpoint : LocalEndpoint
         {
             probe.Connect(new UnixDomainSocketEndPoint(SocketPath));
         }
+        catch (SocketException failure) when (failure.SocketErrorCode is not SocketError.ConnectionRefused)
+        {
+            // Not a refusal (a busy or interrupted probe): it is not known that nothing answers, so the file is not touched.
+            throw new IOException("cannot tell whether a service answers on " + SocketPath + " (" + failure.SocketErrorCode + ")");
+        }
         catch (SocketException)
         {
-            // Nothing answers: left over.
+            // Refused: nothing answers, left over.
             File.Delete(SocketPath);
 
             return;

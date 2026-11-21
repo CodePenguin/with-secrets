@@ -326,8 +326,8 @@ public sealed class HostService : IDisposable
 
                 app.Run(service.Handle);
                 app.StartAsync().GetAwaiter().GetResult();
-                options.CommandLineEndpoint?.Started();
                 service._endpointStarted = true;
+                options.CommandLineEndpoint?.Started();
                 service._pump = Task.Run(service.PumpLoop);
                 if (options.MachineEndpoint is { } machineEndpoint)
                 {
@@ -551,8 +551,7 @@ public sealed class HostService : IDisposable
             return;
         }
 
-        // Two surfaces share this listener until the command line has its own endpoint: the browser administration (/api and the /admin application) and the command line's routes (/v1).
-        // Each is handled apart, and nothing under /v1 is reachable from the browser's handler or the other way round.
+        // Two surfaces: the browser administration (/api and the /admin application) and the command line's routes (/v1). Each is handled apart.
         // A connection may use only the surface of the listener it came on: the command line's endpoint answers /v1 and nothing of the browser administration; the loopback port answers the browser administration and nothing
         // of /v1. A connection that carries no surface (it cannot happen with the listeners made here) is answered nothing.
         string? surface = context.Features.Get<Microsoft.AspNetCore.Connections.Features.IConnectionItemsFeature>()?.Items.TryGetValue(LocalEndpoint.SurfaceItem, out object? marked) == true ? marked as string : null;

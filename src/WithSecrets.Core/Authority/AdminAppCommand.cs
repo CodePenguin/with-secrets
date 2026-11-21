@@ -23,7 +23,17 @@ public static class AdminAppCommand
 
         string link = $"http://localhost:{port}/admin";
         // The service is asked through the command line's endpoint (who it is, whether it runs); the port is only where the browser finds the app.
-        endpoint ??= LocalEndpoint.ForCommandLine();
+        try
+        {
+            endpoint ??= LocalEndpoint.ForCommandLine();
+        }
+        catch (IOException channelProblem)
+        {
+            await error.WriteLineAsync("with-secrets: the channel to the host service cannot be used: " + channelProblem.Message);
+
+            return RunCommand.Usage;
+        }
+
         using HttpClient client = new(endpoint.CreateHandler()) { Timeout = TimeSpan.FromSeconds(3) };
         if (trust is { PinnedFingerprint: null, Problem: null })
         {

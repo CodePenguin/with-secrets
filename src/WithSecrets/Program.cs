@@ -9,7 +9,6 @@ internal static class Program
     // secrets as Dotenvx ciphertext). The store key is never stored: it is wrapped under keys that only the passkeys (WebAuthn PRF) can produce.
     private const string StoreFolder = ".with-secrets";
 
-    /// <summary>True when the failure (or one inside it) is a socket that could not be bound because the address is already in use.</summary>
     /// <summary>The reason the command line's endpoint could not be made (a plain I/O error from the endpoint: a path and a rule), found in the chain of the start failure. Null when it is something else.</summary>
     private static string? EndpointProblem(Exception failure)
     {
@@ -24,6 +23,7 @@ internal static class Program
         return null;
     }
 
+    /// <summary>True when the failure (or one inside it) is a socket that could not be bound because the address is already in use.</summary>
     private static bool PortInUse(Exception failure)
     {
         for (Exception? item = failure; item is not null; item = item.InnerException)
@@ -193,7 +193,20 @@ internal static class Program
         using StreamWriter outWriter = new(stdout, new UTF8Encoding(false)) { AutoFlush = true };
         using StreamWriter errWriter = new(stderr, new UTF8Encoding(false)) { AutoFlush = true };
 
-        return await LaunchClient.RunAsync(args, Directory.GetCurrentDirectory(), LocalEndpoint.ForCommandLine(), command.Port, outWriter, errWriter, trust, approve: approve);
+        LocalEndpoint endpoint;
+        try
+        {
+            endpoint = LocalEndpoint.ForCommandLine();
+        }
+        catch (IOException problem)
+        {
+            // The channel cannot be named safely here (for example a path too long for a socket): nothing is sent anywhere else.
+            await errWriter.WriteLineAsync("with-secrets: the channel to the host service cannot be used: " + problem.Message);
+
+            return RunCommand.Usage;
+        }
+
+        return await LaunchClient.RunAsync(args, Directory.GetCurrentDirectory(), endpoint, command.Port, outWriter, errWriter, trust, approve: approve);
     }
 
     /// <summary>The host service in the foreground, until Ctrl+C. Windows service installation and start at logon come later.</summary>
