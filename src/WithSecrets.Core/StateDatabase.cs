@@ -548,11 +548,18 @@ public sealed class StateDatabase
             try
             {
                 stream = OpenGate();
-                if (OpenGateOrNull() is { } intruder)
+
+                // Prove that the lock excludes: a second exclusive open of the same file, made while this one is held, must be refused *because the file is locked*. Any other outcome is not proof: an open that succeeds means
+                // the lock excludes nobody, and an open that fails for another reason (no more file handles, no memory, no permission) says nothing about locking. Neither is used as a lock.
+                GateProbe probe = ClassifySecondOpen(SecondGateOpen);
+                if (probe == GateProbe.Allowed)
                 {
-                    // A second exclusive open of the same file was allowed: this lock excludes nobody, so it must not be used as one.
-                    intruder.Dispose();
                     throw new StateDatabaseException($"{FileLabel} cannot be created safely: the lock file {GatePath} does not exclude other processes on this file system (file locking is off or not supported there)");
+                }
+
+                if (probe == GateProbe.Unverified)
+                {
+                    throw new StateDatabaseException($"{FileLabel} cannot be created safely: it could not be verified that the lock file {GatePath} excludes other processes (the check failed for a reason other than the file being locked). Nothing was changed.");
                 }
 
                 CheckGateFile();
@@ -594,19 +601,53 @@ public sealed class StateDatabase
 
         return new FileStream(GatePath, options);
     }
-    /// <summary>A second exclusive open of the lock file while it is held: null when it is refused (what a working lock does).</summary>
-    private FileStream? OpenGateOrNull()
+    /// <summary>What a second exclusive open of the held lock file showed.</summary>
+    internal enum GateProbe
+    {
+        /// <summary>Refused because the file is locked: the lock excludes.</summary>
+        Excluded,
+
+        /// <summary>It opened: the lock excludes nobody.</summary>
+        Allowed,
+
+        /// <summary>It failed for some other reason: nothing is known about the lock.</summary>
+        Unverified,
+    }
+
+    /// <summary>For tests: replaces the second open of the lock file in the check above (to make it fail in a way a test chooses).</summary>
+    internal Func<FileStream>? SecondGateOpen { get; init; }
+
+    /// <summary>Makes the second open (the given one, or the lock file again) and says what it showed. Never throws.</summary>
+    private GateProbe ClassifySecondOpen(Func<FileStream>? open)
     {
         try
         {
-            return OpenGate();
+            using FileStream second = (open ?? OpenGate)();
+
+            return GateProbe.Allowed;
         }
-        catch (IOException)
+        catch (Exception failure)
         {
-            return null;
+            return ClassifyFailure(failure);
         }
     }
 
+    /// <summary>
+    /// The refusal that proves the lock: the operating system's own "locked by another" answer and no other. Linux and macOS: <c>flock</c> would block (EWOULDBLOCK: 11 on Linux, 35 on macOS), which .NET reports as an I/O error carrying
+    /// that errno. Windows: a sharing violation (ERROR_SHARING_VIOLATION, 32, HRESULT 0x80070020), which is what a share-none open of a file that is open says. Everything else (too many open files, disk full, no memory, no permission,
+    /// any other I/O error) is <see cref="GateProbe.Unverified" />. A lock violation (33) is a byte-range lock and does not count either.
+    /// </summary>
+    internal static GateProbe ClassifyFailure(Exception failure)
+    {
+        if (failure is not IOException io)
+        {
+            return GateProbe.Unverified;
+        }
+
+        bool contended = OperatingSystem.IsWindows() ? (uint)io.HResult == 0x80070020 : io.HResult == (OperatingSystem.IsMacOS() ? 35 : 11);
+
+        return contended ? GateProbe.Excluded : GateProbe.Unverified;
+    }
     /// <summary>On Linux and macOS the lock file, when there is one, is a regular file of this user that nobody else can open. Throws otherwise (the file is not touched).</summary>
     private void CheckGateFile()
     {
