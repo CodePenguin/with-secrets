@@ -612,7 +612,7 @@ public sealed class HostService : IDisposable
             }
 
             response.ContentType = "application/json";
-            await response.WriteAsync("{\"protocolVersion\":" + LaunchProtocol.Version + ",\"running\":true,\"locked\":" + (Lock.IsLocked ? "true" : "false") + "}");
+            await response.WriteAsync("{\"protocolVersion\":" + LaunchProtocol.Version + ",\"running\":true,\"locked\":" + (Lock.IsLocked ? "true" : "false") + ",\"adminPort\":" + Port.ToString(System.Globalization.CultureInfo.InvariantCulture) + "}");
 
             return;
         }

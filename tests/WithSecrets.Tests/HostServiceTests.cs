@@ -565,7 +565,7 @@ internal static class HostServiceTests
         check((await rig.Http.GetAsync(rig.Url("/v1/secrets"))).StatusCode == HttpStatusCode.NotFound && (await rig.Http.GetAsync(rig.Url("/"))).StatusCode == HttpStatusCode.NotFound, "service: there is no route that lists or returns secrets");
 
         string status = await rig.Http.GetStringAsync(rig.Url("/v1/status"));
-        check(status == "{\"protocolVersion\":1,\"running\":true,\"locked\":false}", "service: /v1/status returns the version, running and the lock state only (" + status + ")");
+        check(status == "{\"protocolVersion\":1,\"running\":true,\"locked\":false,\"adminPort\":" + rig.Service.Port + "}", "service: /v1/status returns the version, running, the lock state and the admin web app's port only (" + status + ")");
         if (Socket.OSSupportsIPv6)
         {
             try
@@ -1256,7 +1256,7 @@ internal static class HostServiceTests
         RunArgs args = CliArgs.ParseRun(["--secrets", "TOKEN", "--reason", "no service", "--", "anything"], out _)!;
         int code = await LaunchClient.RunAsync(args, parent, LocalEndpoint.Loopback(free), null, stdout, stderr, new ServiceTrust(null));
         check(code == LaunchClient.ServiceNotRunning && LaunchClient.ServiceNotRunning == 6, "client: with no service the exit code is 6 (" + code + ")");
-        check(stderr.ToString().Trim() == "with-secrets: the host service is not running. Start it with: with-secrets service" && stdout.ToString().Length == 0, "client: with no service one clear line is printed and nothing else (" + stderr.ToString().Trim() + ")");
+        check(stderr.ToString().Trim().StartsWith("with-secrets: the host service is not running. Start it with: with-secrets service (nothing answers on ", StringComparison.Ordinal) && stderr.ToString().Trim().Split('\n').Length == 1 && stdout.ToString().Length == 0, "client: with no service one clear line is printed and nothing else (" + stderr.ToString().Trim() + ")");
 
         // Through a running service: the same output and exit code as a direct run, the link printed where it always was.
         using Rig rig = new(parent);

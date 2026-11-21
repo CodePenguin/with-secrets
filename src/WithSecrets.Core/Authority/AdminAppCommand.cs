@@ -39,8 +39,10 @@ public static class AdminAppCommand
         {
             // First run: this machine is not approved yet, so no identity is pinned and the program on the port cannot be checked. The link is public and carries nothing; it is offered
             // as unverified (and not opened), and the person compares the fingerprint the service printed in its own window before approving anything.
+            (string firstStatus, int? firstPort) = await StatusAsync(client, endpoint);
+            link = firstPort is { } reportedFirst ? $"http://localhost:{reportedFirst}/admin" : link;
             await output.WriteLineAsync("Admin web app: " + link);
-            await output.WriteLineAsync("Service: " + await StatusAsync(client, endpoint));
+            await output.WriteLineAsync("Service: " + firstStatus);
             await output.WriteLineAsync("Not verified: this machine is not approved yet, so no identity is pinned and the program on the port cannot be checked. Open the link only if the service you started printed this port, and compare its fingerprint with the one shown in the app before you approve.");
 
             return 0;
@@ -56,7 +58,13 @@ public static class AdminAppCommand
             return LaunchClient.ServiceNotAuthenticated;
         }
 
-        string status = refused is null ? await StatusAsync(client, endpoint) : "not running (start it with: with-secrets service)";
+        (string status, int? reportedPort) = refused is null ? await StatusAsync(client, endpoint) : ("not running (start it with: with-secrets service)", null);
+        if (reportedPort is { } servicePort)
+        {
+            // The port the running service says its admin web app is on wins over the one this command resolved: a wrong --port or WITH_SECRETS_PORT would print a dead link.
+            link = $"http://localhost:{servicePort}/admin";
+        }
+
         await output.WriteLineAsync("Admin web app: " + link);
         await output.WriteLineAsync("Service: " + status);
         if (open is not null && refused is null)
@@ -69,7 +77,7 @@ public static class AdminAppCommand
     }
 
     /// <summary>The public status line of the service at its command line endpoint: not running, or running with its lock state.</summary>
-    public static async Task<string> StatusAsync(HttpClient client, LocalEndpoint endpoint)
+    public static async Task<(string Text, int? AdminPort)> StatusAsync(HttpClient client, LocalEndpoint endpoint)
     {
         try
         {
@@ -77,11 +85,13 @@ public static class AdminAppCommand
             using JsonDocument doc = JsonDocument.Parse(await client.GetStringAsync(new Uri(endpoint.BaseUri, "v1/status")));
             bool locked = doc.RootElement.TryGetProperty("locked", out JsonElement value) && value.ValueKind != JsonValueKind.False;
 
-            return locked ? "running, LOCKED (unlock it in the app)" : "running, unlocked";
+            int? adminPort = doc.RootElement.TryGetProperty("adminPort", out JsonElement portValue) && portValue.ValueKind == JsonValueKind.Number && portValue.TryGetInt32(out int reported) && reported is >= 1 and <= 65535 ? reported : null;
+
+            return (locked ? "running, LOCKED (unlock it in the app)" : "running, unlocked", adminPort);
         }
         catch (Exception error) when (error is HttpRequestException or TaskCanceledException or JsonException or IOException)
         {
-            return "not running (start it with: with-secrets service)";
+            return ("not running (start it with: with-secrets service)", null);
         }
     }
 }

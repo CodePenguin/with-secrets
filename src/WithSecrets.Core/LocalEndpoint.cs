@@ -228,13 +228,11 @@ internal sealed class UnixSocketEndpoint : LocalEndpoint
             return Path.Combine(runtime, "with-secrets");
         }
 
-        return "/tmp/with-secrets-" + UserId().ToString(System.Globalization.CultureInfo.InvariantCulture);
+        return "/tmp/with-secrets-" + GetEffectiveUserId().ToString(System.Globalization.CultureInfo.InvariantCulture);
     }
 
     [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "geteuid")]
     private static extern uint GetEffectiveUserId();
-
-    private static uint UserId() => GetEffectiveUserId();
 
     /// <summary>The effective user id of this process.</summary>
     internal static uint EffectiveUserId() => GetEffectiveUserId();

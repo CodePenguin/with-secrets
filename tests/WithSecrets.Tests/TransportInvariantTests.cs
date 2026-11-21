@@ -26,6 +26,11 @@ internal static class TransportInvariantTests
             LocalEndpoint real = LocalEndpoint.ForCommandLine();
             check(real is not LoopbackEndpoint && real.BaseUri.Host == "localhost" && real.BaseUri.IsDefaultPort && (OperatingSystem.IsWindows() ? real.Describe().Contains("pipe", StringComparison.Ordinal) : real.Describe().Contains("socket", StringComparison.Ordinal)), "invariants: the command line's default endpoint is the user's own channel (" + real.Describe() + "), with no port");
 
+            // The admin command prints the link of the port the running service reports, not a port it was merely told: a wrong --port must not give a dead link next to "running".
+            StringWriter adminOut = new();
+            int adminCode = await AdminAppCommand.RunAsync(1, adminOut, new StringWriter(), rig.Machine.Trust, endpoint: rig.Service.Endpoint);
+            check(adminCode == 0 && adminOut.ToString().Contains("http://localhost:" + rig.Service.Port + "/admin", StringComparison.Ordinal) && adminOut.ToString().Contains("running", StringComparison.Ordinal), "invariants: admin prints the admin web app's real port as the service reports it, whatever port was asked for (" + adminOut.ToString().Trim().Replace("\n", " | ") + ")");
+
             string program = rig.Script("marker", "echo ran> \"%~dpn0.marker.txt\"", "echo ran > \"$0.marker.txt\"");
 
             // The right service, pinned: the run goes through.

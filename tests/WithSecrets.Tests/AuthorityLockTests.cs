@@ -149,7 +149,7 @@ internal static class AuthorityLockTests
         using HostServiceTests.Rig rig = new(root, startLocked: true);
         HostService service = rig.Service;
         string status = await rig.Http.GetStringAsync(rig.Url("/v1/status"));
-        check(service.Lock.IsLocked && status == "{\"protocolVersion\":1,\"running\":true,\"locked\":true}", "lock: a service starts LOCKED and /v1/status says running and locked, nothing else (" + status + ")");
+        check(service.Lock.IsLocked && status == "{\"protocolVersion\":1,\"running\":true,\"locked\":true,\"adminPort\":" + service.Port + "}", "lock: a service starts LOCKED and /v1/status says running and locked, nothing else (" + status + ")");
 
         HostServiceTests.Raw refused = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, rig.Script("never", "echo never", "echo never")));
         check(refused.Status == HttpStatusCode.Locked && refused.Body.Contains("/admin", StringComparison.Ordinal) && refused.Body.Contains("locked", StringComparison.Ordinal) && rig.Store.Reads == 0 && rig.Approvers.IsEmpty, "lock: a run while locked is refused (423) with one line naming the admin page; nothing is asked or decrypted (" + refused.Body + ")");
@@ -367,7 +367,7 @@ internal static class AuthorityLockTests
         check(store.Grants().Count == grantsBefore && second.Authorization.SyncedGrants.Count == 0 && !second.Authorization.Keys.IsHeld, "unattended: unlocking creates no grant, widens none and holds no key");
         using HttpClient commandLine = new(second.Endpoint.CreateHandler());
         string status = await commandLine.GetStringAsync(new Uri(second.Endpoint.BaseUri, "v1/status"));
-        check(status == "{\"protocolVersion\":1,\"running\":true,\"locked\":false}", "unattended: status reports unlocked and nothing else");
+        check(status == "{\"protocolVersion\":1,\"running\":true,\"locked\":false,\"adminPort\":" + second.Port + "}", "unattended: status reports unlocked and nothing else");
 
         // It never replaces a passkey: a sensitive operation still taps, with the service unlocked unattended.
         await Login(second, http);

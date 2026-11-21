@@ -126,7 +126,7 @@ public static class LaunchClient
         }
         catch (HttpRequestException)
         {
-            await stderr.WriteLineAsync(NotRunningMessage);
+            await stderr.WriteLineAsync(NotRunningMessage + " (nothing answers on " + endpoint.Describe() + "; the service and this command must run as the same user" + (OperatingSystem.IsWindows() ? "" : ", with the same XDG_RUNTIME_DIR or TMPDIR") + ")");
 
             return ServiceNotRunning;
         }
@@ -261,7 +261,7 @@ public static class LaunchClient
         }
         catch (HttpRequestException)
         {
-            await stderr.WriteLineAsync(NotRunningMessage);
+            await stderr.WriteLineAsync(NotRunningMessage + " (nothing answers on " + endpoint.Describe() + "; the service and this command must run as the same user" + (OperatingSystem.IsWindows() ? "" : ", with the same XDG_RUNTIME_DIR or TMPDIR") + ")");
 
             return ServiceNotRunning;
         }
