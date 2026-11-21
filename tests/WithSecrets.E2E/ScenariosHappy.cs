@@ -57,7 +57,7 @@ internal static class ScenariosHappy
 
         // 5. A pre-approval: the same kind of request, but it lets the same command run again for a while without asking.
         CliCommand.Run grantRun = (CliCommand.Run)Cmds.Parse(["--secrets", "E2E_SECRET", "--reason", "e2e run", "--", ..Rig.ScriptCommand("check")]);
-        using (Cmd<int> preApprove = new((port, o, e) => LaunchClient.RunAsync(grantRun.Args, rig.Work, app.Service.Port, null, o, e, rig.Machine.Trust, approve: true).GetAwaiter().GetResult()))
+        using (Cmd<int> preApprove = new((port, o, e) => LaunchClient.RunAsync(grantRun.Args, rig.Work, app.Service.Endpoint, null, o, e, rig.Machine.Trust, approve: true).GetAwaiter().GetResult()))
         {
             await c.DemoCaptionAsync("5. A pre-approval lets the same command run again without asking, for a time the person chooses.");
             await Spa.OpenRequest(c, preApprove, app, s, "Run request from");

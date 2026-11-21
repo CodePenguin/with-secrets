@@ -187,7 +187,7 @@ internal static class Program
         using StreamWriter outWriter = new(stdout, new UTF8Encoding(false)) { AutoFlush = true };
         using StreamWriter errWriter = new(stderr, new UTF8Encoding(false)) { AutoFlush = true };
 
-        return await LaunchClient.RunAsync(args, Directory.GetCurrentDirectory(), port.Value, command.Port, outWriter, errWriter, trust, approve: approve);
+        return await LaunchClient.RunAsync(args, Directory.GetCurrentDirectory(), LocalEndpoint.Loopback(port.Value), command.Port, outWriter, errWriter, trust, approve: approve);
     }
 
     /// <summary>The host service in the foreground, until Ctrl+C. Windows service installation and start at logon come later.</summary>

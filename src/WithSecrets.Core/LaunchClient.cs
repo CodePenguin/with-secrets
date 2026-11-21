@@ -48,10 +48,10 @@ public static class LaunchClient
     public const string NotRunningMessage = "with-secrets: the host service is not running. Start it with: with-secrets service";
 
     /// <summary>
-    /// Runs the request through the service on 127.0.0.1:<paramref name="servicePort" />. <paramref name="environment" /> is the
+    /// Runs the request through the service at <paramref name="endpoint" />. <paramref name="environment" /> is the
     /// environment the program inherits (this process's own when null); <paramref name="pagePort" /> is the --port of the run.
     /// </summary>
-    public static async Task<int> RunAsync(RunArgs args, string workingDirectory, int servicePort, int? pagePort, TextWriter stdout, TextWriter stderr, ServiceTrust trust, IReadOnlyDictionary<string, string>? environment = null, HttpMessageHandler? handler = null, CancellationToken cancel = default, bool approve = false)
+    public static async Task<int> RunAsync(RunArgs args, string workingDirectory, LocalEndpoint endpoint, int? pagePort, TextWriter stdout, TextWriter stderr, ServiceTrust trust, IReadOnlyDictionary<string, string>? environment = null, HttpMessageHandler? handler = null, CancellationToken cancel = default, bool approve = false)
     {
         environment ??= CurrentEnvironment();
         Func<string, string?> lookup = name => environment.FirstOrDefault(item => string.Equals(item.Key, name, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) is { Key: not null } found ? found.Value : null;
@@ -102,17 +102,17 @@ public static class LaunchClient
             [.. encrypted.Select(value => new LaunchEncrypted(value.Variable, value.File, value.KeySecret, value.Ciphertext))]);
 
         using HttpClient client = handler is null
-            ? new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false })
+            ? new HttpClient(endpoint.CreateHandler())
             : new HttpClient(handler, false);
         client.Timeout = Timeout.InfiniteTimeSpan;
 
         // Before anything is sent: is this the host service of this machine? A program that merely holds the port is refused here.
-        if (await AuthenticateService(client, servicePort, trust, stderr, cancel) is { } refused)
+        if (await AuthenticateService(client, endpoint, trust, stderr, cancel) is { } refused)
         {
             return refused;
         }
 
-        string url = $"http://127.0.0.1:{servicePort}/v1/{(approve ? "approve" : "launch")}" + (pagePort is { } page ? "?pagePort=" + page : "");
+        Uri url = new(endpoint.BaseUri, "v1/" + (approve ? "approve" : "launch") + (pagePort is { } page ? "?pagePort=" + page : ""));
         using HttpRequestMessage message = new(HttpMethod.Post, url)
         {
             Content = new StringContent(request.Canonical(), new UTF8Encoding(false), new MediaTypeHeaderValue("application/json"))
@@ -190,7 +190,7 @@ public static class LaunchClient
     /// <paramref name="stderr" />; nothing of the request was sent. This authenticates the service to the client (a program that only holds
     /// the port cannot sign); it adds no credential of the client.
     /// </summary>
-    internal static async Task<int?> AuthenticateService(HttpClient client, int servicePort, ServiceTrust trust, TextWriter stderr, CancellationToken cancel)
+    internal static async Task<int?> AuthenticateService(HttpClient client, LocalEndpoint endpoint, ServiceTrust trust, TextWriter stderr, CancellationToken cancel)
     {
         if (trust.Problem is not null)
         {
@@ -202,20 +202,20 @@ public static class LaunchClient
         limit.CancelAfter(IdentityTimeout);
         try
         {
-            using HttpRequestMessage message = new(HttpMethod.Post, $"http://127.0.0.1:{servicePort}/v1/identity")
+            using HttpRequestMessage message = new(HttpMethod.Post, new Uri(endpoint.BaseUri, "v1/identity"))
             {
                 Content = new StringContent("{\"challenge\":\"" + challenge + "\"}", new UTF8Encoding(false), new MediaTypeHeaderValue("application/json"))
             };
             using HttpResponseMessage response = await client.SendAsync(message, HttpCompletionOption.ResponseContentRead, limit.Token);
             if (response.StatusCode != HttpStatusCode.OK)
             {
-                return await Fail(stderr, ServiceNotAuthenticated, NotServiceMessage(servicePort, "it answered the identity check with HTTP " + (int)response.StatusCode));
+                return await Fail(stderr, ServiceNotAuthenticated, NotServiceMessage(endpoint, "it answered the identity check with HTTP " + (int)response.StatusCode));
             }
 
             string text = await response.Content.ReadAsStringAsync(limit.Token);
             if (text.Length > 4096 || !CanonicalJson.Open(text, out JsonDocument? doc, out _))
             {
-                return await Fail(stderr, ServiceNotAuthenticated, NotServiceMessage(servicePort, "its answer to the identity check is not valid"));
+                return await Fail(stderr, ServiceNotAuthenticated, NotServiceMessage(endpoint, "its answer to the identity check is not valid"));
             }
 
             string? fingerprint;
@@ -227,7 +227,7 @@ public static class LaunchClient
                 if (reader.Problem is not null || !reader.Int("protocolVersion", out int version) || version != LaunchProtocol.Version || !reader.Text("fingerprint", out fingerprint)
                     || !reader.Text("publicKey", out string? keyText) || !reader.Text("signature", out string? signatureText))
                 {
-                    return await Fail(stderr, ServiceNotAuthenticated, NotServiceMessage(servicePort, "its answer to the identity check is not valid"));
+                    return await Fail(stderr, ServiceNotAuthenticated, NotServiceMessage(endpoint, "its answer to the identity check is not valid"));
                 }
 
                 try
@@ -237,14 +237,14 @@ public static class LaunchClient
                 }
                 catch (FormatException)
                 {
-                    return await Fail(stderr, ServiceNotAuthenticated, NotServiceMessage(servicePort, "its answer to the identity check is not valid"));
+                    return await Fail(stderr, ServiceNotAuthenticated, NotServiceMessage(endpoint, "its answer to the identity check is not valid"));
                 }
             }
 
             // It must hold the private key of the fingerprint it names, for this very challenge.
             if (KeyIdentity.Fingerprint(publicKey) != fingerprint || !KeyIdentity.Verify(publicKey, WireText.Bytes(WireText.IdentityDomain, challenge), signature))
             {
-                return await Fail(stderr, ServiceNotAuthenticated, NotServiceMessage(servicePort, "it could not prove the identity it claims"));
+                return await Fail(stderr, ServiceNotAuthenticated, NotServiceMessage(endpoint, "it could not prove the identity it claims"));
             }
 
             if (trust.PinnedFingerprint is null)
@@ -254,7 +254,7 @@ public static class LaunchClient
 
             if (!string.Equals(fingerprint, trust.PinnedFingerprint, StringComparison.Ordinal))
             {
-                return await Fail(stderr, ServiceNotAuthenticated, NotServiceMessage(servicePort, $"its identity {fingerprint} is not the pinned one {trust.PinnedFingerprint}"));
+                return await Fail(stderr, ServiceNotAuthenticated, NotServiceMessage(endpoint, $"its identity {fingerprint} is not the pinned one {trust.PinnedFingerprint}"));
             }
 
             return null;
@@ -267,12 +267,12 @@ public static class LaunchClient
         }
         catch (OperationCanceledException) when (limit.IsCancellationRequested && !cancel.IsCancellationRequested)
         {
-            return await Fail(stderr, ServiceNotAuthenticated, NotServiceMessage(servicePort, "it did not answer the identity check in time"));
+            return await Fail(stderr, ServiceNotAuthenticated, NotServiceMessage(endpoint, "it did not answer the identity check in time"));
         }
     }
 
-    private static string NotServiceMessage(int port, string why) =>
-        $"the program that answers on port {port} is not this machine's host service ({why}). Nothing was sent. Stop that program, or start the service on another port (with-secrets service --port N, and --service-port N for a run).";
+    private static string NotServiceMessage(LocalEndpoint endpoint, string why) =>
+        $"the program that answers at {endpoint.Describe()} is not this machine's host service ({why}). Nothing was sent. Stop that program, or start the service on another port (with-secrets service --port N, and --service-port N for a run).";
 
     /// <summary>The environment of this process, as a map.</summary>
     public static IReadOnlyDictionary<string, string> CurrentEnvironment()

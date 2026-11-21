@@ -162,7 +162,7 @@ internal static class AdminTests
     {
         StringWriter err = new();
         RunArgs args = CliArgs.ParseRun(["--secrets", "TOKEN", "--reason", "impostor test", "--", "anything"], out _)!;
-        int code = await LaunchClient.RunAsync(args, work, port, null, new StringWriter(), err, trust);
+        int code = await LaunchClient.RunAsync(args, work, LocalEndpoint.Loopback(port), null, new StringWriter(), err, trust);
 
         return (code, err.ToString());
     }

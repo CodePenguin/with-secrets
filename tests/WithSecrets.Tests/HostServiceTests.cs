@@ -151,7 +151,7 @@ internal static class HostServiceTests
                 AuditUploadInterval = auditInterval ?? TimeSpan.FromSeconds(2),
                 AuditMaxBackoff = auditInterval is { } interval ? interval * 4 : TimeSpan.FromSeconds(60),
             });
-            Http = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(60) };
+            Http = new HttpClient(Service.Endpoint.CreateHandler()) { Timeout = TimeSpan.FromSeconds(60) };
         }
 
         public string Work { get; }
@@ -168,7 +168,7 @@ internal static class HostServiceTests
 
         public ConcurrentBag<IApprover> Approvers { get; }
 
-        public string Url(string path) => "http://127.0.0.1:" + Service.Port + path;
+        public string Url(string path) => Service.Endpoint.BaseUri.AbsoluteUri.TrimEnd('/') + path;
 
         public string NextId() => "req-" + Interlocked.Increment(ref _ids) + "-" + Guid.NewGuid().ToString("N")[..8];
 
@@ -296,6 +296,37 @@ internal static class HostServiceTests
         return condition();
     }
 
+    /// <summary>
+    /// The two surfaces of the service are handled apart: the command line's routes (/v1, the application protocol) and the browser administration (/api, /admin). The request goes through the rig's endpoint, so this same
+    /// check runs over every transport the command line has.
+    /// </summary>
+    private static async Task Surfaces(Action<bool, string> check, string parent)
+    {
+        using Rig rig = new(parent);
+        async Task<(HttpStatusCode Status, string Body, string? Type)> Get(string path)
+        {
+            using HttpResponseMessage response = await rig.Http.GetAsync(rig.Url(path));
+
+            return (response.StatusCode, await response.Content.ReadAsStringAsync(), response.Content.Headers.ContentType?.MediaType);
+        }
+
+        (HttpStatusCode Status, string Body, string? Type) cli = await Get("/v1/status");
+        (HttpStatusCode Status, string Body, string? Type) browser = await Get("/api/v1/status");
+        (HttpStatusCode Status, string Body, string? Type) unknownCli = await Get("/v1/nothing");
+        (HttpStatusCode Status, string Body, string? Type) browserUnderCli = await Get("/v1/api/v1/status");
+        check(cli.Status == HttpStatusCode.OK && cli.Body.Contains("\"protocolVersion\"", StringComparison.Ordinal) && cli.Body.Contains("\"running\":true", StringComparison.Ordinal), "surfaces: the command line's status route answers with the protocol's own document");
+        check(browser.Body.Contains("apiVersion", StringComparison.Ordinal) && !cli.Body.Contains("apiVersion", StringComparison.Ordinal), "surfaces: the same name under /api is the browser administration's own document, not the command line's (" + (int)browser.Status + ")");
+        check(unknownCli.Status == HttpStatusCode.NotFound && browserUnderCli.Status == HttpStatusCode.NotFound, "surfaces: an unknown command line route, and an administration route placed under /v1, are 404 (" + (int)unknownCli.Status + ", " + (int)browserUnderCli.Status + ")");
+
+        using HttpRequestMessage fromPage = new(HttpMethod.Post, rig.Url("/v1/identity"));
+        fromPage.Headers.Add("Origin", "http://example.test");
+        fromPage.Content = new StringContent("{\"challenge\":\"AAAAAAAAAAAAAAAAAAAAAA\"}", new UTF8Encoding(false), new MediaTypeHeaderValue("application/json"));
+        using HttpResponseMessage pageResponse = await rig.Http.SendAsync(fromPage);
+        using HttpRequestMessage badHost = new(HttpMethod.Get, rig.Url("/v1/status"));
+        badHost.Headers.Host = "evil.example";
+        using HttpResponseMessage badHostResponse = await rig.Http.SendAsync(badHost);
+        check(pageResponse.StatusCode == HttpStatusCode.Forbidden && badHostResponse.StatusCode == (HttpStatusCode)421, "surfaces: a request with an Origin (a web page) and one with a Host that is not a local name are refused on the command line's routes");
+    }
     public static async Task Run(Action<bool, string> check)
     {
         string parent = Path.Combine(Path.GetTempPath(), "ws-host-" + Guid.NewGuid().ToString("N")[..8]);
@@ -316,6 +347,7 @@ internal static class HostServiceTests
             await ApprovalOverHttp(check, parent);
             await FixRound1(check, parent);
             await ClientAndCommandLine(check, parent);
+            await Surfaces(check, parent);
         }
         finally
         {
@@ -1157,7 +1189,7 @@ internal static class HostServiceTests
         StringWriter stdout = new();
         StringWriter stderr = new();
         RunArgs args = CliArgs.ParseRun(["--secrets", "TOKEN", "--reason", "no service", "--", "anything"], out _)!;
-        int code = await LaunchClient.RunAsync(args, parent, free, null, stdout, stderr, new ServiceTrust(null));
+        int code = await LaunchClient.RunAsync(args, parent, LocalEndpoint.Loopback(free), null, stdout, stderr, new ServiceTrust(null));
         check(code == LaunchClient.ServiceNotRunning && LaunchClient.ServiceNotRunning == 6, "client: with no service the exit code is 6 (" + code + ")");
         check(stderr.ToString().Trim() == "with-secrets: the host service is not running. Start it with: with-secrets service" && stdout.ToString().Length == 0, "client: with no service one clear line is printed and nothing else (" + stderr.ToString().Trim() + ")");
 
@@ -1167,18 +1199,18 @@ internal static class HostServiceTests
         StringWriter outText = new();
         StringWriter errText = new();
         RunArgs run = CliArgs.ParseRun(["--secrets", "TOKEN", "--reason", "via client", "--", show], out _)!;
-        int exit = await LaunchClient.RunAsync(run, rig.Work, rig.Service.Port, null, outText, errText, rig.Machine.Trust);
+        int exit = await LaunchClient.RunAsync(run, rig.Work, rig.Service.Endpoint, null, outText, errText, rig.Machine.Trust);
         check(exit == 9 && outText.ToString().Contains("t=[REDACTED]", StringComparison.Ordinal) && errText.ToString().Contains("e=[REDACTED]", StringComparison.Ordinal), "client: output goes to the same streams and the exit code passes through (" + exit + ")");
         check(errText.ToString().Contains("with-secrets: waiting for the user to approve this request...", StringComparison.Ordinal) && !outText.ToString().Contains(Value, StringComparison.Ordinal) && !errText.ToString().Contains(Value, StringComparison.Ordinal), "client: the terminal shows the usual waiting line and no value");
 
         // The client has no store: a request for an unknown secret is refused by the service.
         StringWriter unknownErr = new();
-        int unknown = await LaunchClient.RunAsync(CliArgs.ParseRun(["--secrets", "GHOST", "--reason", "x", "--", show], out _)!, rig.Work, rig.Service.Port, null, new StringWriter(), unknownErr, rig.Machine.Trust);
+        int unknown = await LaunchClient.RunAsync(CliArgs.ParseRun(["--secrets", "GHOST", "--reason", "x", "--", show], out _)!, rig.Work, rig.Service.Endpoint, null, new StringWriter(), unknownErr, rig.Machine.Trust);
         check(unknown == RunCommand.Usage && unknownErr.ToString().Contains("Unknown secret: GHOST", StringComparison.Ordinal), "client: an unknown secret is refused by the service with the usual message and exit 2");
 
         // The usual client-side usage errors are unchanged.
         StringWriter usageErr = new();
-        int usage = await LaunchClient.RunAsync(CliArgs.ParseRun(["--reason", "x", "--", show], out _)!, rig.Work, rig.Service.Port, null, new StringWriter(), usageErr, rig.Machine.Trust);
+        int usage = await LaunchClient.RunAsync(CliArgs.ParseRun(["--reason", "x", "--", show], out _)!, rig.Work, rig.Service.Endpoint, null, new StringWriter(), usageErr, rig.Machine.Trust);
         check(usage == RunCommand.Usage && usageErr.ToString().Contains("Name the secrets with --secrets", StringComparison.Ordinal), "client: a run that names no secret fails as before");
 
         // Command line.

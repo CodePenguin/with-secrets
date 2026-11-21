@@ -1434,7 +1434,7 @@ internal static class GrantAuthorityTests
             HostServiceTests.Raw refusedApprove = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, Show(rig)), path: "/v1/approve");
             check(refused.Status == HttpStatusCode.ServiceUnavailable && refusedApprove.Status == HttpStatusCode.ServiceUnavailable && rig.Store.Reads == 0 && !File.Exists(Marker(rig)), "startup: until it has reconciled the service refuses runs and approvals with 503 and decrypts nothing");
             StringWriter notReadyErr = new();
-            int notReady = await LaunchClient.RunAsync(CliArgs.ParseRun(["--secrets", "TOKEN", "--reason", "early", "--", Show(rig)], out _)!, rig.Work, rig.Service.Port, null, new StringWriter(), notReadyErr, rig.Machine.Trust);
+            int notReady = await LaunchClient.RunAsync(CliArgs.ParseRun(["--secrets", "TOKEN", "--reason", "early", "--", Show(rig)], out _)!, rig.Work, rig.Service.Endpoint, null, new StringWriter(), notReadyErr, rig.Machine.Trust);
             check(notReady == LaunchClient.ServiceUnavailable && notReadyErr.ToString().Contains("not ready", StringComparison.Ordinal), "startup: a client told 503 exits " + LaunchClient.ServiceUnavailable + " with a line that says to ask again, not 4 (store error) (" + notReady + ")");
             link.Offline = false;
             check(await HostServiceTests.WaitFor(() => rig.Service.Ready, 30), "startup: it keeps trying and becomes ready when the authority answers");

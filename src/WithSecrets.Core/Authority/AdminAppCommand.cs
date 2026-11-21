@@ -35,7 +35,7 @@ public static class AdminAppCommand
         }
 
         StringWriter refusal = new();
-        int? refused = await LaunchClient.AuthenticateService(client, port.Value, trust, refusal, CancellationToken.None);
+        int? refused = await LaunchClient.AuthenticateService(client, LocalEndpoint.Loopback(port.Value), trust, refusal, CancellationToken.None);
         if (refused == LaunchClient.ServiceNotAuthenticated)
         {
             // Not this machine's service: nothing is trusted, and the link is not offered as the authority's.

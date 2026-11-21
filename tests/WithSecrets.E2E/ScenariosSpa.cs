@@ -299,7 +299,7 @@ internal static class ScenariosSpa
         await Scenarios3.SeedSecret(rig, c, app);
         rig.WriteScript("check", "script-value");
         CliCommand.Run run = (CliCommand.Run)Cmds.Parse(["--secrets", "E2E_SECRET", "--reason", "e2e grant", "--", ..Rig.ScriptCommand("check")]);
-        using Cmd<int> approve = new((port, o, e) => LaunchClient.RunAsync(run.Args, rig.Work, app.Service.Port, null, o, e, rig.Machine.Trust, approve: true).GetAwaiter().GetResult());
+        using Cmd<int> approve = new((port, o, e) => LaunchClient.RunAsync(run.Args, rig.Work, app.Service.Endpoint, null, o, e, rig.Machine.Trust, approve: true).GetAwaiter().GetResult());
 
         // The pre-approval waits in the Approvals queue like any request; the person picks how long it lasts and taps once.
         await Spa.OpenRequest(c, approve, app, s, "Run request from");

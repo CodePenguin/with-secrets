@@ -157,12 +157,13 @@ public sealed class HostService : IDisposable
     /// <summary>The most launches in progress at once; each holds an approval page and a thread.</summary>
     public const int MaxConcurrentLaunches = 8;
 
-    private HostService(HostServiceOptions options, WebApplication app, int port)
+    private HostService(HostServiceOptions options, WebApplication app, int port, LocalEndpoint endpoint)
     {
         _options = options;
         _web = options.WebAssets ?? AdminWebAssets.FromAssembly();
         _app = app;
         Port = port;
+        Endpoint = endpoint;
         // The authority believes a grant only when a person's passkey assertion backs it: it checks those against the keys of the signed manifest.
         options.Deployment.Authority.Verifier ??= options.State is { } verifierState ? new ManifestApprovalVerifier(verifierState) : null;
         Authorization = options.Deployment.CreateAuthorization(options.Gate, options.Monotonic);
@@ -272,7 +273,11 @@ public sealed class HostService : IDisposable
     /// <summary>The host's side of the authority protocol: signs requests, verifies answers, applies invalidations.</summary>
     public HostAuthorization Authorization { get; }
 
+    /// <summary>The loopback port: where the browser administration is served (and, until the command line has its own endpoint, the command line).</summary>
     public int Port { get; }
+
+    /// <summary>Where the command line reaches this service.</summary>
+    public LocalEndpoint Endpoint { get; }
 
     public LaunchGate Gate => _options.Gate;
 
@@ -305,8 +310,9 @@ public sealed class HostService : IDisposable
             HostService? service = null;
             try
             {
-                WebApplication app = Build(options, port, withIpv6);
-                service = new HostService(options, app, port);
+                LocalEndpoint endpoint = LocalEndpoint.Loopback(port, withIpv6);
+                WebApplication app = Build(options, endpoint);
+                service = new HostService(options, app, port, endpoint);
                 // Locked by default; unattended unlock applies only when the administrator chose it. Before any request is accepted: check machine status, host name binding and security
                 // revision with the authority (it also vouches for the machine), which needs the authority unlocked.
                 service._startupUnlockNote = service.Lock.IsLocked ? UnattendedUnlock.TryUnlock(options.Deployment.Store, options.Deployment.Keys, service.Lock, options.UnlockProtection ?? UnlockProtections.ForThisPlatform()) : null;
@@ -486,7 +492,7 @@ public sealed class HostService : IDisposable
         }
     }
 
-    private static WebApplication Build(HostServiceOptions options, int port, bool withIpv6)
+    private static WebApplication Build(HostServiceOptions options, LocalEndpoint endpoint)
     {
         WebApplicationBuilder builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions
         {
@@ -506,11 +512,7 @@ public sealed class HostService : IDisposable
             kestrel.Limits.MaxRequestLineSize = 4096;
             kestrel.Limits.MaxRequestHeadersTotalSize = 16 * 1024;
             kestrel.Limits.RequestHeadersTimeout = options.BodyTimeout;
-            kestrel.Listen(IPAddress.Loopback, port);
-            if (withIpv6)
-            {
-                kestrel.Listen(IPAddress.IPv6Loopback, port);
-            }
+            endpoint.Listen(kestrel);
         });
 
         return builder.Build();
@@ -542,7 +544,23 @@ public sealed class HostService : IDisposable
             return;
         }
 
-        // The administration API (JSON, under /api): sessions are read-only, every change carries its own passkey authorization (see AdminApi). Nothing under /api is anything but JSON.
+        // Two surfaces share this listener until the command line has its own endpoint: the browser administration (/api and the /admin application) and the command line's routes (/v1).
+        // Each is handled apart, and nothing under /v1 is reachable from the browser's handler or the other way round.
+        if (IsBrowserSurface(path))
+        {
+            await HandleBrowser(context, path);
+
+            return;
+        }
+
+        await HandleCli(context, path);
+    }
+
+    private static bool IsBrowserSurface(string path) => path == "/api" || path.StartsWith("/api/", StringComparison.Ordinal) || AdminWebAssets.IsApplicationPath(path);
+
+    /// <summary>The browser administration: the JSON API under /api and the single-page application under /admin. Every change needs its own passkey authorization (see AdminApi); sessions are read-only.</summary>
+    private async Task HandleBrowser(HttpContext context, string path)
+    {
         if (path == "/api" || path.StartsWith("/api/", StringComparison.Ordinal))
         {
             await Admin.Api.HandleAsync(context);
@@ -550,15 +568,15 @@ public sealed class HostService : IDisposable
             return;
         }
 
-        // The administration web application (the single-page application) under /admin: its built files from this assembly, the page for an application route, never for /api.
-        // Built without the frontend, its address answers a JSON 404 that says where the API is.
-        if (AdminWebAssets.IsApplicationPath(path))
-        {
-            await _web.ServeAsync(context, Admin.Api.NotBuiltAsync);
+        // The page for an application route, never for /api. Built without the frontend, its address answers a JSON 404 that says where the API is.
+        await _web.ServeAsync(context, Admin.Api.NotBuiltAsync);
+    }
 
-            return;
-        }
-
+    /// <summary>The command line's routes under /v1 (the application protocol: status, identity, launch, approve, cancel). Programs only.</summary>
+    private async Task HandleCli(HttpContext context, string path)
+    {
+        HttpResponse response = context.Response;
+        HttpRequest request = context.Request;
         // A browser page sends Origin on a cross-site request. This API is for programs, not pages.
         if (request.Headers.ContainsKey("Origin"))
         {

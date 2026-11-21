@@ -157,7 +157,7 @@ internal static class AuthorityLockTests
         check(approve.Status == HttpStatusCode.Locked && rig.Approvers.IsEmpty && rig.Machine.Deployment.Store.Grants().Count == 0, "lock: approve while locked is refused too and makes no grant");
 
         StringWriter errText = new();
-        int exit = await LaunchClient.RunAsync(CliArgs.ParseRun(["--secrets", "TOKEN", "--reason", "locked", "--", "anything"], out _)!, rig.Work, service.Port, null, new StringWriter(), errText, rig.Machine.Trust);
+        int exit = await LaunchClient.RunAsync(CliArgs.ParseRun(["--secrets", "TOKEN", "--reason", "locked", "--", "anything"], out _)!, rig.Work, service.Endpoint, null, new StringWriter(), errText, rig.Machine.Trust);
         string[] lines = errText.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         check(exit == LaunchClient.AuthorityLocked && LaunchClient.AuthorityLocked == 8 && lines.Length == 1 && lines[0].StartsWith("with-secrets: the authority is locked", StringComparison.Ordinal) && lines[0].Contains(service.Admin.PageUrl, StringComparison.Ordinal),
             "lock: the client prints one clear line with the admin page link and exits 8 (" + exit + ": " + errText + ")");
