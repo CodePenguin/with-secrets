@@ -136,6 +136,7 @@ internal static class HostServiceTests
                 Store = Store,
                 Deployment = Machine.Deployment,
                 Port = 0,
+                CommandLineEndpoint = TestEndpoint(),
                 BodyTimeout = bodyTimeout ?? TimeSpan.FromSeconds(15),
                 ApproverFactory = (_, _) =>
                 {
@@ -151,8 +152,10 @@ internal static class HostServiceTests
                 AuditUploadInterval = auditInterval ?? TimeSpan.FromSeconds(2),
                 AuditMaxBackoff = auditInterval is { } interval ? interval * 4 : TimeSpan.FromSeconds(60),
             });
-            Http = new HttpClient(Service.Endpoint.CreateHandler()) { Timeout = TimeSpan.FromSeconds(60) };
         }
+
+        /// <summary>The command line's endpoint of a test service: Windows, a named pipe of its own; elsewhere the loopback port (until the Unix socket exists). WS_TEST_TRANSPORT=loopback forces the loopback port.</summary>
+        internal static LocalEndpoint? TestEndpoint() => OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable("WS_TEST_TRANSPORT") != "loopback" ? LocalEndpoint.NamedPipe("ws-test-" + Guid.NewGuid().ToString("N")) : null;
 
         public string Work { get; }
 
@@ -162,9 +165,23 @@ internal static class HostServiceTests
 
         public CountingStore Store { get; }
 
-        public HostService Service { get; internal set; }
+        private HostService _service = null!;
+        private HttpClient? _http;
 
-        public HttpClient Http { get; }
+        /// <summary>The service. A test that replaces it gets a client for the new one's endpoint.</summary>
+        public HostService Service
+        {
+            get => _service;
+            internal set
+            {
+                _service = value;
+                _http?.Dispose();
+                _http = null;
+            }
+        }
+
+        /// <summary>A client for the command line's endpoint of the current service (the application protocol is the same over every endpoint).</summary>
+        public HttpClient Http => _http ??= new HttpClient(Service.Endpoint.CreateHandler()) { Timeout = TimeSpan.FromSeconds(60) };
 
         public ConcurrentBag<IApprover> Approvers { get; }
 
@@ -195,7 +212,7 @@ internal static class HostServiceTests
 
         public void Dispose()
         {
-            Http.Dispose();
+            _http?.Dispose();
             Service.Dispose();
             Machine.Deployment.Dispose();
         }

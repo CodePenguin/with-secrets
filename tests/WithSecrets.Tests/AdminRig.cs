@@ -220,6 +220,7 @@ internal sealed class AdminApp : IDisposable
             Store = _rig.Store,
             Deployment = Machine.Restart(),
             Port = 0,
+            CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(),
             UnlockProtection = _protection,
             AdminAskerFactory = _askers,
             PasskeyAdminFactory = _passkeys is null ? null : () => _passkeys,

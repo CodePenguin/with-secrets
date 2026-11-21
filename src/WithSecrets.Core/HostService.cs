@@ -67,6 +67,9 @@ public sealed class HostServiceOptions
     /// <summary>The port on 127.0.0.1 and [::1]. 0 picks a free one (tests).</summary>
     public int Port { get; init; } = ServiceEndpoint.DefaultPort;
 
+    /// <summary>The endpoint the command line connects to besides the loopback port (the program passes <see cref="LocalEndpoint.ForCommandLine" />). Null leaves only the loopback port.</summary>
+    public LocalEndpoint? CommandLineEndpoint { get; init; }
+
     /// <summary>For tests: replaces the approval time limit setting.</summary>
     public TimeSpan? TimeLimit { get; init; }
 
@@ -163,7 +166,7 @@ public sealed class HostService : IDisposable
         _web = options.WebAssets ?? AdminWebAssets.FromAssembly();
         _app = app;
         Port = port;
-        Endpoint = endpoint;
+        Endpoint = options.CommandLineEndpoint ?? endpoint;
         // The authority believes a grant only when a person's passkey assertion backs it: it checks those against the keys of the signed manifest.
         options.Deployment.Authority.Verifier ??= options.State is { } verifierState ? new ManifestApprovalVerifier(verifierState) : null;
         Authorization = options.Deployment.CreateAuthorization(options.Gate, options.Monotonic);
@@ -505,6 +508,7 @@ public sealed class HostService : IDisposable
         builder.Configuration.Sources.Clear();
         builder.Logging.ClearProviders();
         builder.Services.AddSingleton<IHostLifetime, QuietLifetime>();
+        options.CommandLineEndpoint?.Configure(builder.WebHost);
         builder.WebHost.ConfigureKestrel(kestrel =>
         {
             kestrel.AddServerHeader = false;
@@ -513,6 +517,7 @@ public sealed class HostService : IDisposable
             kestrel.Limits.MaxRequestHeadersTotalSize = 16 * 1024;
             kestrel.Limits.RequestHeadersTimeout = options.BodyTimeout;
             endpoint.Listen(kestrel);
+            options.CommandLineEndpoint?.Listen(kestrel);
         });
 
         return builder.Build();
