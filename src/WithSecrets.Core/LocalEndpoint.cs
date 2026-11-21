@@ -143,8 +143,8 @@ internal sealed class LoopbackEndpoint(int port, bool ipv6) : LocalEndpoint
 [System.Runtime.Versioning.SupportedOSPlatform("windows")]
 internal sealed class NamedPipeEndpoint(string name) : LocalEndpoint
 {
-    /// <summary>A service that is running accepts at once; this is only how long a busy one (every pipe instance in use for a moment) is waited for.</summary>
-    private const int ConnectTimeoutMilliseconds = 1500;
+    /// <summary>A service that is running accepts at once; this is only how long a busy one (every pipe instance in use for a moment, as when many commands start together) is waited for. A pipe that does not exist is not waited for.</summary>
+    private const int ConnectTimeoutMilliseconds = 10000;
 
     public string Name { get; } = name;
 
@@ -160,12 +160,31 @@ internal sealed class NamedPipeEndpoint(string name) : LocalEndpoint
         return "with-secrets-" + sid;
     }
 
+    /// <summary>Whether a pipe of this name exists now, from the list of pipes (nothing is opened, so no instance is taken).</summary>
+    private static bool PipeExists(string name)
+    {
+        foreach (string entry in Directory.EnumerateFileSystemEntries(@"\\.\pipe\"))
+        {
+            if (string.Equals(Path.GetFileName(entry), name, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public override async Task<Stream> ConnectAsync(CancellationToken cancel)
     {
         System.IO.Pipes.NamedPipeClientStream pipe = new(".", Name, System.IO.Pipes.PipeDirection.InOut, System.IO.Pipes.PipeOptions.Asynchronous | System.IO.Pipes.PipeOptions.CurrentUserOnly, System.Security.Principal.TokenImpersonationLevel.Anonymous);
         try
         {
-            // A pipe that does not exist is a service that is not running: the wait for it to appear is bounded (a short time, well under the 3 s limit of the admin command) and then fails like a refused connection.
+            // A pipe that does not exist is a service that is not running: it fails at once, like a refused connection (the connect call itself would wait for the pipe to appear). One that exists but is busy is waited for.
+            if (!PipeExists(Name))
+            {
+                throw new IOException("no service answers on the pipe");
+            }
+
             await pipe.ConnectAsync(ConnectTimeoutMilliseconds, cancel);
         }
         catch (TimeoutException)

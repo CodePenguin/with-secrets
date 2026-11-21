@@ -137,17 +137,6 @@ internal static class LocalPipeTests
         security.SetOwner(user);
         using NamedPipeServerStream server = NamedPipeServerStreamAcl.Create(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous, 0, 0, security);
         NamedPipeEndpoint endpoint = new(name);
-        LocalChannelException? refused = null;
-        try
-        {
-            using Stream stream = await endpoint.ConnectAsync(CancellationToken.None);
-        }
-        catch (LocalChannelException error)
-        {
-            refused = error;
-        }
-
-        check(refused is not null && refused.Message.Contains("elevation", StringComparison.Ordinal), "pipe: an elevated client does not talk to a pipe a normal process made, and says why (different elevation levels)");
 
         // Through the HTTP client the command line uses: the same explanation arrives, and it is not "not running".
         using HttpClient commandLine = new(endpoint.CreateHandler()) { Timeout = TimeSpan.FromSeconds(10) };
@@ -161,5 +150,5 @@ internal static class LocalPipeTests
             seen = error;
         }
 
-        check(LocalChannelException.Find(seen) is not null, "pipe: the explanation of the refusal reaches the command line through the HTTP client");
+        check(LocalChannelException.Find(seen) is { } refused && refused.Message.Contains("elevation", StringComparison.Ordinal), "pipe: an elevated client does not talk to a pipe a normal process made, and the explanation (different elevation levels) reaches the command line through the HTTP client");
     }}

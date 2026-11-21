@@ -470,6 +470,14 @@ public sealed class StateDatabase
     {
         Directory.CreateDirectory(Folder);
 
+        // One creator at a time. The files of an earlier state.db are removed below only while there is no state.db; without this, a writer that saw no state.db a moment ago could remove the journal files of the one that has just
+        // made it and written its first key (the key was lost, found by the parallel first-creation test). Under the gate that check and the removal cannot overlap with another creator.
+        using FileStream gate = AcquireCreationGate();
+        if (File.Exists(FilePath))
+        {
+            return;
+        }
+
         // A -wal or -shm left behind by an earlier state.db would be applied to the new file. Remove them, but only while there
         // is still no state.db (another process may have just made one, and its journal files are its own).
         foreach (string stale in new[] { FilePath + "-wal", FilePath + "-shm" })
@@ -514,6 +522,25 @@ public sealed class StateDatabase
                 {
                     // A stray temporary file is harmless.
                 }
+            }
+        }
+    }
+
+    /// <summary>An exclusive lock on a small file beside state.db for the time of a creation. Waits as long as the busy timeout; a creator that finds the file already made after it gets the gate does nothing.</summary>
+    private FileStream AcquireCreationGate()
+    {
+        string path = FilePath + ".creating";
+        DateTime deadline = DateTime.UtcNow + _busyTimeout;
+        while (true)
+        {
+            try
+            {
+                return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1, FileOptions.DeleteOnClose);
+            }
+            catch (IOException) when (DateTime.UtcNow < deadline)
+            {
+                // Another creator holds it.
+                Thread.Sleep(5);
             }
         }
     }

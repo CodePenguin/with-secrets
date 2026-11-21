@@ -642,6 +642,9 @@ internal static class ScenariosSpa
         foreach (string view in new[] { "Overview", "Machines", "Settings" })
         {
             await Spa.GoTo(c, view, view);
+            // The scheme has just changed: wait until the page has painted it and nothing is still animating, so that axe never sees the text colour of one scheme on the background of the other (seen once on macOS: 1.03:1).
+            await c.Page.EvaluateAsync("() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))");
+            await c.Page.WaitForFunctionAsync("() => document.getAnimations().length === 0 && matchMedia('(prefers-color-scheme: dark)').matches");
             await Spa.Axe(c, s, $"{view} in the dark scheme");
             await c.DemoSnapAsync($"{view} in the dark scheme.");
         }
