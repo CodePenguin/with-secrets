@@ -123,6 +123,42 @@ internal static class LocalSocketTests
 
             check(refused is HttpRequestException, "socket: the client does not connect through a directory that others can enter");
 
+            // Defense in depth: a peer whose user is not the one expected is closed before anything is read. Here the expectation is changed, which is what a connection from another user looks like to the service.
+            uint me = UnixSocketEndpoint.EffectiveUserId();
+            string peerDirectory = Path.Combine(parent, "peer");
+            Directory.CreateDirectory(peerDirectory);
+            File.SetUnixFileMode(peerDirectory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            HostService? strictPeer = Starts(parent, new UnixSocketEndpoint(peerDirectory) { ExpectedPeerUserId = me + 1 }, out string strictReason);
+            Exception? wrongUser = null;
+            if (strictPeer is not null)
+            {
+                try
+                {
+                    using HttpClient stranger = new(strictPeer.Endpoint.CreateHandler()) { Timeout = TimeSpan.FromSeconds(10) };
+                    await stranger.GetAsync(new Uri(strictPeer.Endpoint.BaseUri, "v1/status"));
+                }
+                catch (Exception error)
+                {
+                    wrongUser = error;
+                }
+
+                strictPeer.Dispose();
+            }
+
+            string rightDirectory = Path.Combine(parent, "peer2");
+            Directory.CreateDirectory(rightDirectory);
+            File.SetUnixFileMode(rightDirectory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            HostService? rightPeer = Starts(parent, new UnixSocketEndpoint(rightDirectory) { ExpectedPeerUserId = me }, out string rightReason);
+            bool rightAnswers = false;
+            if (rightPeer is not null)
+            {
+                using HttpClient friend = new(rightPeer.Endpoint.CreateHandler()) { Timeout = TimeSpan.FromSeconds(10) };
+                using HttpResponseMessage friendReply = await friend.GetAsync(new Uri(rightPeer.Endpoint.BaseUri, "v1/status"));
+                rightAnswers = friendReply.IsSuccessStatusCode;
+                rightPeer.Dispose();
+            }
+
+            check(wrongUser is HttpRequestException && rightAnswers, "socket: the service asks the kernel who the peer is: a peer of another user is closed unanswered, the same user is answered (" + strictReason + ", " + rightReason + ")");
             // No service: the client fails at once with a connection error, and the command line says the service is not running (exit 6); there is no port to fall back to.
             string emptyDirectory = Path.Combine(parent, "empty");
             Directory.CreateDirectory(emptyDirectory);

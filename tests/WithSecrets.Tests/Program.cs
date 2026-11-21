@@ -333,6 +333,11 @@ internal static class Program
             LocalSocketTests.Run(Check).GetAwaiter().GetResult();
         }
 
+        if (Wants("TransportInvariants"))
+        {
+            TransportInvariantTests.Run(Check).GetAwaiter().GetResult();
+        }
+
         if (Wants("HostService"))
         {
             HostServiceTests.Run(Check).GetAwaiter().GetResult();

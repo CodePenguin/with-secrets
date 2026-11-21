@@ -202,6 +202,9 @@ internal sealed class UnixSocketEndpoint : LocalEndpoint
 
     private static uint UserId() => GetEffectiveUserId();
 
+    /// <summary>The effective user id of this process.</summary>
+    internal static uint EffectiveUserId() => GetEffectiveUserId();
+
     public override SocketsHttpHandler CreateHandler() => new()
     {
         UseProxy = false,
@@ -234,7 +237,60 @@ internal sealed class UnixSocketEndpoint : LocalEndpoint
     {
         CheckDirectory(create: true);
         RemoveStaleSocket();
-        kestrel.ListenUnixSocket(SocketPath);
+        // Defense in depth: the directory already keeps other users out; every accepted connection is also asked who is on the other end (the kernel's record of the peer's user), and one that is not this user is closed
+        // before a byte of it is read. When the peer cannot be determined the connection is refused as well.
+        kestrel.ListenUnixSocket(SocketPath, listen => listen.Use(next => async context =>
+        {
+            if (!PeerIsThisUser(context))
+            {
+                context.Abort();
+
+                return;
+            }
+
+            await next(context);
+        }));
+    }
+
+    /// <summary>For tests: the user id a peer must have (default: this process's effective user id).</summary>
+    internal uint? ExpectedPeerUserId { get; init; }
+
+    private bool PeerIsThisUser(Microsoft.AspNetCore.Connections.ConnectionContext context)
+    {
+        try
+        {
+            Socket? socket = context.Features.Get<Microsoft.AspNetCore.Connections.Features.IConnectionSocketFeature>()?.Socket;
+
+            return socket is not null && PeerUserId(socket) is { } peer && peer == (ExpectedPeerUserId ?? GetEffectiveUserId());
+        }
+        catch (Exception error) when (error is SocketException or InvalidOperationException or PlatformNotSupportedException or ObjectDisposedException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>The user id of the process at the other end of a Unix socket, as the kernel recorded it when it connected (Linux SO_PEERCRED, macOS LOCAL_PEERCRED). Null where this platform has neither.</summary>
+    internal static uint? PeerUserId(Socket socket)
+    {
+        if (OperatingSystem.IsLinux())
+        {
+            // struct ucred { pid_t pid; uid_t uid; gid_t gid; }
+            byte[] value = new byte[12];
+            socket.GetRawSocketOption(1, 17, value);
+
+            return BitConverter.ToUInt32(value, 4);
+        }
+
+        if (OperatingSystem.IsMacOS())
+        {
+            // struct xucred { u_int cr_version; uid_t cr_uid; short cr_ngroups; gid_t cr_groups[16]; }, level SOL_LOCAL (0), LOCAL_PEERCRED (1)
+            byte[] value = new byte[76];
+            socket.GetRawSocketOption(0, 1, value);
+
+            return BitConverter.ToUInt32(value, 4);
+        }
+
+        return null;
     }
 
     /// <summary>The socket exists now: owner-only (the directory already keeps everyone else out; this is the second lock).</summary>
