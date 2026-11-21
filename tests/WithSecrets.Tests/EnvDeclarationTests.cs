@@ -677,9 +677,9 @@ internal static class EnvDeclarationTests
             check(!run.Err.Contains(bad["encrypted:".Length..], StringComparison.Ordinal) && !run.Err.Contains(privateKey, StringComparison.Ordinal) && !run.Audit.Contains(bad["encrypted:".Length..], StringComparison.Ordinal) && !run.Audit.Contains(privateKey, StringComparison.Ordinal), "encrypted: a " + label + " value leaves no ciphertext or key on stderr or in the audit");
         }
 
-        (folder, script, dump) = Project(parent, "SHORT=" + DotenvxCipher.Instance.Encrypt("abc", publicKey) + "\n");
+        (folder, script, dump) = Project(parent, "SHORT=" + DotenvxCipher.Instance.Encrypt("qzx", publicKey) + "\n");
         run = await Execute(parent, folder, script, dump, new RecordingSource(new() { ["DOTENV_PRIVATE_KEY"] = privateKey }), new FakeApprover(true), []);
-        check(run.Code == RunCommand.Usage && run.Err.Contains("SHORT", StringComparison.Ordinal) && run.EnvDump.Length == 0 && !run.Err.Contains("abc", StringComparison.Ordinal), "encrypted: a decrypted value too short to redact is exit 2 naming the variable");
+        check(run.Code == RunCommand.Usage && run.Err.Contains("SHORT", StringComparison.Ordinal) && run.EnvDump.Length == 0 && !run.Err.Contains("qzx", StringComparison.Ordinal), "encrypted: a decrypted value too short to redact is exit 2 naming the variable");
 
         // denied: the key is not read
         (folder, script, dump) = Project(parent, $"DB_PASS={cipher}\n");
