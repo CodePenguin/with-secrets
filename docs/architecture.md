@@ -400,7 +400,7 @@ Not built: a Windows service that starts at logon; a macOS Keychain machine key 
 
 - `Dotenvx.Primitives` (version 3.3.1, `WithSecrets.Core.csproj`) supplies the cryptography and nothing else: key pairs, `Encrypt` and `Decrypt` of the `encrypted:` ECIES format. `DotenvxCipher` (`SecretStore.cs`) wraps it. The same `DotenvxCipher` encrypts the values in the secret store and decrypts the `encrypted:` values in project `.env` files; they are one mechanism and one format, not two.
 - with-secrets owns the `.env` parser (bounded, one declaration per line, no expansion, no multiline), file selection and composition, classification of the effective declarations, `secret://` resolution, approval and request binding, audit, and the decision to launch the child.
-- `Dotenvx.Core` is not used in the launch path. Its parser expands `${...}` and evaluates `$(...)` commands, and its `ParseOptions` cannot turn either off, so using it would execute commands while a launch plan is being built. It also brings in `Dotenvx.Providers`, which overlaps with the provider design in 10.3. with-secrets must keep the plan predictable: no expansion, no command evaluation, no implicit execution.
+- `Dotenvx.Core` is not used to parse project `.env` files or build the launch plan. Its parser expands `${...}` and evaluates `$(...)` commands, and its `ParseOptions` cannot turn either off, so using it for that job would execute commands while a launch plan is being built. Its provider integration is a separate concern: `Dotenvx.Core` may be used by the dedicated Dotenvx provider adapter described in 10.3, without bringing its parser or command evaluation into the with-secrets launch-planning path.
 - Dotenvx's `.env` syntax is followed where the parser supports it; where Dotenvx supports more (expansion, evaluation, multiline values), with-secrets does not.
 
 #### File selection and composition
@@ -426,7 +426,7 @@ DATABASE_PASSWORD=secret://personal/database/password
 
 - The left side is the child environment-variable name; the right side of a `secret://` declaration is a logical secret path. They may differ, for example `STRIPE_KEY=secret://team/payments/STRIPE_PRODUCTION_KEY`.
 - Comments are not declarations.
-- Ordinary values remain ordinary configuration. `encrypted:` values remain encrypted in project files and are decrypted by with-secrets with `DotenvxCipher`. External `secret://` values are resolved by with-secrets.
+- Ordinary values remain ordinary configuration. `encrypted:` values remain encrypted in project files and are decrypted by with-secrets with `DotenvxCipher`. External `secret://` values are resolved by the selected with-secrets provider adapter; a logical path does not select Dotenvx or any other provider by itself.
 - An explicit `secret://` declaration must not silently be satisfied or replaced by an inherited environment variable. Inherited-environment and encrypted-value precedence are those of `EnvDeclarations.cs`.
 - A missing mount, denied permission, unavailable provider, missing secret, or required credential is a hard error. No fallback, cross-provider search, silent substitution, or alternate-name prompt.
 
@@ -532,12 +532,16 @@ The authority retains machine records and their history. A previously known Untr
 
 #### Cache, grants, startup, and reconnection
 
-- Secret values and the host service's working authorization/grant state are memory-only. The host service does not persist secret cache values or authorization state locally. A host-service restart destroys them.
+- The authority's native store and mounted-provider cache may persist secret values only as encrypted ciphertext. Both native entries and mounted-provider cache entries use the same Dotenvx.Primitives-based at-rest encryption mechanism and the same native store data-encryption key K, protected by the existing master key MK and passkey/recovery unlock hierarchy. Do not create a separate mounted-cache encryption key, password, or unlock path. Mounted entries remain read-only because of their ownership and lifecycle, not because they use a different cryptographic subsystem. Only a successful authority unlock that makes the existing secret-data key hierarchy available can rehydrate stored values. Locking or restarting the authority clears decrypted values and usable key material from memory; ciphertext remains stored.
+- Host services do not persist secret values or usable authorization state. Their synchronized grants and working authorization state are memory-only and are rebuilt only after successful authority reconciliation. The authority's encrypted native-store and mounted-cache ciphertext is not copied to hosts and does not create an offline-use mode.
 - Durable grants live at the authority. The approver chooses the grant expiration at approval time, including an indefinite grant where offered. Do not impose a new fixed lifetime.
 - The CLI exposes `with-secrets approve COMMAND` and `with-secrets run COMMAND`. `approve` performs the normal request validation and human approval flow to create or update a grant, but does not launch the command. `run` performs the same normal validation and uses an applicable, unexpired grant without prompting; it does not bypass request scope or constraints. Preapproval is limited to the approved grant scope, not blanket permission.
 - An active grant may be extended, an expired grant renewed, or a grant revoked through an authority-controlled operation. The authority is the source of truth for all grant changes. A host cannot use an extension or renewal it has not received. No previously synchronized grant authorizes use while the authority is unreachable; grant validity alone is not sufficient without current authority vouching.
+- An administrator may extend an active grant's expiration without repeating the original approval, but the operation requires fresh, operation-bound administrator passkey authentication. The extension preserves the grant's exact existing scope: it cannot add secret paths, commands, working directories, machines, or other permissions. The new expiration must be permitted by the authority's grant-lifetime policy.
+- A once-only grant that has not yet been consumed may have its lifetime/usage policy corrected by an administrator through the same authenticated operation, without changing its scope. If it has already been consumed, the authority may issue a replacement grant with the same scope and a new lifetime; the consumed grant remains in history and is not silently reactivated. An expired grant may be renewed under the same scope-preservation rule. A revoked grant cannot be extended or renewed; it requires a new approval.
+- Each extension, correction, renewal, or replacement is recorded as a distinct audited administrative action linked to the original grant. The original approval and grant history are retained. Changing the approved scope is not an extension and requires a new approval.
 - At startup, the host service must authenticate to its authority and reconcile machine status, host-name binding, and security revision before accepting secret requests. If the authority is unavailable at startup, the service cannot accept new requests.
-- After successful startup reconciliation, if the security revision is unchanged, the authority may restore still-valid grants into host-service memory. Secret values are fetched on demand and cached in memory. If the revision changed, old grants are not restored.
+- After successful startup reconciliation, if the security revision is unchanged, the authority may restore still-valid grants into host-service memory. The authority must be unlocked before it can rehydrate encrypted native-store or mounted-provider cache values. Mounted values are refreshed from their providers as needed; host services never persist their own plaintext or encrypted secret-value cache. If the revision changed, old grants are not restored.
 - If the authority becomes unreachable, every grant check fails closed immediately. The host does not continue using a previously synchronized grant or cached secret value under an offline grace period. A remote host drops and zeroes its held store key when its authority link fails; it must re-establish authenticated connectivity and successfully check in before secret use can resume. The same rule applies to local-authority mode: if the local authority cannot perform the authorization check, the request is denied. A service restart, lock, trust change, or loss of authority vouching clears the relevant in-memory authorization state and held key. There is no offline-authorization lease or offline secret-use mode.
 - Losing connectivity prevents new secret use; it is not a grace period. The authority records revocations durably and distributes them to connected hosts; a host applies a received revocation immediately, clears affected grants/cache and held key, and refuses the revoked fingerprint. Reconnection requires a fresh authenticated check-in and reconciliation before secret use resumes.
 - The authority invalidates grants and in-flight requests when a security transition occurs and delivers the existing invalidation messages through authenticated HTTP/2 long polling. Each host maintains one outstanding long-poll request; the authority holds it until the existing protocol has an invalidation message to deliver. The response carries the existing message payload without redefining it. The host acknowledges through the existing acknowledgment operation and immediately issues its next long poll.
@@ -606,7 +610,7 @@ Machine-to-machine communication uses ordinary HTTPS with TLS 1.3 mutual authent
 - Read-only metadata requests may be retried when safe. Administrative mutations use the existing idempotency mechanism. A secret release whose response is lost has an ambiguous outcome and is not automatically retried; the client may make a new request, which is independently authorized at the current release checkpoint. Do not persist secret values merely to replay a response.
 - Use fixed, built-in resource safeguards appropriate for a development tool: modest global and per-machine concurrent-request limits, bounded request bodies, and operation-specific timeout defaults. These are implementation constants, not user settings, environment variables, or deployment configuration. Do not add request-per-second quotas, adaptive throttling, reputation scoring, or elaborate abuse detection. Reject excess concurrent work rather than queueing it without bound.
 - Cancellation propagates to server work where safe. A timeout or disconnect does not prove that an operation did not complete.
-- Durable authority operations remain atomic in SQLite. Machine records/statuses, security revisions, grants, signing-key metadata/rotation history, audit history, processed request IDs/results, and pending invalidation state are durable. Secret values and host working authorization/cache state remain memory-only.
+- Durable authority operations remain atomic in SQLite. Machine records/statuses, security revisions, grants, signing-key metadata/rotation history, audit history, processed request IDs/results, pending invalidation state, and encrypted native-store/mounted-provider secret ciphertext are durable. Decrypted secret values, usable data-encryption keys, and host working authorization/cache state remain memory-only.
 - A machine disable/untrust operation atomically updates status, increments security revision, invalidates grants, and records the audit event. Grant approval atomically records approved scope, expiration, and audit event.
 - Do not add a message broker or distributed transaction system.
 
@@ -661,13 +665,13 @@ The authority has two distinct security concerns: making its protected key hiera
 - **Unattended unlock is opt-in.** An administrator may explicitly configure the authority to unlock after startup using a platform-protected mechanism appropriate to that deployment. This option must be visibly enabled and documented as a weaker protection against an attacker who can control the running host or invoke its OS key-protection facility.
 - Unattended unlock changes only how the authority's key hierarchy becomes available after startup. It does not bypass administrator authentication for sensitive operations.
 - The exact cross-platform key-protection mechanism and the manual-unlock ceremony remain implementation/design details to validate against the existing passkey-PRF vault and each supported deployment platform. Do not assume DPAPI, Keychain, a Linux keyring, or a hosted KMS is universally available or equivalent. Do not claim absolute security; document the threat model and platform-specific limits.
-- Locking the authority must discard usable in-memory key material and decrypted working material as far as the runtime permits. Health/status endpoints may report that the process is running but locked; they must not disclose protected material.
+- Locking the authority must discard usable in-memory key material, the mounted-cache encryption key, and decrypted cached secret values as far as the runtime permits. Persisted cache ciphertext remains unusable until the same authority unlock process makes its wrapping key available again. Health/status endpoints may report that the process is running but locked; they must not disclose protected material.
 
 **Sensitive administrator operations**
 
 - Sensitive administrative operations always require a fresh passkey authentication with user verification, regardless of whether the authority was manually or automatically unlocked.
 - The authentication challenge must be bound to the specific operation and its security-relevant parameters (for example, target machine, grant scope and expiration, key identity, or settings being changed). It must be single-use, time-limited, and protected against replay. A previously authenticated web session or an earlier unlock does not satisfy this requirement.
-- At minimum, sensitive operations include administrator passkey enrollment/removal/replacement; machine trust, disable, untrust, or re-trust transitions; grant creation, scope/expiration changes, extension, renewal, and revocation; secret and provider-credential creation, replacement, or removal; security-setting and unlock-policy changes; and authority-key recovery or rotation.
+- At minimum, sensitive operations include administrator passkey enrollment/removal/replacement; machine trust, disable, untrust, or re-trust transitions; grant creation, scope/expiration/usage-policy changes, extension, renewal, replacement of a consumed once-only grant, and revocation; secret and provider-credential creation, replacement, or removal; security-setting and unlock-policy changes; and authority-key recovery or rotation.
 - Recovery is a separate, tightly controlled ceremony. A recovery code or unattended-unlock key is not a routine substitute for fresh passkey authentication on sensitive operations.
 - Failed or unavailable passkey authentication fails closed. There is no fallback to an ordinary password, an unlocked authority session, or unattended-unlock material for these operations.
 - Sensitive-operation attempts and outcomes are durably audited without recording passkey secrets, PRF output, recovery codes, or private key material.
@@ -731,7 +735,7 @@ Known limits of the session design: **OPEN for the maintainer (inherent, cookie 
 
 **Unlock mode.** `unlock_policy` (manual by default, unattended only by a fresh tap on the app) and, for unattended, a DPAPI-sealed random 32-byte blob and its SHA-256 are in `authority_settings`. `IUnlockProtection` has `DpapiUnlockProtection` (Windows, current user) and `NoUnlockProtection` elsewhere (the option is refused with a message); no other platform is assumed. At start, `UnattendedUnlock.TryUnlock` opens the blob, compares the hash and unlocks; any doubt leaves the service locked. It grants nothing, widens nothing and never replaces a tap. Weaker by design: any process of the same Windows user can open the blob. The service prints the mode at start, the app shows it, and reference.md documents it as weaker.
 
-**Key hierarchy (what exists).** Three purposes with no shared key: (1) the machine identity key (CNG key `with-secrets machine identity v1`, signs machine requests, reconcile and audit events and the service identity proof; domain-separated signed messages); (2) the authority signing key (CNG key `with-secrets authority signing key v1`, then `... g2`, `... g3`, signs the authority's answers and rotation transitions; public part pinned in `host.json`; used only while unlocked); (3) secret-data keys: the store key K and master key MK, kept only as ciphertext in the signed vault of `state.db` wrapped by each passkey's PRF output, never by (1) or (2). The held PRF-derived material (secret-data only) lives in service memory for one grant and is zeroed at lock, grant end or service stop. The unattended-unlock material is a fourth, unrelated random value that unlocks nothing cryptographic: it only lets the service decide to unlock. A signature by one signing key never verifies under the other (tested), and no file of the authority or host contains the held material (tested).
+**Key hierarchy and key separation.** The machine identity key signs machine requests, reconciliation and audit events, and service identity proofs; it is never used to encrypt or wrap secret data. The authority signing key signs authority answers and key-rotation transitions; it is also never used to encrypt or wrap secret data. Secret-data keys are a separate hierarchy: the master key MK is protected by the existing passkey-PRF/recovery slots; the single native store data-encryption key K is wrapped by MK in the vault and is used by the Dotenvx.Primitives-based at-rest encryption mechanism for both native entries and mounted-provider cache values. There is no separate mounted-cache key. No machine-identity or authority-signing key participates in this hierarchy. The authority's existing unlock process is the only path that makes MK and then K available. Locking or restarting clears MK, K, and decrypted values from usable memory. The unattended-unlock material is a separate random value that only lets the service decide to unlock; it is not itself a data-encryption key. A signature by one signing key never verifies under the other.
 
 **Backup and recovery procedure (written and exercised; full steps in `docs/operations.md`).** (a) Authority signing key: routine rotation is a transition signed by the current key (**Rotate** in the app's Settings; refused while the authority is locked); loss or distrust: **Recover** makes a new key with no transition and pins it for this machine, other hosts re-enroll. The CNG keys are not exportable, so there is no backup of the key itself and none is invented: a restored `authority.db` on a machine without the key fails closed (`AuthorityDatabaseException`, nothing signed, decrypted or run) until an administrator recovers the key with a fresh tap. (b) Secret-data keys: the recovery code (`--recover`) and a second admin passkey; there is no other copy of K or MK. (c) Unattended-unlock blob: not backed up; if it will not open or the policy signature does not verify under the active key, the service stays locked and an administrator unlocks with a tap. (d) Backup set: `state.db` and `authority.db`, copied while the service is stopped; `host.json` (per-machine pin), `audit-outbox.db`, logs and every key are not part of it. The backup holds ciphertext, public keys, names, grants and audit, no private key, master key, recovery code or secret value (scanned in the suite). **Exercised** (suite `Operations`): a restore on a second machine with new keys (store opens, manifest and admin passkeys verify, machine records, history, grants with their assertions and the audit rows are unchanged, the transition chain verifies and a host pinned to the first key follows it; locked, unlocked-without-key and Pending machines run nothing; Recover by tap, approval of the new identity, a run, the audit continuing); two rotations followed by a recovery through the admin API (each its own tap, a non-admin key refused, the host follows the signed transitions without a tap and refuses an unpinned recovered key, decrypting nothing); three lock, restart, unlock cycles (held key zeroed, locked after restart, no session survives, a non-admin key cannot unlock); a host name change from refusal to approval to the next run. A restore from an older backup also restores older state (a machine since disabled, a grant since revoked): review Machines and Grants after a restore.
 
@@ -809,9 +813,16 @@ The path is a logical name only. It does not expose provider name, account, SDK,
 - Do not query every provider looking for a matching name. This prevents accidental cross-tenant disclosure and keeps resolution auditable.
 - Approval and audit identify the logical name and selected provider/mount identity without exposing credentials or values.
 
-**Provider candidates**
+**First-party providers and Dotenvx integration**
 
-1Password, Bitwarden Secrets Manager, HashiCorp Vault and LastPass are optional provider candidates behind the host/authority adapter boundary. LastPass would go through its command-line client; whether that client is supported for unattended use has not been checked. For Bitwarden, the target is Secrets Manager, not the personal password-manager product. These are not first-release requirements. The local encrypted SQLite store remains a first-party provider.
+with-secrets has two distinct Dotenvx-related integrations; they must not be conflated:
+
+- **Default local provider:** The built-in local encrypted SQLite provider stores with-secrets-managed secrets in its local store. It uses `Dotenvx.Primitives` for the encrypted-value cryptography through `DotenvxCipher`. This is a storage/cryptography dependency, not the Dotenvx provider architecture, and it does not make Dotenvx the provider for those values.
+- **Dotenvx provider:** A separate first-party provider adapter uses the Dotenvx provider architecture to retrieve secrets from backends supported by Dotenvx. This is the integration point for Dotenvx-supported providers such as 1Password, Bitwarden Secrets Manager, and Armor. Use `Dotenvx.Core` within this adapter where its provider architecture supplies the required functionality. Its use here does not change the with-secrets-owned project `.env` parser, launch planning, approval, logical mount, or secret-delivery boundaries.
+
+The Dotenvx provider is one provider instance/type behind the same with-secrets adapter and logical-mount boundary as other providers. Dotenvx's backend selection and provider-specific authentication/retrieval behavior remain inside that adapter; they do not become project declaration syntax or implicit cross-provider fallback. The authority still owns logical path authorization, batching at the with-secrets adapter boundary, cache/freshness policy, and delivery. The Dotenvx adapter is responsible for mapping a with-secrets batch onto Dotenvx's supported operations and preserving per-request result identity and errors.
+
+Direct first-party adapters for 1Password, Bitwarden Secrets Manager, Armor, HashiCorp Vault, or other backends may be considered independently; using Dotenvx to access a backend does not require or imply a separate direct adapter for that backend. These are not first-release requirements. LastPass remains an optional candidate only if its command-line client supports the required unattended service operation. For Bitwarden, the target is Secrets Manager, not the personal password-manager product.
 
 Mount configuration and project permission formats, and provider metadata shown to approvers, remain open. Mount resolution, provider identity/reconciliation, provider version/rotation semantics, provider outage behavior, and retrieval error handling are specified below. Provider-specific syntax must not leak into project `.env` declarations.
 
@@ -828,14 +839,18 @@ An adapter instance represents one configured provider connection. Multiple conn
 - The adapter contains provider integration logic only. It does not provide UI, HTML, JavaScript, dynamic configuration forms, or configuration schemas for the admin UI.
 - The admin UI owns provider-specific configuration screens. The adapter exposes its configuration type and validation results for the authority/UI integration.
 - Adapters are read-only with respect to provider data: no create, modify, rotate, delete, or migration operations.
-- The core depends only on the common adapter contract, not provider SDKs or provider-specific types.
+- The core depends only on the common adapter contract, not provider SDKs or provider-specific types. The `Dotenvx.Core` dependency belongs to the dedicated Dotenvx provider adapter, not `WithSecrets.Core`; `WithSecrets.Core` may reference `Dotenvx.Primitives` for the built-in local store's encryption.
 - Every adapter implements the complete required contract. There are no optional capability flags or optional operations.
 - The authority owns provider configuration persistence, configuration revisions, operation timeouts, concurrency limits, cache/freshness policy, grant lifetimes, and secret delivery. Adapters do not own the secret cache and do not write cache timestamps.
 - Adapters must be thread-safe, support concurrent calls, and honor cancellation. They may declare provider-specific concurrency constraints for the authority to enforce.
 
 **Required operations**
 
-Every adapter provides initialization, configuration update, shutdown, configuration validation, mount validation, secret retrieval, and secret listing. Pagination is implemented internally by the adapter and exposed through opaque continuation tokens.
+Every adapter provides initialization, configuration update, shutdown, configuration validation, mount validation, **batch secret retrieval**, and secret listing. Pagination is implemented internally by the adapter and exposed through opaque continuation tokens.
+
+The authority resolves and authorizes each requested logical path, applies cache policy, and groups the remaining provider reads by the exact configured provider instance. For one launch, it invokes each affected adapter with one batch containing that instance's uncached secret requests. It does not combine requests across provider instances or across launches. Cache hits are not sent to the adapter. Retries may submit only the requests that remain eligible for retry, within the existing bounded retry/deadline policy.
+
+Batching is a provider invocation boundary, not a promise of one provider network/API request or one user prompt. An adapter may need multiple provider operations internally, but it must coordinate authentication for the batch rather than independently initiating authentication for every secret. It returns one individually attributable result for every request, preserving request identity even when paths repeat. A missing, duplicate, or unknown result identity, or a result that contains neither a value nor an error, is an InvalidResponse failure; the authority never guesses which value belongs to which request. A batch-wide failure is reported as ProviderAdapterException and applies to the outstanding batch; an item-specific failure is returned only for that request. Successful items remain independently usable, subject to the normal launch-wide fail-closed rules for any required secret that failed.
 
 ```csharp
 public interface IProviderAdapter
@@ -862,8 +877,8 @@ public interface IProviderAdapter
         string basePath,
         CancellationToken cancellationToken);
 
-    Task<RetrieveSecretResult> RetrieveSecretAsync(
-        string path,
+    Task<IReadOnlyList<ProviderSecretResult>> RetrieveSecretsAsync(
+        IReadOnlyList<ProviderSecretRequest> requests,
         CancellationToken cancellationToken);
 
     Task<ListSecretsResult> ListSecretsAsync(
@@ -1011,11 +1026,24 @@ Invalid or stale lifecycle reports (for example, a delayed `Ready` after shutdow
 
 **Retrieval and listing data contracts**
 
-A retrieval returns UTF-8 bytes only; provider metadata is not returned with the value:
+A retrieval returns UTF-8 bytes only; provider metadata is not returned with the value. Batch requests and results use an opaque per-request correlation ID so results cannot be mis-associated when a batch contains repeated paths:
 
 ```csharp
+public sealed record ProviderSecretRequest(
+    Guid RequestId,
+    string Path);
+
 public sealed record RetrieveSecretResult(byte[] Value);
+
+public sealed record ProviderSecretResult(
+    Guid RequestId,
+    RetrieveSecretResult? Secret,
+    ProviderErrorKind? ErrorKind = null,
+    string? ProviderCode = null,
+    TimeSpan? RetryAfter = null);
 ```
+
+Each request ID must be unique within the batch. Each result must contain exactly one of Secret or ErrorKind. The adapter returns exactly one result for every request ID and no others. The core validates this contract before using any result; malformed or incomplete batches fail as InvalidResponse and no ambiguous value is delivered. A batch-wide failure uses ProviderAdapterException; an item-specific failure uses that item's ErrorKind, ProviderCode, and RetryAfter. ProviderCode remains diagnostic only, and RetryAfter is subject to the core's existing limits.
 
 The core validates strict UTF-8 before updating its cache and preserves the exact bytes without normalization or re-encoding. The CLI later converts to the target process encoding; if the value cannot be represented, the operation fails rather than silently corrupting it. Host-service responses use UTF-8. An empty provider value is treated as unset. A missing path or provider error is a hard failure; there is no fallback.
 
@@ -1054,6 +1082,20 @@ public enum DescriptionSource
 
 When the source is `Provider`, each provider listing refreshes the effective description, including setting it to null when the provider has no description. When the source is `Local`, provider listings do not overwrite it. There is one effective description and one source marker, not separate competing local/provider descriptions.
 
+**Provider authentication and user interaction**
+
+Provider authentication is distinct from with-secrets approval. The person must still approve the complete requested secret set through the normal with-secrets flow; a provider login, desktop authorization, OS permission dialog, or service-account credential does not grant a with-secrets permission or bypass a grant.
+
+Authentication mode, credential handling, session reuse, refresh, and provider-specific authentication mechanics belong to the adapter and its configured provider instance. The common architecture does not prescribe how an individual provider performs authentication or detects completion; those details are implemented and tested with each first-party adapter.
+
+When user interaction is required, it is initiated explicitly by the person through the local administration web app. The host service owns the authentication lifecycle and provider session. The adapter initiates the provider-supported authentication mechanism when requested by the service; the provider's own UI handles the interaction (for example, a browser flow, native desktop prompt, or OS authentication UI). The administration web app does not implement or impersonate that provider UI. It displays the pending state and refreshes to reflect the resulting provider authentication status.
+
+A launch must not trigger a separate authentication attempt for every secret in a batch. The adapter coordinates authentication for the batch and reuses an established provider session according to that provider's documented behavior. It must not weaken provider verification, disable required OS security prompts, or silently substitute another credential or provider.
+
+The background service must not independently launch interactive authentication or block indefinitely waiting for a person. A required interaction is represented as a pending authentication state that the person can initiate from the administration web app; the service and adapter manage its lifecycle without relying on an agent terminal or a service-owned desktop dialog. A pending secret request may resume after authentication succeeds, but secrets are delivered only after provider authentication and the normal with-secrets authorization both succeed. If authentication is cancelled, fails, or cannot be completed, the affected launch fails closed. There is no prompt-on-the-agent, automatic fallback, or silent substitution. Authentication failures are not eligible for stale-cache serving.
+
+Provider credentials and provider session material remain on the authority side. Secret values are not persisted as part of provider authentication state or in a cross-launch plaintext cache. A provider may retain its own authenticated session/token only as required by its supported authentication mechanism and the authority's credential-protection design.
+
 **Logging and diagnostics**
 
 Adapters use the existing `Microsoft.Extensions.Logging.ILogger` abstraction, which can be backed by the application's existing Serilog setup. There is no separate adapter logging framework or metrics interface. Detailed diagnostics go to structured logs; status messages remain concise and safe for display. Never log secret values, credentials, or decrypted provider responses.
@@ -1062,6 +1104,7 @@ Adapters use the existing `Microsoft.Extensions.Logging.ILogger` abstraction, wh
 
 - The adapter contract is a design boundary, not a promise that a provider is already implemented.
 - Provider-specific connection setup, authentication, retry/backoff strategy, and recovery are adapter responsibilities; global timeouts, cancellation, concurrency enforcement, cache policy, and status retention remain authority responsibilities.
+- Batch retrieval is mandatory for every adapter. The authority groups uncached reads by provider instance for each launch; adapters must preserve per-request result identity and coordinate authentication across the batch.
 - The precise public API for declaring adapter concurrency constraints and the exact configuration factory/registration mechanism remain implementation details to settle while implementing the common contract.
 - Provider listing, mount validation, and retrieval must all resolve against the exact configured adapter instance selected by the mount. They must not search other providers or mounts.
 - The cache is keyed by provider instance ID plus opaque external secret ID, never by logical path. Grants and project permissions are evaluated against the requested logical path.
@@ -1089,14 +1132,17 @@ This keeps project declarations and authorization independent of provider-specif
 
 The core owns cache freshness and stale-serving policy. Stale serving is an availability safeguard for temporary provider outages, not an alternate source of truth.
 
-The provider cache is an in-memory optimization for provider data freshness and reuse. Its stale-serving behavior is governed by the rules in this section. It does not authorize offline secret use, create an offline authorization lease, or allow secret retrieval while the authority is unavailable (10.2).
+The provider cache is authority-owned and persisted as encrypted ciphertext in the native store, using the same Dotenvx.Primitives-based at-rest encryption and native store key K as native entries. The existing MK/passkey-recovery unlock hierarchy protects K; no separate cache key or unlock mechanism exists. K and decrypted values remain memory-only and are cleared on lock or restart. The cache's stale-serving behavior is governed by the rules in this section. It does not authorize offline secret use, create an offline authorization lease, or allow secret retrieval while the authority is unavailable (10.2).
 
-- Stale serving is configured per provider instance through MaxStaleDuration. It is not a provider-type setting and is not configured per secret or mount.
+- Stale serving is configured per provider instance through MaxStaleDuration. It is not a provider-type setting and is not configured per secret or mount. The same setting remains the single stale-serving limit; do not introduce a second stale-duration or cache-lifetime setting.
 - The default is zero (disabled). A configured value may be from zero through a hard system-wide maximum of 24 hours. Values above the cap are rejected, not silently clamped. The cap is a system constant initially, not another administrator setting.
 - The maximum age is measured from the cached value's lastVerifiedAt timestamp: the last successful retrieval that proved the value current. It is not measured from when an outage begins. A value already 20 hours old has at most 4 hours remaining under the 24-hour maximum.
 - A cached value may be served stale only after the core's bounded retry policy is exhausted for an eligible temporary availability failure (Unavailable or RateLimited), and only while its age remains within that provider instance's configured MaxStaleDuration.
 - Stale fallback does not apply to authentication or authorization failures, missing/deleted secrets, invalid configuration, invalid provider responses, unknown errors, or cancellation. If no cached value exists, retrieval fails.
-- A successful provider retrieval replaces the cached value and updates lastVerifiedAt. A failed refresh leaves both the existing cached value and its original lastVerifiedAt unchanged. A failure must never extend the stale-serving window.
+- A successful provider retrieval replaces the encrypted cached value and updates lastVerifiedAt. A failed refresh leaves both the existing cached value and its original lastVerifiedAt unchanged. A failure must never extend the stale-serving window. Locking, restarting, decrypting, or reading a cached value does not update lastVerifiedAt.
+- When MaxStaleDuration is greater than zero, the authority schedules a proactive batch refresh when a cached value reaches 75% of that duration (for example, at 18 hours for a 24-hour setting), leaving a refresh margin before the stale boundary. Due values are grouped by provider instance and refreshed through the existing batch retrieval contract; do not add a separate per-secret refresh API or another freshness setting. A successful refresh replaces the ciphertext and resets lastVerifiedAt. A failed refresh leaves both unchanged and is retried only under the core's bounded retry/backoff policy; it must not create a tight retry loop. The authority also attempts refresh for stale or missing values when a request requires them and the provider is available. With MaxStaleDuration set to zero, stale outage delivery is disabled and retrieval is on demand rather than proactively scheduled against a stale boundary.
+- Proactive refresh does not require or create a with-secrets grant, does not extend any grant, and does not make a value deliverable to a caller. It updates only the provider cache. Secret delivery still requires an unlocked authority, current authority authorization, a valid grant or normal approval, and a value that meets the freshness rules.
+- Background refresh must not launch provider authentication UI or wait indefinitely. If provider authentication is required, the existing web-initiated provider-authentication flow applies. A failed or interrupted refresh preserves the previous ciphertext and lastVerifiedAt; if that value exceeds the stale limit, it cannot be delivered until a successful refresh.
 - Once the maximum permitted age is reached, retrieval fails closed. When the provider recovers, the next retrieval attempt fetches the current provider value and replaces the stale cache entry; there is no special stale-first recovery mode.
 - Changing MaxStaleDuration is a policy-only provider-instance configuration change. It applies immediately to existing cache entries without reconnecting or reinitializing the adapter and without changing cached values or timestamps. Reducing the duration immediately enforces the shorter limit.
 
@@ -1123,6 +1169,7 @@ public enum ProviderErrorKind
     Unavailable,
     RateLimited,
     AuthenticationFailed,
+    InteractionRequired,
     AccessDenied,
     SecretNotFound,
     InvalidConfiguration,
@@ -1153,7 +1200,8 @@ public sealed class ProviderAdapterException : Exception
 
 - ProviderCode is optional provider-specific diagnostic metadata for structured logs and troubleshooting only. It must not contain credentials, secret values, or sensitive provider response data. Core behavior is determined exclusively by Kind.
 - RetryAfter is optional provider-supplied retry guidance, principally for rate limiting. The core owns retry scheduling, limits, and backoff; adapters do not run independent retry loops.
-- Only Unavailable and RateLimited are retryable. Authentication failures, access denial, missing secrets, invalid configuration, invalid responses, and Unknown fail immediately and are never retried.
+- Only Unavailable and RateLimited are retryable. Authentication failures, interaction-required failures, access denial, missing secrets, invalid configuration, invalid responses, and Unknown fail immediately and are never retried. InteractionRequired means the provider needs a human or interactive desktop action that the authority cannot complete in the current execution context; it is not a request for the agent to collect credentials.
+- Item-level errors returned in ProviderSecretResult follow the same categories and retry rules as ProviderAdapterException. An item-level Unavailable or RateLimited result may be retried as part of a smaller batch; other item-level errors are final. A batch-wide ProviderAdapterException applies to all requests still outstanding in that invocation.
 - The core applies a small, bounded number of automatic retries with a bounded overall retrieval deadline. System-wide defaults and limits govern retries; provider instances and adapters cannot expand them. A supplied RetryAfter is respected only within those core-enforced limits.
 - Retries apply only to the provider operation. Mount resolution, authorization, and cache-policy evaluation occur once per request, and the selected provider instance remains fixed throughout the request.
 - Caller or authority cancellation propagates as cancellation and does not qualify for stale fallback. A provider-side timeout is translated to ProviderAdapterException(Unavailable). If the authority's provider-operation deadline expires while the caller remains active, the operation is treated as Unavailable and may qualify for stale fallback after retries, subject to the normal stale policy.
@@ -1221,6 +1269,8 @@ A browser session and administrative authorization are separate security concept
 - Completing one operation does not authorize a subsequent operation. Each mutation requires its own fresh authorization.
 - Enforce this at the API/server boundary, regardless of frontend behavior.
 - Routine use of an existing applicable grant does not require fresh administrative passkey authorization; creating or changing grants does.
+- Grant management provides an administrator action to extend an active grant's expiration without repeating the original approval. The administrator reviews the existing scope and selects the new permitted expiration before completing a fresh passkey authorization. The operation cannot broaden the grant.
+- A once-only grant that has not been used may have its lifetime/usage policy corrected. If it has already been consumed, the UI offers a same-scope replacement grant rather than reactivating the consumed record. Expired grants may be renewed under the same scope; revoked grants cannot be restored. The original grant and every administrative extension, correction, renewal, or replacement remain separately visible in audit history.
 
 #### Administration UI secret boundary
 
