@@ -318,6 +318,7 @@ internal sealed class LastPassCli(string executablePath, string username) : IAsy
         return swept;
     }
 
+    /// <summary>True when the process exists or cannot be inspected (access denied counts as alive). A pid reused by an unrelated process keeps a leftover home until that process ends, which is safer than judging by a wall-clock start time.</summary>
     private static bool ProcessAlive(int pid)
     {
         try

@@ -37,18 +37,29 @@ public sealed class ProviderRetriever(Func<Guid, IProviderAdapter> adapters, Tim
                 IProviderAdapter adapter = adapters(instanceId);
 
                 // WaitAsync abandons an adapter that ignores its token, so the deadline holds.
-                IReadOnlyList<ProviderSecretResult> results = await adapter.RetrieveSecretsAsync(outstanding, linked.Token).WaitAsync(linked.Token).ConfigureAwait(false);
+                Task<IReadOnlyList<ProviderSecretResult>> call = adapter.RetrieveSecretsAsync(outstanding, linked.Token);
+                IReadOnlyList<ProviderSecretResult> results;
                 try
                 {
-                    results = ProviderBatch.Validate(outstanding, results);
+                    results = await call.WaitAsync(linked.Token).ConfigureAwait(false);
                 }
-                catch (ProviderAdapterException)
+                catch (OperationCanceledException)
                 {
-                    WipeAll(results);
+                    WipeWhenDone(call);
                     throw;
                 }
 
-                outstanding = Apply(outstanding, results, outcomes, out retryAfter);
+                try
+                {
+                    results = ProviderBatch.Validate(outstanding, results);
+                    outstanding = Apply(outstanding, results, outcomes, out retryAfter);
+                }
+                catch (Exception failure) when (failure is not OperationCanceledException)
+                {
+                    WipeAll(results);
+                    WipeOutcomes(outstanding, outcomes);
+                    throw;
+                }
             }
             catch (OperationCanceledException)
             {
@@ -151,11 +162,49 @@ public sealed class ProviderRetriever(Func<Guid, IProviderAdapter> adapters, Tim
         return again;
     }
 
-    private static void WipeAll(IReadOnlyList<ProviderSecretResult> results)
+    private static void WipeWhenDone(Task<IReadOnlyList<ProviderSecretResult>> call)
     {
+        if (call.IsCompletedSuccessfully)
+        {
+            WipeAll(call.Result);
+
+            return;
+        }
+
+        _ = call.ContinueWith(done =>
+        {
+            if (done.IsCompletedSuccessfully)
+            {
+                WipeAll(done.Result);
+            }
+            else
+            {
+                _ = done.Exception;
+            }
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+    }
+
+    private static void WipeOutcomes(List<ProviderSecretRequest> outstanding, Dictionary<Guid, RetrievalOutcome> outcomes)
+    {
+        foreach (ProviderSecretRequest request in outstanding)
+        {
+            if (outcomes.Remove(request.RequestId, out RetrievalOutcome? outcome) && outcome is RetrievalSuccess success)
+            {
+                CryptographicOperations.ZeroMemory(success.Value);
+            }
+        }
+    }
+
+    private static void WipeAll(IReadOnlyList<ProviderSecretResult>? results)
+    {
+        if (results is null)
+        {
+            return;
+        }
+
         foreach (ProviderSecretResult result in results)
         {
-            if (result.Secret?.Value is { } value)
+            if (result?.Secret?.Value is { } value)
             {
                 CryptographicOperations.ZeroMemory(value);
             }

@@ -340,6 +340,16 @@ internal static class ProviderRetrievalTests
         outcomes = await rig.Run([a]);
         check(IsFailure(outcomes, a.RequestId, ProviderErrorKind.Unavailable), "retrieval: hung adapter that ignores its token fails Unavailable at the deadline");
 
+        // What an abandoned adapter returns late is wiped, not left in memory.
+        byte[] late = Encoding.UTF8.GetBytes("late");
+        never.SetResult([new ProviderSecretResult(a.RequestId, new RetrieveSecretResult(late))]);
+        for (int wait = 0; wait < 100 && !late.All(b => b == 0); wait++)
+        {
+            await Task.Delay(50);
+        }
+
+        check(late.All(b => b == 0), "retrieval: a result an abandoned adapter returns after the deadline is wiped");
+
         // Deadline during a backoff wait is Unavailable, not the last recorded kind.
         Rig limited = new();
         a = Req("p/a");
