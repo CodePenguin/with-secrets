@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using WithSecrets.OnePassword;
 
 namespace WithSecrets;
 
@@ -322,7 +323,20 @@ internal static class Program
         HostService service;
         try
         {
-            service = HostService.Start(new HostServiceOptions { State = state, Store = store, Port = port.Value, CommandLineEndpoint = LocalEndpoint.ForCommandLine(), Deployment = deployment, MachineEndpoint = machineEndpoint, MachineListenerStarted = port => TerminalPrompt.Line($"with-secrets service: machine listener now on {machineEndpoint!.Bind}:{port} (the authority signing key was made by the first approval; no restart was needed)."), });
+            service = HostService.Start(new HostServiceOptions
+            {
+                State = state,
+                Store = store,
+                Port = port.Value,
+                CommandLineEndpoint = LocalEndpoint.ForCommandLine(),
+                Deployment = deployment,
+                ConfigureProviders = (registry, authorityLock, review) => OnePasswordProvider.Register(registry, authorityLock, review,
+                    Environment.GetEnvironmentVariable(OnePasswordProvider.ExecutableVariable) ?? ""),
+                SealOnePasswordConfiguration = token => state.TryManifest(out Manifest? manifest, out _) && manifest?.Review is { } reviewKey
+                    ? OnePasswordProvider.SealConfiguration(token, reviewKey.PublicKey) : null,
+                MachineEndpoint = machineEndpoint,
+                MachineListenerStarted = port => TerminalPrompt.Line($"with-secrets service: machine listener now on {machineEndpoint!.Bind}:{port} (the authority signing key was made by the first approval; no restart was needed)."),
+            });
         }
         catch (Exception failure)
         {

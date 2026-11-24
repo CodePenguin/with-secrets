@@ -9,13 +9,14 @@ import type { Grant, Invitation, Machine, OperationName, ParameterValue, Passkey
 export type FieldDef = {
   name: string
   label: string
-  kind: 'text' | 'number' | 'checkbox' | 'select' | 'textarea'
+  kind: 'text' | 'password' | 'number' | 'checkbox' | 'select' | 'textarea'
   options?: ReadonlyArray<{ value: string; label: string }>
   hint?: string
   required?: boolean
   min?: number
   max?: number
   maxLength?: number
+  visible?: (values: FormValues) => boolean
 }
 
 export type FormValues = Record<string, string | boolean>
@@ -46,6 +47,7 @@ export type OperationDef = {
   confirmLabel?: string
   /** Validates the form and gives the exact operation, or the errors by field name. */
   prepare: (values: FormValues) => { errors: Record<string, string> } | Prepared
+  prepareForValidation?: (prepared: Prepared, values: FormValues, signal: AbortSignal) => Promise<{ prepared: Prepared; draft: FormValues }>
   validate?: (prepared: Prepared, signal: AbortSignal) => Promise<ProviderValidation>
 }
 

@@ -114,6 +114,11 @@ internal static class Program
 
     private static int Main(string[] args)
     {
+        if (Environment.GetEnvironmentVariable("OP_SERVICE_ACCOUNT_TOKEN") is OnePasswordTests.FakeToken or OnePasswordTests.SlowToken)
+        {
+            return OnePasswordTests.FakeOp(args);
+        }
+
         // A child of the cross-process database tests: it does that one job and ends (see StateDatabaseProcessTests).
         if (args.Length > 0 && args[0].StartsWith("--state-", StringComparison.Ordinal))
         {
@@ -300,6 +305,12 @@ internal static class Program
         // WS_ONLY=KeyVault,Manifest runs just those suites (a quick loop); unset runs all of them.
         string[] only = (Environment.GetEnvironmentVariable("WS_ONLY") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         bool Wants(string suite) => only.Length == 0 || only.Contains(suite, StringComparer.OrdinalIgnoreCase);
+
+        if (Wants("OnePassword"))
+        {
+            OnePasswordTests.Run(Check).GetAwaiter().GetResult();
+        }
+
 
         if (Wants("EnvDeclarations"))
         {

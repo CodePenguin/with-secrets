@@ -1,8 +1,8 @@
 import { api } from '../../api/client'
 import type { Mount, Provider, ProviderType } from '../../api/types'
-import type { FieldDef, FormValues, OperationDef } from '../authorization/operations'
+import type { FieldDef, FormValues, OperationDef, Prepared } from '../authorization/operations'
 
-const credentialNotice = 'Do not put passwords or tokens in the configuration. Credential entry is not available yet.'
+const credentialNotice = 'Do not put passwords or tokens in the configuration. Use the dedicated token field when available.'
 const maxConfig = 2_000
 const durationFields: FieldDef[] = [
   { name: 'hours', label: 'Hours', kind: 'number', hint: 'The maximum is 24 hours. Use zero to disable stale delivery.' },
@@ -30,11 +30,28 @@ function maxStale(values: FormValues, errors: Record<string, string>): string {
   return String(duration)
 }
 
-// Adapter-specific editors can extend this registry while retaining the same signed JSON parameter.
-const configurationFields = new Map<string, FieldDef>()
-function formFor(type: string): FieldDef {
-  return configurationFields.get(type) ?? { name: 'config', label: 'Configuration JSON', kind: 'textarea', required: true, maxLength: maxConfig }
+const onePassword = 'onepassword'
+const tokenField: FieldDef = { name: 'serviceAccountToken', label: '1Password service-account token', kind: 'password', maxLength: maxConfig }
+const jsonField: FieldDef = { name: 'config', label: 'Configuration JSON', kind: 'textarea', maxLength: maxConfig }
+
+function providerConfiguration(type: string, values: FormValues, errors: Record<string, string>): string {
+  if (type !== onePassword) return configuration(values, errors)
+  if (text(values, tokenField.name)) return '{}'
+  const sealed = text(values, 'sealedConfiguration')
+  if (!sealed) errors.serviceAccountToken = 'Enter a 1Password service-account token.'
+  return sealed
 }
+
+async function sealOnePassword(prepared: Prepared, values: FormValues, signal: AbortSignal) {
+  const token = text(values, tokenField.name)
+  if (!token) return { prepared, draft: values }
+  const { config } = await api.post('/api/v1/providers/onepassword/seal', { body: { serviceAccountToken: token }, signal })
+  return {
+    prepared: { ...prepared, parameters: { ...prepared.parameters, config } },
+    draft: { ...values, serviceAccountToken: '', sealedConfiguration: config },
+  }
+}
+
 
 function configuration(values: FormValues, errors: Record<string, string>): string {
   const raw = text(values, 'config')
@@ -62,7 +79,8 @@ export function addProvider(types: ProviderType[]): OperationDef {
     fields: [
       { name: 'name', label: 'Provider name', kind: 'text', required: true, maxLength: 64 },
       { name: 'type', label: 'Provider type', kind: 'select', required: true, options: types.map(({ type }) => ({ value: type, label: type })) },
-      formFor(types[0]?.type ?? ''),
+      { ...tokenField, visible: (values) => text(values, 'type') === onePassword },
+      { ...jsonField, visible: (values) => text(values, 'type') !== onePassword },
       ...durationFields,
     ],
     initial: { type: types[0]?.type ?? '', config: '{}', ...durationValues(3600) },
@@ -72,12 +90,14 @@ export function addProvider(types: ProviderType[]): OperationDef {
       const type = text(values, 'type')
       if (!name || name.length > 64) errors.name = 'Enter a provider name of 1 to 64 characters.'
       if (!types.some((item) => item.type === type)) errors.type = 'Choose a provider type.'
-      const config = configuration(values, errors)
+      const config = providerConfiguration(type, values, errors)
       const seconds = maxStale(values, errors)
       if (Object.keys(errors).length) return { errors }
 
       return { operation: 'provider-add', parameters: { name, type, config, 'max-stale-seconds': seconds }, summary: `Add provider ${name}.`, done: `Added provider ${name}.` }
     },
+    prepareForValidation: (prepared, values, signal) => text(values, 'type') === onePassword
+      ? sealOnePassword(prepared, values, signal) : Promise.resolve({ prepared, draft: values }),
     validate: ({ parameters }, signal) => api.post('/api/v1/providers/validate', { body: { type: String(parameters.type), config: String(parameters.config) }, signal }),
   }
 }
@@ -87,17 +107,18 @@ export function changeProviderConfig(provider: Provider): OperationDef {
     key: 'provider-config',
     title: 'Change configuration',
     confirmLabel: 'Save configuration',
-    warning: credentialNotice,
+    warning: provider.type === onePassword ? undefined : credentialNotice,
     about: [['Provider', provider.name]],
-    fields: [formFor(provider.type)],
-    initial: { config: provider.configuration },
+    fields: [provider.type === onePassword ? tokenField : jsonField],
+    initial: provider.type === onePassword ? {} : { config: provider.configuration },
     prepare(values) {
       const errors: Record<string, string> = {}
-      const config = configuration(values, errors)
+      const config = providerConfiguration(provider.type, values, errors)
       if (Object.keys(errors).length) return { errors }
 
       return { operation: 'provider-config', parameters: { id: provider.id, revision: String(provider.revision), config }, summary: `Change configuration for ${provider.name}.`, done: 'Configuration saved.' }
     },
+    prepareForValidation: provider.type === onePassword ? sealOnePassword : undefined,
     validate: ({ parameters }, signal) => api.post('/api/v1/providers/validate', { body: { type: provider.type, config: String(parameters.config) }, signal }),
   }
 }

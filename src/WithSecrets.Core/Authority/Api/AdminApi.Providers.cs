@@ -19,6 +19,8 @@ internal sealed partial class AdminApi
             _ => Task.FromResult(new ApiResult(200, admin.Providers?.Mounts() ?? []))),
         new("GET", Prefix + "/mounts/{id}/entries", "listMountEntries", "List namespace entry metadata for a mount.", "providers", ApiAccess.Read, 200, "NamespaceEntryList", null, [], null,
             call => Task.FromResult(ProviderRead(call, (providers, id) => providers.Entries(id)))),
+        new("POST", Prefix + "/providers/onepassword/seal", "sealOnePasswordConfiguration", "Seal a write-only 1Password token for provider configuration.", "providers",
+            ApiAccess.Authorize, 200, "SealedProviderConfiguration", S.Obj([("serviceAccountToken", S.Str(min: 1, max: 2000))]), [], null, SealOnePasswordConfigurationAsync),
         new("POST", Prefix + "/providers/validate", "validateProvider", "Validate a proposed provider configuration or mount path.", "providers", ApiAccess.Authorize, 200,
             "ProviderValidation", ProviderValidationBody(), [], null, ValidateProviderAsync, BodyLimit: ConfigurationBodyLimit),
         new("POST", Prefix + "/mounts/{id}/refresh", "refreshMount", "Refresh the namespace entries of a mount from its provider.", "providers", ApiAccess.Authorize, 200,
@@ -74,6 +76,32 @@ internal sealed partial class AdminApi
             ? null
             : ProviderProblem(429, "too-many-requests", "too many requests; wait a minute");
     }
+
+    private Task<ApiResult> SealOnePasswordConfigurationAsync(ApiCall call)
+    {
+        if (ProviderRequestProblem(call.Session) is { } refusal)
+        {
+            return Task.FromResult(refusal);
+        }
+
+        try
+        {
+            string token = call.Body!.Value.GetProperty("serviceAccountToken").GetString()!;
+            string? config = admin.Providers!.SealOnePasswordConfiguration(token);
+            if (config is not null && ProviderAdmin.ConfigurationScreen(config) is null)
+            {
+                return Task.FromResult(new ApiResult(200, new { config }));
+            }
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // The request contains a credential. Never include provider exception details.
+        }
+
+        return Task.FromResult(ProviderProblem(400, "configuration-not-sealed",
+            "The 1Password configuration could not be sealed. Check the token and authority setup."));
+    }
+
 
     private async Task<ApiResult> ValidateProviderAsync(ApiCall call)
     {

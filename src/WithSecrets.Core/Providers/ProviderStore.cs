@@ -1,3 +1,5 @@
+using System.Text.Json.Nodes;
+
 using Microsoft.Data.Sqlite;
 
 namespace WithSecrets;
@@ -75,6 +77,42 @@ public sealed class ProviderStore(AuthorityStore store)
             return Require(connection, transaction, id);
         });
     }
+
+    internal static bool HasEncryptedConfigurations(SqliteConnection connection, SqliteTransaction transaction)
+        => WithSecretsDatabase.Scalar(connection, transaction,
+            "SELECT 1 FROM provider_instances WHERE json_type(configuration, '$.encryptedConfiguration') IS NOT NULL LIMIT 1") is not null;
+
+    /// <summary>Seals provider configurations to the new review key in the caller's manifest rotation transaction.</summary>
+    internal static IReadOnlyList<Guid> RekeyConfigurations(SqliteConnection connection, SqliteTransaction transaction,
+        string oldReviewPrivate, string newReviewPublic)
+    {
+        List<ProviderInstance> encrypted = QueryAll(connection, transaction,
+            $"SELECT {InstanceColumns} FROM provider_instances WHERE json_type(configuration, '$.encryptedConfiguration') IS NOT NULL",
+            ReadInstance);
+        foreach (ProviderInstance instance in encrypted)
+        {
+            string replacement;
+            try
+            {
+                JsonObject configuration = JsonNode.Parse(instance.Configuration)!.AsObject();
+                string ciphertext = configuration["encryptedConfiguration"]!.GetValue<string>();
+                string plaintext = DotenvxCipher.Instance.Decrypt(oldReviewPrivate, ciphertext);
+                configuration["encryptedConfiguration"] = DotenvxCipher.Instance.Encrypt(plaintext, newReviewPublic);
+                replacement = configuration.ToJsonString();
+            }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            {
+                throw new ProviderConfigurationException("a provider configuration could not be re-encrypted; nothing was changed");
+            }
+
+            WithSecretsDatabase.Execute(connection, transaction,
+                "UPDATE provider_instances SET configuration = $config, revision = revision + 1 WHERE id = $id",
+                ("$config", replacement), ("$id", Id(instance.Id)));
+        }
+
+        return [.. encrypted.Select(instance => instance.Id)];
+    }
+
 
     /// <summary>Policy only: nothing but max_stale_seconds changes, the revision stays.</summary>
     public ProviderInstance SetMaxStale(Guid id, TimeSpan maxStale, Action<SqliteConnection, SqliteTransaction>? beforeCommit = null)

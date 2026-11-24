@@ -80,7 +80,10 @@ internal static class ApiTests
             ValidateConfigurationHandler = _ => Task.FromResult<IReadOnlyList<ProviderValidationIssue>>([new("Check the test vault.", ValidationSeverity.Warning)]),
             ListHandler = (_, _) => Task.FromResult(new ListSecretsResult([new ProviderSecretInfo("TOKEN", "ext-token", "Token metadata")], null, true)),
         }, () => new FakeConfiguration());
-        using AdminApp app = new(root, providers: registry);
+        const string token = "ops_write_only_canary";
+        var (publicKey, privateKey) = DotenvxCipher.Instance.NewKeyPair();
+        using AdminApp app = new(root, providers: registry,
+            sealOnePasswordConfiguration: supplied => OnePassword.OnePasswordProvider.SealConfiguration(supplied, publicKey));
         ProviderAuthority providers = app.Service.Providers!;
         ProviderInstance instance = providers.Store.AddInstance("vault-one", "test", """{"label":"test"}""", TimeSpan.FromHours(1));
         await providers.StartInstanceAsync(instance);
@@ -110,6 +113,27 @@ internal static class ApiTests
             check(status == 200 && Conform(schema, body) is null && body.Contains(expected, StringComparison.Ordinal), "providers API: " + path + " returns its documented data");
         }
 
+        const string sealPath = "/api/v1/providers/onepassword/seal";
+        string tokenBody = JsonSerializer.Serialize(new { serviceAccountToken = token });
+        (int sealedStatus, string sealedBody) = await browser.PostAsync(sealPath, tokenBody);
+        check(sealedStatus == 200 && Conform("SealedProviderConfiguration", sealedBody) is null
+            && !sealedBody.Contains(token, StringComparison.Ordinal) && providers.Store.Instances().Count == 1,
+            "providers API: token sealing returns ciphertext and leaves stored instances untouched");
+        if (sealedStatus == 200)
+        {
+            using JsonDocument answer = JsonDocument.Parse(sealedBody);
+            using JsonDocument configuration = JsonDocument.Parse(answer.RootElement.GetProperty("config").GetString()!);
+            string ciphertext = configuration.RootElement.GetProperty("encryptedConfiguration").GetString()!;
+            using JsonDocument opened = JsonDocument.Parse(DotenvxCipher.Instance.Decrypt(privateKey, ciphertext));
+            check(opened.RootElement.GetProperty("serviceAccountToken").GetString() == token,
+                "providers API: the returned configuration seals the submitted token to the key");
+        }
+
+        (int invalidToken, string tokenProblem) = await browser.PostAsync(sealPath, """{"serviceAccountToken":"invalid token canary"}""");
+        check(invalidToken == 400 && !tokenProblem.Contains("canary", StringComparison.Ordinal),
+            "providers API: a refused token is not echoed");
+
+
         string validateBody = JsonSerializer.Serialize(new { type = "test", config = """{"label":"test"}""" });
         (int validated, string issues) = await browser.PostAsync("/api/v1/providers/validate", validateBody);
         check(validated == 200 && Conform("ProviderValidation", issues) is null && issues.Contains("Check the test vault.", StringComparison.Ordinal), "providers API: configuration validation returns issues");
@@ -131,6 +155,10 @@ internal static class ApiTests
         (int refreshDenied, string refreshProblem) = await limited.SendAsync(HttpMethod.Post, mountPath + "/refresh", null);
         check(validateDenied == 403 && Code(validateProblem) == "scope-required" && refreshDenied == 403 && Code(refreshProblem) == "scope-required",
             "providers API: validation and refresh require admin.decide");
+
+        (int sealDenied, _) = await limited.PostAsync(sealPath, tokenBody);
+        check(sealDenied == 403, "providers API: token sealing requires admin.decide");
+
 
         providers.Store.RemoveMount(mount.Id);
         providers.Store.RemoveInstance(instance.Id);

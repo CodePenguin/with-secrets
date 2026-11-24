@@ -182,7 +182,8 @@ public sealed class ProviderAuthority : IDisposable
 
         using CancellationTokenSource limit = new(ChangeDeadline);
         CancellationToken token = limit.Token;
-        Task updating = Task.Run(() => Registry.UpdateInstanceAsync(instance.Id, instance.Configuration, token), token);
+        Task updating = Task.Run(() => Registry.UpdateInstanceAsync(instance.Id, () => Store.Instance(instance.Id)?.Configuration
+            ?? throw new ProviderConfigurationException("The provider instance no longer exists."), token), token);
         _ = updating.ContinueWith(done => done.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
         try
         {
@@ -196,6 +197,25 @@ public sealed class ProviderAuthority : IDisposable
             throw;
         }
     }
+
+    internal Task ReloadConfigurationsAsync(IReadOnlyList<Guid> instances)
+        => Task.WhenAll(instances.Select(ReloadConfigurationAsync));
+
+    private async Task ReloadConfigurationAsync(Guid id)
+    {
+        try
+        {
+            if (Store.Instance(id) is { } instance)
+            {
+                await ReconfigureInstanceAsync(instance).ConfigureAwait(false);
+            }
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            AppLog.Warn("Provider instance {Instance} did not reload after review-key rotation ({Type}).", id, error.GetType().Name);
+        }
+    }
+
 
     /// <summary>Shuts down and forgets the running instance of a removed configuration (within the shutdown deadline). Nothing to do when it is not running.</summary>
     internal async Task StopInstanceAsync(Guid id)

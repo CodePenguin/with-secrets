@@ -78,6 +78,44 @@ describe('Providers page', () => {
     })
   })
 
+  it.each(['add', 'replace'] as const)('seals the 1Password token before the %s authorization', async (mode) => {
+    const api = providerApi()
+    const seal = 'POST /api/v1/providers/onepassword/seal'
+    const config = '{"encryptedConfiguration":"encrypted:fixture"}'
+    const token = 'ops_test_token'
+    const existing = { ...instance, type: 'onepassword', configuration: config, actions: ['config'] }
+    api.on('GET /api/v1/providers', { body: [existing] })
+    api.on('GET /api/v1/providers/types', { body: [{ type: 'test', adapterVersion: '1.0' }, { type: 'onepassword', adapterVersion: '1.0' }] })
+    api.on(seal, { body: { config } })
+    api.on(validate, { body: { ok: true, issues: [{ message: 'Check vault access.', severity: 'warning' }] } })
+    const user = userEvent.setup()
+    renderApp(mode === 'add' ? '/providers' : `/providers/${instance.id}`)
+    await user.click(await screen.findByRole('button', { name: mode === 'add' ? /^Add provider$/ : `Change configuration ${instance.name}` }))
+    const form = within(screen.getByRole('dialog'))
+    if (mode === 'add') {
+      await user.type(form.getByLabelText(/Provider name/), 'Team vault')
+      await user.selectOptions(form.getByLabelText(/Provider type/), 'onepassword')
+    }
+    expect(form.queryByLabelText(/Configuration JSON/)).not.toBeInTheDocument()
+    const input = form.getByLabelText(/service-account token/)
+    expect(input).toHaveAttribute('type', 'password')
+    expect(input).toHaveValue('')
+    await user.type(input, token)
+    await user.click(form.getByRole('button', { name: 'Continue' }))
+    expect(await form.findByText('Check vault access.')).toBeVisible()
+    expect(input).toHaveValue('')
+    await user.click(form.getByRole('checkbox', { name: 'Continue with these warnings' }))
+    await user.click(form.getByRole('button', { name: 'Continue' }))
+    await waitFor(() => expect(api.count(authorize)).toBe(1))
+    expect(api.count(seal)).toBe(1)
+    expect(api.calls.filter((call) => JSON.stringify(call.body)?.includes(token)).map((call) => call.method + ' ' + call.path)).toEqual([seal])
+    expect(api.calls.find((call) => call.method + ' ' + call.path === authorize)?.body).toMatchObject({
+      operation: mode === 'add' ? 'provider-add' : 'provider-config',
+      parameters: { config, 'confirm-warnings': 'yes' },
+    })
+  })
+
+
   it('shows the provider link in the navigation only when the service offers providers', async () => {
     const reader = { 'GET /api/v1/session': { body: session({ capabilities: ['admin.read'] }) } }
     signedIn({ ...reader, 'GET /api/v1/status': { body: status({ capabilities: { providers: true } }) } })

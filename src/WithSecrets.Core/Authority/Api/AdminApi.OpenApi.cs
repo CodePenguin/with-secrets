@@ -101,6 +101,7 @@ internal sealed partial class AdminApi
                 ("message", S.Str()), ("severity", S.Str(values: ["warning", "error"])),
                 ("target", S.Str(nullable: true)), ("providerCode", S.Str(nullable: true)),
             ]),
+            ["SealedProviderConfiguration"] = S.Obj([("config", ParameterSchema("config"))]),
             ["ProviderValidation"] = S.Obj([("ok", S.Bool()), ("issues", S.Arr(S.Ref("ProviderValidationIssue")))]),
             ["MountRefresh"] = S.Obj([("complete", S.Bool()), ("added", S.Int(min: 0)), ("removed", S.Int(min: 0)), ("changed", S.Int(min: 0))]),
             ["Login"] = S.Obj([("state", S.Str(values: ["waiting", "ready", "failed"])), ("problem", S.Str(nullable: true))]),

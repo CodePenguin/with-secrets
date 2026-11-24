@@ -57,6 +57,9 @@ public static class CliArgs
         Every run is approved once. A grant (below) lets one exact command run again without asking, for a time; reuseMaxMinutes sets the longest time.
 
         To run a program: with-secrets [--secrets NAME[,NAME...]] --reason "why" [-f .env] -- PROGRAM [ARGS...]
+        Set WITH_SECRETS_ONEPASSWORD_EXECUTABLE to the trusted absolute path to op on the authority host.
+
+
         A run goes through the host service, which must be running (with-secrets service, in a terminal of its own). The run reaches it over
         a channel only this user can open (Windows: a named pipe; Linux and macOS: a Unix socket), never over a network port. Without the service a run exits 6.
         The user approves the request. Then PROGRAM runs with only those secrets as environment variables, and its output is

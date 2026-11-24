@@ -32,6 +32,7 @@ public sealed class AuthorityLock
     private readonly List<Action<string>> _onLock = [];
     private bool _locked = true;
     private UnlockMethod? _how;
+    private CancellationTokenSource? _unlockSession;
 
     /// <summary>A lock that starts locked, as every service does.</summary>
     public AuthorityLock()
@@ -57,6 +58,19 @@ public sealed class AuthorityLock
             }
         }
     }
+
+    /// <summary>A token that is cancelled when this unlock session ends. While locked it is already cancelled.</summary>
+    public CancellationToken UnlockSessionToken
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _unlockSession?.Token ?? new CancellationToken(canceled: true);
+            }
+        }
+    }
+
 
     public UnlockMethod? How
     {
@@ -90,6 +104,7 @@ public sealed class AuthorityLock
     {
         lock (_gate)
         {
+            _unlockSession ??= new CancellationTokenSource();
             _locked = false;
             _how = how;
         }
@@ -109,6 +124,13 @@ public sealed class AuthorityLock
         Action<string>[] discards;
         lock (_gate)
         {
+            if (_unlockSession is { } session)
+            {
+                // CancelAsync marks the token before returning and runs callbacks outside this gate.
+                _ = session.CancelAsync();
+                _unlockSession = null;
+            }
+
             _locked = true;
             _how = null;
             discards = [.. _onLock];

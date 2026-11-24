@@ -342,7 +342,10 @@ public sealed class ProviderRegistry(TimeProvider? clock = null)
     /// Applies an already committed configuration. Health goes Initializing; the adapter reconnects asynchronously. When the adapter takes it, lifecycle is Ready; when it
     /// refuses it, lifecycle goes Unavailable (with a constant message) and the failure is rethrown.
     /// </summary>
-    public async Task UpdateInstanceAsync(Guid id, string configurationJson, CancellationToken cancellationToken)
+    public Task UpdateInstanceAsync(Guid id, string configurationJson, CancellationToken cancellationToken)
+        => UpdateInstanceAsync(id, () => configurationJson, cancellationToken);
+
+    internal async Task UpdateInstanceAsync(Guid id, Func<string> readConfiguration, CancellationToken cancellationToken)
     {
         Instance instance = Active(id);
         ProviderType type;
@@ -367,7 +370,7 @@ public sealed class ProviderRegistry(TimeProvider? clock = null)
             await instance.ConfigurationUpdates.WaitAsync(linked.Token).ConfigureAwait(false);
             try
             {
-                IAdapterConfiguration configuration = LoadConfiguration(instance.Adapter, type.NewConfiguration(), configurationJson);
+                IAdapterConfiguration configuration = LoadConfiguration(instance.Adapter, type.NewConfiguration(), readConfiguration());
                 instance.ResetHealth();
                 await instance.Adapter.UpdateConfigurationAsync(configuration, linked.Token).ConfigureAwait(false);
                 linked.Token.ThrowIfCancellationRequested();

@@ -84,6 +84,16 @@ public sealed class ReviewKeys(ISecretCipher? cipher = null) : IDisposable
         }
     }
 
+    /// <summary>Decrypts data sealed to the current open review key.</summary>
+    public string? TryDecryptCurrent(string ciphertext)
+    {
+        lock (_gate)
+        {
+            return _publicKey is { } publicKey ? TryDecrypt(ciphertext, publicKey) : null;
+        }
+    }
+
+
     public void Close()
     {
         lock (_gate)

@@ -244,6 +244,12 @@ public sealed class KeyRotation(StateDatabase db, SecretStore store, EnrollmentT
                             return rekey(connection, transaction, Encoding.UTF8.GetString(oldReview), nextReview.PublicKey);
                         }
 
+                        if (ProviderStore.HasEncryptedConfigurations(connection, transaction))
+                        {
+                            return "the authority must re-encrypt the provider configurations; nothing was changed";
+                        }
+
+
                         return WithSecretsDatabase.Scalar(connection, transaction, "SELECT 1 FROM grants WHERE seal IS NOT NULL LIMIT 1") is null
                             ? null : "the authority must re-encrypt the grant evidence; nothing was changed";
                     });
@@ -253,6 +259,7 @@ public sealed class KeyRotation(StateDatabase db, SecretStore store, EnrollmentT
             string signText = "Rotate the store keys and keep only " + ApprovalSummary.Clean(signer.Name) + ".\n"
                 + "Removed (add them again): " + (removedNames.Count == 0 ? "(none)" : string.Join(", ", removedNames.Select(ApprovalSummary.Clean))) + ".\n"
                 + rows.Count.ToString(CultureInfo.InvariantCulture) + " secret(s) will be encrypted again under the new keys.\n"
+                + "Encrypted provider configurations are re-encrypted too. Reloaded providers may need new grant approvals.\n"
                 + "Confirm with the same admin key.";
             ManifestApproval confirmed = target.Approver.AskManifest(new ApprovalPrompt(SignHeading, signText), nextText, commit);
             if (!confirmed.Decision.Approved)

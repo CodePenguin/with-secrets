@@ -124,6 +124,14 @@ public sealed class HostServiceOptions
     /// <summary>Called (with the port) when the machine listener starts after the service did: at the first approval that makes the authority signing key. Null: nothing is told.</summary>
     public Action<int>? MachineListenerStarted { get; init; }
 
+    /// <summary>Registers host-bundled providers with the local authority's lock and review key.</summary>
+    public Action<ProviderRegistry, AuthorityLock, ReviewKeys>? ConfigureProviders { get; init; }
+
+
+    /// <summary>Seals a write-only token into the bundled 1Password provider configuration.</summary>
+    public Func<string, string?>? SealOnePasswordConfiguration { get; init; }
+
+
     /// <summary>For tests: the provider registry, with the adapter types a test registers. Default: a registry of the adapter types bundled with this release (none yet).</summary>
     internal ProviderRegistry? ProviderRegistry { get; init; }
 }
@@ -206,7 +214,7 @@ public sealed class HostService : IDisposable
             return new TargetAdminAsker(primary, local);
         });
         IPasskeyAdmin? passkeys = options.PasskeyAdminFactory?.Invoke() ?? (options.State is { } passkeyState
-            ? new StatePasskeyAdmin(passkeyState) { RekeyReview = Review is null ? null : RekeyGrantEvidence }
+            ? new StatePasskeyAdmin(passkeyState) { RekeyReview = Review is null ? null : RekeyReviewData }
             : null);
         IUnlockProtection protection = options.UnlockProtection ?? UnlockProtections.ForThisPlatform();
         options.Deployment.Store.EndOpenInvitations(); // an invitation's key is only in memory, so one made before this start can no longer be answered
@@ -233,10 +241,12 @@ public sealed class HostService : IDisposable
 
             // The authority's runs read the native store plus every mounted secret (10.3); a name no mount selects is served by the native store as before. A host whose
             // authority is remote has none of this: the adapters run at the authority.
-            if (options.Deployment.Remote is null)
+            if (Review is { } review)
             {
-                Providers = new ProviderAuthority(secretStore, options.Deployment.Store, options.Deployment.Keys, options.ProviderRegistry ?? new ProviderRegistry(authorityClock), Audit, authorityClock);
-                Admin.Providers = new ProviderAdmin(Providers, options.State.Audit);
+                ProviderRegistry registry = options.ProviderRegistry ?? new ProviderRegistry(authorityClock);
+                options.ConfigureProviders?.Invoke(registry, Lock, review);
+                Providers = new ProviderAuthority(secretStore, options.Deployment.Store, options.Deployment.Keys, registry, Audit, authorityClock);
+                Admin.Providers = new ProviderAdmin(Providers, options.State.Audit, options.SealOnePasswordConfiguration);
             }
         }
 
@@ -250,7 +260,7 @@ public sealed class HostService : IDisposable
 
     public ReviewKeys? Review { get; }
 
-    internal string? RekeyGrantEvidence(Microsoft.Data.Sqlite.SqliteConnection connection, Microsoft.Data.Sqlite.SqliteTransaction transaction, string oldReviewPrivate, string newReviewPublic)
+    internal string? RekeyReviewData(Microsoft.Data.Sqlite.SqliteConnection connection, Microsoft.Data.Sqlite.SqliteTransaction transaction, string oldReviewPrivate, string newReviewPublic)
     {
         try
         {
@@ -266,13 +276,26 @@ public sealed class HostService : IDisposable
                 return "the authority has no signing key; nothing was changed";
             }
 
+            IReadOnlyList<Guid> providers = ProviderStore.RekeyConfigurations(connection, transaction, oldReviewPrivate, newReviewPublic);
             Lock.EnsureUnlocked();
             if (Review is { } review)
             {
-                WithSecretsDatabase.AfterCommit(transaction, review.Close);
+                WithSecretsDatabase.AfterCommit(transaction, () =>
+                {
+                    review.Close();
+                    if (Providers is { } authority && providers.Count != 0)
+                    {
+                        authority.ReloadConfigurationsAsync(providers).GetAwaiter().GetResult();
+                    }
+                });
             }
 
+
             return null;
+        }
+        catch (ProviderConfigurationException error)
+        {
+            return error.Message;
         }
         catch (AuthorityLockedException)
         {

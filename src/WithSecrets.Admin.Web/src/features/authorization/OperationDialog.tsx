@@ -502,9 +502,16 @@ export function OperationDialog({ def, resume, onClose }: Props) {
     setValidating(true)
     setValidationError(null)
     try {
-      const checked = await def.validate(result, request.signal)
+      let prepared = result
+      if (def.prepareForValidation) {
+        const sealed = await def.prepareForValidation(prepared, draft, request.signal)
+        if (request.signal.aborted) return
+        prepared = sealed.prepared
+        setDraft(sealed.draft)
+      }
+      const checked = await def.validate(prepared, request.signal)
       if (request.signal.aborted) return
-      if (checked.ok && checked.issues.length === 0) await continueToPasskey(result)
+      if (checked.ok && checked.issues.length === 0) await continueToPasskey(prepared)
       else setValidation(checked)
     } catch (error) {
       if (!request.signal.aborted) setValidationError(error)
@@ -524,7 +531,7 @@ export function OperationDialog({ def, resume, onClose }: Props) {
         {def.intro ? <p>{def.intro}</p> : null}
         {def.about ? <Facts items={def.about} /> : null}
         {def.warning ? <Notice kind="warning">{def.warning}</Notice> : null}
-        {def.fields?.map((field, index) => (
+        {def.fields?.filter((field) => field.visible?.(draft) ?? true).map((field, index) => (
           <Field key={field.name} label={field.label} hint={field.hint} error={state.errors[field.name]} required={field.required}>
             {(control) => {
               if (field.kind === 'checkbox') {
@@ -545,7 +552,7 @@ export function OperationDialog({ def, resume, onClose }: Props) {
                 return <textarea {...input} rows={5} maxLength={field.maxLength} autoComplete="off" spellCheck={false} />
               }
               // eslint-disable-next-line jsx-a11y/no-autofocus -- the first field of a modal form
-              return <input {...input} type="text" inputMode={field.kind === 'number' ? 'numeric' : undefined} maxLength={field.maxLength} autoComplete="off" spellCheck={false} autoFocus={index === 0} />
+              return <input {...input} type={field.kind === 'password' ? 'password' : 'text'} inputMode={field.kind === 'number' ? 'numeric' : undefined} maxLength={field.maxLength} autoComplete="off" spellCheck={false} autoFocus={index === 0} />
             }}
           </Field>
         ))}

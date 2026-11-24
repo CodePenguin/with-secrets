@@ -787,7 +787,21 @@ internal static class RecoveryTests
         {
             World w = NewWorld(root, laptop, phone);
             using TestMachine machine = new(w.Folder);
-            using HostServiceTests.Rig rig = new(root, machine: machine);
+            string executable = Path.Combine(AppContext.BaseDirectory,
+                OperatingSystem.IsWindows() ? "WithSecrets.Tests.exe" : "WithSecrets.Tests");
+            StateDatabase serviceState = new(machine.Deployment.Store.Database);
+            using HostService service = HostService.Start(new HostServiceOptions
+            {
+                State = serviceState,
+                Store = new SecretStore(serviceState),
+                Deployment = machine.Deployment,
+                Lock = AuthorityLock.UnlockedForTests(),
+                CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(),
+                Port = 0,
+                ConfigureProviders = (registry, authorityLock, review) =>
+                    OnePassword.OnePasswordProvider.Register(registry, authorityLock, review, executable),
+            });
+            w.Db.Audit = serviceState.Audit;
             const string reviewCanary = "--review-rotation-canary";
             AuthorityStore authority = machine.Deployment.Store;
             (GrantRecord beforeGrant, LaunchRequest request) = await MakeReviewGrant(machine, laptop, reviewCanary);
@@ -797,8 +811,19 @@ internal static class RecoveryTests
             string oldMaster = Convert.ToHexStringLower(KeyVault.OpenMaster(before, oldUnlock));
             string oldPrf = Convert.ToHexStringLower(oldUnlock.Output);
             Dictionary<string, string> oldRows = new SecretStore(w.Db).Snapshot().Rows;
-            check(rig.Service.Review!.TryOpen(before, oldUnlock), "rotate: review is open before the store keys rotate");
-            Flow flow = StartRotate(w, rekey: rig.Service.RekeyGrantEvidence);
+            check(service.Review!.TryOpen(before, oldUnlock), "rotate: review is open before the store keys rotate");
+            ProviderAuthority providers = service.Providers!;
+            string[] tokens = [OnePasswordTests.FakeToken, OnePasswordTests.SlowToken];
+            ProviderInstance[] beforeProviders = tokens.Select((token, index) => providers.Store.AddInstance(
+                "1Password vault " + index, "onepassword",
+                OnePassword.OnePasswordProvider.SealConfiguration(token, before.Review!.PublicKey), TimeSpan.Zero)).ToArray();
+            foreach (ProviderInstance instance in beforeProviders)
+            {
+                await providers.StartInstanceAsync(instance);
+            }
+
+
+            Flow flow = StartRotate(w, rekey: service.RekeyReviewData);
             (string Url, string Origin)? one = flow.Next();
             string pageOne = one is null ? "" : TestState.Get(client, one.Value.Url).Body;
             (int status1, string body1) = one is null ? (0, "") : TestState.Approve(client, one.Value.Url, one.Value.Origin, "localhost", laptop);
@@ -826,13 +851,30 @@ internal static class RecoveryTests
             check(after is not null && after.Version == before.Version + 1 && after.Keys.Count == 1 && after.Keys[0].Id == TestAuthenticator.Encode(laptop.CredentialId) && after.Store != before.Store && after.Vault != before.Vault && after.Recovery!.Wrap != before.Recovery!.Wrap && after.Recovery.Salt != before.Recovery.Salt,
                 "rotate: manifest v+1 has only the tapped key, a new store key, vault and recovery slot");
             GrantRecord rekeyed = authority.FindGrant(beforeGrant.Id)!;
-            check(!rig.Service.Review!.IsOpen && after!.Review!.PublicKey != before.Review!.PublicKey
+            check(!service.Review!.IsOpen && after!.Review!.PublicKey != before.Review!.PublicKey
                 && rekeyed.ReviewKey == after.Review.PublicKey && rekeyed.Evidence!.Ciphertext != beforeGrant.Evidence!.Ciphertext
                 && authority.Sealer!.Problem(rekeyed) is null, "rotate: the same commit re-encrypts and reseals evidence and closes the previous review key");
             using Unlock currentUnlock = TestVault.Unlock(w.Db, laptop)!;
-            check(rig.Service.Review.TryOpen(after!, currentUnlock)
-                && rig.Service.Review.TryDecrypt(rekeyed.Evidence!.Ciphertext, rekeyed.ReviewKey!)?.Contains(reviewCanary, StringComparison.Ordinal) == true,
+            check(service.Review.TryOpen(after!, currentUnlock)
+                && service.Review.TryDecrypt(rekeyed.Evidence!.Ciphertext, rekeyed.ReviewKey!)?.Contains(reviewCanary, StringComparison.Ordinal) == true,
                 "rotate: the review key opened by the kept passkey decrypts the re-encrypted approval");
+            ProviderInstance[] afterProviders = beforeProviders.Select(instance => providers.Store.Instance(instance.Id)!).ToArray();
+            for (int index = 0; index < afterProviders.Length; index++)
+            {
+                ProviderInstance updated = afterProviders[index];
+                using JsonDocument envelope = JsonDocument.Parse(updated.Configuration);
+                string ciphertext = envelope.RootElement.GetProperty("encryptedConfiguration").GetString()!;
+                using JsonDocument opened = JsonDocument.Parse(service.Review.TryDecryptCurrent(ciphertext)!);
+                check(updated.Revision == beforeProviders[index].Revision + 1
+                    && updated.Configuration != beforeProviders[index].Configuration
+                    && opened.RootElement.GetProperty("serviceAccountToken").GetString() == tokens[index],
+                    "rotate: the new review key opens the correct token for each existing provider instance");
+                ListSecretsResult listed = await providers.Registry.Adapter(updated.Id).ListSecretsAsync(new("vault", null, null), default);
+                check(listed is { IsComplete: true, Secrets.Count: 2 },
+                    "rotate: the running 1Password adapter can list with its re-encrypted configuration");
+            }
+
+
             GrantResponse viaGrant = await machine.Deployment.Authority.GrantAsync(GrantEnvelope.Create(GrantOps.Use, request with { RequestId = "use-" + request.RequestId }, beforeGrant.ScopeKey, machine.HostName, machine.MachineKey));
             check(viaGrant.Outcome == GrantOps.Granted, "rotate: the existing grant still serves the approved command");
             check(after is not null && after.Keys[0].Slot is { } slot && slot.Salt == before.Keys.First(key => key.Name == "laptop").Slot!.Salt, "rotate: the kept key keeps its slot salt (its PRF output still works)");
@@ -847,12 +889,15 @@ internal static class RecoveryTests
             check(after is not null && Fails(() => KeyVault.OpenRecovery(after, RecoveryCodeBytes(w.Code))), "rotate: the old recovery code fails");
             check(newCode is not null && CodePattern.IsMatch(newCode) && after is not null && RecoveryCode.TryParse(newCode, out byte[] fresher) && DotenvxCipher.Instance.Derive(Encoding.UTF8.GetString(KeyVault.UnwrapVault(after.Vault, KeyVault.OpenRecovery(after, fresher), after.Store))) == after.Store,
                 "rotate: the new recovery code (final reply) opens the new store (" + (newCode ?? "none") + ")");
-            IReadOnlyList<AuditRow> rows = AuditRows(w.Db);
+            // The service can upload the rotation event while this test is reading it.
+            IReadOnlyList<AuditRow> rows = [.. service.Audit.Outbox.Pending(1000)
+                .Concat(authority.AuditHistory(new AuditQuery(Limit: 1000)).Select(record => record.Event))
+                .Select(TestAudit.Row)];
             AuditRow? rotated = rows.FirstOrDefault(row => row.Event == "key-rotated");
             check(rotated is not null && rotated.Detail.Contains("phone", StringComparison.Ordinal) && rotated.Detail.Contains("1 key(s) removed", StringComparison.Ordinal) && rotated.KeyName == "laptop", "rotate: a key-rotated audit row names the removed keys and the count (" + rotated?.Detail + ")");
 
             Flow failed = StartRotate(w, rekey: (connection, transaction, oldReview, nextReview) =>
-                rig.Service.RekeyGrantEvidence(connection, transaction, oldReview, nextReview) ?? "rekey fault (test)");
+                service.RekeyReviewData(connection, transaction, oldReview, nextReview) ?? "rekey fault (test)");
             (string Url, string Origin)? faultOne = failed.Next();
             (string Url, string Origin)? faultTwo = faultOne is null ? null : NextLink(TestState.Approve(client, faultOne.Value.Url, faultOne.Value.Origin, "localhost", laptop).Body);
             if (faultTwo is { } final)
@@ -860,9 +905,10 @@ internal static class RecoveryTests
                 TestState.Approve(client, final.Url, final.Origin, "localhost", laptop);
             }
             check(!failed.Result().Done && TestState.Current(w.Db)!.Canonical() == after!.Canonical()
-                && GrantAuthorityTests.SameGrant(authority.FindGrant(rekeyed.Id), rekeyed) && rig.Service.Review.IsOpen,
-                "rotate: rolling back a failed evidence rekey preserves the manifest, evidence and open review key");
-            rig.Service.Dispose();
+                && GrantAuthorityTests.SameGrant(authority.FindGrant(rekeyed.Id), rekeyed) && service.Review.IsOpen
+                && afterProviders.All(instance => providers.Store.Instance(instance.Id) == instance),
+                "rotate: rolling back a failed evidence rekey preserves the manifest, evidence, provider configurations and open review key");
+            service.Dispose();
             SqliteConnection.ClearAllPools();
 
             string[] said = [.. flow.Lines, result.Detail, pageOne, pageTwo, body1, Audit(w.Db)];
