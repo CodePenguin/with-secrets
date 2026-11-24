@@ -185,7 +185,7 @@ public sealed class CngSigningKey : ISigningKey
 
     /// <summary>
     /// A new key under <paramref name="name" />. A key that already has the name is deleted first: used for a generation that
-    /// authority.db does not record yet, so whatever holds the name is a leftover or a planted key, never one in use.
+    /// with-secrets.db does not record yet, so whatever holds the name is a leftover or a planted key, never one in use.
     /// </summary>
     public static CngSigningKey CreateFresh(string name)
     {

@@ -5,7 +5,7 @@ namespace WithSecrets;
 
 internal static class Program
 {
-    // Everything lives in the user profile: %USERPROFILE%\.with-secrets\state.db (passkeys, settings, approvals and the
+    // Everything lives in the user profile: %USERPROFILE%\.with-secrets\with-secrets.db (passkeys, settings, approvals and the
     // secrets as Dotenvx ciphertext). The store key is never stored: it is wrapped under keys that only the passkeys (WebAuthn PRF) can produce.
     private const string StoreFolder = ".with-secrets";
 
@@ -90,7 +90,7 @@ internal static class Program
         // Diagnostics: warnings go to the log file always; --debug (or WITH_SECRETS_DEBUG=1) adds the Debug events, to the terminal too.
         AppLog.Configure(AppLog.DebugRequested(command.Debug));
 
-        // A run is a client of the host service: it opens no store and no state.db, decrypts nothing and starts nothing itself.
+        // A run is a client of the host service: it opens no store and no with-secrets.db, decrypts nothing and starts nothing itself.
         if (command is CliCommand.Run run)
         {
             return await RunThroughService(run, run.Args, approve: false);
@@ -101,7 +101,13 @@ internal static class Program
         {
             // With nothing enrolled, admin is the first-time setup: the first passkey, then the link.
             StateDatabase first = StateDatabase.InFolder(StorePath());
-            if (first.TryManifest(out Manifest? enrolled, out _) && enrolled is null)
+            if (!first.TryManifest(out Manifest? enrolled, out string? storeError))
+            {
+                Console.Error.WriteLine("with-secrets: " + storeError);
+                return RunCommand.StoreError;
+            }
+
+            if (enrolled is null)
             {
                 if (!HumanCommands.RequireTerminal(CliArgs.NoTerminalMessage(command)))
                 {
@@ -118,9 +124,13 @@ internal static class Program
             return await AdminAppCommand.RunAsync(app.AdminPort, Console.Out, Console.Error, ServiceTrust.From(HostConfigFile.InFolder(StorePath())), OpenInBrowser(app));
         }
 
-        // pair: pairing this machine with an authority by a one-time invitation (hidden prompt, or unattended from a secret file or WITH_SECRETS_PAIRING). Opens no store and no state.db.
+        // pair: pairing this machine with an authority by a one-time invitation (hidden prompt, or unattended from a secret file or WITH_SECRETS_PAIRING). Check the local database before pairing.
         if (command is CliCommand.Pair)
         {
+            if (StateDatabase.InFolder(StorePath()).Gate(Console.Error) is { } refusal)
+            {
+                return refusal;
+            }
             return await RunPairAsync();
         }
 
@@ -134,7 +144,7 @@ internal static class Program
         StateDatabase state = StateDatabase.InFolder(folder);
         SecretStore store = new(state);
 
-        // Every command checks state.db first, and its signed manifest. A database that cannot be used (damaged, locked, of
+        // Every command checks with-secrets.db first, and its signed manifest. A database that cannot be used (damaged, locked, of
         // another schema version, or failing verification) stops here: nothing is asked, nothing is listed and nothing runs.
         if (state.Gate(Console.Error) is { } failed)
         {
@@ -271,7 +281,7 @@ internal static class Program
         try
         {
             // The machine identity key is made on the first start (Windows: a non-exportable CNG key that never leaves it; elsewhere an owner-only key file, which anything running as this user can copy).
-            deployment = LocalDeployment.OpenProduction(folder);
+            deployment = LocalDeployment.OpenProduction(folder, state.Database);
 
             // host.json may select a remote authority (public data only: its endpoint address and its identity certificate).
             if (deployment.HostConfig.Load().Config?.Remote is { } remoteConfig)

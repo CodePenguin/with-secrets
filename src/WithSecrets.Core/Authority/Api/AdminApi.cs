@@ -295,6 +295,11 @@ internal sealed partial class AdminApi
                 : SessionCapabilities.For(session.Scope).Contains(SessionCapabilities.AdminRead, StringComparer.Ordinal);
             if (!hasRequiredScope)
             {
+                if (route.OperationId == "getGrantReview")
+                {
+                    return new ApiProblem(403, "admin-required", "review text requires an administrator session");
+                }
+
                 return new ApiProblem(403, "scope-required", "this session does not have permission to read this resource");
             }
 
@@ -358,7 +363,7 @@ internal sealed partial class AdminApi
         JsonElement? body = null;
         if (route.Request is not null)
         {
-            (JsonElement? parsed, ApiProblem? problem) = await ReadBody(request, route.Request, context.RequestAborted, route.BodyLimit > 0 ? route.BodyLimit : MaxBody);
+            (JsonElement? parsed, ApiProblem? problem) = await ReadBody(request, route, context.RequestAborted);
             if (problem is not null)
             {
                 admin.Refused(name, "invalid request: " + problem.Code, caller);
@@ -386,8 +391,10 @@ internal sealed partial class AdminApi
     }
 
     /// <summary>The body as a checked JSON object: small, application/json, no duplicate members, and exactly what the route's schema allows.</summary>
-    private async Task<(JsonElement? Body, ApiProblem? Problem)> ReadBody(HttpRequest request, JsonObject schema, CancellationToken cancel, int maxBody)
+    private async Task<(JsonElement? Body, ApiProblem? Problem)> ReadBody(HttpRequest request, ApiRoute route, CancellationToken cancel)
     {
+        int maxBody = route.BodyLimit > 0 ? route.BodyLimit : MaxBody;
+        bool authorization = route.OperationId is "createAuthorization" or "createInlineAuthorization";
         if (request.ContentType is not { } contentType || !contentType.Split(';')[0].Trim().Equals("application/json", StringComparison.OrdinalIgnoreCase))
         {
             return (null, new ApiProblem(415, "unsupported-media-type", "the body must be application/json"));
@@ -427,17 +434,32 @@ internal sealed partial class AdminApi
         }
         catch (JsonException)
         {
-            return (null, new ApiProblem(400, "invalid-json", "the body is not valid JSON (an object, each member once)"));
+            return authorization && bytes.Length > MaxBody
+                ? (null, BodyTooLarge(MaxBody))
+                : (null, new ApiProblem(400, "invalid-json", "the body is not valid JSON (an object, each member once)"));
         }
 
         using (document)
         {
             JsonElement root = document.RootElement.Clone();
-            string? invalid = ApiValidator.Validate(root, schema, (JsonObject)Document["components"]!["schemas"]!);
+            if (authorization && bytes.Length > MaxBody && !CarriesProviderConfiguration(root))
+            {
+                return (null, BodyTooLarge(MaxBody));
+            }
+
+            string? invalid = ApiValidator.Validate(root, route.Request!, (JsonObject)Document["components"]!["schemas"]!);
 
             return invalid is null ? (root, null) : (null, new ApiProblem(400, "invalid-request", invalid));
         }
     }
+
+    private static ApiProblem BodyTooLarge(int maxBody) => new(413, "payload-too-large", "the body is at most " + maxBody.ToString(CultureInfo.InvariantCulture) + " bytes");
+
+    private static bool CarriesProviderConfiguration(JsonElement root)
+        => root.ValueKind == JsonValueKind.Object && root.TryGetProperty("operation", out JsonElement operation)
+            && operation.ValueKind == JsonValueKind.String && operation.GetString() is "provider-add" or "provider-config"
+            && root.TryGetProperty("parameters", out JsonElement parameters) && parameters.ValueKind == JsonValueKind.Object
+            && parameters.TryGetProperty("config", out JsonElement config) && config.ValueKind == JsonValueKind.String;
 
     // ---- handlers ----
 
@@ -765,6 +787,12 @@ internal sealed partial class AdminApi
         return Task.FromResult(grant is not null ? new ApiResult(200, grant) : new ApiResult(status, new ApiProblem(status, status == 404 ? "not-found" : "invalid-request", problem ?? "not found")));
     }
 
+    private Task<ApiResult> GetGrantReviewAsync(ApiCall call)
+    {
+        (GrantReviewDto? review, string? problem, int status) = admin.GrantReview(call.Path["id"]);
+        return Task.FromResult(review is not null ? new ApiResult(200, review) : new ApiResult(status, new ApiProblem(status, status == 404 ? "not-found" : "invalid-request", problem ?? "not found")));
+    }
+
     private (AuditQuery? Query, ApiProblem? Problem) AuditQueryOf(ApiCall call, ApiRoute? route = null)
     {
         IQueryCollection query = call.Context.Request.Query;
@@ -849,7 +877,7 @@ internal sealed partial class AdminApi
     }
 
     private AuthorizationDto Dto(AuthorizationView view) => new(view.Id, view.Operation, view.State.ToString().ToLowerInvariant(), view.Detail, view.Link, view.Sentence, [.. view.Parameters.Select(item => new NameValueDto(item.Name, item.Value))], view.Created, view.Expires,
-        (int)AdminService.AuthorizationLifetime.TotalSeconds, view.Result is { } result ? new AuthorizationResultDto(result.Outcome, result.Code, result.Detail, result.Link, result.Invitation, result.InvitationGone) : null, view.Proof);
+        (int)AdminService.AuthorizationLifetime.TotalSeconds, view.Result is { } result ? new AuthorizationResultDto(result.Outcome, result.Code, result.Detail, result.Link, result.Invitation, result.InvitationGone) : null, view.Proof, view.PrfKey);
 
     private Task<ApiResult> CreateAuthorizationAsync(ApiCall call) => CreateAuthorizationAsync(call, false);
 
@@ -895,8 +923,11 @@ internal sealed partial class AdminApi
         if (!call.Context.Request.Headers.ContainsKey("Origin")) return Task.FromResult(new ApiResult(403, new ApiProblem(403, "origin-required", "this request must come from the administration page: it carries no Origin")));
         object? owner = OwnerOf(call);
         if (owner is null) return Task.FromResult(new ApiResult(401, new ApiProblem(401, "session-required", "this needs an administrator session")));
-        string proof = call.Body!.Value.GetProperty("proof").GetString()!;
-        bool? accepted = admin.SubmitInlineProof(owner, call.Path["id"], proof);
+        JsonElement body = call.Body!.Value;
+        string proof = body.GetProperty("proof").GetString()!;
+        string? prf = body.TryGetProperty("prf", out JsonElement sealedPrf) ? sealedPrf.GetRawText() : null;
+        bool? accepted = admin.SubmitInlineProof(owner, call.Path["id"], proof, prf, out bool unexpectedPrf);
+        if (unexpectedPrf) return Task.FromResult(new ApiResult(400, new ApiProblem(400, "invalid-request", "unexpected key release data")));
         return Task.FromResult(accepted switch
         {
             null => new ApiResult(404, new ApiProblem(404, "not-found", "no such authorization for this caller")),
@@ -992,7 +1023,7 @@ internal sealed record ApiCall(HttpContext Context, Dictionary<string, string> P
 
 internal sealed record NameValueDto(string Name, string Value);
 
-internal sealed record AuthorizationDto(string Id, string Operation, string State, string? Detail, string? Link, string Sentence, IReadOnlyList<NameValueDto> Parameters, DateTimeOffset Created, DateTimeOffset Expires, int LifetimeSeconds, AuthorizationResultDto? Result = null, ProofStart? Proof = null);
+internal sealed record AuthorizationDto(string Id, string Operation, string State, string? Detail, string? Link, string Sentence, IReadOnlyList<NameValueDto> Parameters, DateTimeOffset Created, DateTimeOffset Expires, int LifetimeSeconds, AuthorizationResultDto? Result = null, ProofStart? Proof = null, string? PrfKey = null);
 
 internal sealed record AuthorizationResultDto(string Outcome, string? Code, string? Detail, string? Link, InvitationCreatedDto? Invitation, bool InvitationGone);
 

@@ -15,22 +15,35 @@ public sealed record ApprovalCheck(bool Ok, string SignerName, bool Admin, strin
 public interface IApprovalVerifier
 {
     ApprovalCheck Verify(ApprovalEvidence evidence, int minutes);
+    ApprovalCheck Signer(string proof);
 }
 
-/// <summary>Verifies against the keys of the signed manifest in <c>state.db</c> (the check a grant gets every time it is read).</summary>
+/// <summary>Verifies against the keys of the signed manifest in <c>with-secrets.db</c> (the check a grant gets every time it is read).</summary>
 public sealed class ManifestApprovalVerifier(StateDatabase db) : IApprovalVerifier
 {
+    public ApprovalCheck Signer(string proof) => Check(ReadManifest, proof, null);
+
     public ApprovalCheck Verify(ApprovalEvidence evidence, int minutes)
+        => Check(ReadManifest, evidence.Proof, () => ReuseBinding.Challenge(RequestBinding.Compute(evidence.Nonce, evidence.Text), minutes));
+
+    internal static ApprovalCheck Signer(Manifest manifest, string proof) => Check(() => manifest, proof, null);
+
+    internal static ApprovalCheck Verify(Manifest manifest, ApprovalEvidence evidence, int minutes)
+        => Check(() => manifest, evidence.Proof, () => ReuseBinding.Challenge(RequestBinding.Compute(evidence.Nonce, evidence.Text), minutes));
+
+    private Manifest? ReadManifest() => db.Read(connection => connection is null ? null : db.CurrentManifest(connection, null));
+
+    private static ApprovalCheck Check(Func<Manifest?> readManifest, string proof, Func<byte[]>? challenge)
     {
         try
         {
-            Manifest? manifest = db.Read(connection => connection is null ? null : db.CurrentManifest(connection, null));
+            Manifest? manifest = readManifest();
             if (manifest is null)
             {
                 return new ApprovalCheck(false, "", false, "no signed manifest");
             }
 
-            using System.Text.Json.JsonDocument document = System.Text.Json.JsonDocument.Parse(evidence.Proof);
+            using System.Text.Json.JsonDocument document = System.Text.Json.JsonDocument.Parse(proof);
             string? id = document.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object && document.RootElement.TryGetProperty("id", out System.Text.Json.JsonElement element) && element.ValueKind == System.Text.Json.JsonValueKind.String ? element.GetString() : null;
             ManifestKey? signer = manifest.Keys.FirstOrDefault(item => item.Id == id);
             if (signer is null)
@@ -38,8 +51,12 @@ public sealed class ManifestApprovalVerifier(StateDatabase db) : IApprovalVerifi
                 return new ApprovalCheck(false, "", false, "the approving key is not enrolled");
             }
 
-            byte[] challenge = ReuseBinding.Challenge(RequestBinding.Compute(evidence.Nonce, evidence.Text), minutes);
-            AssertionResult result = WebAuthn.VerifyStored(signer.Record(0), challenge, evidence.Proof);
+            if (challenge is null)
+            {
+                return new ApprovalCheck(true, signer.Name, signer.Admin, "");
+            }
+
+            AssertionResult result = WebAuthn.VerifyStored(signer.Record(0), challenge(), proof);
 
             return new ApprovalCheck(result.Ok, signer.Name, signer.Admin, result.Ok ? "" : "the signature does not verify");
         }
@@ -51,10 +68,9 @@ public sealed class ManifestApprovalVerifier(StateDatabase db) : IApprovalVerifi
 }
 
 /// <summary>The approval evidence stored with a grant row: <see cref="Kind" /> is <c>approve</c> (the approval that made or updated it) or <c>admin</c> (an admin's extend or renew).</summary>
-public sealed record StoredEvidence(string Kind, string Nonce, string Text, string Proof, int Minutes)
-{
-    public ApprovalEvidence Evidence => new(Nonce, Text, Proof);
-}
+public sealed record StoredEvidence(string Kind, string Nonce, string Ciphertext, string Proof, int Minutes);
+
+public sealed record PlainEvidence(string Kind, ApprovalEvidence Evidence, int Minutes);
 
 /// <summary>
 /// The scope of a grant and the evidence that backs it. The scope key covers the machine, the request fingerprint (program path, folder, secret names,
@@ -68,6 +84,7 @@ public static class GrantEvidence
     public const string AdminKind = "admin";
 
     public const string SecurityRevisionPrefix = "Security revision: ";
+    public const string DecisionPrefix = "Decision: ";
     public const string ChangePrefix = "Change: ";
     public const string GrantIdPrefix = "Grant id: ";
     public const string GrantScopePrefix = "Grant scope: ";
@@ -76,6 +93,8 @@ public static class GrantEvidence
     public const string NewEndPrefix = "New end: ";
     public const string NoEnd = "no end";
     public const string ContentsPrefix = "Grant contents: ";
+    public const string ReplacesPrefix = "Replaces: ";
+    public const string NewUsagePrefix = "New usage: ";
 
     /// <summary>
     /// What a grant covers besides its scope key: the exact secret names, the program and the working folder, as one SHA-256 (upper-case hex). The scope key is made by the
@@ -156,8 +175,28 @@ public static class GrantEvidence
     }
 
     /// <summary>
+    /// The machine-readable lines of an admin replace page (the passkey signs them): the new grant's id, the consumed once-only grant it replaces, the scope it copies
+    /// from that grant exactly (scope key, machine, contents, security revision), and the new grant's usage, revision and end.
+    /// </summary>
+    public static string ReplaceLines(GrantRecord original, string newGrantId, DateTimeOffset? newEnd)
+    {
+        return string.Join('\n',
+            ChangePrefix + GrantOps.Replace,
+            GrantIdPrefix + newGrantId,
+            ReplacesPrefix + original.Id,
+            GrantScopePrefix + original.ScopeKey,
+            MachinePrefix + original.Fingerprint,
+            ContentsPrefix + ContentsKey(original),
+            SecurityRevisionPrefix + original.SecurityRevision.ToString(CultureInfo.InvariantCulture),
+            NewUsagePrefix + GrantUsage.Reusable,
+            NewRevisionPrefix + "1",
+            NewEndPrefix + EndText(newEnd));
+    }
+
+    /// <summary>
     /// Null when the admin passkey's evidence in <paramref name="command" /> says exactly this change to <paramref name="grant" /> as it is now (the
-    /// authority checks it inside the transaction), else why not. Revoke needs the same proof, with no end.
+    /// authority checks it inside the transaction), else why not. Revoke needs the same proof, with no end. For replace, <paramref name="grant" /> is the
+    /// original, and the evidence must name the command's new grant id, that original, its scope exactly, a reusable usage and revision 1.
     /// </summary>
     public static string? AdminProblem(IApprovalVerifier? verifier, GrantAdminCommand command, GrantRecord grant, DateTimeOffset now)
     {
@@ -179,13 +218,28 @@ public static class GrantEvidence
         }
 
         string change = command.Operation;
+        bool replace = change == GrantOps.Replace;
+        if (replace && (command.NewGrantId is null
+            || Line(evidence.Text, GrantIdPrefix) != command.NewGrantId
+            || Line(evidence.Text, ReplacesPrefix) != grant.Id
+            || Line(evidence.Text, NewUsagePrefix) != GrantUsage.Reusable
+            || Line(evidence.Text, NewRevisionPrefix) != "1"))
+        {
+            return "the admin page text is not this replacement of this grant";
+        }
+
+        if (!replace && (Line(evidence.Text, GrantIdPrefix) != grant.Id
+            || Line(evidence.Text, ReplacesPrefix) is not null
+            || Line(evidence.Text, NewRevisionPrefix) != (grant.Revision + 1).ToString(CultureInfo.InvariantCulture)))
+        {
+            return "the admin page text is not this change to this grant";
+        }
+
         if (Line(evidence.Text, ChangePrefix) != change
-            || Line(evidence.Text, GrantIdPrefix) != grant.Id
             || Line(evidence.Text, GrantScopePrefix) != grant.ScopeKey
             || Line(evidence.Text, MachinePrefix) != grant.Fingerprint
             || Line(evidence.Text, ContentsPrefix) != ContentsKey(grant)
             || Line(evidence.Text, SecurityRevisionPrefix) != grant.SecurityRevision.ToString(CultureInfo.InvariantCulture)
-            || Line(evidence.Text, NewRevisionPrefix) != (grant.Revision + 1).ToString(CultureInfo.InvariantCulture)
             || Line(evidence.Text, NewEndPrefix) != EndText(newEnd))
         {
             return "the admin page text is not this change to this grant";
@@ -212,63 +266,64 @@ public static class GrantEvidence
     /// <summary>
     /// Null when a person's assertion backs the grant's present state, else why not (the row is then ignored, as if there were no grant). An active
     /// grant counts only with evidence that fits the row exactly: the approval that made it (scope, security revision, minutes, time) or an admin's
-    /// extend or renew (grant, scope, machine, revisions, new end). A revocation or an invalidation is never evidence of a usable grant.
+    /// extend or renew (grant, scope, machine, revisions, new end), or the admin's replace that made it (also the grant it replaces and its usage). A revocation or an
+    /// invalidation is never evidence of a usable grant.
     /// </summary>
-    public static string? RowProblem(IApprovalVerifier? verifier, GrantRecord row)
+    internal static string? RowProblem(Func<ApprovalEvidence, int, ApprovalCheck> verify, GrantRecord row, PlainEvidence plain)
     {
-        if (verifier is null)
-        {
-            return "no verifier for approvals is configured";
-        }
-
-        if (row.Evidence is not { } stored)
-        {
-            return "the grant has no approval evidence";
-        }
-
-        DateTimeOffset? issued = Issued(stored.Text);
+        string text = plain.Evidence.Text;
+        DateTimeOffset? issued = Issued(text);
         if (issued is null || row.Updated < issued - Skew || row.Updated > issued.Value.AddMinutes(ApprovalSettings.MaxTimeoutMinutes))
         {
             return "the grant's evidence was not made when the grant says";
         }
 
-        if (stored.Kind == ApproveKind)
+        if (plain.Kind == ApproveKind)
         {
-            bool always = stored.Minutes == ReuseOffer.Always && row.Expires is null;
-            if (!always && (stored.Minutes is < 1 or > ReuseSettings.MaxMinutes || row.Expires != row.Updated.AddMinutes(stored.Minutes)))
+            // Minutes 0 ("Approve once") is a once-only grant's evidence, and only that: it has no end, and a reusable row never carries it.
+            bool once = row.Usage == GrantUsage.Once;
+            bool always = plain.Minutes == ReuseOffer.Always && row.Expires is null;
+            if (once ? plain.Minutes != 0 || row.Expires is not null : !always && (plain.Minutes is < 1 or > ReuseSettings.MaxMinutes || row.Expires != row.Updated.AddMinutes(plain.Minutes)))
             {
                 return "the grant's end does not match the minutes that were signed";
             }
 
-            if (Line(stored.Text, ApprovalSummary.RequestIdPrefix) != row.ScopeKey || Line(stored.Text, SecurityRevisionPrefix) != row.SecurityRevision.ToString(CultureInfo.InvariantCulture) || Line(stored.Text, ContentsPrefix) != ContentsKey(row))
+            if (Line(text, ApprovalSummary.RequestIdPrefix) != row.ScopeKey || Line(text, SecurityRevisionPrefix) != row.SecurityRevision.ToString(CultureInfo.InvariantCulture) || Line(text, ContentsPrefix) != ContentsKey(row))
             {
                 return "the signed text is not for this grant";
             }
 
-            ApprovalCheck approved = verifier.Verify(stored.Evidence, stored.Minutes);
+            ApprovalCheck approved = verify(plain.Evidence, plain.Minutes);
 
             return approved.Ok ? null : "the approval does not verify (" + approved.Detail + ")";
         }
 
-        if (stored.Kind != AdminKind)
+        if (plain.Kind != AdminKind)
         {
             return "the grant's evidence is of an unknown kind";
         }
 
-        string? change = Line(stored.Text, ChangePrefix);
-        if (change is not ("extend" or "renew")
-            || Line(stored.Text, GrantIdPrefix) != row.Id
-            || Line(stored.Text, GrantScopePrefix) != row.ScopeKey
-            || Line(stored.Text, MachinePrefix) != row.Fingerprint
-            || Line(stored.Text, ContentsPrefix) != ContentsKey(row)
-            || Line(stored.Text, SecurityRevisionPrefix) != row.SecurityRevision.ToString(CultureInfo.InvariantCulture)
-            || Line(stored.Text, NewRevisionPrefix) != row.Revision.ToString(CultureInfo.InvariantCulture)
-            || Line(stored.Text, NewEndPrefix) != EndText(row.Expires))
+        // A replacement is believed only as what its page made: a reusable grant with this id, linked to the grant it replaces, at its first revision.
+        string? change = Line(text, ChangePrefix);
+        bool replacement = change == GrantOps.Replace;
+        if (replacement && (row.Replaces is null || row.Usage != GrantUsage.Reusable || Line(text, ReplacesPrefix) != row.Replaces || Line(text, NewUsagePrefix) != row.Usage))
         {
             return "the signed text is not for this grant as it is now";
         }
 
-        ApprovalCheck checkedAdmin = verifier.Verify(stored.Evidence, 0);
+        if (change is not (GrantOps.Extend or GrantOps.Renew or GrantOps.Replace)
+            || Line(text, GrantIdPrefix) != row.Id
+            || Line(text, GrantScopePrefix) != row.ScopeKey
+            || Line(text, MachinePrefix) != row.Fingerprint
+            || Line(text, ContentsPrefix) != ContentsKey(row)
+            || Line(text, SecurityRevisionPrefix) != row.SecurityRevision.ToString(CultureInfo.InvariantCulture)
+            || Line(text, NewRevisionPrefix) != row.Revision.ToString(CultureInfo.InvariantCulture)
+            || Line(text, NewEndPrefix) != EndText(row.Expires))
+        {
+            return "the signed text is not for this grant as it is now";
+        }
+
+        ApprovalCheck checkedAdmin = verify(plain.Evidence, 0);
 
         return checkedAdmin is { Ok: true, Admin: true } ? null : "the change was not signed by an admin key";
     }

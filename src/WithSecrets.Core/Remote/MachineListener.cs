@@ -182,7 +182,7 @@ public sealed class MachineListenerOptions
 /// The authority's machine listener (architecture 10.2): a Kestrel endpoint of its own, separate from the loopback browser and client APIs, that serves ONLY the machine API. TLS 1.3 and HTTP/2 only, no session resumption,
 /// a mutual-TLS client certificate on every connection; the certificate it presents is the current temporary certificate of this running instance (chosen for each handshake). Every route requires the caller's certificate
 /// to be validated against that machine's enrolled identity certificate AND the machine to be Trusted now; the one exception is the pairing route, which a structurally valid certificate of an unenrolled machine may reach
-/// (and is a seam until pairing is built). The caller's identity is the certificate's, never a header or a field. The same <see cref="LocalAuthority" /> serves the operations (same logic, same <c>authority.db</c>, same
+/// (and is a seam until pairing is built). The caller's identity is the certificate's, never a header or a field. The same <see cref="LocalAuthority" /> serves the operations (same logic, same <c>with-secrets.db</c>, same
 /// <c>processed_requests</c>): the listener adds transport policy and the binding of a request to the machine its certificate names, and it refuses everything while the authority is locked.
 /// <para>
 /// Policy: no redirects, no caching (<c>Cache-Control: no-store</c>, no validators, no conditional requests), no compression, UTF-8 <c>application/json</c> only, structured errors with a correlation id and no detail,

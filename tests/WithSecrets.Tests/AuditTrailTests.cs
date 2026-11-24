@@ -31,6 +31,18 @@ internal static class AuditTrailTests
         public void Advance(TimeSpan by) => _now += by;
     }
 
+    /// <summary>Takes every event of every batch (the test's verifier accepts the unsigned answer) and keeps the batches.</summary>
+    private sealed class CapturingSink(List<AuditBatch> batches) : IAuditSink
+    {
+        public Task<AuditAck> UploadAsync(AuditBatch batch, CancellationToken cancel = default)
+        {
+            batches.Add(batch);
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+
+            return Task.FromResult(new AuditAck(1, batch.BatchId, batch.Digest(), batch.MachineFingerprint, [.. batch.Events.Select(item => new AuditAckEntry(item.EventId, AuditStatus.Accepted, ""))], now, now.AddMinutes(1), "test", []));
+        }
+    }
+
     /// <summary>The authority as the host's audit uploader sees it: it can be unreachable, hang, or answer with something altered.</summary>
     private sealed class FlakySink(IAuditSink inner) : IAuditSink
     {
@@ -234,7 +246,7 @@ internal static class AuditTrailTests
         AuditEvent third = outbox.Append(Facts(AuditEventTypes.Execution, "exited", "", exit: 0));
         IReadOnlyList<AuditEvent> pending = outbox.Pending(10);
         check(new[] { first.Sequence, second.Sequence, third.Sequence }.SequenceEqual([1L, 2L, 3L]) && pending.Select(item => item.EventId).SequenceEqual([first.EventId, second.EventId, third.EventId]) && pending.All(item => item.Verify(key.PublicKey)), "outbox: events are numbered 1, 2, 3, kept in order, and stored signed");
-        check(Scalar(outbox.FilePath, "PRAGMA journal_mode") as string == "wal" && Convert.ToInt32(Scalar(outbox.FilePath, "SELECT version FROM schema_version")) == 2 && Path.GetFileName(outbox.FilePath) == "audit-outbox.db", "outbox: a file of its own in the store folder, WAL, schema version 2");
+        check(Scalar(outbox.FilePath, "PRAGMA journal_mode") as string == "wal" && Convert.ToInt32(Scalar(outbox.FilePath, "SELECT version FROM schema_version")) == 3 && Path.GetFileName(outbox.FilePath) == "with-secrets.db", "outbox: shared database in WAL mode, schema version 3");
 
         outbox.Acknowledge([first.EventId]);
         check(outbox.Count("pending") == 2 && outbox.LastSequence() == 3 && outbox.Append(Facts()).Sequence == 4, "outbox: an acknowledged event is removed, and its number is not used again");
@@ -290,16 +302,16 @@ internal static class AuditTrailTests
         // Damaged, other schema, not a file.
         string damagedDir = Path.Combine(parent, "ob-damaged-" + Guid.NewGuid().ToString("N")[..6]);
         Directory.CreateDirectory(damagedDir);
-        File.WriteAllText(Path.Combine(damagedDir, HostAuditOutbox.FileName), "this is not a database");
+        File.WriteAllText(Path.Combine(damagedDir, WithSecretsDatabase.FileName), "this is not a database");
         HostAuditOutbox damaged = HostAuditOutbox.InFolder(damagedDir, key, clock);
         check(Catch<AuditOutboxException>(() => damaged.Append(Facts())) is not null && Catch<AuditOutboxException>(() => damaged.Pending(5)) is not null && !new HostAudit(damaged, audit.Uploader).TryRecord(Facts()), "outbox failure: a damaged file cannot be used: appending and reading throw, TryRecord is false");
 
         Sql(outbox.FilePath, "UPDATE schema_version SET version = 99");
         AuditOutboxException? mismatch = Catch<AuditOutboxException>(() => HostAuditOutbox.InFolder(dir, key, clock).Append(Facts()));
-        check(mismatch?.Message == "audit-outbox.db is not of schema version 2; delete audit-outbox.db to start over", "outbox schema: another schema version is refused with the delete-it message (" + mismatch?.Message + ")");
+        check(mismatch?.Message == "with-secrets.db is not of schema version 3; delete with-secrets.db to start over", "outbox schema: another schema version is refused with the delete-it message (" + mismatch?.Message + ")");
 
         string blockedDir = Path.Combine(parent, "ob-blocked-" + Guid.NewGuid().ToString("N")[..6]);
-        Directory.CreateDirectory(Path.Combine(blockedDir, HostAuditOutbox.FileName));
+        Directory.CreateDirectory(Path.Combine(blockedDir, WithSecretsDatabase.FileName));
         check(Catch<AuditOutboxException>(() => HostAuditOutbox.InFolder(blockedDir, key, clock).Append(Facts())) is not null, "outbox failure: a folder where the file should be is an error, not a crash");
     }
 
@@ -627,11 +639,8 @@ internal static class AuditTrailTests
     {
         using TestMachine machine = new(Path.Combine(parent, "sc-" + Guid.NewGuid().ToString("N")[..6]));
         string file = machine.Deployment.Store.FilePath;
-        check(AuthorityStore.SchemaVersion == 5 && Convert.ToInt32(Scalar(file, "SELECT version FROM schema_version")) == 5 && Convert.ToInt32(Scalar(file, "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('audit_events','audit_machine_state','audit_gaps','authority_settings')")) == 4, "schema: a new authority.db is version 5 with the audit tables");
-        Sql(file, "DROP TABLE audit_events; DROP TABLE audit_machine_state; DROP TABLE audit_gaps; DROP TABLE authority_settings; UPDATE schema_version SET version = 3;");
-        AuthorityStore migrated = AuthorityStore.InFolder(machine.Folder);
-        check(migrated.AuditHistory(new AuditQuery()).Count == 0 && Convert.ToInt32(Scalar(file, "SELECT version FROM schema_version")) == 5 && migrated.Machines().Count == 1 && migrated.AuditRetentionDays() == 365, "schema: a version 3 authority.db gains the audit tables in place (machines are kept)");
-        Sql(file, "UPDATE schema_version SET version = 6");
+        check(WithSecretsDatabase.SchemaVersion == 3 && Convert.ToInt32(Scalar(file, "SELECT version FROM schema_version")) == 3 && Convert.ToInt32(Scalar(file, "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('audit_events','audit_machine_state','audit_gaps','authority_settings')")) == 4, "schema: a new with-secrets.db is version 3 with the audit tables");
+        Sql(file, "UPDATE schema_version SET version = 5");
         check(Catch<AuthorityDatabaseException>(() => AuthorityStore.InFolder(machine.Folder).AuditHistory(new AuditQuery())) is not null, "schema: another version is still refused");
     }
 
@@ -651,7 +660,7 @@ internal static class AuditTrailTests
         check(machine.Deployment.Store.AuditHistory(new AuditQuery()).Count == 0, "audit search: nothing recorded yet finds nothing");
         AuditEvent a = outbox.Append(Facts(program: "/work/build.sh", arguments: ["--token=[REDACTED]"]));
         AuditEvent b = outbox.Append(Facts(AuditEventTypes.Execution, "exited", "", "g-1", 3, "/work", "/work/build.sh"));
-        AuditEvent skipped = AuditEvent.Create(Facts(), Guid.NewGuid().ToString("D"), 9, DateTimeOffset.UtcNow, machine.MachineKey, (string)Scalar(outbox.FilePath, "SELECT epoch FROM counter")!);
+        AuditEvent skipped = AuditEvent.Create(Facts(), Guid.NewGuid().ToString("D"), 9, DateTimeOffset.UtcNow, machine.MachineKey, (string)Scalar(outbox.FilePath, "SELECT epoch FROM outbox_counter")!);
         machine.Deployment.Authority.UploadAsync(Batch(machine, a, b, skipped)).GetAwaiter().GetResult();
         check(machine.Deployment.Store.AuditHistory(Parse().Query!).Count == 3, "audit search: all three stored events are found, newest first");
         check(machine.Deployment.Store.AuditHistory(Parse(("grant", "g-1")).Query!) is { Count: 1 } one && one[0].Event.Outcome == "exited", "audit search: the grant filter applies");
@@ -827,13 +836,14 @@ internal static class AuditTrailTests
                 "durable before launch: if only the launch event cannot be committed the program still runs (it is after the fact), the other events are recorded and the numbers stay gapless");
         }
 
-        // Real failures of the outbox file: damaged, and a folder in its place.
+        // The shared database must open before a service can accept secret-bearing requests.
         foreach (bool asFolder in new[] { false, true })
         {
             using TestMachine machine = new(Path.Combine(parent, "bad-" + Guid.NewGuid().ToString("N")[..6]));
-            string file = Path.Combine(machine.Folder, HostAuditOutbox.FileName);
+            string file = Path.Combine(machine.Folder, WithSecretsDatabase.FileName);
             if (asFolder)
             {
+                File.Delete(file);
                 Directory.CreateDirectory(file);
             }
             else
@@ -841,9 +851,11 @@ internal static class AuditTrailTests
                 File.WriteAllText(file, "this is not a database");
             }
 
-            using HostServiceTests.Rig rig = new(parent, approver: () => new FakeApprover(true), machine: machine, auditInterval: Fast);
-            HostServiceTests.Raw run = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, GrantAuthorityTests.Show(rig)));
-            check(run.Result is { Outcome: LaunchOutcome.Failed, ExitCode: RunCommand.AuditError } && rig.Store.Reads == 0 && !File.Exists(HostServiceTests.Marker(rig)), "outbox failure: " + (asFolder ? "a folder where the outbox file belongs" : "a damaged outbox file") + " fails the secret-bearing run closed; nothing is decrypted or started (" + run.Stderr.Trim() + ")");
+            AuthorityDatabaseException? failure = Catch<AuthorityDatabaseException>(() =>
+            {
+                using HostServiceTests.Rig rig = new(parent, approver: () => new FakeApprover(true), machine: machine, auditInterval: Fast);
+            });
+            check(failure is not null, "shared database failure: " + (asFolder ? "a folder on the database path" : "a damaged database") + " prevents the service from starting");
         }
 
         // Redaction: no secret value, argument canary or environment value is in the authority's database or the outbox.
@@ -852,25 +864,35 @@ internal static class AuditTrailTests
             const string Other = "Canary-Other-9001337";
             using TestMachine machine = new(Path.Combine(parent, "red-" + Guid.NewGuid().ToString("N")[..6]));
             using HostServiceTests.Rig rig = new(parent, approver: () => new FakeApprover(true), machine: machine, auditInterval: Fast);
-            string[] canaries = ["ArgCanary-111", "ArgCanary-222", "ArgCanary-333", "ArgCanary-444x", "EnvCanary-555"];
+            string[] argCanaries = ["ArgCanary-111", "ArgCanary-222", "ArgCanary-333", "ArgCanary-444x"];
+            const string EnvCanary = "EnvCanary-555";
             HostServiceTests.Raw run = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, GrantAuthorityTests.Show(rig), ["--token=ArgCanary-111", "--password", "ArgCanary-222", "https://bob:ArgCanary-333@host/p", "Authorization: Bearer ArgCanary-444x", "--ok"], environment: HostServiceTests.Env(("WS_ENV_CANARY", "EnvCanary-555"))));
             await HostServiceTests.WaitFor(() => Events(rig).Count == 3 && rig.Service.Audit.Outbox.Count("pending") == 0);
             List<AuditEvent> events = Events(rig);
             string[] expected = ["--token=[REDACTED]", "--password", "[REDACTED]", "https://[REDACTED]@host/p", "Authorization: [REDACTED] [REDACTED]", "--ok"];
             check(run.Result is { Outcome: LaunchOutcome.Exited } && events.Count == 3 && events.All(item => item.Arguments.SequenceEqual(expected)), "redaction: the arguments in every event are the redacted ones (" + string.Join(" | ", events.FirstOrDefault()?.Arguments ?? []) + ")");
+            rig.Service.Dispose();
 
-            StringBuilder everything = new();
-            foreach (string file in Directory.GetFiles(machine.Folder).Where(name => Path.GetFileName(name).StartsWith("authority.db", StringComparison.Ordinal) || Path.GetFileName(name).StartsWith("audit-outbox.db", StringComparison.Ordinal)))
+            string FilesText(string prefix)
             {
-                using FileStream stream = new(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-                using MemoryStream copy = new();
-                stream.CopyTo(copy);
-                everything.Append(Encoding.UTF8.GetString(copy.ToArray()));
+                StringBuilder found = new();
+                foreach (string file in Directory.GetFiles(machine.Folder).Where(name => Path.GetFileName(name).StartsWith(prefix, StringComparison.Ordinal)))
+                {
+                    using FileStream stream = new(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                    using MemoryStream copy = new();
+                    stream.CopyTo(copy);
+                    found.Append(Encoding.UTF8.GetString(copy.ToArray()));
+                }
+
+                return found.ToString();
             }
 
-            string text = everything.ToString();
+            string text = FilesText("with-secrets.db");
             check(text.Contains("authorization", StringComparison.Ordinal) && text.Contains("[REDACTED]", StringComparison.Ordinal), "redaction: the database files were read (the events are in them)");
-            check(!text.Contains(Value, StringComparison.Ordinal) && !text.Contains(Other, StringComparison.Ordinal) && canaries.All(canary => !text.Contains(canary, StringComparison.Ordinal)), "redaction: no secret value, no argument canary and no environment value is in authority.db or audit-outbox.db (and their logs)");
+            check(!text.Contains(Value, StringComparison.Ordinal) && !text.Contains(Other, StringComparison.Ordinal) && !text.Contains(EnvCanary, StringComparison.Ordinal), "redaction: no secret or environment value is in the database or its journals");
+
+            check(!argCanaries.Any(canary => text.Contains(canary, StringComparison.Ordinal)), "redaction: argument canaries are absent from the database and its journals");
+            check(rig.Machine.Deployment.Store.Grants().Single().Evidence?.Ciphertext.StartsWith("encrypted:", StringComparison.Ordinal) == true, "redaction: the once-only grant keeps encrypted evidence");
             check(!run.Stdout.Contains(Value, StringComparison.Ordinal) && !(run.Stdout + run.Stderr).Contains("EnvCanary-555", StringComparison.Ordinal), "redaction: the secret value is not in what the run printed either");
         }
 
@@ -915,7 +937,16 @@ internal static class AuditTrailTests
             string program = GrantAuthorityTests.Show(rig);
             await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program));
             await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program));
-            Sql(rig.Service.Audit.Outbox.FilePath, "DELETE FROM events WHERE sequence = 3");
+            Sql(rig.Service.Audit.Outbox.FilePath, "DELETE FROM outbox_events WHERE sequence = 3");
+
+            // An upload that read its batch before the delete may still be in flight, and would deliver event 3 once the sink is back. Stay offline until two more attempts have started: the second one began after the first returned, so it read the outbox after the delete.
+            int attempts = sink.Calls;
+            check(await HostServiceTests.WaitFor(() =>
+            {
+                rig.Service.Audit.Wake();
+
+                return sink.Calls >= attempts + 2;
+            }), "sequence gap: the uploader has read the outbox again since the event was lost");
             sink.Offline = false;
             rig.Service.Audit.Wake();
             check(await HostServiceTests.WaitFor(() => machine.Deployment.Store.AuditHistory(new AuditQuery()).Count == 5 && rig.Service.Audit.Outbox.Count("pending") == 0), "sequence gap: the remaining events are delivered and acknowledged");
@@ -949,7 +980,7 @@ internal static class AuditTrailTests
 
     // ---- review fixes (M1, M2, L1 to L7) ----
 
-    private static string EpochOf(HostAuditOutbox outbox) => (string)Scalar(outbox.FilePath, "SELECT epoch FROM counter")!;
+    private static string EpochOf(HostAuditOutbox outbox) => (string)Scalar(outbox.FilePath, "SELECT epoch FROM outbox_counter")!;
 
     private static async Task Review(Action<bool, string> check, string parent)
     {
@@ -984,10 +1015,8 @@ internal static class AuditTrailTests
             await machine.Deployment.Authority.UploadAsync(Batch(machine, [.. first.Pending(10), lateOne]));
             check(e1.Epoch == epoch1 && store.AuditGaps() is [{ Kind: "missing", From: 3, To: 5 } hole] && hole.Epoch == epoch1, "epoch: every event carries its outbox's epoch; the authority tracks 3 to 5 as missing in that epoch");
 
-            foreach (string leftover in Directory.GetFiles(machine.Folder, HostAuditOutbox.FileName + "*"))
-            {
-                File.Delete(leftover);
-            }
+            // Model an outbox sequence reset without dropping the authority's copy of the earlier events.
+            Sql(first.FilePath, $"DELETE FROM outbox_events; UPDATE outbox_counter SET last_sequence = 0, epoch = '{Guid.NewGuid():N}'");
 
             HostAuditOutbox second = HostAuditOutbox.InFolder(machine.Folder, machine.MachineKey, clock);
             for (int index = 0; index < 6; index++)
@@ -1007,6 +1036,24 @@ internal static class AuditTrailTests
             check(EpochOf(reopened) == epoch2 && reopened.Append(Facts()).Epoch == epoch2, "epoch: it is kept across a restart of the same outbox");
             check(e1 with { Epoch = "" } is { } noEpoch && noEpoch.Problem() is not null && !AuditEvent.TryParse(e1.ToJson().Replace("\"epoch\":\"" + epoch1 + "\",", "", StringComparison.Ordinal), out _, out _), "epoch: an event without one is refused");
             check(!(e1 with { Epoch = "other" }).Verify(machine.MachineKey.PublicKey), "epoch: changing the epoch breaks the signature (it is part of what is signed)");
+            using SoftwareSigningKey restoredKey = new();
+            HostAuditOutbox restored = HostAuditOutbox.InFolder(machine.Folder, restoredKey, clock);
+            AuditEvent onRestoredMachine = restored.Append(Facts());
+            check(onRestoredMachine.Sequence == 1 && onRestoredMachine.Epoch != epoch2
+                && restored.Pending(20, onRestoredMachine.MachineFingerprint).Select(item => item.EventId).SequenceEqual([onRestoredMachine.EventId])
+                && restored.Pending(20).Any(item => item.Epoch == epoch2),
+                "epoch: a restored machine starts its own sequence, uploads as itself and retains the earlier machine's signed events");
+
+            // The uploader runs: the earlier machine's events cannot be sent by this one (the upload session is this machine's), so they are rejected, never left pending.
+            int earlier = restored.Pending(100).Count(item => item.MachineFingerprint != onRestoredMachine.MachineFingerprint);
+            List<AuditBatch> sent = [];
+            CapturingSink capture = new(sent);
+            AuditUploader uploader = new(restored, () => capture, (_, _, _, _) => Task.FromResult<string?>(null), onRestoredMachine.MachineFingerprint);
+            AuditUploadResult drained = await uploader.DrainAsync();
+            check(earlier > 0 && drained.Rejected == earlier && drained.Acknowledged == 1 && !drained.Failed
+                && sent.SelectMany(batch => batch.Events).All(item => item.MachineFingerprint == onRestoredMachine.MachineFingerprint)
+                && restored.Count("pending") == 0 && restored.Count("rejected") >= earlier,
+                "restore: when the uploader runs, the earlier machine's events are marked rejected (kept, not uploaded, not pending) and this machine's are uploaded (" + drained + ")");
         }
 
         // L1: the upload loop survives anything.
@@ -1109,15 +1156,6 @@ internal static class AuditTrailTests
             check(ack.Entries[0].Status == AuditStatus.Accepted && (await machine.Deployment.Authority.UploadAsync(Batch(machine, same))).Entries[0].Status == AuditStatus.Duplicate, "duplicate check: an event id another machine already used does not block this machine's event, and its own repeat is a duplicate");
             AuditEvent clash = AuditEvent.Create(Facts(outcome: "different"), otherEvent, 9, clock.GetUtcNow(), machine.MachineKey, EpochOf(outbox));
             check((await machine.Deployment.Authority.UploadAsync(Batch(machine, clash))).Entries[0].Detail == "event-id-reused", "duplicate check: the same id with other content from the same machine is still refused");
-        }
-
-        // Migration from the first cut (schema 4).
-        {
-            using TestMachine machine = new(Path.Combine(parent, "mg-" + Guid.NewGuid().ToString("N")[..6]));
-            string file = machine.Deployment.Store.FilePath;
-            Sql(file, "DROP TABLE audit_events; DROP TABLE audit_machine_state; DROP TABLE audit_gaps; CREATE TABLE audit_events (event_id TEXT PRIMARY KEY NOT NULL, fingerprint TEXT NOT NULL); CREATE TABLE audit_machine_state (fingerprint TEXT PRIMARY KEY NOT NULL, highest INTEGER NOT NULL, updated TEXT NOT NULL); CREATE TABLE audit_gaps (id INTEGER PRIMARY KEY, fingerprint TEXT NOT NULL); UPDATE schema_version SET version = 4;");
-            AuthorityStore migrated = AuthorityStore.InFolder(machine.Folder);
-            check(migrated.AuditHistory(new AuditQuery()).Count == 0 && Convert.ToInt32(Scalar(file, "SELECT version FROM schema_version")) == 5 && migrated.Machines().Count == 1 && Convert.ToInt32(Scalar(file, "SELECT COUNT(*) FROM pragma_table_info('audit_machine_state') WHERE name = 'epoch'")) == 1, "schema: a version 4 authority.db is migrated to 5 (the audit tables of the first cut are replaced, machines are kept)");
         }
     }
 }

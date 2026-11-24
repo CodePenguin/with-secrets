@@ -153,7 +153,7 @@ public sealed record ReuseOffer(int MaxMinutes)
 }
 
 /// <summary>
-/// The grant time settings. They come from the settings in state.db in the protected store folder, never from the environment or
+/// The grant time settings. They come from the settings in with-secrets.db in the protected store folder, never from the environment or
 /// the command line, because the agent controls both of those.
 /// </summary>
 public static class ReuseSettings
@@ -167,7 +167,7 @@ public static class ReuseSettings
     /// <summary>The highest ceiling, and the longest grant ever honoured: 24 hours.</summary>
     public const int MaxMinutes = 1440;
 
-    /// <summary>From state.db: the stored ceiling, the default when none is stored, and no time when the settings cannot be used.</summary>
+    /// <summary>From with-secrets.db: the stored ceiling, the default when none is stored, and no time when the settings cannot be used.</summary>
     public static ReuseOffer Load(StateDatabase db)
     {
         ToolSettings settings = ToolSettings.Load(db, out string? error);

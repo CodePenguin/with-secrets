@@ -10,6 +10,15 @@ internal sealed class RecordingAudit(bool refuse = false) : IHostAudit
 {
     public List<AuditFacts> Facts { get; } = [];
 
+    public void RecordIn(Microsoft.Data.Sqlite.SqliteConnection connection, Microsoft.Data.Sqlite.SqliteTransaction transaction, AuditFacts facts)
+    {
+        if (refuse)
+        {
+            throw new AuditOutboxException("test audit refused");
+        }
+        WithSecretsDatabase.AfterCommit(transaction, () => TryRecord(facts));
+    }
+
     public bool TryRecord(AuditFacts facts)
     {
         if (refuse)

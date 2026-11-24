@@ -48,12 +48,28 @@ internal static class KeyVaultTests
 
         (string publicKey, string privateKey) = DotenvxCipher.Instance.NewKeyPair();
         string vault = KeyVault.WrapVault(Encoding.UTF8.GetBytes(privateKey), mk, publicKey);
-        Manifest withStore = first.WithSecrets(publicKey, new Dictionary<string, string> { ["A_NAME"] = new string('a', 64) }, vault);
+        ReviewKey review = KeyVault.NewReviewKey(mk);
+        Manifest withStore = first.WithSecrets(publicKey, new Dictionary<string, string> { ["A_NAME"] = new string('a', 64) }, vault, review);
         string storeText = withStore.Canonical();
-        check(storeText.Contains(",\"store\":\"" + publicKey + "\",\"vault\":\"" + vault + "\",\"secrets\":{\"A_NAME\"", StringComparison.Ordinal) && Manifest.Parse(storeText, out error) is { } back && back.Vault == vault && error is null, "slot manifest: the vault is signed text next to the store key (" + error + ")");
+        check(storeText.Contains(",\"store\":\"" + publicKey + "\",\"vault\":\"" + vault + "\",\"review\":{\"pub\":\"" + review.PublicKey + "\",\"vault\":\"" + review.Vault + "\"}", StringComparison.Ordinal)
+            && Manifest.Parse(storeText, out error) is { } back && back.Vault == vault && back.Review == review && back.Canonical() == storeText, "slot manifest: the review key and vault are signed alongside the store key");
+        byte[] reviewPrivate = KeyVault.UnwrapReview(review.Vault, mk, review.PublicKey);
+        try
+        {
+            check(DotenvxCipher.Instance.Derive(Encoding.UTF8.GetString(reviewPrivate)) == review.PublicKey && review.PublicKey != publicKey
+                && Fails(() => KeyVault.UnwrapReview(review.Vault, mk, publicKey)) && Fails(() => KeyVault.UnwrapVault(review.Vault, mk, review.PublicKey))
+                && Fails(() => KeyVault.UnwrapReview(vault, mk, publicKey)), "review key: the wrap is bound to its public key and its own context");
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(reviewPrivate);
+        }
         Manifest more = withStore.WithKey(phone.Record("localhost", "phone", mk));
         check(more.Vault == vault && more.Keys.Count == 2 && more.Keys.All(key => key.Slot is not null) && more.WithSettings(ToolSettings.Defaults).Vault == vault && more.WithoutKey(more.Keys[0].Id).Vault == vault && more.WithSecrets(publicKey, new Dictionary<string, string>()).Vault == vault,
             "slot manifest: key, settings and secret changes keep the vault and the slots");
+        check(more.Review == review && more.WithSettings(ToolSettings.Defaults).Review == review
+            && more.WithoutKey(more.Keys[0].Id).Review == review && more.WithSecrets(publicKey, new Dictionary<string, string>()).Review == review,
+            "review key: ordinary manifest changes carry the review key");
 
         // A manifest is not valid when a key has no slot, a slot is not the right shape, or the vault does not go with the store key.
         (string Name, Manifest Value)[] invalid =
@@ -67,6 +83,10 @@ internal static class KeyVaultTests
             ("a vault without a store key", first with { Vault = vault }),
             ("a vault that is not base64url", withStore with { Vault = "***" }),
             ("a vault that is too short", withStore with { Vault = Base64Url.EncodeToString(new byte[20]) }),
+            ("a missing review key", withStore with { Review = null }),
+            ("a review key without a store", first with { Review = review }),
+            ("the store key reused for review", withStore with { Review = review with { PublicKey = publicKey } }),
+            ("a malformed review vault", withStore with { Review = review with { Vault = "***" } }),
         ];
         foreach ((string name, Manifest value) in invalid)
         {
@@ -86,9 +106,11 @@ internal static class KeyVaultTests
         check(Manifest.Parse(vaultEdit.Text, out _) is not null && vaultEdit.Verify(out error) is null && error is not null && error.Contains("signature", StringComparison.Ordinal), "slot manifest: an edited vault passes the shape check but fails the signature (" + error + ")");
         SignedManifest swapped = withVault with { Text = storeText.Replace(vault, KeyVault.WrapVault(Encoding.UTF8.GetBytes(privateKey), mk, publicKey), StringComparison.Ordinal) };
         check(swapped.Verify(out _) is null, "slot manifest: another valid vault for the same key (a replay swap) fails the signature too");
+        SignedManifest reviewEdit = withVault with { Text = storeText.Replace(review.Vault, KeyVault.NewReviewKey(mk).Vault, StringComparison.Ordinal) };
+        check(Manifest.Parse(reviewEdit.Text, out _) is not null && reviewEdit.Verify(out _) is null, "review key: replacing the review vault invalidates the signature");
 
         // The first manifest of a first setup has the store key and the vault and no secrets: editing the vault there fails too.
-        Manifest firstWithStore = first with { Store = publicKey, Vault = vault };
+        Manifest firstWithStore = first with { Store = publicKey, Vault = vault, Review = review };
         string firstText = firstWithStore.Canonical();
         SignedManifest firstSigned = TestState.Sign(laptop, firstText);
         check(firstWithStore.Problem() is null && Manifest.Parse(firstText, out _) is { Version: 1 } && firstSigned.Verify(out error) is not null, "slot manifest: a first manifest with the store key and vault (no secrets) is valid and verifies (" + error + ")");

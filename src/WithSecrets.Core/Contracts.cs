@@ -48,6 +48,9 @@ public static class SecretNames
         return parts.Take(parts.Length - 1).All(part => Folder.IsMatch(part) && part is not "." and not "..");
     }
 
+    /// <summary>True for one folder segment of a name: 1 to 64 of letters, digits, '_', '.', '-', and not '.' or '..'.</summary>
+    public static bool IsFolderSegment(string segment) => Folder.IsMatch(segment) && segment is not "." and not "..";
+
     /// <summary>Secrets whose last segment starts with this hold a Dotenvx private key: used only to decrypt .env values, never given to a program.</summary>
     public const string PrivateKeyPrefix = "DOTENV_PRIVATE_KEY";
 

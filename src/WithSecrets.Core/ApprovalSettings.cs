@@ -2,13 +2,13 @@ using System.Globalization;
 
 namespace WithSecrets;
 
-/// <summary>How approval works. Only the approval settings are read here; they are kept in state.db (see <see cref="ToolSettings" />).</summary>
+/// <summary>How approval works. Only the approval settings are read here; they are kept in with-secrets.db (see <see cref="ToolSettings" />).</summary>
 public sealed record ApprovalSettings(string? BaseUrl, int Port, TimeSpan Timeout)
 {
     public const int DefaultTimeoutMinutes = 5;
     public const int MaxTimeoutMinutes = 30;
 
-    /// <summary>The approval settings in state.db. Settings that cannot be used: defaults and a short error that names the setting.</summary>
+    /// <summary>The approval settings in with-secrets.db. Settings that cannot be used: defaults and a short error that names the setting.</summary>
     public static ApprovalSettings Load(StateDatabase db, out string? error)
     {
         return ToolSettings.Load(db, out error).Approval;

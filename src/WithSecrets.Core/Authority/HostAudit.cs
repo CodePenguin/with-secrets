@@ -8,34 +8,20 @@ namespace WithSecrets;
 public sealed class AuditOutboxException(string message, Exception? inner = null) : Exception(message, inner);
 
 /// <summary>
-/// The host-local audit outbox: <c>audit-outbox.db</c> in the store folder (SQLite, WAL, <c>synchronous=FULL</c>, schema version 2). An event is numbered, signed by the
+/// The host-local audit outbox: <c>with-secrets.db</c> (SQLite, WAL, <c>synchronous=FULL</c>). An event is numbered, signed by the
 /// machine identity key and committed in ONE write transaction, so the per-machine sequence is monotonic and gapless (a failed append consumes no number), and a commit
 /// that returned is on disk. Events stay until the authority acknowledges them; only then are they removed. No secret value, no environment value and no OS user is stored.
 /// A file of another schema version, or a damaged one, is never repaired: delete it to start over (the sequence then restarts at 1 under a new epoch, which the authority records).
 /// </summary>
-public sealed class HostAuditOutbox(string path, ISigningKey machineKey, TimeProvider? clock = null)
+public sealed class HostAuditOutbox(WithSecretsDatabase database, ISigningKey machineKey, TimeProvider? clock = null)
 {
-    public const string FileName = "audit-outbox.db";
-    public const int SchemaVersion = 2;
-    public static readonly TimeSpan BusyTimeout = TimeSpan.FromSeconds(5);
-
-    private const string Schema = """
-        CREATE TABLE schema_version (version INTEGER NOT NULL);
-        CREATE TABLE counter (id INTEGER PRIMARY KEY CHECK (id = 1), last_sequence INTEGER NOT NULL, epoch TEXT NOT NULL);
-        INSERT INTO counter (id, last_sequence, epoch) VALUES (1, 0, $epoch);
-        CREATE TABLE events (
-            sequence INTEGER PRIMARY KEY NOT NULL, event_id TEXT NOT NULL UNIQUE, json TEXT NOT NULL, created TEXT NOT NULL,
-            state TEXT NOT NULL, reason TEXT);
-        """;
-
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
-    private int _checked;
+    private readonly string _fingerprint = KeyIdentity.Fingerprint(machineKey.PublicKey);
 
-    public string FilePath { get; } = Path.GetFullPath(path);
+    public string FilePath => database.FilePath;
+    public string FileLabel => database.FileLabel;
 
-    public string FileLabel => Path.GetFileName(FilePath);
-
-    public static HostAuditOutbox InFolder(string folder, ISigningKey machineKey, TimeProvider? clock = null) => new(Path.Combine(folder, FileName), machineKey, clock);
+    public static HostAuditOutbox InFolder(string folder, ISigningKey machineKey, TimeProvider? clock = null) => new(WithSecretsDatabase.InFolder(folder), machineKey, clock);
 
     /// <summary>For tests: called inside the append transaction at named points ("before-sign", "before-commit"); throwing from it must leave nothing behind.</summary>
     internal Action<string>? Fault { get; set; }
@@ -43,34 +29,69 @@ public sealed class HostAuditOutbox(string path, ISigningKey machineKey, TimePro
     /// <summary>
     /// Numbers, signs and durably commits one event. Throws <see cref="AuditOutboxException" /> when it could not be committed (nothing is then stored and no number is used).
     /// </summary>
-    public AuditEvent Append(AuditFacts facts)
+    public AuditEvent Append(AuditFacts facts) => AppendAll([facts])[0];
+
+    /// <summary>Numbers, signs and durably commits several events in ONE write transaction: all of them are committed, or none (and no number is used).</summary>
+    public IReadOnlyList<AuditEvent> AppendAll(IReadOnlyList<AuditFacts> facts)
+        => Write((connection, transaction) => AppendIn(connection, transaction, facts));
+
+    internal IReadOnlyList<AuditEvent> AppendIn(SqliteConnection connection, SqliteTransaction transaction, IReadOnlyList<AuditFacts> facts)
     {
-        return Write((connection, transaction) =>
+        if (facts.Count == 0)
         {
-            long next = Convert.ToInt64(StateDatabase.Scalar(connection, transaction, "SELECT last_sequence FROM counter WHERE id = 1"), CultureInfo.InvariantCulture) + 1;
-            string epoch = (string)StateDatabase.Scalar(connection, transaction, "SELECT epoch FROM counter WHERE id = 1")!;
-            Fault?.Invoke("before-sign");
-            AuditEvent item = AuditEvent.Create(AuditRedaction.Bound(facts), Guid.NewGuid().ToString("D"), next, _clock.GetUtcNow(), machineKey, epoch);
-            if (item.Problem() is { } problem)
+            return [];
+        }
+
+        // A best-effort caller may keep its own change if writing the event fails.
+        const string savepoint = "append_audit";
+        transaction.Save(savepoint);
+        try
+        {
+            long next = (long)WithSecretsDatabase.Scalar(connection, transaction, "SELECT last_sequence FROM outbox_counter WHERE id = 1")!;
+            string epoch = (string)WithSecretsDatabase.Scalar(connection, transaction, "SELECT epoch FROM outbox_counter WHERE id = 1")!;
+            string machine = (string)WithSecretsDatabase.Scalar(connection, transaction, "SELECT machine FROM outbox_counter WHERE id = 1")!;
+            if (machine.Length > 0 && machine != _fingerprint)
             {
-                // Nothing the authority would refuse is signed: the run that this records does not go ahead.
-                throw new AuditOutboxException("the audit event is not valid: " + problem);
+                next = 0;
+                epoch = Guid.NewGuid().ToString("N");
             }
 
-            StateDatabase.Execute(connection, transaction, "INSERT INTO events (sequence, event_id, json, created, state, reason) VALUES ($seq, $id, $json, $now, 'pending', NULL)",
-                ("$seq", next), ("$id", item.EventId), ("$json", item.ToJson()), ("$now", CanonicalJson.Time(_clock.GetUtcNow())));
-            StateDatabase.Execute(connection, transaction, "UPDATE counter SET last_sequence = $seq WHERE id = 1", ("$seq", next));
-            Fault?.Invoke("before-commit");
+            List<AuditEvent> items = [];
+            foreach (AuditFacts one in facts)
+            {
+                Fault?.Invoke("before-sign");
+                AuditEvent item = AuditEvent.Create(AuditRedaction.Bound(one), Guid.NewGuid().ToString("D"), ++next, _clock.GetUtcNow(), machineKey, epoch);
+                if (item.Problem() is { } problem)
+                {
+                    throw new AuditOutboxException("the audit event is not valid: " + problem);
+                }
 
-            return item;
-        });
+                WithSecretsDatabase.Execute(connection, transaction, "INSERT INTO outbox_events (machine, sequence, event_id, json, created, state) VALUES ($machine, $seq, $id, $json, $now, 'pending')",
+                    ("$machine", _fingerprint), ("$seq", next), ("$id", item.EventId), ("$json", item.ToJson()), ("$now", CanonicalJson.Time(_clock.GetUtcNow())));
+                items.Add(item);
+            }
+
+            WithSecretsDatabase.Execute(connection, transaction, "UPDATE outbox_counter SET last_sequence = $seq, epoch = $epoch, machine = $machine WHERE id = 1",
+                ("$seq", next), ("$epoch", epoch), ("$machine", _fingerprint));
+            Fault?.Invoke("before-commit");
+            transaction.Release(savepoint);
+            return items;
+        }
+        catch
+        {
+            transaction.Rollback(savepoint);
+            transaction.Release(savepoint);
+            throw;
+        }
     }
 
     /// <summary>The events the authority has not acknowledged and has not rejected, oldest first. A stored row that cannot be read is marked rejected and skipped.</summary>
-    public IReadOnlyList<AuditEvent> Pending(int limit)
+    public IReadOnlyList<AuditEvent> Pending(int limit) => Pending(limit, null);
+
+    internal IReadOnlyList<AuditEvent> Pending(int limit, string? machine)
     {
         List<long> unreadable = [];
-        List<AuditEvent> events = Use(false, connection =>
+        List<AuditEvent> events = Read(connection =>
         {
             Fault?.Invoke("pending");
             List<AuditEvent> found = [];
@@ -79,7 +100,13 @@ public sealed class HostAuditOutbox(string path, ISigningKey machineKey, TimePro
                 return found;
             }
 
-            using SqliteCommand command = StateDatabase.Command(connection, null, "SELECT sequence, json FROM events WHERE state = 'pending' ORDER BY sequence LIMIT $limit", ("$limit", limit));
+            string filter = machine is null ? "" : " AND machine = $machine";
+            using SqliteCommand command = WithSecretsDatabase.Command(connection, null,
+                "SELECT id, json FROM outbox_events WHERE state = 'pending'" + filter + " ORDER BY id LIMIT $limit", ("$limit", limit));
+            if (machine is not null)
+            {
+                command.Parameters.AddWithValue("$machine", machine);
+            }
             using SqliteDataReader reader = command.ExecuteReader();
             while (reader.Read())
             {
@@ -98,7 +125,7 @@ public sealed class HostAuditOutbox(string path, ISigningKey machineKey, TimePro
 
         foreach (long sequence in unreadable)
         {
-            Write((connection, transaction) => StateDatabase.Execute(connection, transaction, "UPDATE events SET state = 'rejected', reason = 'unreadable' WHERE sequence = $seq", ("$seq", sequence)));
+            Write((connection, transaction) => WithSecretsDatabase.Execute(connection, transaction, "UPDATE outbox_events SET state = 'rejected', reason = 'unreadable' WHERE id = $id AND state = 'pending'", ("$id", sequence)));
         }
 
         return events;
@@ -117,7 +144,7 @@ public sealed class HostAuditOutbox(string path, ISigningKey machineKey, TimePro
         {
             foreach (string id in ids)
             {
-                StateDatabase.Execute(connection, transaction, "DELETE FROM events WHERE event_id = $id", ("$id", id));
+                WithSecretsDatabase.Execute(connection, transaction, "DELETE FROM outbox_events WHERE event_id = $id", ("$id", id));
             }
 
             Fault?.Invoke("after-acknowledge");
@@ -139,156 +166,53 @@ public sealed class HostAuditOutbox(string path, ISigningKey machineKey, TimePro
         {
             foreach (AuditAckEntry entry in list)
             {
-                StateDatabase.Execute(connection, transaction, "UPDATE events SET state = 'rejected', reason = $reason WHERE event_id = $id AND state = 'pending'", ("$id", entry.EventId), ("$reason", entry.Detail.Length > 200 ? entry.Detail[..200] : entry.Detail));
+                WithSecretsDatabase.Execute(connection, transaction, "UPDATE outbox_events SET state = 'rejected', reason = $reason WHERE event_id = $id AND state = 'pending'", ("$id", entry.EventId), ("$reason", entry.Detail.Length > 200 ? entry.Detail[..200] : entry.Detail));
             }
 
             return 0;
         });
     }
 
+    /// <summary>The reason kept with the events of another machine (a restore onto this one) when the uploader passes them over.</summary>
+    public const string OtherMachineReason = "signed by another machine";
+
+    /// <summary>
+    /// Marks every pending event signed by another machine than <paramref name="machine" /> rejected: only that machine could upload it, so it is kept for the person
+    /// to see and never sent. Returns how many.
+    /// </summary>
+    public int RejectOtherMachines(string machine)
+    {
+        return Write((connection, transaction) => WithSecretsDatabase.Execute(connection, transaction,
+            "UPDATE outbox_events SET state = 'rejected', reason = $reason WHERE state = 'pending' AND machine <> $machine", ("$reason", OtherMachineReason), ("$machine", machine)));
+    }
+
     /// <summary>The number of events in the given state ("pending" or "rejected").</summary>
     public int Count(string state)
     {
-        return Use(false, connection => connection is null ? 0 : Convert.ToInt32(StateDatabase.Scalar(connection, null, "SELECT COUNT(*) FROM events WHERE state = $state", ("$state", state)), CultureInfo.InvariantCulture));
+        return Read(connection => connection is null ? 0 : Convert.ToInt32(WithSecretsDatabase.Scalar(connection, null, "SELECT COUNT(*) FROM outbox_events WHERE state = $state", ("$state", state)), CultureInfo.InvariantCulture));
     }
 
     /// <summary>The last sequence number used (0: none yet).</summary>
     public long LastSequence()
     {
-        return Use(false, connection => connection is null ? 0L : Convert.ToInt64(StateDatabase.Scalar(connection, null, "SELECT last_sequence FROM counter WHERE id = 1"), CultureInfo.InvariantCulture));
+        return Read(connection => connection is null ? 0L : Convert.ToInt64(WithSecretsDatabase.Scalar(connection, null, "SELECT last_sequence FROM outbox_counter WHERE id = 1"), CultureInfo.InvariantCulture));
     }
 
-    // ---- plumbing ----
+    private T Read<T>(Func<SqliteConnection?, T> work) => Use(() => database.Read(work));
+    private T Write<T>(Func<SqliteConnection, SqliteTransaction, T> work) => Use(() => database.Write(work));
 
-    private T Write<T>(Func<SqliteConnection, SqliteTransaction, T> work)
-    {
-        return Use(true, connection =>
-        {
-            using SqliteTransaction transaction = connection!.BeginTransaction(deferred: false);
-            T result = work(connection, transaction);
-            transaction.Commit();
-
-            return result;
-        });
-    }
-
-    private T Use<T>(bool create, Func<SqliteConnection?, T> work)
+    private T Use<T>(Func<T> work)
     {
         try
         {
-            using SqliteConnection? connection = Open(create);
-
-            return work(connection);
+            return work();
         }
-        catch (SqliteException failure)
+        catch (WithSecretsDatabaseException error)
         {
-            throw new AuditOutboxException(failure.SqliteErrorCode is 5 or 6 ? $"{FileLabel} is locked by another process" : failure.SqliteErrorCode is 13 ? $"{FileLabel} cannot grow: the disk is full" : $"cannot use {FileLabel}: {failure.Message}", failure);
+            string detail = error.InnerException is SqliteException { SqliteErrorCode: 13 }
+                ? $"{FileLabel} cannot grow: the disk is full" : error.Message;
+            throw new AuditOutboxException(detail, error);
         }
-        catch (Exception failure) when (failure is IOException or UnauthorizedAccessException)
-        {
-            throw new AuditOutboxException($"cannot use {FileLabel}: {failure.Message}", failure);
-        }
-    }
-
-    private SqliteConnection? Open(bool create)
-    {
-        if (!File.Exists(FilePath))
-        {
-            if (!create)
-            {
-                return null;
-            }
-
-            Create();
-        }
-
-        SqliteConnection connection = Connect(FilePath, SqliteOpenMode.ReadWrite);
-        try
-        {
-            connection.Open();
-            StateDatabase.Execute(connection, null, "PRAGMA busy_timeout = " + (int)BusyTimeout.TotalMilliseconds);
-            StateDatabase.Execute(connection, null, "PRAGMA synchronous = FULL");
-            if (Volatile.Read(ref _checked) == 0 && StateDatabase.Scalar(connection, null, "PRAGMA quick_check") is not "ok")
-            {
-                throw new AuditOutboxException($"{FileLabel} is damaged; delete {FileLabel} to start over");
-            }
-
-            long found;
-            try
-            {
-                found = Convert.ToInt64(StateDatabase.Scalar(connection, null, "SELECT version FROM schema_version"), CultureInfo.InvariantCulture);
-            }
-            catch (SqliteException)
-            {
-                found = -1;
-            }
-
-            if (found != SchemaVersion)
-            {
-                throw new AuditOutboxException($"{FileLabel} is not of schema version {SchemaVersion}; delete {FileLabel} to start over");
-            }
-
-            Volatile.Write(ref _checked, 1);
-
-            return connection;
-        }
-        catch
-        {
-            connection.Dispose();
-            throw;
-        }
-    }
-
-    private void Create()
-    {
-        Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
-        string temp = FilePath + "." + Guid.NewGuid().ToString("N") + ".new";
-        try
-        {
-            using (SqliteConnection connection = Connect(temp, SqliteOpenMode.ReadWriteCreate))
-            {
-                connection.Open();
-                StateDatabase.Execute(connection, null, "PRAGMA journal_mode = WAL");
-                using SqliteTransaction transaction = connection.BeginTransaction(deferred: false);
-                StateDatabase.Execute(connection, transaction, Schema, ("$epoch", Guid.NewGuid().ToString("N")));
-                StateDatabase.Execute(connection, transaction, "INSERT INTO schema_version (version) VALUES ($version)", ("$version", SchemaVersion));
-                transaction.Commit();
-            }
-
-            try
-            {
-                File.Move(temp, FilePath, false);
-            }
-            catch (IOException) when (File.Exists(FilePath))
-            {
-                // Another process created it first: use that one.
-            }
-        }
-        finally
-        {
-            foreach (string leftover in new[] { temp, temp + "-wal", temp + "-shm" })
-            {
-                try
-                {
-                    File.Delete(leftover);
-                }
-                catch (Exception failure) when (failure is IOException or UnauthorizedAccessException)
-                {
-                    // A stray temporary file is harmless.
-                }
-            }
-        }
-    }
-
-    private static SqliteConnection Connect(string file, SqliteOpenMode mode)
-    {
-        return new SqliteConnection(new SqliteConnectionStringBuilder
-        {
-            DataSource = file,
-            Mode = mode,
-            Pooling = false,
-            DefaultTimeout = Math.Max(1, (int)Math.Ceiling(BusyTimeout.TotalSeconds)),
-        }.ToString());
     }
 }
 
@@ -296,6 +220,7 @@ public sealed class HostAuditOutbox(string path, ISigningKey machineKey, TimePro
 public interface IHostAudit
 {
     bool TryRecord(AuditFacts facts);
+    void RecordIn(SqliteConnection connection, SqliteTransaction transaction, AuditFacts facts);
 }
 
 /// <summary>What one drain of the outbox came to.</summary>
@@ -311,13 +236,26 @@ public sealed class AuditUploader(HostAuditOutbox outbox, Func<IAuditSink> sink,
     public async Task<AuditUploadResult> DrainAsync(CancellationToken cancel = default)
     {
         int acknowledged = 0;
-        int rejected = 0;
+        int rejected;
+        try
+        {
+            // A restored database can hold another machine's signed events. The upload session authenticates only this machine, so those can never
+            // be sent from here: they are rejected (kept for the person to see), not left pending for ever.
+            rejected = outbox.RejectOtherMachines(machineFingerprint);
+        }
+        catch (Exception error) when (error is not (OutOfMemoryException or OperationCanceledException))
+        {
+            AppLog.Warn("the audit outbox could not be read for upload: {Type}", error.GetType().Name);
+
+            return new AuditUploadResult(0, 0, true);
+        }
+
         while (true)
         {
             IReadOnlyList<AuditEvent> pending;
             try
             {
-                pending = outbox.Pending(batchSize);
+                pending = outbox.Pending(batchSize, machineFingerprint);
             }
             catch (Exception error) when (error is not (OutOfMemoryException or OperationCanceledException))
             {
@@ -396,6 +334,33 @@ public sealed class HostAudit(HostAuditOutbox outbox, AuditUploader uploader) : 
         Wake();
 
         return true;
+    }
+
+    public void RecordIn(SqliteConnection connection, SqliteTransaction transaction, AuditFacts facts)
+    {
+        outbox.AppendIn(connection, transaction, [facts]);
+        WithSecretsDatabase.AfterCommit(transaction, Wake);
+    }
+
+    internal static bool TryRecordIn(IHostAudit audit, SqliteConnection connection, SqliteTransaction transaction, AuditFacts facts)
+    {
+        try
+        {
+            audit.RecordIn(connection, transaction, facts);
+            return true;
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            AppLog.Warn("an audit event could not be recorded ({Type})", error.GetType().Name);
+            return false;
+        }
+    }
+
+    /// <summary>Commits the events in one transaction (all or none) and wakes the uploader. Throws when they could not be committed, so the caller fails closed.</summary>
+    public void RecordAll(IReadOnlyList<AuditFacts> facts)
+    {
+        outbox.AppendAll(facts);
+        Wake();
     }
 
     /// <summary>Asks the loop to upload now.</summary>

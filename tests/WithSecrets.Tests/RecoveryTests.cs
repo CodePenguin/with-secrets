@@ -546,7 +546,7 @@ internal static class RecoveryTests
     }
 
     /// <summary>The files of the folder, not counting the signed audit outbox (an administrative change writes its event there).</summary>
-    internal static string[] Files(string folder) => [.. Directory.EnumerateFiles(folder).Select(Path.GetFileName).OfType<string>().Where(name => !name.StartsWith("audit-outbox.db", StringComparison.Ordinal) && name != "state.db.lock").Order(StringComparer.Ordinal)];
+    internal static string[] Files(string folder) => [.. Directory.EnumerateFiles(folder).Select(Path.GetFileName).OfType<string>().Where(name => name != "with-secrets.db.lock" && !name.EndsWith("-wal", StringComparison.Ordinal) && !name.EndsWith("-shm", StringComparison.Ordinal)).Order(StringComparer.Ordinal)];
 
     private static async Task Recover(Action<bool, string> check, string root)
     {
@@ -559,6 +559,13 @@ internal static class RecoveryTests
         // Right code, the old keys still exist, a new authenticator: all three values are in the new store.
         {
             World w = NewWorld(root, laptop, phone);
+            using TestMachine machine = new(w.Folder);
+            using HostServiceTests.Rig rig = new(root, machine: machine, approver: () => new GrantAuthorityTests.Chooser(60, signer: laptop));
+            AuthorityStore authority = machine.Deployment.Store;
+            const string reviewCanary = "--review-recovery-canary";
+            (GrantRecord beforeGrant, _) = await MakeReviewGrant(machine, laptop, reviewCanary);
+            rig.Service.Dispose();
+            authority.RecordPairingEvent("before-store-recovery", null, "test");
             Manifest before = TestState.Current(w.Db)!;
             string oldBytes = Snapshot(w.Db);
             string oldKey = OldStoreKey(w.Db, laptop);
@@ -585,16 +592,26 @@ internal static class RecoveryTests
             Manifest? after = TestState.Current(w.Db);
             check(after is { Version: 1 } && after.Keys.Count == 1 && after.Keys[0].Id == TestAuthenticator.Encode(fresh.CredentialId) && after.Store != before.Store && after.Recovery is not null && after.Recovery.Wrap != before.Recovery!.Wrap && after.Secrets.Count == 3,
                 "recover: the new state has only the new passkey, a new store key, a new recovery slot and the three secrets");
+            using ReviewKeys review = new();
+            using Unlock newUnlock = TestVault.Unlock(w.Db, fresh)!;
+            GrantRecord afterGrant = authority.FindGrant(beforeGrant.Id)!;
+            check(after?.Review?.PublicKey == before.Review!.PublicKey && after.Review.Vault != before.Review.Vault
+                && GrantAuthorityTests.SameGrant(afterGrant, beforeGrant) && review.TryOpen(after, newUnlock)
+                && review.TryDecrypt(afterGrant.Evidence!.Ciphertext, afterGrant.ReviewKey!)?.Contains(reviewCanary, StringComparison.Ordinal) == true,
+                "recover: the new passkey opens the original review key and its unchanged grant evidence");
+            check(authority.Sealer!.Problem(afterGrant) == "the approving passkey is not enrolled", "recover: preserved evidence does not restore the old approval's authority");
             Dictionary<string, string>? read = ReadAll(w.Db, fresh);
             check(read is not null && Values.All(item => read.TryGetValue(item.Key, out string? value) && value == item.Value), "recover: all three values are read through the normal approved path with the new passkey");
             check(ReadAll(w.Db, laptop) is null && ReadAll(w.Db, phone) is null, "recover: the old admin keys are gone from the new state (they open nothing)");
-            string renamed = Path.Combine(w.Folder, "state.db.recovered-20261103120000");
-            check(File.Exists(renamed), "recover: the old file was renamed to state.db.recovered-<UTC yyyyMMddHHmmss>, not deleted (" + string.Join(", ", Files(w.Folder)) + ")");
-            check(File.Exists(renamed) && Snapshot(new StateDatabase(renamed)) == oldBytes, "recover: the renamed file is the old state, unchanged");
+            string snapshot = Path.Combine(w.Folder, "with-secrets.db.recovered-20261103120000");
+            check(File.Exists(snapshot) && Snapshot(new StateDatabase(snapshot)) == oldBytes, "recover: the database snapshot contains the previous store");
+            check(File.Exists(snapshot) && authority.Audit().Any(item => item.Event == "before-store-recovery")
+                && new AuthorityStore(snapshot).Audit().Any(item => item.Event == "before-store-recovery"),
+                "recover: authority history is preserved in the live database and in the snapshot");
             check(Files(w.Folder).All(name => !name.Contains(".recovering-", StringComparison.Ordinal)), "recover: no temporary file is left");
             IReadOnlyList<AuditRow> rows = AuditRows(w.Db);
             AuditRow? recovered = rows.FirstOrDefault(row => row.Event == "recovered");
-            check(recovered is not null && recovered.Detail.Contains("3 secrets", StringComparison.Ordinal) && recovered.Detail.Contains("state.db.recovered-20261103120000", StringComparison.Ordinal), "recover: a `recovered` audit row names the secret count and the old file (" + recovered?.Detail + ")");
+            check(recovered is not null && recovered.Detail.Contains("3 secrets", StringComparison.Ordinal) && recovered.Detail.Contains("with-secrets.db.recovered-20261103120000", StringComparison.Ordinal), "recover: a `recovered` audit row names the secret count and the old file (" + recovered?.Detail + ")");
             check(after is not null && Fails(() => KeyVault.OpenRecovery(after, RecoveryCodeBytes(w.Code))), "recover: the old recovery code no longer opens the new store");
             check(after is not null && RecoveryCode.TryParse(newCode, out byte[] fresher) && KeyVault.UnwrapVault(after.Vault, KeyVault.OpenRecovery(after, fresher), after.Store).Length == 64, "recover: the new recovery code (final page) opens the new store");
             check(CodePattern.IsMatch(newCode) && newCode != w.Code, "recover: a new recovery code was shown on the last page");
@@ -659,7 +676,7 @@ internal static class RecoveryTests
             ConfigChange result = flow.Result();
             Manifest? now = TestState.Current(w.Db);
             check(result.Code != 0 && result.Detail.Contains("the old store changed while you were recovering; run --recover again", StringComparison.Ordinal), "recover: a --set between the check and the swap is refused (" + result.Detail + ")");
-            check(now is not null && now.Keys.Count == 1 && now.Keys[0].Id == TestAuthenticator.Encode(laptop.CredentialId) && now.Secrets.ContainsKey("D_NAME") && Files(w.Folder).SequenceEqual(["state.db"]), "recover: after that refusal the old store (with the new secret) is in place and no recovered or temporary file exists (" + string.Join(", ", Files(w.Folder)) + ")");
+            check(now is not null && now.Keys.Count == 1 && now.Keys[0].Id == TestAuthenticator.Encode(laptop.CredentialId) && now.Secrets.ContainsKey("D_NAME") && Files(w.Folder).SequenceEqual(["with-secrets.db"]), "recover: after that refusal the old store (with the new secret) is in place and no recovered or temporary file exists (" + string.Join(", ", Files(w.Folder)) + ")");
         }
 
         // A right code, then a failure at the new-key step: cancelled on the passkey page, no 6-digit code, and a failed swap.
@@ -715,7 +732,7 @@ internal static class RecoveryTests
             StateDatabase db = StateDatabase.InFolder(Path.Combine(root, "nothing-" + Guid.NewGuid().ToString("N")));
             Flow flow = StartRecover(db);
             ConfigChange result = flow.Result();
-            check(result.Code != 0 && !File.Exists(db.FilePath), "recover: with no state.db there is nothing to recover and nothing is made (" + result.Detail + ")");
+            check(result.Code != 0 && !File.Exists(db.FilePath), "recover: with no with-secrets.db there is nothing to recover and nothing is made (" + result.Detail + ")");
         }
 
         await Task.CompletedTask;
@@ -728,17 +745,34 @@ internal static class RecoveryTests
         return bytes;
     }
 
+    private static async Task<(GrantRecord Grant, LaunchRequest Request)> MakeReviewGrant(TestMachine machine, TestAuthenticator signer, string argument)
+    {
+        LocalAuthority authority = machine.Deployment.Authority;
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        LaunchRequest request = IdentityTests.Sample("review-" + Guid.NewGuid().ToString("N"), now) with { Arguments = [argument] };
+        string scope = GrantEvidence.Scope(machine.Fingerprint, request.Digest(), request.Arguments);
+        int revision = machine.Deployment.Store.Find(machine.Fingerprint)!.SecurityRevision;
+        string text = string.Join('\n', GrantEvidence.ApproveLines(revision, scope, contents: GrantEvidence.ContentsKey(request.SecretNames, request.Program, request.WorkingDirectory)))
+            + "\n" + ApprovalSummary.RequestIdPrefix + scope + "\nCommand: test " + argument + "\n" + ApprovalSummary.IssuedLine(now);
+        string nonce = Guid.NewGuid().ToString("N");
+        string proof = signer.Assert(ReuseBinding.Challenge(RequestBinding.Compute(nonce, text), 60), TestState.Origin, "localhost", TestState.NextCount());
+        using IDisposable offered = authority.Offer(request.RequestId, request.Digest(), () => ApprovalDecision.Allow("approved", 60, new ApprovalEvidence(nonce, text, proof)));
+        GrantResponse result = await authority.GrantAsync(GrantEnvelope.Create(GrantOps.Approve, request, scope, machine.HostName, machine.MachineKey));
+        return (machine.Deployment.Store.FindGrant(result.GrantId) ?? throw new InvalidOperationException(result.ReasonCode), request);
+    }
+
     // ---------------------------------------------------------------------------------------------------------------
     // --rotate-key
     // ---------------------------------------------------------------------------------------------------------------
 
-    internal static Flow StartRotate(World w, Action<Dictionary<string, string>>? tamper = null, ApprovalSettings? settings = null)
+    internal static Flow StartRotate(World w, Action<Dictionary<string, string>>? tamper = null, ApprovalSettings? settings = null,
+        Func<SqliteConnection, SqliteTransaction, string, string, string?>? rekey = null)
     {
         return new Flow((announce, read) =>
         {
             (EnrollmentTarget primary, EnrollmentTarget local) = Targets(w.Db, announce, read, settings);
 
-            return new KeyRotation(w.Db, w.Store, primary, local, announce) { RowsBeforeSign = tamper }.Run();
+            return new KeyRotation(w.Db, w.Store, primary, local, announce) { RowsBeforeSign = tamper, RekeyReview = rekey }.Run();
         });
     }
 
@@ -752,13 +786,19 @@ internal static class RecoveryTests
         // The good flow: tap 1 and tap 2 by the laptop; the phone is removed.
         {
             World w = NewWorld(root, laptop, phone);
+            using TestMachine machine = new(w.Folder);
+            using HostServiceTests.Rig rig = new(root, machine: machine);
+            const string reviewCanary = "--review-rotation-canary";
+            AuthorityStore authority = machine.Deployment.Store;
+            (GrantRecord beforeGrant, LaunchRequest request) = await MakeReviewGrant(machine, laptop, reviewCanary);
             Manifest before = TestState.Current(w.Db)!;
             string oldKey = OldStoreKey(w.Db, laptop);
             using Unlock oldUnlock = TestVault.Unlock(w.Db, laptop)!;
             string oldMaster = Convert.ToHexStringLower(KeyVault.OpenMaster(before, oldUnlock));
             string oldPrf = Convert.ToHexStringLower(oldUnlock.Output);
             Dictionary<string, string> oldRows = new SecretStore(w.Db).Snapshot().Rows;
-            Flow flow = StartRotate(w);
+            check(rig.Service.Review!.TryOpen(before, oldUnlock), "rotate: review is open before the store keys rotate");
+            Flow flow = StartRotate(w, rekey: rig.Service.RekeyGrantEvidence);
             (string Url, string Origin)? one = flow.Next();
             string pageOne = one is null ? "" : TestState.Get(client, one.Value.Url).Body;
             (int status1, string body1) = one is null ? (0, "") : TestState.Approve(client, one.Value.Url, one.Value.Origin, "localhost", laptop);
@@ -785,6 +825,16 @@ internal static class RecoveryTests
             Manifest? after = TestState.Current(w.Db);
             check(after is not null && after.Version == before.Version + 1 && after.Keys.Count == 1 && after.Keys[0].Id == TestAuthenticator.Encode(laptop.CredentialId) && after.Store != before.Store && after.Vault != before.Vault && after.Recovery!.Wrap != before.Recovery!.Wrap && after.Recovery.Salt != before.Recovery.Salt,
                 "rotate: manifest v+1 has only the tapped key, a new store key, vault and recovery slot");
+            GrantRecord rekeyed = authority.FindGrant(beforeGrant.Id)!;
+            check(!rig.Service.Review!.IsOpen && after!.Review!.PublicKey != before.Review!.PublicKey
+                && rekeyed.ReviewKey == after.Review.PublicKey && rekeyed.Evidence!.Ciphertext != beforeGrant.Evidence!.Ciphertext
+                && authority.Sealer!.Problem(rekeyed) is null, "rotate: the same commit re-encrypts and reseals evidence and closes the previous review key");
+            using Unlock currentUnlock = TestVault.Unlock(w.Db, laptop)!;
+            check(rig.Service.Review.TryOpen(after!, currentUnlock)
+                && rig.Service.Review.TryDecrypt(rekeyed.Evidence!.Ciphertext, rekeyed.ReviewKey!)?.Contains(reviewCanary, StringComparison.Ordinal) == true,
+                "rotate: the review key opened by the kept passkey decrypts the re-encrypted approval");
+            GrantResponse viaGrant = await machine.Deployment.Authority.GrantAsync(GrantEnvelope.Create(GrantOps.Use, request with { RequestId = "use-" + request.RequestId }, beforeGrant.ScopeKey, machine.HostName, machine.MachineKey));
+            check(viaGrant.Outcome == GrantOps.Granted, "rotate: the existing grant still serves the approved command");
             check(after is not null && after.Keys[0].Slot is { } slot && slot.Salt == before.Keys.First(key => key.Name == "laptop").Slot!.Salt, "rotate: the kept key keeps its slot salt (its PRF output still works)");
             Dictionary<string, string>? read = ReadAll(w.Db, laptop);
             check(read is not null && Values.All(item => read.TryGetValue(item.Key, out string? value) && value == item.Value), "rotate: every value still decrypts through an approved read by the tapped key");
@@ -800,6 +850,20 @@ internal static class RecoveryTests
             IReadOnlyList<AuditRow> rows = AuditRows(w.Db);
             AuditRow? rotated = rows.FirstOrDefault(row => row.Event == "key-rotated");
             check(rotated is not null && rotated.Detail.Contains("phone", StringComparison.Ordinal) && rotated.Detail.Contains("1 key(s) removed", StringComparison.Ordinal) && rotated.KeyName == "laptop", "rotate: a key-rotated audit row names the removed keys and the count (" + rotated?.Detail + ")");
+
+            Flow failed = StartRotate(w, rekey: (connection, transaction, oldReview, nextReview) =>
+                rig.Service.RekeyGrantEvidence(connection, transaction, oldReview, nextReview) ?? "rekey fault (test)");
+            (string Url, string Origin)? faultOne = failed.Next();
+            (string Url, string Origin)? faultTwo = faultOne is null ? null : NextLink(TestState.Approve(client, faultOne.Value.Url, faultOne.Value.Origin, "localhost", laptop).Body);
+            if (faultTwo is { } final)
+            {
+                TestState.Approve(client, final.Url, final.Origin, "localhost", laptop);
+            }
+            check(!failed.Result().Done && TestState.Current(w.Db)!.Canonical() == after!.Canonical()
+                && GrantAuthorityTests.SameGrant(authority.FindGrant(rekeyed.Id), rekeyed) && rig.Service.Review.IsOpen,
+                "rotate: rolling back a failed evidence rekey preserves the manifest, evidence and open review key");
+            rig.Service.Dispose();
+            SqliteConnection.ClearAllPools();
 
             string[] said = [.. flow.Lines, result.Detail, pageOne, pageTwo, body1, Audit(w.Db)];
             check(!Holds(said, [.. Values.Values]) && !Holds([body2], [.. Values.Values]), "rotate: no secret value is in any output");

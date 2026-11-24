@@ -7,7 +7,7 @@ namespace WithSecrets.Tests;
 
 /// <summary>
 /// The signed manifest: keys (with the one admin) and settings in one canonical JSON text, signed by the admin key. Every
-/// read verifies it; any edit made to state.db outside the tool fails verification, and then nothing can be used.
+/// read verifies it; any edit made to with-secrets.db outside the tool fails verification, and then nothing can be used.
 /// </summary>
 internal static class ManifestTests
 {
@@ -48,7 +48,7 @@ internal static class ManifestTests
             + "\",\"alg\":-7,\"rp\":\"localhost\",\"created\":\"2026-11-01T10:00:00.0000000+00:00\",\"admin\":true,\"slot\":{\"salt\":\"" + laptopRecord.Slot!.Salt + "\",\"wrap\":\"" + laptopRecord.Slot.Wrap
             + "\"}}],\"store\":\"\",\"vault\":\"\",\"secrets\":{},\"settings\":" + ToolSettings.Defaults.Canonical() + "}";
         check(first.Canonical() == expected, "manifest: the canonical text has a fixed key order (" + first.Canonical() + ")");
-        check(first.Version == 1 && first.Admins.Single().Id == id && first.Keys.Count == 1, "manifest: the first manifest is version 1 with the first key as admin");
+        check(first.Version == 1 && first.Admins.Single().Id == id && first.Keys.Count == 1, "manifest: the first manifest is version 2 with the first key as admin");
 
         Manifest second = first.WithKey(Record(phone, "phone", "ws.example.com"));
         check(second.Version == 2 && second.Keys.Count == 2 && second.Keys.Count(key => key.Admin) == 1 && second.Admins.Single().Id == id, "manifest: adding a key is version + 1 and the new key is not admin by default");
@@ -125,8 +125,8 @@ internal static class ManifestTests
         check(keys.Count == 2 && keys.Single(key => key.Admin).Name == "laptop" && !keys.Single(key => key.Name == "phone").Admin, "manifest store: keys come from the manifest, the first is the admin");
         check(ToolSettings.Load(again, out error).Port == 8765 && error is null, "manifest store: settings come from the manifest");
         check(TestState.Current(again)!.Version == 2, "manifest store: the version is 2 after two changes");
-        check(Tables(db.FilePath).SequenceEqual(["manifest", "schema_version", "secrets", "sign_counts"]), "manifest store: no passkeys or settings table; secrets have their own (" + string.Join(",", Tables(db.FilePath)) + ")");
-        check(StateDatabase.SchemaVersion == 11, "manifest store: the schema version is 11 (no audit table; slots, the vault and the recovery slot are in the manifest)");
+        check(Tables(db.FilePath).SequenceEqual(WithSecretsDatabase.Tables), "manifest store: one layout includes the state, authority and audit tables");
+        check(WithSecretsDatabase.SchemaVersion == 3, "manifest store: the slots, vault and recovery slot live in the manifest");
     }
 
     private static string[] Tables(string path)
@@ -246,9 +246,9 @@ internal static class ManifestTests
             check(seeded.TryCheck(out _), "manifest tamper: " + name + ": the state verifies before the edit");
             tamper(seeded);
             StateDatabase db = new(seeded.FilePath);
-            check(!db.TryCheck(out string? error) && error is not null && error.Contains("state failed verification: delete state.db to start over (only if you did not edit it)", StringComparison.Ordinal), "manifest tamper: " + name + ": verification fails (" + error + ")");
+            check(!db.TryCheck(out string? error) && error is not null && error.Contains("delete with-secrets.db to start over", StringComparison.Ordinal), "manifest tamper: " + name + ": verification fails (" + error + ")");
             StringWriter stderr = new();
-            check(db.Gate(stderr) == RunCommand.StoreError && stderr.ToString().Contains("state failed verification", StringComparison.Ordinal) && !stderr.ToString().Contains("not enrolled", StringComparison.OrdinalIgnoreCase), "manifest tamper: " + name + ": every command exits 4 with the verification message");
+            check(db.Gate(stderr) == RunCommand.StoreError && stderr.ToString().Contains("delete with-secrets.db to start over", StringComparison.Ordinal) && !stderr.ToString().Contains("not enrolled", StringComparison.OrdinalIgnoreCase), "manifest tamper: " + name + ": every command exits 4 with the verification message");
             check(new PasskeyStore(db).All().Count == 0 && !new PasskeyStore(db).TryAll(out _), "manifest tamper: " + name + ": no key can approve, and keys are an error, not empty");
             ToolSettings.Load(db, out string? settingsError);
             check(settingsError is not null, "manifest tamper: " + name + ": the settings are an error");

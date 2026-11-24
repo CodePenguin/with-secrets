@@ -75,10 +75,10 @@ public sealed class LocalDeployment(AuthorityStore store, AuthorityKeyRing keys,
     }
 
     /// <summary>A deployment over any keys (tests, tools). <paramref name="authorityKey" /> opens the authority key of a generation.</summary>
-    public static LocalDeployment Create(string folder, ISigningKey machineKey, Func<int, ISigningKey> authorityKey, string hostName, TimeProvider? clock = null, Func<int, ISigningKey>? create = null)
+    public static LocalDeployment Create(string folder, ISigningKey machineKey, Func<int, ISigningKey> authorityKey, string hostName, TimeProvider? clock = null, Func<int, ISigningKey>? create = null, WithSecretsDatabase? database = null)
     {
         clock ??= TimeProvider.System;
-        AuthorityStore store = AuthorityStore.InFolder(folder, clock);
+        AuthorityStore store = new(database ?? WithSecretsDatabase.InFolder(folder), clock);
         AuthorityKeyRing keys = new(store, authorityKey, clock, create);
 
         return new LocalDeployment(store, keys, new LocalAuthority(store, keys, clock), machineKey, hostName, HostConfigFile.InFolder(folder), clock);
@@ -88,10 +88,11 @@ public sealed class LocalDeployment(AuthorityStore store, AuthorityKeyRing keys,
     /// The deployment of this user's machine: the machine identity and the authority signing key are persistent keys under their fixed names (<see cref="MachineKeyStore" />: non-exportable CNG keys on Windows, owner-only
     /// key files under <c>keys</c> in the store folder elsewhere), made on first use; the rest is in the store folder.
     /// </summary>
-    public static LocalDeployment OpenProduction(string folder)
+    public static LocalDeployment OpenProduction(string folder, WithSecretsDatabase? database = null)
     {
         ISigningKey machine = MachineKeyStore.OpenOrCreate(folder, KeyNames.Machine, out _);
-        LocalDeployment deployment = Create(folder, machine, generation => MachineKeyStore.OpenOrCreate(folder, AuthorityKeyNameOf(generation), out _), Environment.MachineName, create: generation => MachineKeyStore.CreateFresh(folder, AuthorityKeyNameOf(generation)));
+        LocalDeployment deployment = Create(folder, machine, generation => MachineKeyStore.OpenOrCreate(folder, AuthorityKeyNameOf(generation), out _), Environment.MachineName,
+            create: generation => MachineKeyStore.CreateFresh(folder, AuthorityKeyNameOf(generation)), database: database);
 
         return deployment;
     }

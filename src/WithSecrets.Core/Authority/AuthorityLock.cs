@@ -95,6 +95,14 @@ public sealed class AuthorityLock
         }
     }
 
+    internal bool WhileUnlocked(Func<bool> use)
+    {
+        lock (_gate)
+        {
+            return !_locked && use();
+        }
+    }
+
     /// <summary>Locks at once and runs every registered discard (key material zeroed as far as the runtime permits). Idempotent.</summary>
     public void Lock(string reason)
     {
@@ -292,7 +300,7 @@ public static class UnattendedUnlock
             return "unattended unlock is configured but its material is missing; the authority stays locked";
         }
 
-        // The policy row must be one the authority key signed when an administrator tapped for it; a row planted by a plain write to authority.db has no such signature.
+        // The policy row must be one the authority key signed when an administrator tapped for it; a row planted by a plain write to with-secrets.db has no such signature.
         try
         {
             byte[]? publicKey = keys.ActivePublicKey();

@@ -734,7 +734,24 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
     /// authority calls it only when the machine may ask, and records the grant for the time chosen there. Needs the authority: while it cannot be
     /// reached nothing is approved. What the page released (the unlock material) is never used here and is zeroed.
     /// </summary>
-    public async Task<GrantApproval> ApproveGrantAsync(LaunchRequest launch, string scopeKey, Func<ApprovalDecision> present, CancellationToken cancel)
+    public Task<GrantApproval> ApproveGrantAsync(LaunchRequest launch, string scopeKey, Func<ApprovalDecision> present, CancellationToken cancel) => ApproveAsync(launch, scopeKey, present, false, cancel);
+
+    /// <summary>
+    /// Records the consumed once-only grant of a run the person approved once (<paramref name="decision" />, already made on the page, is presented to the authority
+    /// with no time and no unlock material). <see cref="GrantApproval.Granted" /> is true only when the authority answered <see cref="GrantOps.Recorded" />. The
+    /// grant is never synchronized here and no store key is held for it: it covers no further run. Needs the authority: while it cannot be reached nothing is recorded.
+    /// </summary>
+    public Task<GrantApproval> RecordOnceGrantAsync(LaunchRequest launch, string scopeKey, ApprovalDecision decision, CancellationToken cancel)
+    {
+        if (!decision.Approved || decision.ReuseMinutes != 0)
+        {
+            return Task.FromResult(new GrantApproval(false, "only an approval given once records a once-only grant", GrantReasons.NoTime, null));
+        }
+
+        return ApproveAsync(launch, scopeKey, () => decision with { Unlock = null, ReuseMinutes = 0 }, true, cancel);
+    }
+
+    private async Task<GrantApproval> ApproveAsync(LaunchRequest launch, string scopeKey, Func<ApprovalDecision> present, bool once, CancellationToken cancel)
     {
         GrantApproval Deny(string message, string code) => new(false, message, code, null);
         if (Locked)
@@ -785,6 +802,19 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
             if (RevisionProblem(response.SecurityRevision) is { } revisionProblem)
             {
                 return Deny(revisionProblem, ReasonCodes.AuthorizationChanged);
+            }
+
+            if (once)
+            {
+                // Recorded, never granted: nothing is remembered for the scope and no key is held for it.
+                if (response.Outcome == GrantOps.Recorded && !response.HasGrant && response.ScopeKey == scopeKey && response.GrantId.Length > 0 && local is { Approved: true, ReuseMinutes: 0 })
+                {
+                    return new GrantApproval(true, "", response.ReasonCode, response.GrantId, null);
+                }
+
+                return Deny(response.ReasonCode is GrantReasons.NoEvidence or GrantReasons.BadEvidence or GrantReasons.NoTime
+                    ? "the approval did not carry a passkey assertion that records it as a once-only grant, so it was not recorded."
+                    : Message(response.ReasonCode), response.ReasonCode);
             }
 
             if (response.Outcome == GrantOps.Granted && response.ScopeKey == scopeKey && response.GrantId.Length > 0 && local is { Approved: true })

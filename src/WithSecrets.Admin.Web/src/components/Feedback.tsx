@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ApiError } from '../api/client'
 import styles from './Feedback.module.css'
 
@@ -9,10 +9,14 @@ const AnnouncerContext = createContext<Announce>(() => undefined)
 /** One polite live region for the whole application: async status changes (loaded, saved, refused) are announced here, not by moving focus. */
 export function AnnouncerProvider({ children }: { children: ReactNode }) {
   const [message, setMessage] = useState('')
+  const timer = useRef<number | undefined>(undefined)
+  useEffect(() => () => window.clearTimeout(timer.current), [])
+
   const announce = useCallback<Announce>((text) => {
     // Cleared first so the same sentence twice is read twice.
+    window.clearTimeout(timer.current)
     setMessage('')
-    setTimeout(() => setMessage(text), 50)
+    timer.current = window.setTimeout(() => setMessage(text), 50)
   }, [])
   const value = useMemo(() => announce, [announce])
 
@@ -53,11 +57,13 @@ export function ProblemAlert({ error, title }: { error: unknown; title?: string 
   )
 }
 
-export function Notice({ kind = 'info', title, children }: { kind?: 'info' | 'warning' | 'ok'; title?: string; children: ReactNode }) {
-  const prefix = kind === 'warning' ? 'Warning: ' : kind === 'ok' ? '' : 'Note: '
+const noticeStyles = { info: [styles.alertInfo, 'Note: '], warning: [styles.alertWarn, 'Warning: '], ok: [styles.alertOk, ''], error: [styles.alertError, 'Problem: '] } as const
+
+export function Notice({ kind = 'info', title, children }: { kind?: keyof typeof noticeStyles; title?: string; children: ReactNode }) {
+  const [style, prefix] = noticeStyles[kind]
 
   return (
-    <div className={[styles.alert, kind === 'warning' ? styles.alertWarn : kind === 'ok' ? styles.alertOk : styles.alertInfo].join(' ')}>
+    <div className={[styles.alert, style].join(' ')}>
       {title ? (
         <p className={styles.alertTitle}>
           <span aria-hidden="true">{prefix}</span>

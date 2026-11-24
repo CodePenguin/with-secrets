@@ -3,7 +3,7 @@
   "info": {
     "title": "with-secrets authority administration API",
     "version": "1.0.0",
-    "description": "The administration API of the with-secrets authority on the Windows host service\u0027s loopback port (same origin as the administration web application). JSON only. A browser session is READ-ONLY (an HttpOnly, SameSite=Strict cookie plus a secret given once, in service memory only). Every administrative change needs its own fresh passkey authorization; the narrow exception is Deny request in Approvals, which releases no secrets. Approve once uses its own fresh request-bound WebAuthn challenge and assertion; it does not create a grant or an administrative authorization, bound to the operation and its parameters, single use and time limited. There is no CORS. Changes within v1 are additive; a breaking change is a new major version. Another version number (/api/v2/...) is answered with 400 and the problem code unsupported-api-version listing supportedVersions; an unknown path under /api is 404 route-not-found; /api never falls through to the web application. Every response carries X-Api-Version; a request may carry it too (X-Api-Version: 1) and another value is refused with unsupported-api-version. No answer contains a secret value, a credential, a private key or recovery material."
+    "description": "The administration API of the with-secrets authority on the Windows host service\u0027s loopback port (same origin as the administration web application). JSON only. A browser session is READ-ONLY (an HttpOnly, SameSite=Strict cookie plus a secret given once, in service memory only). Every administrative change needs its own fresh passkey authorization; the narrow exception is Deny request in Approvals, which releases no secrets. Approve once uses its own fresh request-bound WebAuthn challenge and assertion; it records a once-only grant that the run it approves uses up, and it is not an administrative authorization, bound to the operation and its parameters, single use and time limited. There is no CORS. Changes within v1 are additive; a breaking change is a new major version. Another version number (/api/v2/...) is answered with 400 and the problem code unsupported-api-version listing supportedVersions; an unknown path under /api is 404 route-not-found; /api never falls through to the web application. Every response carries X-Api-Version; a request may carry it too (X-Api-Version: 1) and another value is refused with unsupported-api-version. No answer contains a secret value, a credential, a private key or recovery material."
   },
   "servers": [
     {
@@ -44,6 +44,9 @@
     },
     {
       "name": "passkeys"
+    },
+    {
+      "name": "providers"
     },
     {
       "name": "authorizations"
@@ -1839,7 +1842,7 @@
               "type": "string",
               "minLength": 4,
               "maxLength": 80,
-              "description": "The grant\u0027s id, or an unambiguous start of it."
+              "description": "The id of what the operation changes: a grant\u0027s id (or an unambiguous start of it), a pairing invitation\u0027s, or a provider instance\u0027s or mount\u0027s (its full id)."
             }
           }
         ],
@@ -2024,7 +2027,7 @@
               "type": "string",
               "minLength": 4,
               "maxLength": 80,
-              "description": "The grant\u0027s id, or an unambiguous start of it."
+              "description": "The id of what the operation changes: a grant\u0027s id (or an unambiguous start of it), a pairing invitation\u0027s, or a provider instance\u0027s or mount\u0027s (its full id)."
             }
           }
         ],
@@ -2229,7 +2232,7 @@
               "type": "string",
               "minLength": 4,
               "maxLength": 80,
-              "description": "The grant\u0027s id, or an unambiguous start of it."
+              "description": "The id of what the operation changes: a grant\u0027s id (or an unambiguous start of it), a pairing invitation\u0027s, or a provider instance\u0027s or mount\u0027s (its full id)."
             }
           }
         ],
@@ -2529,7 +2532,7 @@
               "type": "string",
               "minLength": 4,
               "maxLength": 80,
-              "description": "The grant\u0027s id, or an unambiguous start of it."
+              "description": "The id of what the operation changes: a grant\u0027s id (or an unambiguous start of it), a pairing invitation\u0027s, or a provider instance\u0027s or mount\u0027s (its full id)."
             }
           }
         ],
@@ -2983,7 +2986,7 @@
               "type": "string",
               "minLength": 4,
               "maxLength": 80,
-              "description": "The grant\u0027s id, or an unambiguous start of it."
+              "description": "The id of what the operation changes: a grant\u0027s id (or an unambiguous start of it), a pairing invitation\u0027s, or a provider instance\u0027s or mount\u0027s (its full id)."
             }
           }
         ],
@@ -3182,7 +3185,7 @@
               "type": "string",
               "minLength": 4,
               "maxLength": 80,
-              "description": "The grant\u0027s id, or an unambiguous start of it."
+              "description": "The id of what the operation changes: a grant\u0027s id (or an unambiguous start of it), a pairing invitation\u0027s, or a provider instance\u0027s or mount\u0027s (its full id)."
             }
           }
         ],
@@ -3554,7 +3557,7 @@
               "type": "string",
               "minLength": 4,
               "maxLength": 80,
-              "description": "The grant\u0027s id, or an unambiguous start of it."
+              "description": "The id of what the operation changes: a grant\u0027s id (or an unambiguous start of it), a pairing invitation\u0027s, or a provider instance\u0027s or mount\u0027s (its full id)."
             }
           }
         ],
@@ -3566,6 +3569,107 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Grant"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/grants/{id}/review": {
+      "get": {
+        "operationId": "getGrantReview",
+        "summary": "The signed approval text of a grant, available while review is open (state open, locked or none); an approval-only session gets 403 admin-required.",
+        "tags": [
+          "grants"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 4,
+              "maxLength": 80,
+              "description": "The id of what the operation changes: a grant\u0027s id (or an unambiguous start of it), a pairing invitation\u0027s, or a provider instance\u0027s or mount\u0027s (its full id)."
+            }
+          }
+        ],
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GrantReview"
                 }
               }
             }
@@ -4601,6 +4705,2032 @@
         ]
       }
     },
+    "/api/v1/providers": {
+      "get": {
+        "operationId": "listProviders",
+        "summary": "List configured provider instances.",
+        "tags": [
+          "providers"
+        ],
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderList"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "addProvider",
+        "summary": "Add a provider instance.",
+        "tags": [
+          "providers"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "A name: a passkey\u0027s or a machine\u0027s friendly name (at most 40 characters), or a provider instance\u0027s (at most 64; leading and trailing spaces are dropped)."
+                  },
+                  "type": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "description": "The provider type of the instance (one the service offers)."
+                  },
+                  "config": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 2000,
+                    "description": "The instance\u0027s configuration: a JSON object on one line. It is stored unencrypted and shown in the signed text, so it must hold no credential (a field such as tokenEnv may name the environment variable that holds one)."
+                  },
+                  "max-stale-seconds": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 5,
+                    "description": "How long a cached value may still be served while its provider is unavailable: whole seconds as text, 0 to 86400."
+                  },
+                  "confirm-warnings": {
+                    "type": "string",
+                    "enum": [
+                      "yes"
+                    ],
+                    "description": "Go on although the provider\u0027s validation reported warnings (it is signed)."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization",
+                  "name",
+                  "type",
+                  "config",
+                  "max-stale-seconds"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "provider-add",
+        "description": "Add a provider instance. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider administration is unavailable on this service (internal-error).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/providers/{id}": {
+      "get": {
+        "operationId": "getProvider",
+        "summary": "Read one provider instance by id.",
+        "tags": [
+          "providers"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Provider"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider administration is unavailable on this service (internal-error).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      },
+      "delete": {
+        "operationId": "removeProvider",
+        "summary": "Remove a provider instance with no mounts.",
+        "tags": [
+          "providers"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  },
+                  "revision": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 10,
+                    "description": "The revision of the provider instance as it was shown (whole number as text); the change is refused when it has moved."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization",
+                  "revision"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "provider-remove",
+        "description": "Remove a provider instance with no mounts. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider administration is unavailable on this service (internal-error).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/providers/types": {
+      "get": {
+        "operationId": "listProviderTypes",
+        "summary": "List registered provider types.",
+        "tags": [
+          "providers"
+        ],
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderTypeList"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/providers/{id}/mounts": {
+      "get": {
+        "operationId": "listProviderMounts",
+        "summary": "List mounts of a provider instance.",
+        "tags": [
+          "providers"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MountList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/mounts": {
+      "get": {
+        "operationId": "listMounts",
+        "summary": "List all provider mounts.",
+        "tags": [
+          "providers"
+        ],
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MountList"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      },
+      "post": {
+        "operationId": "addMount",
+        "summary": "Add a provider mount and end grants whose source changes.",
+        "tags": [
+          "providers"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  },
+                  "instance": {
+                    "type": "string",
+                    "minLength": 36,
+                    "maxLength": 36,
+                    "description": "The id of the provider instance the mount reads from."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "tree",
+                      "single"
+                    ],
+                    "description": "A tree mount (a folder of secret names) or a single secret name."
+                  },
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200,
+                    "description": "The mount\u0027s logical path: the folder (tree) or the secret name (single)."
+                  },
+                  "base": {
+                    "type": "string",
+                    "maxLength": 300,
+                    "description": "The provider path the mount reads (for a tree mount it may be empty: the provider\u0027s root)."
+                  },
+                  "confirm-warnings": {
+                    "type": "string",
+                    "enum": [
+                      "yes"
+                    ],
+                    "description": "Go on although the provider\u0027s validation reported warnings (it is signed)."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization",
+                  "instance",
+                  "kind",
+                  "path",
+                  "base"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "mount-add",
+        "description": "Add a provider mount and end grants whose source changes. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider administration is unavailable on this service (internal-error).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/mounts/{id}/entries": {
+      "get": {
+        "operationId": "listMountEntries",
+        "summary": "List namespace entry metadata for a mount.",
+        "tags": [
+          "providers"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NamespaceEntryList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/providers/validate": {
+      "post": {
+        "operationId": "validateProvider",
+        "summary": "Validate a proposed provider configuration or mount path.",
+        "tags": [
+          "providers"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "type": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64,
+                        "description": "The provider type of the instance (one the service offers)."
+                      },
+                      "config": {
+                        "type": "string",
+                        "minLength": 2,
+                        "maxLength": 2000,
+                        "description": "The instance\u0027s configuration: a JSON object on one line. It is stored unencrypted and shown in the signed text, so it must hold no credential (a field such as tokenEnv may name the environment variable that holds one)."
+                      },
+                      "mountBase": {
+                        "type": "string",
+                        "maxLength": 300,
+                        "description": "The provider path the mount reads (for a tree mount it may be empty: the provider\u0027s root)."
+                      }
+                    },
+                    "additionalProperties": false,
+                    "required": [
+                      "type",
+                      "config"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "instance": {
+                        "type": "string",
+                        "minLength": 36,
+                        "maxLength": 36,
+                        "description": "The id of the provider instance the mount reads from."
+                      },
+                      "config": {
+                        "type": "string",
+                        "minLength": 2,
+                        "maxLength": 2000,
+                        "description": "The instance\u0027s configuration: a JSON object on one line. It is stored unencrypted and shown in the signed text, so it must hold no credential (a field such as tokenEnv may name the environment variable that holds one)."
+                      },
+                      "mountBase": {
+                        "type": "string",
+                        "maxLength": 300,
+                        "description": "The provider path the mount reads (for a tree mount it may be empty: the provider\u0027s root)."
+                      }
+                    },
+                    "additionalProperties": false,
+                    "required": [
+                      "instance",
+                      "mountBase"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderValidation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider administration is unavailable on this service (internal-error).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/mounts/{id}/refresh": {
+      "post": {
+        "operationId": "refreshMount",
+        "summary": "Refresh the namespace entries of a mount from its provider.",
+        "tags": [
+          "providers"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MountRefresh"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider administration is unavailable on this service (internal-error).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/providers/{id}/config": {
+      "put": {
+        "operationId": "changeProviderConfig",
+        "summary": "Change a provider instance configuration.",
+        "tags": [
+          "providers"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  },
+                  "revision": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 10,
+                    "description": "The revision of the provider instance as it was shown (whole number as text); the change is refused when it has moved."
+                  },
+                  "config": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 2000,
+                    "description": "The instance\u0027s configuration: a JSON object on one line. It is stored unencrypted and shown in the signed text, so it must hold no credential (a field such as tokenEnv may name the environment variable that holds one)."
+                  },
+                  "confirm-warnings": {
+                    "type": "string",
+                    "enum": [
+                      "yes"
+                    ],
+                    "description": "Go on although the provider\u0027s validation reported warnings (it is signed)."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization",
+                  "revision",
+                  "config"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "provider-config",
+        "description": "Change a provider instance configuration. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider administration is unavailable on this service (internal-error).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/providers/{id}/max-stale": {
+      "put": {
+        "operationId": "changeProviderMaxStale",
+        "summary": "Change the provider instance cache policy.",
+        "tags": [
+          "providers"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  },
+                  "revision": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 10,
+                    "description": "The revision of the provider instance as it was shown (whole number as text); the change is refused when it has moved."
+                  },
+                  "max-stale-seconds": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 5,
+                    "description": "How long a cached value may still be served while its provider is unavailable: whole seconds as text, 0 to 86400."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization",
+                  "revision",
+                  "max-stale-seconds"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "provider-max-stale",
+        "description": "Change the provider instance cache policy. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider administration is unavailable on this service (internal-error).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/mounts/{id}": {
+      "delete": {
+        "operationId": "removeMount",
+        "summary": "Remove a provider mount and end grants whose source changes.",
+        "tags": [
+          "providers"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "mount-remove",
+        "description": "Remove a provider mount and end grants whose source changes. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider administration is unavailable on this service (internal-error).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
     "/api/v1/authorizations": {
       "post": {
         "operationId": "createAuthorization",
@@ -4921,7 +7051,7 @@
               "type": "string",
               "minLength": 4,
               "maxLength": 80,
-              "description": "The grant\u0027s id, or an unambiguous start of it."
+              "description": "The id of what the operation changes: a grant\u0027s id (or an unambiguous start of it), a pairing invitation\u0027s, or a provider instance\u0027s or mount\u0027s (its full id)."
             }
           }
         ],
@@ -4935,6 +7065,29 @@
                   "proof": {
                     "type": "string",
                     "maxLength": 12000
+                  },
+                  "prf": {
+                    "type": "object",
+                    "properties": {
+                      "epk": {
+                        "type": "string",
+                        "maxLength": 256
+                      },
+                      "iv": {
+                        "type": "string",
+                        "maxLength": 128
+                      },
+                      "ct": {
+                        "type": "string",
+                        "maxLength": 256
+                      }
+                    },
+                    "additionalProperties": false,
+                    "required": [
+                      "epk",
+                      "iv",
+                      "ct"
+                    ]
                   }
                 },
                 "additionalProperties": false,
@@ -5096,7 +7249,7 @@
               "type": "string",
               "minLength": 4,
               "maxLength": 80,
-              "description": "The grant\u0027s id, or an unambiguous start of it."
+              "description": "The id of what the operation changes: a grant\u0027s id (or an unambiguous start of it), a pairing invitation\u0027s, or a provider instance\u0027s or mount\u0027s (its full id)."
             }
           },
           {
@@ -5191,7 +7344,7 @@
               "type": "string",
               "minLength": 4,
               "maxLength": 80,
-              "description": "The grant\u0027s id, or an unambiguous start of it."
+              "description": "The id of what the operation changes: a grant\u0027s id (or an unambiguous start of it), a pairing invitation\u0027s, or a provider instance\u0027s or mount\u0027s (its full id)."
             }
           }
         ],
@@ -5292,6 +7445,162 @@
         "x-access": "authorization",
         "x-operation": "unlock",
         "description": "Unlock the authority (needs no session, but its own authorization). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          },
+          {
+            "browserCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/review/unlock": {
+      "post": {
+        "operationId": "unlockReview",
+        "summary": "Open approved command text for review with an administrator passkey\u0027s key release.",
+        "tags": [
+          "authority"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "review-unlock",
+        "description": "Open approved command text for review with an administrator passkey\u0027s key release. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -6418,8 +8727,8 @@
                   "name": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 40,
-                    "description": "A friendly name (a passkey\u0027s or a machine\u0027s)."
+                    "maxLength": 64,
+                    "description": "A name: a passkey\u0027s or a machine\u0027s friendly name (at most 40 characters), or a provider instance\u0027s (at most 64; leading and trailing spaces are dropped)."
                   }
                 },
                 "additionalProperties": false,
@@ -7325,8 +9634,8 @@
                   "name": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 40,
-                    "description": "A friendly name (a passkey\u0027s or a machine\u0027s)."
+                    "maxLength": 64,
+                    "description": "A name: a passkey\u0027s or a machine\u0027s friendly name (at most 40 characters), or a provider instance\u0027s (at most 64; leading and trailing spaces are dropped)."
                   }
                 },
                 "additionalProperties": false,
@@ -7670,7 +9979,7 @@
               "type": "string",
               "minLength": 4,
               "maxLength": 80,
-              "description": "The grant\u0027s id, or an unambiguous start of it."
+              "description": "The id of what the operation changes: a grant\u0027s id (or an unambiguous start of it), a pairing invitation\u0027s, or a provider instance\u0027s or mount\u0027s (its full id)."
             }
           }
         ],
@@ -7859,7 +10168,7 @@
               "type": "string",
               "minLength": 4,
               "maxLength": 80,
-              "description": "The grant\u0027s id, or an unambiguous start of it."
+              "description": "The id of what the operation changes: a grant\u0027s id (or an unambiguous start of it), a pairing invitation\u0027s, or a provider instance\u0027s or mount\u0027s (its full id)."
             }
           }
         ],
@@ -8032,6 +10341,195 @@
         ]
       }
     },
+    "/api/v1/grants/{id}/replace": {
+      "post": {
+        "operationId": "replaceGrant",
+        "summary": "Make a new grant with the same scope as a used once-only grant.",
+        "tags": [
+          "grants"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 4,
+              "maxLength": 80,
+              "description": "The id of what the operation changes: a grant\u0027s id (or an unambiguous start of it), a pairing invitation\u0027s, or a provider instance\u0027s or mount\u0027s (its full id)."
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  },
+                  "minutes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1440,
+                    "description": "Minutes to add to (extend) or to grant from now (renew)."
+                  },
+                  "indefinite": {
+                    "type": "boolean",
+                    "description": "True for a grant with no end (instead of minutes)."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "grant-replace",
+        "description": "Make a new grant with the same scope as a used once-only grant. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          },
+          {
+            "browserCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
     "/api/v1/grants/{id}/revoke": {
       "post": {
         "operationId": "revokeGrant",
@@ -8048,7 +10546,7 @@
               "type": "string",
               "minLength": 4,
               "maxLength": 80,
-              "description": "The grant\u0027s id, or an unambiguous start of it."
+              "description": "The id of what the operation changes: a grant\u0027s id (or an unambiguous start of it), a pairing invitation\u0027s, or a provider instance\u0027s or mount\u0027s (its full id)."
             }
           }
         ],
@@ -8227,7 +10725,7 @@
               "type": "string",
               "minLength": 4,
               "maxLength": 80,
-              "description": "The grant\u0027s id, or an unambiguous start of it."
+              "description": "The id of what the operation changes: a grant\u0027s id (or an unambiguous start of it), a pairing invitation\u0027s, or a provider instance\u0027s or mount\u0027s (its full id)."
             }
           }
         ],
@@ -8571,8 +11069,8 @@
             "schema": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 40,
-              "description": "A friendly name (a passkey\u0027s or a machine\u0027s)."
+              "maxLength": 64,
+              "description": "A name: a passkey\u0027s or a machine\u0027s friendly name (at most 40 characters), or a provider instance\u0027s (at most 64; leading and trailing spaces are dropped)."
             }
           }
         ],
@@ -9024,6 +11522,21 @@
           },
           "protocolVersion": {
             "type": "integer"
+          },
+          "capabilities": {
+            "type": "object",
+            "properties": {
+              "providers": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "providers"
+            ]
+          },
+          "reviewOpen": {
+            "type": "boolean"
           }
         },
         "additionalProperties": false,
@@ -9033,7 +11546,336 @@
           "unlockMode",
           "apiVersion",
           "version",
-          "protocolVersion"
+          "protocolVersion",
+          "capabilities",
+          "reviewOpen"
+        ]
+      },
+      "ProviderType": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "adapterVersion": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "adapterVersion"
+        ]
+      },
+      "ProviderTypeList": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/ProviderType"
+        }
+      },
+      "ProviderStatus": {
+        "type": "object",
+        "properties": {
+          "lifecycle": {
+            "type": "string",
+            "enum": [
+              "initializing",
+              "ready",
+              "unavailable",
+              "shuttingdown"
+            ]
+          },
+          "lifecycleMessage": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lifecycleAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "health": {
+            "type": "string",
+            "enum": [
+              "initializing",
+              "healthy",
+              "degraded",
+              "unavailable",
+              "misconfigured"
+            ]
+          },
+          "healthMessage": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "healthAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "lifecycle",
+          "lifecycleMessage",
+          "lifecycleAt",
+          "health",
+          "healthMessage",
+          "healthAt"
+        ]
+      },
+      "Provider": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "configuration": {
+            "type": "string"
+          },
+          "maxStaleSeconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "mounts": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "status": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ProviderStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "actions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "config",
+                "max-stale",
+                "remove",
+                "add-mount"
+              ]
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "type",
+          "configuration",
+          "maxStaleSeconds",
+          "revision",
+          "mounts",
+          "status",
+          "actions"
+        ]
+      },
+      "ProviderList": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/Provider"
+        }
+      },
+      "Mount": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "instanceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "instanceName": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "tree",
+              "single"
+            ]
+          },
+          "logicalPath": {
+            "type": "string"
+          },
+          "basePath": {
+            "type": "string"
+          },
+          "entries": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "actions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "remove",
+                "refresh"
+              ]
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "instanceId",
+          "instanceName",
+          "kind",
+          "logicalPath",
+          "basePath",
+          "entries",
+          "actions"
+        ]
+      },
+      "MountList": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/Mount"
+        }
+      },
+      "NamespaceEntry": {
+        "type": "object",
+        "properties": {
+          "logicalPath": {
+            "type": "string"
+          },
+          "providerPath": {
+            "type": "string"
+          },
+          "externalId": {
+            "type": "string"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "descriptionSource": {
+            "type": "string",
+            "enum": [
+              "provider",
+              "local"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "logicalPath",
+          "providerPath",
+          "externalId",
+          "description",
+          "descriptionSource"
+        ]
+      },
+      "NamespaceEntryList": {
+        "type": "array",
+        "items": {
+          "$ref": "#/components/schemas/NamespaceEntry"
+        }
+      },
+      "ProviderValidationIssue": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "warning",
+              "error"
+            ]
+          },
+          "target": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "providerCode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "message",
+          "severity",
+          "target",
+          "providerCode"
+        ]
+      },
+      "ProviderValidation": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "issues": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProviderValidationIssue"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "issues"
+        ]
+      },
+      "MountRefresh": {
+        "type": "object",
+        "properties": {
+          "complete": {
+            "type": "boolean"
+          },
+          "added": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "removed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "changed": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "complete",
+          "added",
+          "removed",
+          "changed"
         ]
       },
       "Login": {
@@ -9926,6 +12768,28 @@
             ],
             "format": "date-time"
           },
+          "usage": {
+            "type": "string",
+            "enum": [
+              "reusable",
+              "once"
+            ],
+            "description": "reusable, or once (a grant that the one run it approved uses up)."
+          },
+          "consumed": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "replaces": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The id of the used once-only grant this grant was made from."
+          },
           "actions": {
             "type": "array",
             "items": {
@@ -9933,9 +12797,14 @@
               "enum": [
                 "extend",
                 "renew",
-                "revoke"
+                "revoke",
+                "replace"
               ]
             }
+          },
+          "verified": {
+            "type": "boolean",
+            "description": "The grant seal verifies and the signing passkey is still authorized."
           }
         },
         "additionalProperties": false,
@@ -9955,7 +12824,11 @@
           "workingDirectory",
           "approvedBy",
           "revoked",
-          "actions"
+          "usage",
+          "consumed",
+          "replaces",
+          "actions",
+          "verified"
         ]
       },
       "GrantList": {
@@ -9971,6 +12844,34 @@
         "additionalProperties": false,
         "required": [
           "items"
+        ]
+      },
+      "GrantReview": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "open",
+              "locked",
+              "none"
+            ]
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verified": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "state",
+          "text",
+          "verified"
         ]
       },
       "AuditEvent": {
@@ -10314,6 +13215,7 @@
             "type": "string",
             "enum": [
               "unlock",
+              "review-unlock",
               "lock",
               "policy-manual",
               "policy-unattended",
@@ -10330,12 +13232,19 @@
               "machine-host-change",
               "grant-extend",
               "grant-renew",
+              "grant-replace",
               "grant-revoke",
               "passkey-enroll",
               "store-key-rotate",
               "passkey-unenroll",
               "pairing-create",
-              "pairing-revoke"
+              "pairing-revoke",
+              "provider-add",
+              "provider-config",
+              "provider-max-stale",
+              "provider-remove",
+              "mount-add",
+              "mount-remove"
             ]
           },
           "state": {
@@ -10402,6 +13311,12 @@
                 "type": "null"
               }
             ]
+          },
+          "prfKey": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "additionalProperties": false,
@@ -10417,7 +13332,8 @@
           "expires",
           "lifetimeSeconds",
           "result",
-          "proof"
+          "proof",
+          "prfKey"
         ]
       },
       "ProofStart": {
@@ -10450,6 +13366,7 @@
             "type": "string",
             "enum": [
               "unlock",
+              "review-unlock",
               "lock",
               "policy-manual",
               "policy-unattended",
@@ -10466,12 +13383,19 @@
               "machine-host-change",
               "grant-extend",
               "grant-renew",
+              "grant-replace",
               "grant-revoke",
               "passkey-enroll",
               "store-key-rotate",
               "passkey-unenroll",
               "pairing-create",
-              "pairing-revoke"
+              "pairing-revoke",
+              "provider-add",
+              "provider-config",
+              "provider-max-stale",
+              "provider-remove",
+              "mount-add",
+              "mount-remove"
             ]
           },
           "state": {
@@ -10524,6 +13448,12 @@
           },
           "proof": {
             "$ref": "#/components/schemas/ProofStart"
+          },
+          "prfKey": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "additionalProperties": false,
@@ -10539,7 +13469,8 @@
           "expires",
           "lifetimeSeconds",
           "result",
-          "proof"
+          "proof",
+          "prfKey"
         ]
       },
       "AuthorizationResult": {
@@ -10604,6 +13535,7 @@
             "type": "string",
             "enum": [
               "unlock",
+              "review-unlock",
               "lock",
               "policy-manual",
               "policy-unattended",
@@ -10620,12 +13552,19 @@
               "machine-host-change",
               "grant-extend",
               "grant-renew",
+              "grant-replace",
               "grant-revoke",
               "passkey-enroll",
               "store-key-rotate",
               "passkey-unenroll",
               "pairing-create",
-              "pairing-revoke"
+              "pairing-revoke",
+              "provider-add",
+              "provider-config",
+              "provider-max-stale",
+              "provider-remove",
+              "mount-add",
+              "mount-remove"
             ],
             "description": "The operation to authorize."
           },
@@ -10639,6 +13578,12 @@
                 "boolean"
               ],
               "maxLength": 300
+            },
+            "properties": {
+              "config": {
+                "type": "string",
+                "maxLength": 2000
+              }
             }
           }
         },

@@ -5,7 +5,7 @@ using Microsoft.Data.Sqlite;
 
 namespace WithSecrets.Tests;
 
-/// <summary>The SQLite state store: passkeys and saved approvals in state.db, and the signed audit events the administrative changes write (there is no audit table and no hash chain).</summary>
+/// <summary>The SQLite state store: passkeys and saved approvals in with-secrets.db, and the signed audit events the administrative changes write (there is no audit table and no hash chain).</summary>
 internal static class StateDatabaseTests
 {
     /// <summary>The signed audit events (JSON, in order) of the store folder of <paramref name="path" />: the outbox beside it. Empty when there are none.</summary>
@@ -67,7 +67,7 @@ internal static class StateDatabaseTests
     {
         string folder = Path.Combine(root, "round");
         StateDatabase db = StateDatabase.InFolder(folder);
-        check(db.FilePath == Path.Combine(folder, "state.db"), "db: the file is state.db in the store folder");
+        check(db.FilePath == Path.Combine(folder, "with-secrets.db"), "db: the file is with-secrets.db in the store folder");
         check(db.TryCheck(out string? error) && error is null && !File.Exists(db.FilePath), "db: a missing database is fine and is not created by a check");
 
         PasskeyStore passkeys = new(db);
@@ -81,7 +81,7 @@ internal static class StateDatabaseTests
         check(!passkeys.UpdateSignCount(Id("id-1"), 4000000000u) && passkeys.All()[0].SignCount == 4000000000u, "db passkeys: an equal sign count changes nothing");
         check(passkeys.UpdateSignCount(Id("id-1"), 4000000001u) && passkeys.All()[0].SignCount == 4000000001u && !passkeys.UpdateSignCount("nope", 1), "db passkeys: a higher sign count is saved");
         check(!passkeys.RemoveById(Id("id-1")) && passkeys.RemoveById(Id("id-2")) && !passkeys.RemoveById(Id("id-2")) && passkeys.ForRp("localhost").Count == 1 && passkeys.ForRp("ws.example.com").Count == 0, "db passkeys: remove by Id; the admin key stays");
-        check(passkeys.UnreadableMessage == "cannot read state.db; fix or delete it", "db passkeys: the message names state.db");
+        check(passkeys.UnreadableMessage == "cannot read with-secrets.db; fix or delete it", "db passkeys: the message names with-secrets.db");
 
         AdminAudit audit = db.Audit;
         check(audit.TryRecord(AdminEvent.Change("key-enrolled", "passkey laptop verified", "laptop")) && audit.TryRecord(AdminEvent.Secrets("secrets-set", ["API_KEY", "DB_URL"], "passkey phone verified", "phone")) && audit.TryRecord(AdminEvent.Secrets("secrets-removed", ["OTHER_NAME"], "passkey phone verified", "phone")), "db audit: three writes");
@@ -90,7 +90,7 @@ internal static class StateDatabaseTests
         check(TestAudit.TryRead(db, 20, null, out IReadOnlyList<AuditRow> all, out _) && all.Count == 3 && all[0].Event == "key-enrolled" && all[0].KeyName == "laptop" && all[1].Secrets.SequenceEqual(["API_KEY", "DB_URL"]) && all[2].Secrets.SequenceEqual(["OTHER_NAME"]) && all[2].KeyName == "phone", "db audit: events carry the event name, the names and the key name");
         check(TestAudit.TryRead(db, 1, null, out IReadOnlyList<AuditRow> last, out _) && last.Count == 1 && last[0].Event == "secrets-removed", "db audit: the newest event");
         check(TestAudit.TryRead(db, 20, "API_KEY", out IReadOnlyList<AuditRow> filtered, out _) && filtered.Count == 1 && filtered[0].Secrets.Contains("API_KEY"), "db audit: filtering by name");
-        check(Convert.ToInt32(Scalar(db.FilePath, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'audit'")) == 0, "db audit: state.db has no audit table (the events are in the signed outbox)");
+        check(Convert.ToInt32(Scalar(db.FilePath, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'audit'")) == 0, "db audit: with-secrets.db has no audit table (the events are in the signed outbox)");
     }
 
     private static void Concurrency(Action<bool, string> check, string root)
@@ -134,7 +134,7 @@ internal static class StateDatabaseTests
     }
 
     /// <summary>
-    /// Several writers reach a folder with no state.db at the same moment (the first run of two commands). Each writes one key. Every key must be there and the versions must run 1..N: the one that creates the file must not
+    /// Several writers reach a folder with no with-secrets.db at the same moment (the first run of two commands). Each writes one key. Every key must be there and the versions must run 1..N: the one that creates the file must not
     /// remove the journal files of the one that created it a moment before, and no write may be lost to it.
     /// </summary>
     private static void FirstCreationRace(Action<bool, string> check, string root)
@@ -222,7 +222,7 @@ internal static class StateDatabaseTests
     private static void Locked(Action<bool, string> check, string root)
     {
         string folder = Path.Combine(root, "locked");
-        StateDatabase db = new(Path.Combine(folder, "state.db"), TimeSpan.FromSeconds(1));
+        StateDatabase db = new(Path.Combine(folder, "with-secrets.db"), TimeSpan.FromSeconds(1));
         check(new PasskeyStore(db).Add(Key("first")), "db locked: a first record");
         using (SqliteConnection holder = new(new SqliteConnectionStringBuilder { DataSource = db.FilePath, Pooling = false }.ToString()))
         {
@@ -244,7 +244,7 @@ internal static class StateDatabaseTests
         check(new PasskeyStore(db).Add(Key("second")) && new PasskeyStore(db).All().Count == 2, "db locked: after the lock ends, writes work");
     }
 
-    /// <summary>A -wal or -shm left behind by an earlier state.db must not be applied to a new one.</summary>
+    /// <summary>A -wal or -shm left behind by an earlier with-secrets.db must not be applied to a new one.</summary>
     private static void StaleWal(Action<bool, string> check, string root)
     {
         string old = Path.Combine(root, "stale-old");
@@ -264,14 +264,14 @@ internal static class StateDatabaseTests
             foreach (string suffix in new[] { "-wal", "-shm" })
             {
                 using FileStream source = new(oldDb.FilePath + suffix, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-                using FileStream target = File.Create(Path.Combine(fresh, "state.db" + suffix));
+                using FileStream target = File.Create(Path.Combine(fresh, "with-secrets.db" + suffix));
                 source.CopyTo(target);
             }
         }
 
         StateDatabase newDb = StateDatabase.InFolder(fresh);
         bool added = new PasskeyStore(newDb).Add(Key("new-key"));
-        check(added && newDb.TryCheck(out _) && new PasskeyStore(newDb).All().Select(item => item.Id).SequenceEqual([Id("new-key")]), "db stale wal: a new state.db ignores a leftover -wal and -shm");
+        check(added && newDb.TryCheck(out _) && new PasskeyStore(newDb).All().Select(item => item.Id).SequenceEqual([Id("new-key")]), "db stale wal: a new with-secrets.db ignores a leftover -wal and -shm");
     }
 
     /// <summary>A hand-edited table with wrong column types or NULLs: reads fail closed or report, they never crash.</summary>
@@ -305,19 +305,19 @@ internal static class StateDatabaseTests
     {
         string folder = Path.Combine(root, "events");
         StateDatabase db = StateDatabase.InFolder(folder);
-        check(!db.Audit.TryWriteDenied("set-secrets", ["A_NAME"], "nothing here") && !File.Exists(db.FilePath) && TestAudit.Events(db).Count == 0, "audit events: a refusal with no state.db writes nothing and creates none");
+        check(!db.Audit.TryWriteDenied("set-secrets", ["A_NAME"], "nothing here") && !File.Exists(db.FilePath) && TestAudit.Events(db).Count == 0, "audit events: a refusal with no with-secrets.db writes nothing and creates none");
         check(new PasskeyStore(db).Add(Key("k")), "audit events: a state exists");
         check(db.Audit.TryWriteDenied("set-secrets", ["A_NAME"], "the admin approval was denied") && TestAudit.Rows(db) is [{ Event: AdminEvent.ChangeDenied } denied] && denied.Detail.StartsWith("set-secrets: ", StringComparison.Ordinal) && denied.Secrets.SequenceEqual(["A_NAME"]), "audit events: a refused change is an event with the command, the names and the reason");
 
         // An event that cannot be committed fails the change: the audit is part of it.
-        string refusedFile = Path.Combine(root, "events-refused", "state.db");
-        StateDatabase refusing = new(refusedFile) { Audit = new AdminAudit(() => new RecordingAudit(refuse: true), refusedFile) };
+        string refusedFile = Path.Combine(root, "events-refused", "with-secrets.db");
+        StateDatabase refusing = new(refusedFile) { Audit = new AdminAudit(() => new RecordingAudit(refuse: true), new WithSecretsDatabase(refusedFile)) };
         bool threw = false;
         try
         {
             refusing.Write((connection, transaction) =>
             {
-                refusing.AppendAudit(AdminEvent.Change("key-enrolled", "x", "k"));
+                refusing.AppendAudit(connection, transaction, AdminEvent.Change("key-enrolled", "x", "k"));
 
                 return 0;
             });

@@ -1,7 +1,7 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { approvalDetail, approvalItem, problem, signedIn, violations } from '../../test/fakeApi'
+import { approvalDetail, approvalItem, authorization, grant, problem, signedIn, status, violations } from '../../test/fakeApi'
 import { renderApp } from '../../test/render'
 
 const challengePath = 'POST /api/v1/approvals/req-0001/challenge'
@@ -276,6 +276,41 @@ describe('approvals', () => {
     expect(credentials.get).not.toHaveBeenCalled()
   })
 
+  it('a Deny made while the challenge is still being asked for waits for its answer, so the challenge never meets a decided request', async () => {
+    // The service refuses a challenge for a request that is already decided (409 request-not-pending), as the real one does.
+    let decided = false
+    let release: () => void = () => undefined
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const answered = await challenge(false)
+    const fake = signedIn({
+      [detailPath]: { body: approvalDetail() },
+      [challengePath]: async () => {
+        await held
+
+        return decided ? problem(409, 'request-not-pending', 'this request is no longer pending') : { status: 201, body: answered }
+      },
+      [denyPath]: () => {
+        decided = true
+
+        return { body: approvalDetail({ status: 'denied', review: null }) }
+      },
+    })
+    const user = userEvent.setup()
+    renderApp('/access/req-0001')
+    await waitFor(() => expect(fake.count(challengePath)).toBe(1))
+
+    await user.click(await screen.findByRole('button', { name: 'Deny' }))
+    expect(fake.count(denyPath)).toBe(0)
+
+    release()
+    await waitFor(() => expect(fake.count(denyPath)).toBe(1))
+    const replies = await Promise.all(vi.mocked(fetch).mock.results.map(async (result) => (result.value as Promise<Response>).then((response) => response.status)))
+    expect(replies).not.toContain(409)
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
   it('shows what became of a request that is no longer pending', async () => {
     signedIn({ [detailPath]: { body: approvalDetail({ status: 'expired', review: null }) } })
     renderApp('/access/req-0001')
@@ -289,5 +324,82 @@ describe('approvals', () => {
     renderApp('/access/req-0001')
 
     expect(await screen.findByRole('alert')).toHaveTextContent('no request is available for that id')
+  })
+})
+
+describe('grants: used once-only grants', () => {
+  const used = grant({ id: 'g-once0001', state: 'consumed', status: 'consumed', usage: 'once', consumed: '2026-11-09T09:00:05Z', expires: null, ends: 'used 2026-11-09T09:00:05.0000000Z', actions: ['replace'] })
+
+  it('shows Used once and a used state, and Make a grant from this sends grant-replace with minutes or no end', async () => {
+    const user = userEvent.setup()
+    const fake = signedIn({
+      'GET /api/v1/grants': { body: { items: [used, grant({ id: 'g-new00002', replaces: 'g-once0001' })] } },
+      'POST /api/v1/authorizations/inline': { status: 201, body: authorization({ operation: 'grant-replace', link: null, proof: { mode: 'webauthn', payload: JSON.stringify({ bind: 'AQ', rpId: 'localhost', timeout: 60000 }) }, parameters: [] }) },
+    })
+    renderApp('/access')
+
+    const list = await screen.findByRole('list', { name: 'Grants' })
+    expect(within(list).getByText('Used once')).toBeInTheDocument()
+    expect(within(list).getByText('Used')).toBeInTheDocument()
+    expect(within(list).getByText('Replaces g-once0001')).toBeInTheDocument()
+    expect(within(list).getByText('used 2026-11-09T09:00:05.0000000Z')).toBeInTheDocument()
+    expect(await violations(list)).toEqual([])
+
+    await user.click(within(list).getByRole('button', { name: /Make a grant from this/ }))
+    const dialog = await screen.findByRole('dialog')
+    expect(await violations(dialog)).toEqual([])
+    await user.click(within(dialog).getByRole('button', { name: 'Continue' }))
+    await waitFor(() => expect(fake.count('POST /api/v1/authorizations/inline')).toBe(1))
+    expect(fake.calls.find((call) => call.path === '/api/v1/authorizations/inline')?.body).toEqual({ operation: 'grant-replace', parameters: { id: 'g-once0001', minutes: 60 } })
+  })
+})
+
+describe('grant review', () => {
+  it('opens locked review with sealed PRF output and renders signed text literally', async () => {
+    const user = userEvent.setup()
+    const prfKey = await serverKey()
+    let open = false
+    const text = 'Command: deploy <script>token-canary</script>'
+    const authorizationItem = authorization({ operation: 'review-unlock', link: null, prfKey, proof: { mode: 'webauthn', payload: JSON.stringify({ bind: 'AQIDBA', rpId: 'localhost', timeout: 60000, salt: 'BQYHCA' }) } })
+    const fake = signedIn({
+      'GET /api/v1/status': () => ({ body: status({ reviewOpen: open }) }),
+      'GET /api/v1/grants/grant-0001/review': () => ({ body: { state: open ? 'open' : 'locked', text: open ? text : null, verified: true } }),
+      'POST /api/v1/authorizations/inline': { status: 201, body: authorizationItem },
+      'POST /api/v1/authorizations/auth-id-0001/proof': () => {
+        open = true
+        return { body: { ok: true } }
+      },
+      'GET /api/v1/authorizations/auth-id-0001': () => ({ body: open
+        ? authorization({ operation: 'review-unlock', link: null, state: 'consumed', result: { outcome: 'applied', link: null, detail: null, code: null, invitation: null, invitationGone: false } })
+        : authorizationItem }),
+    })
+    renderApp('/access')
+
+    await user.click(await screen.findByRole('button', { name: /^Review\s*grant grant-0001$/ }))
+    const locked = await screen.findByRole('button', { name: 'Locked: tap to review' })
+    expect(await violations(document.body)).toEqual([])
+    await user.click(locked)
+    const dialog = await screen.findByRole('dialog', { name: 'Unlock review text' })
+    await user.click(await within(dialog).findByRole('button', { name: 'Unlock review' }))
+    await waitFor(() => expect(fake.calls.find((call) => call.path.endsWith('/auth-id-0001/proof'))?.body?.prf).toEqual({
+      epk: expect.any(String), iv: expect.any(String), ct: expect.any(String),
+    }))
+    await user.click(await within(dialog).findByRole('button', { name: 'Close' }))
+    expect((await screen.findByText(text)).tagName).toBe('PRE')
+    expect(document.querySelector('pre script')).toBeNull()
+    expect(await violations(document.body)).toEqual([])
+  })
+
+  it('says an ended grant keeps no review text and an unverified grant is not used', async () => {
+    signedIn({
+      'GET /api/v1/grants': { body: { items: [grant({ id: 'g-ended001', status: 'revoked', state: 'revoked', actions: [] }), grant({ id: 'g-planted1', verified: false })] } },
+      'GET /api/v1/grants/g-planted1/review': { body: { state: 'locked', text: null, verified: false } },
+    })
+    renderApp('/access')
+
+    expect(await screen.findByText('No review text is kept for an ended grant.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /grant g-ended001$/ })).toBeNull()
+    expect(screen.getAllByText('This grant is not verified and is not used.')).toHaveLength(1)
+    expect(await violations(document.body)).toEqual([])
   })
 })

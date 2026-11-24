@@ -40,6 +40,41 @@ public sealed partial class AdminService
         return text is { Length: > 0 and <= 6 } && int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out value) && value >= min && value <= max;
     }
 
+    private bool TryOpenReview(Unlock? unlock)
+    {
+        if (_p.Review is not { } review || unlock is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            StateDatabase state = new(_p.Store.Database);
+            Manifest? manifest = state.Read(connection => state.CurrentManifest(connection, null));
+            return manifest is not null && _p.Lock.WhileUnlocked(() => review.IsOpen || review.TryOpen(manifest, unlock));
+        }
+        catch (Exception error) when (error is StateDatabaseException or WithSecretsDatabaseException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The plan of an operation, or why there is none. The provider and mount operations are planned asynchronously: their plan validates the proposed configuration or
+    /// mount through the provider's adapter before any page exists.
+    /// </summary>
+    private async Task<(AdminPlan? Plan, string? Refusal, int Status)> PlanAsync(string op, IReadOnlyDictionary<string, string> args, CancellationToken cancel)
+    {
+        if (IsProviderOperation(op) && !_p.Lock.IsLocked)
+        {
+            return await ProviderPlanAsync(op, args, cancel);
+        }
+
+        AdminPlan? plan = Plan(op, args, out string? refusal, out int status);
+
+        return (plan, refusal, status);
+    }
+
     private AdminPlan? Plan(string op, IReadOnlyDictionary<string, string> args, out string? refusal, out int status)
     {
         refusal = null;
@@ -63,10 +98,11 @@ public sealed partial class AdminService
                     return null;
                 }
 
+                System.Runtime.CompilerServices.StrongBox<string?> unlockRemark = new();
                 return new AdminPlan("unlock-authority",
                     "unlock the authority so that it serves secret requests again. It creates no grant and widens none; every sensitive change still needs its own passkey tap",
                     [("authority-key", key)],
-                    _ =>
+                    authorization =>
                     {
                         if (KeyMoved(key) is { } moved)
                         {
@@ -74,10 +110,30 @@ public sealed partial class AdminService
                         }
 
                         _p.Lock.Unlock(UnlockMethod.Manual);
+                        if (_p.Review is not null && !TryOpenReview(authorization.Unlock))
+                        {
+                            unlockRemark.Value = "Unlocked. Review text stays locked: this passkey did not release the review key.";
+                        }
                         _p.OnUnlocked();
 
                         return null;
-                    });
+                    }, Remark: unlockRemark, WantsPrf: _p.Review is not null);
+
+            case OpReviewUnlock:
+                if (_p.Review is null)
+                {
+                    refusal = "review text is available at the authority";
+                    return null;
+                }
+
+                if (_p.Review.IsOpen)
+                {
+                    refusal = "the review text is open already";
+                    return null;
+                }
+
+                return new AdminPlan(OpReviewUnlock, "unlock the approved command text for review", [("authority-key", key)],
+                    authorization => KeyMoved(key) ?? (TryOpenReview(authorization.Unlock) ? null : "this passkey did not release the review key; nothing was opened"), WantsPrf: true);
 
             case OpLock:
                 return new AdminPlan("lock-authority",
@@ -363,7 +419,7 @@ public sealed partial class AdminService
 
         return new AdminPlan(operation, sentence, parameters, a =>
         {
-            // The authority key signs the unattended policy, so that only an administrator's tap (and not a plain write to authority.db) can make one.
+            // The authority key signs the unattended policy, so that only an administrator's tap (and not a plain write to with-secrets.db) can make one.
             _p.Store.SetUnlockPolicy(policy, sealedBlob, verifier, a.Admin!, policy == UnlockPolicy.Unattended ? _p.Keys.Current() : null);
 
             return null;
@@ -499,14 +555,49 @@ public sealed partial class AdminService
 
     internal static string GrantState(GrantRecord grant, DateTimeOffset now) => grant.Status != "active" ? grant.Status : grant.IsExpired(now) ? "expired" : "active";
 
-    internal static string GrantEnds(GrantRecord grant, DateTimeOffset now) => grant.Expires is { } at ? (grant.IsExpired(now) ? "ended " : "ends ") + CanonicalJson.Time(at) : "no end";
+    internal static string GrantEnds(GrantRecord grant, DateTimeOffset now) => grant.Status == "consumed" && grant.Consumed is { } used ? "used " + CanonicalJson.Time(used)
+        : grant.Expires is { } at ? (grant.IsExpired(now) ? "ended " : "ends ") + CanonicalJson.Time(at) : "no end";
 
-    /// <summary>Null when the change may be applied to the grant as it is now, else why not (checked before the page, and again by the authority).</summary>
-    internal static string? GrantProblem(string verb, GrantRecord grant, DateTimeOffset now)
+    /// <summary>
+    /// Null when the change may be applied to the grant as it is now, else why not (checked before the page, and again by the authority). Replace applies only to a consumed once-only grant
+    /// that a person's assertion backs (<paramref name="verifier" /> checks it; with none, nothing is replaced), of a machine still Trusted at the grant's security revision, while no active
+    /// grant covers its scope (<paramref name="store" /> is read for both; with none, nothing is replaced): the authority's own refusals, so the app does not offer a replace that must fail.
+    /// </summary>
+    internal static string? GrantProblem(string verb, GrantRecord grant, DateTimeOffset now, AuthorityStore? store = null)
     {
+        if (verb == "replace")
+        {
+            if (grant.Status != "consumed" || grant.Usage != GrantUsage.Once)
+            {
+                return grant.Status == "active" ? "only a once-only grant that was used can be replaced; extend or renew this one instead" : $"the grant is {grant.Status}; only a once-only grant that was used can be replaced";
+            }
+
+            if (store?.Sealer is not { } sealer || sealer.Problem(grant) is not null)
+            {
+                return "no person's approval backs this grant, so it cannot be replaced";
+            }
+
+            if (store.Find(grant.Fingerprint) is not { Status: MachineStatus.Trusted } machine || machine.SecurityRevision != grant.SecurityRevision)
+            {
+                return "the machine's authorization changed since this grant was approved, so it cannot be replaced";
+            }
+
+            return store.ActiveGrantForScope(grant.Fingerprint, grant.ScopeKey) is { } active ? $"an active grant ({active.Id}) already covers this command; extend or renew that one instead" : null;
+        }
+
+        if (grant.Status == "consumed" && verb is "extend" or "renew")
+        {
+            return "this grant was used once; make a new grant from it instead";
+        }
+
         if (grant.Status != "active")
         {
             return $"the grant is {grant.Status}; it cannot be changed (a person makes a new one with: with-secrets approve ...)";
+        }
+
+        if (verb is "extend" or "renew" && (store?.Sealer is not { } activeSealer || activeSealer.Problem(grant) is not null))
+        {
+            return "no valid approval backs this grant";
         }
 
         return verb switch
@@ -522,7 +613,7 @@ public sealed partial class AdminService
     {
         refusal = null;
         status = 409;
-        if (verb is not ("extend" or "renew" or "revoke"))
+        if (verb is not ("extend" or "renew" or "revoke" or "replace"))
         {
             refusal = "unknown operation";
             status = 400;
@@ -554,14 +645,14 @@ public sealed partial class AdminService
         }
 
         DateTimeOffset now = _clock.GetUtcNow();
-        if (GrantProblem(verb, grant, now) is { } problem)
+        if (GrantProblem(verb, grant, now, _p.Store) is { } problem)
         {
             refusal = problem;
 
             return null;
         }
 
-        bool timed = verb is "extend" or "renew";
+        bool timed = verb is "extend" or "renew" or "replace";
         bool indefinite = Arg(args, "indefinite") == "true";
         int? minutes = null;
         if (timed)
@@ -583,19 +674,27 @@ public sealed partial class AdminService
         // What the page shows is exact: the new end is fixed here (counted from the present end, or from now) and is what the authority applies.
         DateTimeOffset? newEnd = verb == "revoke" || indefinite ? null : verb == "extend" ? grant.Expires!.Value.AddMinutes(minutes!.Value) : now.AddMinutes(minutes!.Value);
         MachineRecord? machine = _p.Store.Find(grant.Fingerprint);
+        bool replace = verb == "replace";
+        // A replacement's id is fixed here, so the page (which the passkey signs) names exactly the grant that will exist, and the authority makes no other.
+        string? newGrantId = replace ? GrantOps.NewGrantId() : null;
         string change = verb switch
         {
             "extend" => indefinite ? "extend this grant so that it has no end" : $"extend this grant by {minutes} minutes from its present end",
             "renew" => indefinite ? "renew this ended grant so that it has no end" : $"renew this ended grant for {minutes} minutes from now",
+            "replace" => (indefinite ? "make a new grant with no end" : $"make a new grant for {minutes} minutes from now") + $" ({newGrantId}) in place of this once-only grant that was used: the same machine, program, folder and secrets; it covers every run of that command, with no tap, until it ends",
             _ => "revoke this grant (it ends now and its machine is told)",
         };
-        string sentence = $"{change}\nGrant: {grant.Id} (revision {grant.Revision.ToString(CultureInfo.InvariantCulture)}), {GrantState(grant, now)}, {GrantEnds(grant, now)}\nMachine: {KeyIdentity.Display(grant.Fingerprint)}, host {(machine is null ? "(unknown)" : ApprovalSummary.Clean(machine.HostName))}\nSecrets: {ApprovalSummary.Clean(grant.SecretNames)}\nProgram: {ApprovalSummary.Clean(grant.Program)}\nFolder: {ApprovalSummary.Clean(grant.WorkingDirectory)}\nIt ends: {GrantEvidence.EndText(newEnd)}\n{GrantEvidence.AdminLines(verb, grant, grant.Revision + 1, newEnd)}";
+        string lines = replace ? GrantEvidence.ReplaceLines(grant, newGrantId!, newEnd) : GrantEvidence.AdminLines(verb, grant, grant.Revision + 1, newEnd);
+        string sentence = $"{change}\nGrant: {grant.Id} (revision {grant.Revision.ToString(CultureInfo.InvariantCulture)}), {GrantState(grant, now)}, {GrantEnds(grant, now)}\nMachine: {KeyIdentity.Display(grant.Fingerprint)}, host {(machine is null ? "(unknown)" : ApprovalSummary.Clean(machine.HostName))}\nSecrets: {ApprovalSummary.Clean(grant.SecretNames)}\nProgram: {ApprovalSummary.Clean(grant.Program)}\nFolder: {ApprovalSummary.Clean(grant.WorkingDirectory)}\nIt ends: {GrantEvidence.EndText(newEnd)}\n{lines}";
         string grantId = grant.Id;
         int grantRevision = grant.Revision;
+        IReadOnlyList<(string Name, string Value)> parameters = replace
+            ? [("grant", grantId), ("new-grant", newGrantId!), ("new-end", GrantEvidence.EndText(newEnd))]
+            : [("grant", grantId), ("revision", grantRevision.ToString(CultureInfo.InvariantCulture)), ("new-end", GrantEvidence.EndText(newEnd))];
 
-        return new AdminPlan(verb + "-grant", sentence, [("grant", grantId), ("revision", grantRevision.ToString(CultureInfo.InvariantCulture)), ("new-end", GrantEvidence.EndText(newEnd))], a =>
+        return new AdminPlan(verb + "-grant", sentence, parameters, a =>
         {
-            GrantAdminCommand command = new("adm-" + Guid.NewGuid().ToString("N"), verb, grantId, minutes, indefinite, grantRevision, a.Admin!.Actor, newEnd, a.Evidence);
+            GrantAdminCommand command = new("adm-" + Guid.NewGuid().ToString("N"), verb, grantId, minutes, indefinite, grantRevision, a.Admin!.Actor, newEnd, a.Evidence, newGrantId);
             GrantResponse response = _p.Authority.AdminGrant(command);
 
             // The answer is signed by the authority key; it is checked here too, as a host checks one (key, signature, this request, this change).
@@ -604,12 +703,14 @@ public sealed partial class AdminService
                 return "the authority's answer did not verify; check the grant in the list";
             }
 
-            return !response.HasGrant && response.Outcome != GrantOps.Revoked ? GrantReason(response.ReasonCode) : null;
+            return !response.HasGrant && response.Outcome is not (GrantOps.Revoked or GrantOps.Replaced) ? GrantReason(response.ReasonCode) : null;
         });
     }
 
     private static string GrantReason(string code) => code switch
     {
+        GrantReasons.Exists => "an active grant already covers this command; extend or renew that one instead. Nothing was done",
+        ReasonCodes.AuthorizationChanged => "the machine's authorization changed since this grant was approved; nothing was done",
         GrantReasons.RevisionChanged => "the grant changed while the page was open; nothing was done",
         GrantReasons.NotActive => "the grant is not active; nothing was done",
         GrantReasons.Expired => "the grant has ended; renew it instead",
@@ -623,6 +724,8 @@ public sealed partial class AdminService
 /// <summary>The passkey administration over this user's state: the enrollment pages. The confirmation code that a new passkey's page shows is typed in the terminal that runs the service.</summary>
 public sealed class StatePasskeyAdmin(StateDatabase state) : IPasskeyAdmin
 {
+    internal Func<Microsoft.Data.Sqlite.SqliteConnection, Microsoft.Data.Sqlite.SqliteTransaction, string, string, string?>? RekeyReview { get; init; }
+
     private Enrollment Make(Action<string> announce, Func<string?>? stopReason = null)
     {
         ApprovalSettings settings = ApprovalSettings.Load(state, out _);
@@ -662,7 +765,7 @@ public sealed class StatePasskeyAdmin(StateDatabase state) : IPasskeyAdmin
     {
         ApprovalSettings settings = ApprovalSettings.Load(state, out _);
         (EnrollmentTarget primary, EnrollmentTarget local) = CommandWiring.Targets(state, settings, announce, null);
-        ConfigChange change = new KeyRotation(state, new SecretStore(state), primary, local, announce) { StopReason = stopReason }.Run();
+        ConfigChange change = new KeyRotation(state, new SecretStore(state), primary, local, announce) { StopReason = stopReason, RekeyReview = RekeyReview }.Run();
 
         return change.Done ? ApprovalDecision.Allow(change.Detail) : ApprovalDecision.Deny(change.Detail);
     }, stopReason);

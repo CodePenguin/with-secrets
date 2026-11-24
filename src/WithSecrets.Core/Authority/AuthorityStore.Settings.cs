@@ -27,7 +27,7 @@ public sealed partial class AuthorityStore
 
     private const string PolicyDomain = "with-secrets unlock policy v1\n";
 
-    /// <summary>What the authority signing key signs when the unattended policy is set: the policy row, the sealed blob and its hash, so that a plain write to authority.db cannot turn unattended unlock on.</summary>
+    /// <summary>What the authority signing key signs when the unattended policy is set: the policy row, the sealed blob and its hash, so that a plain write to with-secrets.db cannot turn unattended unlock on.</summary>
     public static byte[] PolicySigningBytes(UnlockPolicy policy, byte[] sealedMaterial, string verifier) => System.Text.Encoding.UTF8.GetBytes(PolicyDomain + UnlockPolicies.Name(policy) + "\n" + Convert.ToBase64String(sealedMaterial) + "\n" + verifier);
 
     /// <summary>The operation name and parameters an authorization for <see cref="SetUnlockPolicy" /> must carry.</summary>
@@ -48,7 +48,7 @@ public sealed partial class AuthorityStore
 
     private static UnlockPolicy ReadPolicy(SqliteConnection connection, SqliteTransaction? transaction)
     {
-        object? stored = StateDatabase.Scalar(connection, transaction, "SELECT value FROM authority_settings WHERE name = $name", ("$name", PolicySetting));
+        object? stored = WithSecretsDatabase.Scalar(connection, transaction, "SELECT value FROM authority_settings WHERE name = $name", ("$name", PolicySetting));
 
         return UnlockPolicies.TryParse(stored as string, out UnlockPolicy policy) ? policy : UnlockPolicy.Manual;
     }
@@ -63,14 +63,14 @@ public sealed partial class AuthorityStore
                 return ((byte[], string, byte[]?)?)null;
             }
 
-            object? blob = StateDatabase.Scalar(connection, null, "SELECT value FROM authority_settings WHERE name = $name", ("$name", SealedSetting));
-            object? verifier = StateDatabase.Scalar(connection, null, "SELECT value FROM authority_settings WHERE name = $name", ("$name", VerifierSetting));
+            object? blob = WithSecretsDatabase.Scalar(connection, null, "SELECT value FROM authority_settings WHERE name = $name", ("$name", SealedSetting));
+            object? verifier = WithSecretsDatabase.Scalar(connection, null, "SELECT value FROM authority_settings WHERE name = $name", ("$name", VerifierSetting));
             if (blob is not string blobText || verifier is not string verifierText)
             {
                 return null;
             }
 
-            object? signature = StateDatabase.Scalar(connection, null, "SELECT value FROM authority_settings WHERE name = $name", ("$name", SignatureSetting));
+            object? signature = WithSecretsDatabase.Scalar(connection, null, "SELECT value FROM authority_settings WHERE name = $name", ("$name", SignatureSetting));
             try
             {
                 return (Convert.FromBase64String(blobText), verifierText, signature is string signatureText ? Convert.FromBase64String(signatureText) : null);
@@ -116,12 +116,12 @@ public sealed partial class AuthorityStore
                 }
                 else
                 {
-                    StateDatabase.Execute(connection, transaction, "DELETE FROM authority_settings WHERE name = $a", ("$a", SignatureSetting));
+                    WithSecretsDatabase.Execute(connection, transaction, "DELETE FROM authority_settings WHERE name = $a", ("$a", SignatureSetting));
                 }
             }
             else
             {
-                StateDatabase.Execute(connection, transaction, "DELETE FROM authority_settings WHERE name IN ($a, $b, $c)", ("$a", SealedSetting), ("$b", VerifierSetting), ("$c", SignatureSetting));
+                WithSecretsDatabase.Execute(connection, transaction, "DELETE FROM authority_settings WHERE name IN ($a, $b, $c)", ("$a", SealedSetting), ("$b", VerifierSetting), ("$c", SignatureSetting));
             }
 
             Audit(connection, transaction, "unlock-policy-changed", null, null, admin.Actor, $"unlock policy {UnlockPolicies.Name(before)} to {UnlockPolicies.Name(policy)}");
@@ -132,7 +132,7 @@ public sealed partial class AuthorityStore
 
     private static void Put(SqliteConnection connection, SqliteTransaction transaction, string name, string value)
     {
-        StateDatabase.Execute(connection, transaction, "INSERT INTO authority_settings (name, value) VALUES ($name, $value) ON CONFLICT(name) DO UPDATE SET value = $value", ("$name", name), ("$value", value));
+        WithSecretsDatabase.Execute(connection, transaction, "INSERT INTO authority_settings (name, value) VALUES ($name, $value) ON CONFLICT(name) DO UPDATE SET value = $value", ("$name", name), ("$value", value));
     }
 
     // ---- admin session timeouts ----
@@ -156,7 +156,7 @@ public sealed partial class AuthorityStore
 
     private static int ReadMinutes(SqliteConnection connection, string name, int fallback, int max)
     {
-        object? stored = StateDatabase.Scalar(connection, null, "SELECT value FROM authority_settings WHERE name = $name", ("$name", name));
+        object? stored = WithSecretsDatabase.Scalar(connection, null, "SELECT value FROM authority_settings WHERE name = $name", ("$name", name));
 
         return stored is string text && int.TryParse(text, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out int minutes) && minutes >= 1 && minutes <= max ? minutes : fallback;
     }
@@ -212,8 +212,8 @@ public sealed partial class AuthorityStore
     {
         return Write((connection, transaction) =>
         {
-            StateDatabase.Execute(connection, transaction, "DELETE FROM admin_spent_nonces WHERE expires < $now", ("$now", Time(Now)));
-            int added = StateDatabase.Execute(connection, transaction, "INSERT OR IGNORE INTO admin_spent_nonces (nonce, expires) VALUES ($nonce, $expires)", ("$nonce", nonce), ("$expires", Time(expires)));
+            WithSecretsDatabase.Execute(connection, transaction, "DELETE FROM admin_spent_nonces WHERE expires < $now", ("$now", Time(Now)));
+            int added = WithSecretsDatabase.Execute(connection, transaction, "INSERT OR IGNORE INTO admin_spent_nonces (nonce, expires) VALUES ($nonce, $expires)", ("$nonce", nonce), ("$expires", Time(expires)));
 
             return added == 1;
         });

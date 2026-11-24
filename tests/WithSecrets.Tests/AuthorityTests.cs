@@ -738,10 +738,10 @@ internal static class AuthorityTests
         // Schema version, damage, and a missing file.
         string folder = Path.Combine(parent, "schema");
         AuthorityStore missing = AuthorityStore.InFolder(folder);
-        check(missing.Machines().Count == 0 && missing.Find("X") is null && !File.Exists(missing.FilePath) && !Directory.Exists(folder), "schema: reading a missing authority.db is empty and creates nothing");
+        check(missing.Machines().Count == 0 && missing.Find("X") is null && !File.Exists(missing.FilePath) && !Directory.Exists(folder), "schema: reading a missing with-secrets.db is empty and creates nothing");
         AuthorityStore created = AuthorityStore.InFolder(folder);
         created.Register(newcomer.PublicKey, "newcomer", "test");
-        check(File.Exists(created.FilePath) && new FileInfo(created.FilePath).Length > 0 && created.Machines().Count == 1, "schema: the first write creates authority.db");
+        check(File.Exists(created.FilePath) && new FileInfo(created.FilePath).Length > 0 && created.Machines().Count == 1, "schema: the first write creates with-secrets.db");
         using (SqliteConnection connection = new("Data Source=" + created.FilePath + ";Pooling=False"))
         {
             connection.Open();
@@ -763,7 +763,7 @@ internal static class AuthorityTests
             mismatch = error;
         }
 
-        check(mismatch is not null && mismatch.Message == "authority.db is not of schema version 5; delete authority.db to start over (machines then enroll again)", "schema: another schema version is refused with the delete-it message (" + mismatch?.Message + ")");
+        check(mismatch is not null && mismatch.Message == "with-secrets.db is not of schema version 3; delete with-secrets.db to start over", "schema: another schema version is refused with the delete-it message (" + mismatch?.Message + ")");
         AuthorityDatabaseException? writing = null;
         try
         {
@@ -778,7 +778,7 @@ internal static class AuthorityTests
 
         string damaged = Path.Combine(parent, "damaged");
         Directory.CreateDirectory(damaged);
-        File.WriteAllText(Path.Combine(damaged, AuthorityStore.FileName), "this is not a database, it is text that is long enough to look like a file");
+        File.WriteAllText(Path.Combine(damaged, WithSecretsDatabase.FileName), "this is not a database, it is text that is long enough to look like a file");
         AuthorityDatabaseException? junk = null;
         try
         {
@@ -841,7 +841,7 @@ internal static class AuthorityTests
         AdminActions.RecoverAuthority(lost.Machine.Deployment.Keys, lost.Machine.Deployment.HostConfig, lost.Fingerprint, "admin passkey laptop");
         check((await lost.Ask("rec-2")).Decision.Approved, "recovery: after the explicit admin recovery (pin) the host accepts the new key");
 
-        // A key that authority.db names but the key store lost is an error, never another key.
+        // A key that with-secrets.db names but the key store lost is an error, never another key.
         using Fixture missing = new(parent);
         missing.Machine.Deployment.Keys.CurrentRecord();
         AuthorityKeyRing wrong = new(missing.Store, _ => new SoftwareSigningKey());
@@ -855,7 +855,7 @@ internal static class AuthorityTests
             mismatch = error;
         }
 
-        check(mismatch is not null && mismatch.Message.Contains("recover", StringComparison.OrdinalIgnoreCase) && mismatch.Message.Contains("admin web app", StringComparison.Ordinal), "keys: a key store whose key is not the one authority.db names is an error that names the recovery command");
+        check(mismatch is not null && mismatch.Message.Contains("recover", StringComparison.OrdinalIgnoreCase) && mismatch.Message.Contains("admin web app", StringComparison.Ordinal), "keys: a key store whose key is not the one with-secrets.db names is an error that names the recovery command");
     }
 
 
@@ -889,7 +889,7 @@ internal static class AuthorityTests
                 threw = true;
             }
 
-            check(threw && !File.Exists(fx.Machine.Deployment.HostConfig.FilePath) && pinnedBefore.Length > 0, "pin: a key store that does not hold the key authority.db names pins nothing");
+            check(threw && !File.Exists(fx.Machine.Deployment.HostConfig.FilePath) && pinnedBefore.Length > 0, "pin: a key store that does not hold the key with-secrets.db names pins nothing");
         }
 
         // L4: a failure while checking the answer is a denial, and what the page released is zeroed.

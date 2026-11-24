@@ -41,7 +41,9 @@ internal static class RetryPostTests
         }
     }
 
-    // A run approval: the proof is processed once. The same body sent again (a page resend) gets 404 and changes nothing.
+    private static bool Resent((int Status, string Body) reply, string firstReply) => reply.Status is 404 or 409 or 0 || (reply.Status == 200 && reply.Body == firstReply);
+
+    // A run approval: the proof is processed once. The same body sent again (a page resend) changes nothing: while the flow is still open it gets the very same kept reply, once the flow has ended it gets 404.
     private static async Task RunApproval(Action<bool, string> check)
     {
         string root = Path.Combine(Path.GetTempPath(), "ws-retry-" + Guid.NewGuid().ToString("N"));
@@ -59,8 +61,9 @@ internal static class RetryPostTests
             IApprover approver = EnrollmentTarget.For(method, new WebApprover(method, settings, queue.Add, TimeSpan.Zero)).Approver;
             Task<ApprovalDecision> task = Task.Run(() => approver.Request(new ApprovalRequest("tool", "/bin/tool", [], "/work", "r", ["OLD_NAME"], null, null, null, "REQ")));
             int first = 0;
-            int again = -2;
-            int third = -2;
+            string firstReply = "";
+            (int Status, string Body) again = (-2, "");
+            (int Status, string Body) third = (-2, "");
             DateTime stop = DateTime.UtcNow.AddSeconds(25);
             while (!task.IsCompleted && DateTime.UtcNow < stop)
             {
@@ -71,15 +74,16 @@ internal static class RetryPostTests
 
                 Uri link = new(match.Value);
                 string url = "http://127.0.0.1:" + link.Port + link.AbsolutePath;
-                first = TestState.Approve(client, url, link.GetLeftPart(UriPartial.Authority), link.IdnHost, admin).Status;
+                (first, firstReply) = TestState.Approve(client, url, link.GetLeftPart(UriPartial.Authority), link.IdnHost, admin);
                 string body = TestState.LastProofBody;
-                again = TestState.Post(client, url + "/proof", body).Status;
-                third = TestState.Post(client, url + "/proof", body).Status;
+                again = TestState.Post(client, url + "/proof", body);
+                third = TestState.Post(client, url + "/proof", body);
             }
 
             ApprovalDecision? decision = await Task.WhenAny(task, Task.Delay(TimeSpan.FromSeconds(5))) == task ? task.Result : null;
             check(first == 200 && decision is { Approved: true }, "resend: the first proof is approved (" + first + ")");
-            check(again is 404 or 409 or 0 && third is 404 or 409 or 0, "resend: the same proof sent again gets 404 and changes nothing (" + again + ", " + third + ")");
+            // Whether the flow has ended when the resend arrives depends on timing: before, the kept reply (the same text as the first); after, 404. Never anything else.
+            check(Resent(again, firstReply) && Resent(third, firstReply), "resend: the same proof sent again gets the very same reply or 404, and changes nothing (" + again.Status + ", " + third.Status + ")");
             check(decision is { Approved: true }, "resend: the decision stays the first one");
         }
         finally

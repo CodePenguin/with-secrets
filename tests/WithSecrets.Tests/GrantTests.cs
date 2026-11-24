@@ -305,8 +305,8 @@ internal static class GrantTests
         check(TestAudit.Events(db).All(item => item.Verify(TestAudit.KeyOf(db).PublicKey)), "audit events: every event is signed by the machine key");
         check(TestAudit.MetadataClean(db, [Secret], out _) && TestAudit.Events(db).Any(item => item.Outcome == "key-removed" && item.Meta.ContainsKey("key") && item.Meta.ContainsKey("detail")), "audit canary: the metadata of the admin events holds the key name and detail and no value");
 
-        // A refusal with no state.db creates nothing.
+        // A refusal with no with-secrets.db creates nothing.
         StateDatabase none = StateDatabase.InFolder(Path.Combine(root, "events-none"));
-        check(!none.Audit.TryWriteDenied("set-secrets", [], "x") && !File.Exists(none.FilePath), "audit events: a refusal with no state.db creates none");
+        check(!none.Audit.TryWriteDenied("set-secrets", [], "x") && !File.Exists(none.FilePath), "audit events: a refusal with no with-secrets.db creates none");
     }
 }

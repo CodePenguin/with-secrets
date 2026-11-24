@@ -11,7 +11,7 @@ internal sealed partial class AdminApi
     private static JsonObject Components()
     {
         string[] machineActions = ["approve", "disable", "enable", "untrust", "trust", "approve-host-change", "rename"];
-        string[] grantActions = ["extend", "renew", "revoke"];
+        string[] grantActions = ["extend", "renew", "revoke", "replace"];
         JsonObject schemas = new()
         {
             ["Problem"] = S.Obj(
@@ -61,7 +61,48 @@ internal sealed partial class AdminApi
                 ("apiVersion", S.Str()),
                 ("version", S.Str()),
                 ("protocolVersion", S.Int()),
+                ("capabilities", S.Obj([("providers", S.Bool())])),
+                ("reviewOpen", S.Bool()),
             ]),
+            ["ProviderType"] = S.Obj([("type", S.Str()), ("adapterVersion", S.Str())]),
+            ["ProviderTypeList"] = S.Arr(S.Ref("ProviderType")),
+            ["ProviderStatus"] = S.Obj(
+            [
+                ("lifecycle", S.Str(values: ["initializing", "ready", "unavailable", "shuttingdown"])),
+                ("lifecycleMessage", S.Str(nullable: true)),
+                ("lifecycleAt", S.Time()),
+                ("health", S.Str(values: ["initializing", "healthy", "degraded", "unavailable", "misconfigured"])),
+                ("healthMessage", S.Str(nullable: true)),
+                ("healthAt", S.Time()),
+            ]),
+            ["Provider"] = S.Obj(
+            [
+                ("id", S.Str(format: "uuid")), ("name", S.Str()), ("type", S.Str()), ("configuration", S.Str()),
+                ("maxStaleSeconds", S.Int(0, 86400)), ("revision", S.Int(min: 1)), ("mounts", S.Int(min: 0)),
+                ("status", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("ProviderStatus"), new JsonObject { ["type"] = "null" }) }),
+                ("actions", S.Arr(S.Str(values: ["config", "max-stale", "remove", "add-mount"]))),
+            ]),
+            ["ProviderList"] = S.Arr(S.Ref("Provider")),
+            ["Mount"] = S.Obj(
+            [
+                ("id", S.Str(format: "uuid")), ("instanceId", S.Str(format: "uuid")), ("instanceName", S.Str()),
+                ("kind", S.Str(values: ["tree", "single"])), ("logicalPath", S.Str()), ("basePath", S.Str()),
+                ("entries", S.Int(min: 0)), ("actions", S.Arr(S.Str(values: ["remove", "refresh"]))),
+            ]),
+            ["MountList"] = S.Arr(S.Ref("Mount")),
+            ["NamespaceEntry"] = S.Obj(
+            [
+                ("logicalPath", S.Str()), ("providerPath", S.Str()), ("externalId", S.Str()), ("description", S.Str(nullable: true)),
+                ("descriptionSource", S.Str(values: ["provider", "local"])),
+            ]),
+            ["NamespaceEntryList"] = S.Arr(S.Ref("NamespaceEntry")),
+            ["ProviderValidationIssue"] = S.Obj(
+            [
+                ("message", S.Str()), ("severity", S.Str(values: ["warning", "error"])),
+                ("target", S.Str(nullable: true)), ("providerCode", S.Str(nullable: true)),
+            ]),
+            ["ProviderValidation"] = S.Obj([("ok", S.Bool()), ("issues", S.Arr(S.Ref("ProviderValidationIssue")))]),
+            ["MountRefresh"] = S.Obj([("complete", S.Bool()), ("added", S.Int(min: 0)), ("removed", S.Int(min: 0)), ("changed", S.Int(min: 0))]),
             ["Login"] = S.Obj([("state", S.Str(values: ["waiting", "ready", "failed"])), ("problem", S.Str(nullable: true))]),
             ["Session"] = S.Obj(
             [
@@ -216,9 +257,14 @@ internal sealed partial class AdminApi
                 ("workingDirectory", S.Str()),
                 ("approvedBy", S.Str()),
                 ("revoked", S.Time(nullable: true)),
+                ("usage", S.Str(description: "reusable, or once (a grant that the one run it approved uses up).", values: ["reusable", "once"])),
+                ("consumed", S.Time(nullable: true)),
+                ("replaces", S.Str(nullable: true, description: "The id of the used once-only grant this grant was made from.")),
                 ("actions", S.Arr(S.Str(values: grantActions))),
+                ("verified", S.Bool("The grant seal verifies and the signing passkey is still authorized.")),
             ]),
             ["GrantList"] = S.Obj([("items", S.Arr(S.Ref("Grant")))]),
+            ["GrantReview"] = S.Obj([("state", S.Str(values: ["open", "locked", "none"])), ("text", S.Str(nullable: true)), ("verified", S.Bool())]),
             ["AuditEvent"] = S.Obj(
             [
                 ("eventId", S.Str()),
@@ -271,6 +317,7 @@ internal sealed partial class AdminApi
                 ("lifetimeSeconds", S.Int(description: "How long a verified authorization may wait for its mutation.")),
                 ("result", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("AuthorizationResult"), new JsonObject { ["type"] = "null" }) }),
                 ("proof", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("ProofStart"), new JsonObject { ["type"] = "null" }) }),
+                ("prfKey", S.Str(nullable: true)),
             ]),
             ["ProofStart"] = S.Obj([("mode", S.Str(values: ["webauthn"])), ("payload", S.Str(description: "Service-generated WebAuthn request data; the service retains the operation, nonce, origin and RP ID context."))]),
             ["InlineAuthorization"] = S.Obj(
@@ -278,7 +325,7 @@ internal sealed partial class AdminApi
                 ("id", S.Str()), ("operation", S.Str(values: [.. Operations.Select(item => item.Operation)])), ("state", S.Str(values: ["pending"])),
                 ("detail", S.Str(nullable: true)), ("link", S.Str(nullable: true)), ("sentence", S.Str()), ("parameters", S.Arr(S.Ref("NameValue"))),
                 ("created", S.Time()), ("expires", S.Time()), ("lifetimeSeconds", S.Int()), ("result", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("AuthorizationResult"), new JsonObject { ["type"] = "null" }) }),
-                ("proof", S.Ref("ProofStart")),
+                ("proof", S.Ref("ProofStart")), ("prfKey", S.Str(nullable: true)),
             ]),
             ["AuthorizationResult"] = S.Obj(
             [
@@ -341,7 +388,9 @@ internal sealed partial class AdminApi
             JsonArray parameters = [];
             foreach (string name in route.Template.Split('/').Where(part => part.StartsWith('{')).Select(part => part.Trim('{', '}')))
             {
-                parameters.Add(new JsonObject { ["name"] = name, ["in"] = "path", ["required"] = true, ["schema"] = name is "fingerprint" or "id" or "name" ? ParameterSchema(name) : S.Str(max: 80) });
+                JsonObject schema = route.Tag == "providers" && name == "id" ? S.Str(format: "uuid")
+                    : name is "fingerprint" or "id" or "name" ? ParameterSchema(name) : S.Str(max: 80);
+                parameters.Add(new JsonObject { ["name"] = name, ["in"] = "path", ["required"] = true, ["schema"] = schema });
             }
 
             foreach (ApiQuery query in route.Query)
@@ -449,13 +498,18 @@ internal sealed partial class AdminApi
                 responses["429"] = ProblemResponse("Too many requests (too-many-requests).");
             }
 
+            if (route.Tag == "providers" && (route.Access != ApiAccess.Read || route.OperationId == "getProvider"))
+            {
+                responses["503"] = ProblemResponse("Provider administration is unavailable on this service (internal-error).");
+            }
+
             responses["500"] = ProblemResponse("The request failed (internal-error). Nothing the response does not say was changed.");
             operation["responses"] = responses;
             if (route.Access is not (ApiAccess.Public or ApiAccess.Owner or ApiAccess.Open))
             {
                 JsonObject session = new() { ["sessionCookie"] = new JsonArray(), ["antiForgery"] = new JsonArray() };
                 JsonObject browser = new() { ["browserCookie"] = new JsonArray(), ["antiForgery"] = new JsonArray() };
-                operation["security"] = route.Access is ApiAccess.Read or ApiAccess.ApprovalsRead or ApiAccess.ApprovalsDecide or ApiAccess.Logout ? new JsonArray(session)
+                operation["security"] = route.Tag == "providers" || route.Access is ApiAccess.Read or ApiAccess.ApprovalsRead or ApiAccess.ApprovalsDecide or ApiAccess.Logout ? new JsonArray(session)
                     : route.Access is ApiAccess.Login or ApiAccess.Claim ? new JsonArray(browser)
                     : new JsonArray(session, browser);
             }
@@ -478,7 +532,7 @@ internal sealed partial class AdminApi
                 ["title"] = "with-secrets authority administration API",
                 ["version"] = "1.0.0",
                 ["description"] = "The administration API of the with-secrets authority on the Windows host service's loopback port (same origin as the administration web application). JSON only. "
-                    + "A browser session is READ-ONLY (an HttpOnly, SameSite=Strict cookie plus a secret given once, in service memory only). Every administrative change needs its own fresh passkey authorization; the narrow exception is Deny request in Approvals, which releases no secrets. Approve once uses its own fresh request-bound WebAuthn challenge and assertion; it does not create a grant or an administrative authorization, "
+                    + "A browser session is READ-ONLY (an HttpOnly, SameSite=Strict cookie plus a secret given once, in service memory only). Every administrative change needs its own fresh passkey authorization; the narrow exception is Deny request in Approvals, which releases no secrets. Approve once uses its own fresh request-bound WebAuthn challenge and assertion; it records a once-only grant that the run it approves uses up, and it is not an administrative authorization, "
                     + "bound to the operation and its parameters, single use and time limited. There is no CORS. Changes within v1 are additive; a breaking change is a new major version. Another version number (/api/v2/...) is answered with 400 and the problem code "
                     + "unsupported-api-version listing supportedVersions; an unknown path under /api is 404 route-not-found; /api never falls through to the web application. Every response carries X-Api-Version; a request may carry it too (X-Api-Version: 1) and another value is refused with unsupported-api-version. No answer contains a secret value, a credential, a private key or recovery material.",
             },

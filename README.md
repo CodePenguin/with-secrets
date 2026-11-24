@@ -95,7 +95,7 @@ Exit codes: `3` not approved, `4` the state failed verification, `5` the audit c
 - An agent that asks for a secret you did not expect: the page names every secret, and nothing is decrypted before you tap.
 - An agent that changes a script or the `.env` after you read it: the bytes you saw are the bytes that run, and the request fingerprint covers the script, the arguments, the folder and the `.env` pairs.
 - Secrets in the agent's context: terminal output is public by design, values and keys appear only in the browser, and the child's output is redacted.
-- A stolen `state.db`: it holds ciphertext and a signed manifest, and the key is wrapped by your passkeys.
+- A stolen `with-secrets.db`: it holds ciphertext and a signed manifest, and the keys are wrapped by your passkeys. The approved command lines kept with each grant are encrypted too (to a separate review key), and every grant row is sealed by the authority key, so an edited or planted grant is never used.
 - Tampered state: every command verifies the signed manifest and every ciphertext's hash first, and stops (exit 4) if anything was edited.
 
 ## What it does not protect against

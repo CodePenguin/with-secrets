@@ -1,11 +1,12 @@
 import axe from 'axe-core'
 import { vi } from 'vitest'
 import { setSessionSecret } from '../api/client'
-import type { ApprovalDetail, ApprovalQueueItem, Authorization, Grant, Machine, Session, Settings, Status } from '../api/types'
+import type { ApprovalDetail, ApprovalQueueItem, Authorization, Grant, Machine, Mount, NamespaceEntry, Provider, Session, Settings, Status } from '../api/types'
 
 export type Call = { method: string; path: string; query: URLSearchParams; body: Record<string, unknown> | null; headers: Record<string, string> }
 export type Reply = { status?: number; body: unknown; problem?: boolean }
-export type Handler = Reply | ((call: Call) => Reply)
+/** A reply, or a function of the call that gives one (a promise holds the answer back until the test releases it). */
+export type Handler = Reply | ((call: Call) => Reply | Promise<Reply>)
 
 export type FakeApi = { calls: Call[]; handlers: Record<string, Handler>; on: (route: string, handler: Handler) => void; count: (route: string) => number }
 
@@ -33,7 +34,7 @@ export function installFakeApi(handlers: Record<string, Handler>): FakeApi {
       api.calls.push(call)
       const handler = api.handlers[call.method + ' ' + call.path]
       if (!handler) throw new Error(`no fake route for ${call.method} ${call.path}`)
-      const reply = typeof handler === 'function' ? handler(call) : handler
+      const reply = typeof handler === 'function' ? await handler(call) : handler
 
       return new Response(JSON.stringify(reply.body), { status: reply.status ?? 200, headers: { 'content-type': reply.problem ? 'application/problem+json' : 'application/json' } })
     }),
@@ -46,7 +47,7 @@ export function problem(status: number, code: string, detail: string): Reply {
   return { status, problem: true, body: { type: 'urn:with-secrets:problem:' + code, title: 'Refused', status, detail, code } }
 }
 
-export const status = (extra: Partial<Status> = {}): Status => ({ running: true, locked: false, unlockMode: 'manual', apiVersion: 'v1', version: __APP_VERSION__, protocolVersion: 1, ...extra })
+export const status = (extra: Partial<Status> = {}): Status => ({ running: true, locked: false, unlockMode: 'manual', apiVersion: 'v1', version: __APP_VERSION__, protocolVersion: 1, capabilities: { providers: false }, reviewOpen: false, ...extra })
 
 export const session = (extra: Partial<Session> = {}): Session => ({
   authenticated: true,
@@ -94,7 +95,45 @@ export const grant = (extra: Partial<Grant> = {}): Grant => ({
   workingDirectory: 'C:\\work',
   approvedBy: 'admin key',
   revoked: null,
+  usage: 'reusable',
+  consumed: null,
+  replaces: null,
   actions: ['extend', 'revoke'],
+  verified: true,
+  ...extra,
+})
+
+export const provider = (extra: Partial<Provider> = {}): Provider => ({
+  id: '80f32bc3-ac95-42b6-b335-db5854769efc',
+  name: 'Build vault',
+  type: 'test',
+  configuration: '{"label":"build"}',
+  maxStaleSeconds: 3601,
+  revision: 2,
+  mounts: 1,
+  status: { lifecycle: 'ready', lifecycleMessage: null, lifecycleAt: '2026-11-09T10:00:00Z', health: 'healthy', healthMessage: null, healthAt: '2026-11-09T10:00:00Z' },
+  actions: ['config', 'max-stale', 'add-mount'],
+  ...extra,
+})
+
+export const mount = (extra: Partial<Mount> = {}): Mount => ({
+  id: 'c367c630-bbf2-4eb4-96b5-b7f1578a3dc8',
+  instanceId: provider().id,
+  instanceName: provider().name,
+  kind: 'tree',
+  logicalPath: 'team',
+  basePath: 'kv',
+  entries: 1,
+  actions: ['remove', 'refresh'],
+  ...extra,
+})
+
+export const entry = (extra: Partial<NamespaceEntry> = {}): NamespaceEntry => ({
+  logicalPath: 'team/TOKEN',
+  providerPath: 'kv/TOKEN',
+  externalId: 'external-token',
+  description: 'Deployment token metadata',
+  descriptionSource: 'provider',
   ...extra,
 })
 
@@ -124,6 +163,7 @@ export const authorization = (extra: Partial<Authorization> = {}): Authorization
   lifetimeSeconds: 120,
   result: null,
   proof: null,
+  prfKey: null,
   ...extra,
 })
 

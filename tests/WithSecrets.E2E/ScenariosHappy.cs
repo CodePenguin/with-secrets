@@ -64,7 +64,7 @@ internal static class ScenariosHappy
             await c.DemoCaptionAsync("The arrow beside Approve chooses how long it lasts, and asks for one tap.");
             await Spa.ApproveFor(c, "Approve for 1 hour");
             await c.Page.GetByText("Grant created for").First.WaitForAsync(new() { Timeout = 20000 });
-            s.Check(await preApprove.Result.WaitAsync(TimeSpan.FromSeconds(30)) == 0 && store.Grants().Count == 1, "the pre-approval made one grant");
+            s.Check(await preApprove.Result.WaitAsync(TimeSpan.FromSeconds(30)) == 0 && store.Grants().Count(grant => grant.Usage == GrantUsage.Reusable) == 1 && store.Grants().Count(grant => grant.Usage == GrantUsage.Once && grant.Status == "consumed") == 1, "the first run (Approve once) recorded a used once-only grant and the pre-approval made one reusable grant");
             await c.DemoCaptionAsync("The grant exists. The next run of that command will not ask.");
         }
 
@@ -93,7 +93,7 @@ internal static class ScenariosHappy
             await Spa.OpenRequest(c, timed, app, s);
             await Spa.ApproveFor(c, "Approve always");
             int exit = await timed.Result.WaitAsync(TimeSpan.FromSeconds(30));
-            s.Check(exit == 0 && timed.Out.Text.Contains("timed-value=" + StreamRedactor.Mask) && store.Grants().Count == 2 && store.Grants().Count(grant => grant.Expires is null) == 1, "a run approved as Always ran, and made a grant with no end (exit " + exit + ": " + timed.Err.Text.Replace('\n', ' ') + ")");
+            s.Check(exit == 0 && timed.Out.Text.Contains("timed-value=" + StreamRedactor.Mask) && store.Grants().Count(grant => grant.Usage == GrantUsage.Reusable) == 2 && store.Grants().Count(grant => grant.Usage == GrantUsage.Reusable && grant.Expires is null) == 1, "a run approved as Always ran, and made a grant with no end (exit " + exit + ": " + timed.Err.Text.Replace('\n', ' ') + ")");
             await c.Page.GetByText("can run it now and again at any time").First.WaitForAsync(new() { Timeout = 20000 });
         }
 

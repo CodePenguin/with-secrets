@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useSettings } from '../../api/queries'
+import { useSettings, useStatus } from '../../api/queries'
 import { PageSettingsCard } from './PageSettingsCard'
 import { Card, Facts, PageHeader } from '../../components/Card'
 import { Button } from '../../components/Button'
@@ -12,6 +12,7 @@ import styles from './SettingsPage.module.css'
 export function SettingsPage() {
   usePageTitle('Settings')
   const settings = useSettings(true)
+  const status = useStatus()
   const start = useStartOperation()
   const [copied, setCopied] = useState<'no' | 'yes' | 'failed'>('no')
 
@@ -35,6 +36,7 @@ export function SettingsPage() {
 
       <Card title="Unlock mode">
         <p>{s.unlockModeDescription}</p>
+        <Facts items={[['Review text', status.data?.reviewOpen ? 'open' : 'locked']]} />
         <Button variant={manual ? 'secondary' : 'primary'} onClick={() => start(setUnlockPolicy(manual ? 'unattended' : 'manual'))}>
           {manual ? 'Allow unattended unlock...' : 'Require a manual unlock...'}
         </Button>

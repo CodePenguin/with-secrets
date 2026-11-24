@@ -10,12 +10,6 @@ public sealed record CopyWarning(string Fingerprint, int Count, string FirstAddr
 
 public sealed partial class AuthorityStore
 {
-    private const string CopyWarningSchema = """
-        CREATE TABLE IF NOT EXISTS copy_warnings (
-            fingerprint TEXT PRIMARY KEY NOT NULL, count INTEGER NOT NULL, first_address TEXT NOT NULL, last_address TEXT NOT NULL,
-            first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, audited TEXT);
-        """;
-
     private const string CopyWarningColumns = "fingerprint, count, first_address, last_address, first_seen, last_seen, audited";
 
     private static CopyWarning ReadCopyWarning(SqliteDataReader reader) => new(reader.GetString(0), reader.GetInt32(1), reader.GetString(2), reader.GetString(3), ParseTime(reader.GetString(4)), ParseTime(reader.GetString(5)),
@@ -31,25 +25,26 @@ public sealed partial class AuthorityStore
     /// Records that the machine's connection was superseded from another address repeatedly (<paramref name="count" /> times within the watch window): the first warning, or a refresh of it. Returns true when a signed audit event
     /// should be written now: the first time, and again at most once per <paramref name="auditEvery" />. Addresses are public data; nothing secret is stored.
     /// </summary>
-    public bool RecordCopyWarning(string fingerprint, string olderAddress, string newerAddress, int count, TimeSpan auditEvery)
+    internal void RecordCopyWarning(string fingerprint, string olderAddress, string newerAddress, int count, TimeSpan auditEvery,
+        Func<SqliteConnection, SqliteTransaction, bool> recordAudit)
     {
-        return Write((connection, transaction) =>
+        Write((connection, transaction) =>
         {
             DateTimeOffset now = Now;
             CopyWarning? known = Query(connection, transaction, $"SELECT {CopyWarningColumns} FROM copy_warnings WHERE fingerprint = $fp", ReadCopyWarning, ("$fp", fingerprint)).FirstOrDefault();
-            bool audit = known?.Audited is not { } last || now - last >= auditEvery;
+            bool audit = (known?.Audited is not { } last || now - last >= auditEvery) && recordAudit(connection, transaction);
             if (known is null)
             {
-                StateDatabase.Execute(connection, transaction, "INSERT INTO copy_warnings (fingerprint, count, first_address, last_address, first_seen, last_seen, audited) VALUES ($fp, $count, $first, $last, $now, $now, $audited)",
+                WithSecretsDatabase.Execute(connection, transaction, "INSERT INTO copy_warnings (fingerprint, count, first_address, last_address, first_seen, last_seen, audited) VALUES ($fp, $count, $first, $last, $now, $now, $audited)",
                     ("$fp", fingerprint), ("$count", count), ("$first", olderAddress), ("$last", newerAddress), ("$now", Time(now)), ("$audited", audit ? Time(now) : null));
             }
             else
             {
-                StateDatabase.Execute(connection, transaction, "UPDATE copy_warnings SET count = $count, last_address = $last, last_seen = $now, audited = $audited WHERE fingerprint = $fp",
+                WithSecretsDatabase.Execute(connection, transaction, "UPDATE copy_warnings SET count = $count, last_address = $last, last_seen = $now, audited = $audited WHERE fingerprint = $fp",
                     ("$fp", fingerprint), ("$count", Math.Max(count, known.Count)), ("$last", newerAddress), ("$now", Time(now)), ("$audited", audit ? Time(now) : known.Audited is { } kept ? Time(kept) : null));
             }
 
-            return audit;
+            return 0;
         });
     }
 }

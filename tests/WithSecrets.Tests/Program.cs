@@ -22,16 +22,43 @@ internal sealed class FakeApprover(bool approve, int reuseMinutes = 0, TestAuthe
             return ApprovalDecision.Deny("test denied");
         }
 
+        // Every approval is a grant, so an approval once carries the assertion too (by the named signer, else the test signer a rig enrolls). A time is signed only by a named signer.
         ApprovalEvidence? evidence = null;
-        if (signer is not null && reuseMinutes > 0)
+        if (signer is not null || reuseMinutes == 0)
         {
             string text = ApprovalSummary.BuildMessage(request) + "\n" + ApprovalSummary.IssuedLine(DateTimeOffset.UtcNow);
             string nonce = "fake-nonce";
-            evidence = new ApprovalEvidence(nonce, text, signer.Assert(ReuseBinding.Challenge(RequestBinding.Compute(nonce, text), reuseMinutes), TestState.Origin, "localhost", (uint)Interlocked.Increment(ref _signs)));
+            evidence = new ApprovalEvidence(nonce, text, (signer ?? TestSigner.Default).Assert(ReuseBinding.Challenge(RequestBinding.Compute(nonce, text), reuseMinutes), TestState.Origin, "localhost", (uint)Interlocked.Increment(ref _signs)));
         }
 
         return ApprovalDecision.Allow("approved", reuseMinutes, evidence, unlock?.Invoke());
     }
+}
+
+/// <summary>
+/// The passkey a test approval is signed with when the test names no other. Every approval is a grant (once: a consumed once-only grant), so an approval through
+/// an authority carries the person's assertion over the page text, as the page makes it; a rig enrolls this key so the authority can check it.
+/// </summary>
+internal static class TestSigner
+{
+    private static readonly Lazy<TestAuthenticator> Shared = new(() => TestAuthenticator.ES256());
+
+    public static TestAuthenticator Default => Shared.Value;
+
+    /// <summary>An assertion by <paramref name="who" /> (default: <see cref="Default" />) over the page text and its issued line, for the reuse <paramref name="minutes" /> (0: once).</summary>
+    public static ApprovalEvidence Sign(ApprovalRequest request, int minutes, TestAuthenticator? who = null)
+    {
+        string text = ApprovalSummary.BuildMessage(request) + "\n" + ApprovalSummary.IssuedLine(DateTimeOffset.UtcNow);
+        string nonce = "test-nonce-" + Guid.NewGuid().ToString("N")[..8];
+
+        return new ApprovalEvidence(nonce, text, (who ?? Default).Assert(ReuseBinding.Challenge(RequestBinding.Compute(nonce, text), minutes), TestState.Origin, "localhost", TestState.NextCount()));
+    }
+
+    /// <summary>An approval once, signed by <see cref="Default" />.</summary>
+    public static ApprovalDecision Allow(ApprovalRequest request, string detail = "approved") => ApprovalDecision.Allow(detail, 0, Sign(request, 0));
+
+    /// <summary>Adds <see cref="Default" /> to the keys of <paramref name="state" /> (after any key already there, so it is never the first, admin, key of a state that has one).</summary>
+    public static void Enroll(StateDatabase state) => TestState.Add(state, Default.Record("localhost", "test-signer") with { Created = DateTimeOffset.UtcNow }, withStore: true);
 }
 
 internal sealed class EditingApprover(string file) : IApprover
@@ -40,7 +67,7 @@ internal sealed class EditingApprover(string file) : IApprover
     {
         File.WriteAllText(file, "#!/bin/sh\necho swapped\n");
 
-        return ApprovalDecision.Allow();
+        return TestSigner.Allow(request);
     }
 }
 
@@ -404,6 +431,11 @@ internal static class Program
             ApiTests.Run(Check).GetAwaiter().GetResult();
         }
 
+        if (Wants("Api") || Wants("ApiContract"))
+        {
+            ApiTests.Contract(Check).GetAwaiter().GetResult();
+        }
+
         if (Wants("Admin"))
         {
             AdminTests.Run(Check).GetAwaiter().GetResult();
@@ -422,6 +454,11 @@ internal static class Program
         if (Wants("StateDatabase"))
         {
             StateDatabaseTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("Database"))
+        {
+            WithSecretsDatabaseTests.Run(Check).GetAwaiter().GetResult();
         }
 
         if (Wants("Config"))
@@ -447,6 +484,57 @@ internal static class Program
         if (Wants("AdminKeys"))
         {
             AdminKeysTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("ProviderContract"))
+        {
+            ProviderContractTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("ProviderStore"))
+        {
+            ProviderStoreTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("ProviderRetrieval"))
+        {
+            ProviderRetrievalTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("ProviderNamespace"))
+        {
+            ProviderNamespaceTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("ProviderCache"))
+        {
+            ProviderCacheTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("ProviderDelivery"))
+        {
+            ProviderDeliveryTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("ProviderRefresh"))
+        {
+            ProviderRefreshTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("ProviderReconcileSchedule"))
+        {
+            ProviderReconcileScheduleTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("ProviderAdmin"))
+        {
+            ProviderAdminTests.Run(Check).GetAwaiter().GetResult();
+            ProviderAdminOperationsTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("ProviderEndToEnd"))
+        {
+            ProviderEndToEndTests.Run(Check).GetAwaiter().GetResult();
         }
 
         if (Wants("SecretStore"))

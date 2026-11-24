@@ -7,7 +7,7 @@ using Microsoft.Data.Sqlite;
 namespace WithSecrets.Tests;
 
 /// <summary>
-/// Phase 6c, the operational procedures exercised rather than described: a backup restored on a second machine (the secret store and authority.db only; no key
+/// Phase 6c, the operational procedures exercised rather than described: a backup restored on a second machine (the secret store and with-secrets.db only; no key
 /// travels, so the restored authority fails closed until an administrator recovers its key with a fresh tap), the authority signing-key chain across rotations and
 /// a recovery, lock, unlock and restart cycles, a host name change approved end to end through the API, and a Docker client launched through the host service.
 /// </summary>
@@ -82,8 +82,10 @@ internal static class OperationsTests
             using StreamReader reader = new(stream, Encoding.Latin1);
             content = reader.ReadToEnd();
         }
-        catch (IOException)
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
+            // Gone between the listing and the read (SQLite removes -wal/-shm and temporary files as connections close). Windows reports a file that is
+            // being deleted as access denied, not as missing.
             return false;
         }
 
@@ -104,14 +106,14 @@ internal static class OperationsTests
         await HostServiceTests.Post(primary.Rig, HostServiceTests.Req(primary.Rig, program), path: "/v1/approve");
         minutes = 0;
         GrantRecord grant = primary.Store.Grants().Single();
-        ManifestApprovalVerifier verifier = new(primary.State);
-        check(GrantEvidence.RowProblem(verifier, grant) is null, "backup fixture: the grant is backed by a passkey assertion that verifies");
+        check(primary.Store.Sealer!.Problem(grant) is null, "backup fixture: the grant is backed by a passkey assertion that verifies");
         AdminBrowser admin = await primary.SignedIn();
         string firstKey = primary.Store.ActiveKey()!.Fingerprint;
         Tapped one = await admin.OpAsync("authority-key-rotate", primary.Laptop);
         Tapped two = await admin.OpAsync("authority-key-rotate", primary.Laptop);
         Tapped renamed = await admin.OpAsync("machine-rename", primary.Laptop, true, null, true, ("fingerprint", primary.Fingerprint[..20]), ("name", "first machine"));
         check(one.MutationStatus == 200 && two.MutationStatus == 200 && renamed.MutationStatus == 200 && primary.Store.AuthorityKeys().Count == 3, "backup fixture: two rotations and a rename, each by its own tap (" + Tap(one) + " / " + Tap(two) + " / " + Tap(renamed) + ")");
+        grant = primary.Store.Grants().Single();
         HostServiceTests.Raw ran = await HostServiceTests.Post(primary.Rig, HostServiceTests.Req(primary.Rig, program));
         check(ran.Result is { Outcome: LaunchOutcome.Exited }, "backup fixture: the first machine still runs a command after the rotations (the host followed the signed transitions)");
 
@@ -123,20 +125,18 @@ internal static class OperationsTests
 
         // Backup: the service is stopped and the two files are copied (a copy of a live database is not a backup).
         string stateFile = primary.State.FilePath;
-        string authorityFile = primary.Store.FilePath;
         byte[] master = TestVault.Master(primary.State);
         string recoveryCode = Convert.ToHexString(TestVault.RecoveryCode(primary.State));
         primary.Service.Dispose();
         SqliteConnection.ClearAllPools();
         string backup = Path.Combine(root, "backup");
         Directory.CreateDirectory(backup);
-        File.Copy(stateFile, Path.Combine(backup, "state.db"));
-        File.Copy(authorityFile, Path.Combine(backup, "authority.db"));
+        File.Copy(stateFile, Path.Combine(backup, "with-secrets.db"));
         long Wal(string file) => File.Exists(file + "-wal") ? new FileInfo(file + "-wal").Length : 0;
-        check(Wal(stateFile) == 0 && Wal(authorityFile) == 0, "backup: a stopped service leaves nothing in the write-ahead logs, so two files are the whole backup (" + Wal(stateFile) + ", " + Wal(authorityFile) + " bytes)");
+        check(Wal(stateFile) == 0 && stateFile == primary.Store.FilePath, "backup: a stopped service leaves nothing in the write-ahead logs, so one file is the whole backup (" + Wal(stateFile) + " bytes)");
 
         // What the backup holds: no key (the signing keys are not in any file) and nothing secret.
-        string[] artifacts = [Path.Combine(backup, "state.db"), Path.Combine(backup, "authority.db")];
+        string[] artifacts = [Path.Combine(backup, "with-secrets.db")];
         bool plainKeys = artifacts.Any(file => Contains(file, Value, "PRIVATE KEY", Convert.ToHexString(master), Convert.ToBase64String(master), Encoding.Latin1.GetString(master), Convert.ToBase64String(Convert.FromHexString(recoveryCode)), recoveryCode));
         string planted = Path.Combine(root, "planted.db");
         File.Copy(artifacts[0], planted);
@@ -152,7 +152,7 @@ internal static class OperationsTests
         IReadOnlyList<MachineRecord> machinesAfter = second.Store.Machines();
         check(machinesAfter.Count == machinesBefore.Count && machinesAfter.Zip(machinesBefore).All(pair => pair.First with { PublicKey = [] } == pair.Second with { PublicKey = [] } && pair.First.PublicKey.AsSpan().SequenceEqual(pair.Second.PublicKey)) && second.Store.Find(primary.Fingerprint) is { FriendlyName: "first machine", Status: MachineStatus.Trusted }, "restore: the machine records (status, revision, names) are as they were (" + string.Join(" | ", machinesAfter.Select(m => m.FriendlyName + m.Status + m.SecurityRevision)) + " vs " + string.Join(" | ", machinesBefore.Select(m => m.FriendlyName + m.Status + m.SecurityRevision)) + ")");
         check(second.Store.History(primary.Fingerprint).SequenceEqual(historyBefore), "restore: the machine's status history is as it was");
-        check(second.Store.Grants().Single() == grant && GrantEvidence.RowProblem(new ManifestApprovalVerifier(second.State), second.Store.Grants()[0]) is null, "restore: the grant is there and its passkey assertion still verifies against the restored manifest");
+        check(GrantAuthorityTests.SameGrant(second.Store.Grants().Single(), grant) && GrantSeals.Verifies(grant, second.Store.ActiveKey()!.PublicKey), "restore: the grant is there and its seal verifies against the backed-up authority public key");
         check(second.Store.Audit(1000).Take(auditBefore.Count).SequenceEqual(auditBefore), "restore: the authority's audit history is as it was");
         (bool verifies, int transitions, int recoveries) = Chain(second.Store);
         check(verifies && transitions == 2 && recoveries == 0 && second.Store.AuthorityKeys().Zip(keysBefore).All(pair => pair.First.Fingerprint == pair.Second.Fingerprint && pair.First.How == pair.Second.How && pair.First.Status == pair.Second.Status && pair.First.PublicKey.AsSpan().SequenceEqual(pair.Second.PublicKey)), "restore: the key history is as it was and every transition (" + transitions + ") verifies against the key before it (" + verifies + " " + recoveries + " " + second.Store.AuthorityKeys().Count + " vs " + keysBefore.Count + ")");
@@ -277,7 +277,7 @@ internal static class OperationsTests
         HostServiceTests.Raw working = await HostServiceTests.Post(app.Rig, HostServiceTests.Req(app.Rig, program));
         check(working.Result is { Outcome: LaunchOutcome.Exited } && app.Secrets.Reads == 1, "key store lost: a Trusted machine runs a command");
 
-        // The key store no longer has the key authority.db names (a wiped profile, a replaced disk).
+        // The key store no longer has the key with-secrets.db names (a wiped profile, a replaced disk).
         app.Machine.LoseAuthorityKeys();
         app.Start(true);
         AuthorityDatabaseException? error = null;

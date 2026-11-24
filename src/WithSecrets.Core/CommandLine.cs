@@ -126,13 +126,13 @@ public static class CliArgs
         web app.
 
         First-time setup also shows a recovery code on its last page, once. Write it down and keep it offline: anyone with the
-        code and state.db can open all secrets. If every passkey is lost, --recover asks for the code on a web page, makes a new
-        passkey and new keys, and carries the secrets over; the old file is renamed (state.db.recovered-<time>), never deleted.
+        code and with-secrets.db can open all secrets. If every passkey is lost, --recover asks for the code on a web page, makes a new
+        passkey and new keys, and carries the secrets over; a snapshot of the previous database is saved (with-secrets.db.recovered-<time>).
 
         Everything else a person does is in the admin web app (with-secrets admin prints its link): storing and removing secrets (values
         are typed on a web page, never in a terminal), adding and removing passkeys, rotating the secret store key, and the page settings.
         Every page lists the admin keys' fingerprints ("Admins: laptop ab12 cd34 ef56 7890, phone ..."). Note them down; if they ever
-        change without you, state.db was replaced.
+        change without you, with-secrets.db was replaced.
 
         --port N (1 to 65535) with --recover or a run makes that call's web page listen on port N instead of the port setting (random free
         port if the setting is 0). It is not saved. If N is in use the call fails. Use it to forward the page over ssh: ssh -L N:localhost:N host.

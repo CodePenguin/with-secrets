@@ -1,4 +1,4 @@
-import type { Grant, Invitation, Machine, OperationName, ParameterValue, Passkey } from '../../api/types'
+import type { Grant, Invitation, Machine, OperationName, ParameterValue, Passkey, ProviderValidation } from '../../api/types'
 
 /**
  * Every administrative change the page can ask for, as data: what the person fills in, the exact operation and parameters the passkey will
@@ -9,7 +9,8 @@ import type { Grant, Invitation, Machine, OperationName, ParameterValue, Passkey
 export type FieldDef = {
   name: string
   label: string
-  kind: 'text' | 'number' | 'checkbox'
+  kind: 'text' | 'number' | 'checkbox' | 'select' | 'textarea'
+  options?: ReadonlyArray<{ value: string; label: string }>
   hint?: string
   required?: boolean
   min?: number
@@ -45,6 +46,7 @@ export type OperationDef = {
   confirmLabel?: string
   /** Validates the form and gives the exact operation, or the errors by field name. */
   prepare: (values: FormValues) => { errors: Record<string, string> } | Prepared
+  validate?: (prepared: Prepared, signal: AbortSignal) => Promise<ProviderValidation>
 }
 
 
@@ -80,6 +82,11 @@ function simple(key: string, title: string, operation: OperationName, summary: s
 export const unlock = (): OperationDef =>
   simple('unlock', 'Unlock the authority', 'unlock', 'Unlock the authority so that secret requests can be served again.', 'The authority is unlocked.', {
     confirmLabel: 'Unlock',
+  })
+
+export const unlockReview = (): OperationDef =>
+  simple('review-unlock', 'Unlock review text', 'review-unlock', 'Use your administrator passkey to open the approved command text.', 'Review text is open.', {
+    confirmLabel: 'Unlock review',
   })
 
 export const lock = (): OperationDef =>
@@ -308,13 +315,13 @@ export const revokeGrant = (grant: Grant): OperationDef => ({
   }),
 })
 
-export function changeGrantEnd(grant: Grant, verb: 'extend' | 'renew'): OperationDef {
+export function changeGrantEnd(grant: Grant, verb: 'extend' | 'renew' | 'replace'): OperationDef {
   const minutes: FieldDef = { name: 'minutes', label: verb === 'extend' ? 'Minutes to add to the present end' : 'Minutes from now', kind: 'number', min: 1, max: 1440, hint: 'From 1 to 1440.' }
   const indefinite: FieldDef = { name: 'indefinite', label: 'No end', kind: 'checkbox', hint: 'The grant then never ends by itself. Revoke it to end it.' }
 
   return {
     key: 'grant-' + verb,
-    title: verb === 'extend' ? 'Extend this grant' : 'Renew this grant',
+    title: verb === 'extend' ? 'Extend this grant' : verb === 'renew' ? 'Renew this grant' : 'Make a grant from this',
     about: grantFacts(grant),
     fields: [minutes, indefinite],
     initial: { minutes: '60', indefinite: false },
@@ -325,17 +332,22 @@ export function changeGrantEnd(grant: Grant, verb: 'extend' | 'renew'): Operatio
       if (!never) count = integer(values, { ...minutes, required: true }, errors)
       if (!never && count === null) return { errors }
       const parameters: Record<string, ParameterValue> = never ? { id: grant.id, indefinite: true } : { id: grant.id, minutes: count as number }
-      const summary = never
-        ? `${verb === 'extend' ? 'Extend' : 'Renew'} grant ${grant.id} so that it has no end.`
-        : verb === 'extend'
-          ? `Extend grant ${grant.id} by ${count} minutes from its present end.`
-          : `Renew grant ${grant.id} for ${count} minutes from now.`
+      const summary =
+        verb === 'replace'
+          ? never
+            ? `Make a new grant with the same scope as used grant ${grant.id}, with no end.`
+            : `Make a new grant with the same scope as used grant ${grant.id}, for ${count} minutes from now.`
+          : never
+            ? `${verb === 'extend' ? 'Extend' : 'Renew'} grant ${grant.id} so that it has no end.`
+            : verb === 'extend'
+              ? `Extend grant ${grant.id} by ${count} minutes from its present end.`
+              : `Renew grant ${grant.id} for ${count} minutes from now.`
 
       return {
-        operation: verb === 'extend' ? 'grant-extend' : 'grant-renew',
+        operation: `grant-${verb}` as const,
         parameters,
         summary,
-        done: summary.replace(/^Extend /, 'Extended ').replace(/^Renew /, 'Renewed '),
+        done: summary.replace(/^Extend /, 'Extended ').replace(/^Renew /, 'Renewed ').replace(/^Make /, 'Made '),
       }
     },
   }

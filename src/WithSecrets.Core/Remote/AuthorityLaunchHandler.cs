@@ -178,7 +178,8 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
             {
                 held.Holder.Drop("machine changed");
             }
-            else if (grant is null || !grant.IsUsable(now) || grant.Revision != bound.Revision || grant.ScopeKey != bound.ScopeKey)
+            else if (grant is null || !grant.IsUsable(now) || grant.Revision != bound.Revision || grant.ScopeKey != bound.ScopeKey
+                || _store.Sealer is not { } sealer || sealer.Problem(grant) is not null)
             {
                 held.Holder.Drop("grant ended or changed");
             }
@@ -272,7 +273,11 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
                 return await ViaGrantAsync(machine, message, page, grant, announceLink, linked.Token, Deny);
             }
 
-            return await ViaPageAsync(machine, message, page, announceLink, linked.Token, Deny);
+            // Every approval is a grant: what the person signs on the page names what the once-only grant records (its scope, the machine's security revision, its contents).
+            List<string> onceLines = [.. page.ExtraLines ?? []];
+            onceLines.AddRange(GrantEvidence.ApproveLines(machine.SecurityRevision, message.Use.ScopeKey, contents: GrantEvidence.ContentsKey(request.SecretNames, request.Program, request.WorkingDirectory)));
+
+            return await ViaPageAsync(machine, message, page with { RequestId = message.Use.ScopeKey, ExtraLines = onceLines }, announceLink, linked.Token, Deny);
         }
         finally
         {
@@ -286,7 +291,7 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
     private ApprovalRequest Page(MachineRecord machine, LaunchAuthorize message, LaunchRequest request)
     {
         PageContext context = message.Context;
-        Dictionary<string, string> sources = request.SecretNames.ToDictionary(name => name, _ => _secrets.Label, StringComparer.Ordinal);
+        Dictionary<string, string> sources = request.SecretNames.ToDictionary(name => name, _secrets.LabelFor, StringComparer.Ordinal);
         string name = string.IsNullOrWhiteSpace(machine.FriendlyName) ? machine.HostName : machine.FriendlyName!;
 
         return new ApprovalRequest(request.Program, context.ResolvedProgram, context.Arguments, request.WorkingDirectory, request.Reason, request.SecretNames, null, request.Arguments, context.Links, context.FingerprintKey, sources, _secrets.NeedsUnlock, context.Script, context.ProgramFile,
@@ -388,6 +393,27 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
                 return deny(ReasonCodes.Cancelled, response.SecurityRevision);
             }
 
+            // The approval is recorded as a consumed once-only grant (the same checks as in local mode, against the revision the page showed) before anything is decrypted. If it cannot be, nothing is delivered.
+            GrantResponse once;
+            try
+            {
+                once = _authority.RecordOnceGrant(message.Use, decision, machine.SecurityRevision);
+            }
+            catch (AuthorityLockedException)
+            {
+                // A lock between the tap and the record: nothing is recorded or delivered, and the record says the approval was not delivered; the lock itself ends the session (see the interface).
+                _store.RecordDeliveryEvent(machine.Fingerprint, request.RequestId, "approved-not-delivered", "the approval could not be recorded as a once-only grant (the authority locked)");
+
+                throw;
+            }
+
+            if (once.Outcome != GrantOps.Recorded)
+            {
+                _store.RecordDeliveryEvent(machine.Fingerprint, request.RequestId, "approved-not-delivered", "the approval could not be recorded as a once-only grant (" + once.ReasonCode + ")");
+
+                return deny(once.ReasonCode, once.SecurityRevision);
+            }
+
             return Deliver(message, SecretsDelivery.ViaPage, "", response.SecurityRevision, unlock, deny);
         }
         finally
@@ -456,7 +482,8 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
         GrantRecord? row = _store.FindGrant(grant.GrantId);
 
         return now is not { Status: MachineStatus.Trusted } || now.SecurityRevision != grant.SecurityRevision
-            || row is null || !row.IsUsable(_clock.GetUtcNow()) || row.Revision != grant.GrantRevision || row.ScopeKey != grant.ScopeKey || row.Fingerprint != machineFingerprint;
+            || row is null || !row.IsUsable(_clock.GetUtcNow()) || row.Revision != grant.GrantRevision || row.ScopeKey != grant.ScopeKey || row.Fingerprint != machineFingerprint
+            || _store.Sealer is not { } sealer || sealer.Problem(row) is not null;
     }
 
     private Unlock? Borrow(string machineFingerprint, GrantResponse grant)

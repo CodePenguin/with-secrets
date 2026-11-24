@@ -1,3 +1,4 @@
+using System.Buffers.Text;
 using System.Text.RegularExpressions;
 using System.Collections.Concurrent;
 using System.Net;
@@ -69,8 +70,14 @@ internal static class RemoteLaunchTests
                 return ApprovalDecision.Deny("cancelled");
             }
 
-            return approve ? ApprovalDecision.Allow() : ApprovalDecision.Deny("test denied");
+            return approve ? TestSigner.Allow(request) : ApprovalDecision.Deny("test denied");
         }
+    }
+
+    /// <summary>Approves with no passkey assertion (nothing a person signed backs it).</summary>
+    private sealed class UnsignedApprover : IApprover
+    {
+        public ApprovalDecision Request(ApprovalRequest request) => ApprovalDecision.Allow();
     }
 
     private sealed class Auth : IDisposable
@@ -104,13 +111,14 @@ internal static class RemoteLaunchTests
 
         public IReadOnlyList<ApprovalRequest> Pages => [.. Approvers.OfType<FakeApprover>().SelectMany(item => item.Requests)];
 
-        public static Auth Create(string root, Func<IApprover>? approver = null, bool realPage = false, bool needsUnlock = false, TimeSpan? idle = null, Dictionary<string, string>? values = null)
+        public static Auth Create(string root, Func<IApprover>? approver = null, bool realPage = false, bool needsUnlock = false, TimeSpan? idle = null, Dictionary<string, string>? values = null, bool queue = false)
         {
             Auth auth = new();
             string folder = Path.Combine(root, "auth-" + Guid.NewGuid().ToString("N")[..8], "state");
             auth.Machine = new TestMachine(folder, trusted: true, hostName: "windows-authority");
             auth.State = StateDatabase.InFolder(folder);
-            TestState.Add(auth.State, auth.Laptop.Record("localhost", "laptop") with { Created = DateTimeOffset.UtcNow });
+            TestState.Add(auth.State, auth.Laptop.Record("localhost", "laptop") with { Created = DateTimeOffset.UtcNow }, withStore: true);
+            TestSigner.Enroll(auth.State);
             auth.Store = new HostServiceTests.CountingStore(values ?? new Dictionary<string, string> { ["TOKEN"] = Real, ["OTHER_KEY"] = RealOther }, needsUnlock);
             if (approver is not null)
             {
@@ -135,7 +143,7 @@ internal static class RemoteLaunchTests
                     return made;
                 },
                 MachineEndpoint = new MachineListenerOptions { Port = 0 },
-                UseApprovalQueueForMachineLaunches = false,
+                UseApprovalQueueForMachineLaunches = queue,
                 AuditUploadInterval = TimeSpan.FromMilliseconds(300),
             });
 
@@ -158,8 +166,12 @@ internal static class RemoteLaunchTests
 
         public List<LaunchAnswer> Seen { get; } = [];
 
+        /// <summary>The last launch message the host sent (its page context names the request's fingerprint key).</summary>
+        public LaunchAuthorize? LastMessage { get; private set; }
+
         public async Task<LaunchAnswer> AuthorizeLaunchAsync(LaunchAuthorize message, Action<ApprovalLinkNotice> onLink, CancellationToken cancel)
         {
+            LastMessage = message;
             if (Override?.Invoke(message) is { } forged)
             {
                 return await forged;
@@ -302,6 +314,20 @@ internal static class RemoteLaunchTests
 
     private static bool Leaks(string haystack, string canary) => Leaks(Encoding.UTF8.GetBytes(haystack), canary);
 
+    private static long TableRows(string folder, string table)
+    {
+        using SqliteConnection connection = new(new SqliteConnectionStringBuilder { DataSource = Path.Combine(folder, "with-secrets.db"), Mode = SqliteOpenMode.ReadOnly, Pooling = false }.ToString());
+        connection.Open();
+        using SqliteCommand command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM " + table;
+
+        return (long)command.ExecuteScalar()!;
+    }
+
+    /// <summary>The tables of the host's with-secrets.db, other than the outbox's (and the schema version), that hold any row.</summary>
+    private static string[] OnlyOutbox(string folder)
+        => [.. WithSecretsDatabase.Tables.Where(table => table is not ("outbox_events" or "outbox_counter" or "schema_version") && TableRows(folder, table) > 0)];
+
     private static IEnumerable<string> FilesUnder(string folder) => Directory.Exists(folder) ? Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories) : [];
 
     private static bool DiskLeaks(string folder, params string[] canaries)
@@ -351,6 +377,7 @@ internal static class RemoteLaunchTests
         {
             WireForms(check);
             await PageAtTheAuthority(check, root, capture, logs);
+            await QueueApproveOnce(check, root);
             await EncryptedEnvValues(check, root);
             await CodeChangesParity(check, root);
             await Refusals(check, root);
@@ -462,6 +489,10 @@ internal static class RemoteLaunchTests
         check(raw.Result is { Outcome: LaunchOutcome.Exited, ExitCode: 4 } && raw.Stdout.Contains("t=[REDACTED]", StringComparison.Ordinal), "page at the authority: the passkey tap there releases the values, the program runs on the host and its exit code passes through (" + raw.Result + " " + raw.Stderr.Trim() + ")");
         check(value == Real, "values: the child's environment has the authority's value (the host's own store holds a different decoy)");
         check(host.Rig.Store.Reads == 0 && host.Rig.Approvers.IsEmpty && auth.Store.Reads == 1, "host: no store read, no local approval page or approver; the authority decrypted once (host reads " + host.Rig.Store.Reads + ", authority reads " + auth.Store.Reads + ")");
+        IReadOnlyList<GrantRecord> onceRows = auth.Machine.Deployment.Store.Grants();
+        check(onceRows is [{ Usage: GrantUsage.Once, Status: "consumed", Expires: null, Consumed: not null, Evidence: { Kind: GrantEvidence.ApproveKind, Minutes: 0 } }] && onceRows[0].Fingerprint == host.Fingerprint && onceRows[0].Program == request.Program && onceRows[0].SecretNames == "TOKEN"
+            && auth.Machine.Deployment.Store.Sealer!.Problem(onceRows[0]) is null && auth.Machine.Deployment.Store.Audit().Any(entry => entry.Event == "grant-once-recorded"),
+            "once at the authority: the page approval once leaves one consumed once-only grant for the host's scope at the authority, backed by the passkey assertion made on that page (" + string.Join(" | ", onceRows.Select(row => row.Usage + "/" + row.Status)) + ")");
 
         bool uploaded = await HostServiceTests.WaitFor(() => auth.Machine.Deployment.Store.AuditHistory(new AuditQuery(Limit: 50)).Count >= 2);
         string audit = string.Join("\n", auth.Machine.Deployment.Store.AuditHistory(new AuditQuery(Limit: 50)).Select(item => item.Event.ToJson()));
@@ -472,8 +503,15 @@ internal static class RemoteLaunchTests
         AppLog.Close();
         string logText = string.Join("\n", FilesUnder(logs).Select(file => File.ReadAllText(file))) + "\n" + capture.Everything();
         check(!Leaks(logText, Real) && !Leaks(logText, RealOther), "canary: the logs (file and events) carry no value");
-        check(!Leaks(audit, Real) && !DiskLeaks(host.Folder, Real, RealOther, KeyCanary), "canary: the host's disk (state, authority.db, audit outbox, host.json) holds no value and no key");
+        check(!Leaks(audit, Real) && !DiskLeaks(host.Folder, Real, RealOther, KeyCanary), "canary: the host's disk (state, with-secrets.db, audit outbox, host.json) holds no value and no key");
         AppLog.Configure(false);
+
+        // One file per machine, and on a remote host it is only the outbox: the store, grants, machines, keys and providers are at the authority.
+        string[] filled = OnlyOutbox(host.Folder);
+        check(filled.Length == 0 && TableRows(host.Folder, "outbox_events") + auth.Machine.Deployment.Store.AuditHistory(new AuditQuery(MachinePrefix: host.Fingerprint[..8], Limit: 50)).Count > 0,
+            "remote host: with-secrets.db holds rows only in the outbox tables (store and authority tables empty: " + string.Join(", ", filled) + ")");
+        string[] old = ["state.db", "authority.db", "audit-outbox.db"];
+        check(old.All(name => !File.Exists(Path.Combine(host.Folder, name)) && !File.Exists(Path.Combine(auth.Machine.Folder, name))), "one file per machine: no old database file is made on the host or the authority");
 
         // Cancelling the page (the person refuses) is a denial at the authority: no program, no decrypt.
         string before = Programs(host, "refused");
@@ -483,6 +521,50 @@ internal static class RemoteLaunchTests
         check(refused.Raw.Result is { Outcome: LaunchOutcome.Denied, ExitCode: RunCommand.Denied } && !refused.Started && deny.Store.Reads == 0 && refused.Raw.Stderr.Contains("did not approve", StringComparison.Ordinal), "refusal: the person's refusal at the authority is a denial, nothing is decrypted and nothing runs (" + refused.Raw.Result + ")");
         _ = before;
         deny.Dispose();
+
+        // An approval whose once-only grant cannot be recorded (no passkey assertion backs it) refuses the launch: nothing is decrypted or delivered.
+        Auth unsigned = Auth.Create(root, () => new UnsignedApprover());
+        using Host unrecorded = await Host.Create(root, unsigned, "wsl-unsigned");
+        Ran notRecorded = await Run(unrecorded, "unsigned");
+        check(notRecorded.Raw.Result is { ExitCode: RunCommand.Denied } && !notRecorded.Started && unsigned.Store.Reads == 0 && unsigned.Machine.Deployment.Store.Grants().Count == 0, "once at the authority: an approval whose once-only grant cannot be recorded delivers nothing and runs nothing (" + notRecorded.Raw.Result + " " + notRecorded.Raw.Stderr.Trim() + ")");
+        unsigned.Dispose();
+    }
+
+    /// <summary>
+    /// The default remote path (as in production): the authority's approval queue, not a page of its own. The person approves once in the admin app (a challenge, a passkey
+    /// assertion over the queue's canonical review); the authority records one consumed once-only grant from that evidence, which verifies as a stored row, and delivers the values.
+    /// </summary>
+    private static async Task QueueApproveOnce(Action<bool, string> check, string root)
+    {
+        using Auth auth = Auth.Create(root, queue: true);
+        using Host host = await Host.Create(root, auth, "wsl-queue");
+        Task<Ran> running = Run(host, "queued");
+        bool listed = await HostServiceTests.WaitFor(() => auth.Service.Approvals.PendingCount == 1 || running.IsCompleted);
+        IReadOnlyList<ApprovalQueueItemDto> pending = auth.Service.Approvals.ListPending(10, null, out _);
+        check(listed && pending.Count == 1 && auth.Approvers.IsEmpty, "queue: with the approval queue on, the remote launch waits in the authority's queue (no page of its own) (" + pending.Count + " pending)");
+        if (pending.Count != 1)
+        {
+            await running;
+
+            return;
+        }
+
+        string requestId = pending[0].RequestId;
+        IProofMethod method = auth.Service.Admin.ApprovalProof!;
+        (ApprovalChallengeDto? challenge, string? challengeCode, _) = auth.Service.Approvals.CreateOrReuseChallenge(requestId, "queue-session", TestState.Origin, method);
+        check(challenge is not null && challengeCode is null, "queue: the admin app gets a passkey challenge for the queued request (" + challengeCode + ")");
+        byte[] bind = Base64Url.DecodeFromChars(challenge!.Payload.GetProperty("bind").GetString()!);
+        string proof = auth.Laptop.Assert(ReuseBinding.Challenge(bind, 0), TestState.Origin, "localhost", TestState.NextCount());
+        (ApprovalDetailDto? detail, string? approveCode, _) = auth.Service.Approvals.Approve(requestId, "queue-session", challenge.FlowId, proof, method, auth.Service.Admin.ProcessedApproval);
+        check(detail is not null && approveCode is null, "queue: approve once with a passkey assertion is accepted (" + approveCode + ")");
+
+        Ran ran = await running;
+        check(ran.Started && ran.Value == Real && ran.Raw.Result is { Outcome: LaunchOutcome.Exited, ExitCode: 4 } && auth.Store.Reads == 1 && host.Rig.Store.Reads == 0, "queue: the approval through the queue delivers the authority's values and the program runs on the host (" + ran.Raw.Result + " " + ran.Raw.Stderr.Trim() + ")");
+        IReadOnlyList<GrantRecord> rows = auth.Machine.Deployment.Store.Grants();
+        check(rows is [{ Usage: GrantUsage.Once, Status: "consumed", Expires: null, Consumed: not null, Evidence: { Kind: GrantEvidence.ApproveKind, Minutes: 0 } }] && rows[0].Fingerprint == host.Fingerprint && rows[0].Program == ran.Request.Program && rows[0].SecretNames == "TOKEN"
+            && auth.Machine.Deployment.Store.Sealer!.Problem(rows[0]) is null,
+            "queue: approve once leaves exactly one consumed once-only grant at the authority whose stored evidence verifies (" + string.Join(" | ", rows.Select(row => row.Usage + "/" + row.Status + "/" + auth.Machine.Deployment.Store.Sealer!.Problem(row))) + ")");
+        check(auth.Machine.Deployment.Store.Audit().Any(entry => entry.Event == "grant-once-recorded"), "queue: the once-only grant is audited grant-once-recorded");
     }
 
     /// <summary>
@@ -956,6 +1038,33 @@ internal static class RemoteLaunchTests
             }
         }
 
+        // (c) the authority locks between the tap and the record of the once-only grant (the key ring refuses as it does when locked): nothing is recorded, decrypted or delivered,
+        // the record says approved-not-delivered, and the lock ends the session as any lock does.
+        PageWaiter tapped = new(approve: true);
+        using (Auth auth = Auth.Create(root, () => tapped))
+        {
+            using Host host = await Host.Create(root, auth, "wsl-lock-before-record");
+            AuthorityLock? unlocked = auth.Machine.Deployment.Keys.LockState;
+            AuthorityLaunchHandler.AfterApprovalCommitted = _ => auth.Machine.Deployment.Keys.LockState = new AuthorityLock();
+            try
+            {
+                Task<Ran> running = Run(host, "lock-before-record");
+                await HostServiceTests.WaitFor(() => tapped.Asked.IsSet);
+                tapped.Release.Set();
+                Ran ran = await running.WaitAsync(TimeSpan.FromSeconds(60));
+                bool noted = await HostServiceTests.WaitFor(() => auth.Machine.Deployment.Store.Audit(500).Any(item => item.Event == "approved-not-delivered" && item.Detail.Contains("the authority locked", StringComparison.Ordinal)), 30);
+                string[] events = [.. auth.Machine.Deployment.Store.Audit(500).Select(item => item.Event)];
+                check(!ran.Started && ran.Raw.Result is not { Outcome: LaunchOutcome.Exited } && noted && auth.Store.Reads == 0 && auth.Service.Launches!.Decryptions == 0 && auth.Machine.Deployment.Store.Grants().Count == 0
+                    && !events.Any(item => item.StartsWith("delivery-", StringComparison.Ordinal)) && !events.Contains("grant-once-recorded"),
+                    "locked: a lock between the tap and the once-only record records no grant, decrypts and delivers nothing, runs nothing, and is recorded approved-not-delivered (noted " + noted + ", reads " + auth.Store.Reads + ", events " + string.Join(",", events) + ", " + ran.Raw.Result + " " + ran.Raw.Stderr.Trim() + ")");
+            }
+            finally
+            {
+                AuthorityLaunchHandler.AfterApprovalCommitted = null;
+                auth.Machine.Deployment.Keys.LockState = unlocked;
+            }
+        }
+
         // The authority goes away entirely.
         Auth gone = Auth.Create(root);
         using Host orphan = await Host.Create(root, gone, "wsl-orphan");
@@ -978,7 +1087,8 @@ internal static class RemoteLaunchTests
     /// <summary>The grant a person approves for this machine and this page's scope, made through the authority protocol (the CLI path for a remote host is not built; see the report).</summary>
     private static async Task<string> MakeGrant(Auth auth, Host host, ApprovalRequest page, int minutes, LaunchRequest actual, IEnumerable<string>? names = null)
     {
-        string scope = GrantEvidence.Scope(host.Fingerprint, page.RequestId!, page.Arguments);
+        // The page names the grant scope it was shown for (every approval is a grant): the scope of this machine, this request's fingerprint and its arguments.
+        string scope = page.RequestId!;
         LaunchRequest request = actual with { RequestId = "mk-" + Guid.NewGuid().ToString("N")[..10], Created = DateTimeOffset.UtcNow, Expires = DateTimeOffset.UtcNow.AddMinutes(5), SecretNames = [.. names ?? actual.SecretNames] };
         GrantEnvelope envelope = GrantEnvelope.Create(GrantOps.Approve, request, scope, host.Machine.HostName, host.Machine.MachineKey);
         int revision = auth.Machine.Deployment.Store.Find(host.Fingerprint)!.SecurityRevision;
@@ -1146,7 +1256,7 @@ internal static class RemoteLaunchTests
         (string program, _) = ValueScript(host.Rig, "scoped");
         Ran first = await Run(host, "scoped", existing: program);
         string grantId = await MakeGrant(auth, host, auth.Pages[0], 60, first.Request);
-        check(grantId.Length > 0 && auth.Machine.Deployment.Store.FindGrant(grantId) is { SecretNames: "TOKEN" } row && GrantEvidence.Line(row.Evidence!.Text, GrantEvidence.ContentsPrefix) == GrantEvidence.ContentsKey(first.Request.SecretNames, first.Request.Program, first.Request.WorkingDirectory), "grant contents: the grant row keeps the exact names, program and folder, and the passkey-signed text carries their digest");
+        check(grantId.Length > 0 && auth.Machine.Deployment.Store.FindGrant(grantId) is { SecretNames: "TOKEN" } row && GrantEvidence.Line(TestVault.ReviewText(auth.State, row), GrantEvidence.ContentsPrefix) == GrantEvidence.ContentsKey(first.Request.SecretNames, first.Request.Program, first.Request.WorkingDirectory), "grant contents: the grant row keeps the exact names, program and folder, and the passkey-signed text carries their digest");
 
         // From here no page is approved: only a grant can release anything.
         auth.Maker = () => new FakeApprover(false);
@@ -1156,8 +1266,11 @@ internal static class RemoteLaunchTests
 
         // Another name under the very same scope key: not covered. The host signs a request naming OTHER_KEY with the grant's scope key and the context of the approved run.
         LaunchRequest other = first.Request with { RequestId = "other-" + Guid.NewGuid().ToString("N")[..8], Created = DateTimeOffset.UtcNow, Expires = DateTimeOffset.UtcNow.AddMinutes(5), SecretNames = ["OTHER_KEY"], Mappings = [new LaunchMapping("OTHER_KEY", "OTHER_KEY")] };
-        string scope = GrantEvidence.Scope(host.Fingerprint, auth.Pages[0].RequestId!, auth.Pages[0].Arguments);
-        PageContext context = new(first.Request.Program, auth.Pages[0].Arguments, [], null, null, auth.Pages[0].RequestId!);
+        // The page names the grant scope; the request's fingerprint key is in the page context the host sent.
+        string scope = auth.Pages[0].RequestId!;
+        string fingerprintKey = host.Proxy.LastMessage!.Context.FingerprintKey;
+        check(GrantEvidence.Scope(host.Fingerprint, fingerprintKey, auth.Pages[0].Arguments) == scope, "grant contents: the scope the page names is the one the host's context makes (control)");
+        PageContext context = new(first.Request.Program, auth.Pages[0].Arguments, [], null, null, fingerprintKey);
         int reads = auth.Store.Reads;
         LaunchAnswer answer = await host.Remote.AuthorizeLaunchAsync(LaunchAuthorize.Create(other, scope, context, host.Machine.HostName, host.Machine.MachineKey), _ => { }, CancellationToken.None);
         check(answer.Delivery is null && answer.Refusal is { Decision: AuthorityDecision.Denied } && auth.Store.Reads == reads && auth.Pages.Count == pages + 1, "grant contents: other secret names under the same scope key are not released by the grant: the page is asked instead (and refused here), nothing is decrypted (" + (answer.Delivery is null) + " " + answer.Refusal?.Decision + " " + answer.Refusal?.ReasonCode + " reads " + auth.Store.Reads + "/" + reads + " pages " + auth.Pages.Count + "/" + pages + ")");
@@ -1187,8 +1300,8 @@ internal static class RemoteLaunchTests
         Ran moved2 = await Run(host, "scoped", existing: program);
         Sql(auth, "UPDATE grants SET program = $program WHERE id = $id", ("$program", first.Request.Program), ("$id", grantId));
         check(!moved2.Started, "grant contents: a grant row whose program was edited is ignored");
-        string text = auth.Machine.Deployment.Store.FindGrant(grantId)!.Evidence!.Text;
-        Sql(auth, "UPDATE grants SET evidence_text = $text WHERE id = $id", ("$text", text.Replace(GrantEvidence.ContentsPrefix, GrantEvidence.ContentsPrefix + "0", StringComparison.Ordinal)), ("$id", grantId));
+        string ciphertext = auth.Machine.Deployment.Store.FindGrant(grantId)!.Evidence!.Ciphertext;
+        Sql(auth, "UPDATE grants SET evidence_ciphertext = $text WHERE id = $id", ("$text", ciphertext + "tampered"), ("$id", grantId));
         Ran forged = await Run(host, "scoped", existing: program);
         check(!forged.Started, "grant contents: a signed text edited to say other contents no longer verifies: no grant");
     }

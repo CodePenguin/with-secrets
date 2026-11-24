@@ -4,6 +4,7 @@ import { AccessPage } from './features/access/AccessPage'
 import { AuditPage } from './features/audit/AuditPage'
 import { MachinesPage } from './features/machines/MachinesPage'
 import { PasskeysPage } from './features/passkeys/PasskeysPage'
+import { ProvidersPage } from './features/providers/ProvidersPage'
 import { SettingsPage } from './features/settings/SettingsPage'
 import { Shell } from './features/shell/Shell'
 import { OverviewPage } from './features/status/OverviewPage'
@@ -16,6 +17,8 @@ export function App() {
         <Route index element={<OverviewPage />} />
         <Route path="access" element={<AccessPage />} />
         <Route path="secrets" element={<SecretsPage />} />
+        <Route path="providers" element={<ProvidersPage />} />
+        <Route path="providers/:id" element={<ProvidersPage />} />
         <Route path="access/:requestId" element={<AccessPage />} />
         <Route path="machines" element={<MachinesPage />} />
         <Route path="audit" element={<AuditPage view="events" />} />

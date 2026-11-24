@@ -6,7 +6,7 @@ using Microsoft.Data.Sqlite;
 namespace WithSecrets;
 
 /// <summary>
-/// The authority's side of the audit trail (schema 4 of <c>authority.db</c>): signed events the hosts uploaded, the per-machine sequence state, the gaps it found, and the
+/// The authority's side of the audit trail (schema 4 of <c>with-secrets.db</c>): signed events the hosts uploaded, the per-machine sequence state, the gaps it found, and the
 /// retention setting. An upload is one transaction: every event is checked (the machine's signature, the shape, a known id) and stored, and the sequence state moves, or nothing
 /// changes; the acknowledgement is signed only after the commit. A hole in a machine's sequence, or a number used twice, is recorded and never a reason to refuse an event.
 /// Retention is the authority's setting; it removes only events that are acknowledged (every stored event is, because it is acknowledged in the commit that stores it).
@@ -22,21 +22,6 @@ public sealed partial class AuthorityStore
     public const int MaxAuditBatch = 200;
 
     private const string RetentionSetting = "audit_retention_days";
-
-    private const string AuditSchema = """
-        CREATE TABLE IF NOT EXISTS audit_events (
-            fingerprint TEXT NOT NULL, event_id TEXT NOT NULL, epoch TEXT NOT NULL, sequence INTEGER NOT NULL, time TEXT NOT NULL, type TEXT NOT NULL, outcome TEXT NOT NULL,
-            reason TEXT NOT NULL, request_id TEXT NOT NULL, folder TEXT NOT NULL, program TEXT NOT NULL, arguments TEXT NOT NULL, grant_id TEXT NOT NULL,
-            exit_code INTEGER, event_json TEXT NOT NULL, received TEXT NOT NULL, acknowledged TEXT NOT NULL, PRIMARY KEY (fingerprint, event_id));
-        CREATE INDEX IF NOT EXISTS audit_events_machine ON audit_events (fingerprint, sequence);
-        CREATE INDEX IF NOT EXISTS audit_events_time ON audit_events (time);
-        CREATE TABLE IF NOT EXISTS audit_machine_state (fingerprint TEXT NOT NULL, epoch TEXT NOT NULL, highest INTEGER NOT NULL, updated TEXT NOT NULL, PRIMARY KEY (fingerprint, epoch));
-        CREATE TABLE IF NOT EXISTS audit_gaps (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, fingerprint TEXT NOT NULL, epoch TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, from_sequence INTEGER NOT NULL, to_sequence INTEGER NOT NULL,
-            detected TEXT NOT NULL, resolved TEXT);
-        CREATE TABLE IF NOT EXISTS authority_settings (name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS admin_spent_nonces (nonce TEXT PRIMARY KEY NOT NULL, expires TEXT NOT NULL);
-        """;
 
     // ---- retention ----
 
@@ -68,7 +53,7 @@ public sealed partial class AuthorityStore
         Write((connection, transaction) =>
         {
             int before = ReadRetention(connection, transaction);
-            StateDatabase.Execute(connection, transaction, "INSERT INTO authority_settings (name, value) VALUES ($name, $value) ON CONFLICT(name) DO UPDATE SET value = $value",
+            WithSecretsDatabase.Execute(connection, transaction, "INSERT INTO authority_settings (name, value) VALUES ($name, $value) ON CONFLICT(name) DO UPDATE SET value = $value",
                 ("$name", RetentionSetting), ("$value", days.ToString(CultureInfo.InvariantCulture)));
             Audit(connection, transaction, "audit-retention-changed", null, null, actor, $"audit retention {before} to {days} days");
 
@@ -78,7 +63,7 @@ public sealed partial class AuthorityStore
 
     private static int ReadRetention(SqliteConnection connection, SqliteTransaction? transaction)
     {
-        object? stored = StateDatabase.Scalar(connection, transaction, "SELECT value FROM authority_settings WHERE name = $name", ("$name", RetentionSetting));
+        object? stored = WithSecretsDatabase.Scalar(connection, transaction, "SELECT value FROM authority_settings WHERE name = $name", ("$name", RetentionSetting));
 
         return stored is string text && int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out int days) && days <= MaxAuditRetentionDays ? days : DefaultAuditRetentionDays;
     }
@@ -102,7 +87,7 @@ public sealed partial class AuthorityStore
     {
         int days = ReadRetention(connection, transaction);
 
-        return days == 0 ? 0 : StateDatabase.Execute(connection, transaction, "DELETE FROM audit_events WHERE acknowledged IS NOT NULL AND received < $cutoff", ("$cutoff", Time(Now - TimeSpan.FromDays(days))));
+        return days == 0 ? 0 : WithSecretsDatabase.Execute(connection, transaction, "DELETE FROM audit_events WHERE acknowledged IS NOT NULL AND received < $cutoff", ("$cutoff", Time(Now - TimeSpan.FromDays(days))));
     }
 
     // ---- upload ----
@@ -190,7 +175,7 @@ public sealed partial class AuthorityStore
             return Refuse("bad-signature");
         }
 
-        if (StateDatabase.Scalar(connection, transaction, "SELECT event_json FROM audit_events WHERE fingerprint = $fp AND event_id = $id", ("$fp", item.MachineFingerprint), ("$id", item.EventId)) is string stored)
+        if (WithSecretsDatabase.Scalar(connection, transaction, "SELECT event_json FROM audit_events WHERE fingerprint = $fp AND event_id = $id", ("$fp", item.MachineFingerprint), ("$id", item.EventId)) is string stored)
         {
             return string.Equals(stored, item.ToJson(), StringComparison.Ordinal) ? new AuditAckEntry(item.EventId, AuditStatus.Duplicate, "") : Refuse("event-id-reused");
         }
@@ -204,7 +189,7 @@ public sealed partial class AuthorityStore
         }
 
         TrackSequence(connection, transaction, item.MachineFingerprint, item.Epoch, item.Sequence, nowText, recordReuse: true);
-        StateDatabase.Execute(connection, transaction, "INSERT INTO audit_events (event_id, fingerprint, epoch, sequence, time, type, outcome, reason, request_id, folder, program, arguments, grant_id, exit_code, event_json, received, acknowledged) VALUES ($id, $fp, $epoch, $seq, $time, $type, $outcome, $reason, $request, $folder, $program, $arguments, $grant, $exit, $json, $now, $now)",
+        WithSecretsDatabase.Execute(connection, transaction, "INSERT INTO audit_events (event_id, fingerprint, epoch, sequence, time, type, outcome, reason, request_id, folder, program, arguments, grant_id, exit_code, event_json, received, acknowledged) VALUES ($id, $fp, $epoch, $seq, $time, $type, $outcome, $reason, $request, $folder, $program, $arguments, $grant, $exit, $json, $now, $now)",
             ("$id", item.EventId), ("$fp", item.MachineFingerprint), ("$epoch", item.Epoch), ("$seq", item.Sequence), ("$time", Time(item.Time)), ("$type", item.Type), ("$outcome", item.Outcome), ("$reason", item.Reason),
             ("$request", item.RequestId), ("$folder", item.Folder), ("$program", item.Program), ("$arguments", ArgumentsText(item.Arguments)), ("$grant", item.GrantId), ("$exit", item.ExitCode),
             ("$json", item.ToJson()), ("$now", nowText));
@@ -228,9 +213,9 @@ public sealed partial class AuthorityStore
     /// </summary>
     private static void TrackSequence(SqliteConnection connection, SqliteTransaction transaction, string fingerprint, string epoch, long sequence, string now, bool recordReuse)
     {
-        object? known = StateDatabase.Scalar(connection, transaction, "SELECT highest FROM audit_machine_state WHERE fingerprint = $fp AND epoch = $epoch", ("$fp", fingerprint), ("$epoch", epoch));
+        object? known = WithSecretsDatabase.Scalar(connection, transaction, "SELECT highest FROM audit_machine_state WHERE fingerprint = $fp AND epoch = $epoch", ("$fp", fingerprint), ("$epoch", epoch));
         long highest = known is { } value ? Convert.ToInt64(value, CultureInfo.InvariantCulture) : 0;
-        if (known is null && StateDatabase.Scalar(connection, transaction, "SELECT COUNT(*) FROM audit_machine_state WHERE fingerprint = $fp", ("$fp", fingerprint)) is { } others && Convert.ToInt64(others, CultureInfo.InvariantCulture) > 0)
+        if (known is null && WithSecretsDatabase.Scalar(connection, transaction, "SELECT COUNT(*) FROM audit_machine_state WHERE fingerprint = $fp", ("$fp", fingerprint)) is { } others && Convert.ToInt64(others, CultureInfo.InvariantCulture) > 0)
         {
             AddGap(connection, transaction, fingerprint, epoch, "epoch", sequence, sequence, now);
         }
@@ -246,7 +231,7 @@ public sealed partial class AuthorityStore
         }
         else
         {
-            using SqliteCommand find = StateDatabase.Command(connection, transaction, "SELECT id, from_sequence, to_sequence, detected FROM audit_gaps WHERE fingerprint = $fp AND epoch = $epoch AND kind = 'missing' AND resolved IS NULL AND from_sequence <= $seq AND to_sequence >= $seq LIMIT 1", ("$fp", fingerprint), ("$epoch", epoch), ("$seq", sequence));
+            using SqliteCommand find = WithSecretsDatabase.Command(connection, transaction, "SELECT id, from_sequence, to_sequence, detected FROM audit_gaps WHERE fingerprint = $fp AND epoch = $epoch AND kind = 'missing' AND resolved IS NULL AND from_sequence <= $seq AND to_sequence >= $seq LIMIT 1", ("$fp", fingerprint), ("$epoch", epoch), ("$seq", sequence));
             (long Id, long From, long To, string Detected)? gap = null;
             using (SqliteDataReader reader = find.ExecuteReader())
             {
@@ -260,20 +245,20 @@ public sealed partial class AuthorityStore
             {
                 if (hole.From == sequence && hole.To == sequence)
                 {
-                    StateDatabase.Execute(connection, transaction, "UPDATE audit_gaps SET resolved = $now WHERE id = $id", ("$now", now), ("$id", hole.Id));
+                    WithSecretsDatabase.Execute(connection, transaction, "UPDATE audit_gaps SET resolved = $now WHERE id = $id", ("$now", now), ("$id", hole.Id));
                 }
                 else if (hole.From == sequence)
                 {
-                    StateDatabase.Execute(connection, transaction, "UPDATE audit_gaps SET from_sequence = $from WHERE id = $id", ("$from", sequence + 1), ("$id", hole.Id));
+                    WithSecretsDatabase.Execute(connection, transaction, "UPDATE audit_gaps SET from_sequence = $from WHERE id = $id", ("$from", sequence + 1), ("$id", hole.Id));
                 }
                 else if (hole.To == sequence)
                 {
-                    StateDatabase.Execute(connection, transaction, "UPDATE audit_gaps SET to_sequence = $to WHERE id = $id", ("$to", sequence - 1), ("$id", hole.Id));
+                    WithSecretsDatabase.Execute(connection, transaction, "UPDATE audit_gaps SET to_sequence = $to WHERE id = $id", ("$to", sequence - 1), ("$id", hole.Id));
                 }
                 else
                 {
-                    StateDatabase.Execute(connection, transaction, "UPDATE audit_gaps SET to_sequence = $to WHERE id = $id", ("$to", sequence - 1), ("$id", hole.Id));
-                    StateDatabase.Execute(connection, transaction, "INSERT INTO audit_gaps (fingerprint, epoch, kind, from_sequence, to_sequence, detected, resolved) VALUES ($fp, $epoch, 'missing', $from, $to, $detected, NULL)",
+                    WithSecretsDatabase.Execute(connection, transaction, "UPDATE audit_gaps SET to_sequence = $to WHERE id = $id", ("$to", sequence - 1), ("$id", hole.Id));
+                    WithSecretsDatabase.Execute(connection, transaction, "INSERT INTO audit_gaps (fingerprint, epoch, kind, from_sequence, to_sequence, detected, resolved) VALUES ($fp, $epoch, 'missing', $from, $to, $detected, NULL)",
                         ("$fp", fingerprint), ("$epoch", epoch), ("$from", sequence + 1), ("$to", hole.To), ("$detected", hole.Detected));
                 }
             }
@@ -283,13 +268,13 @@ public sealed partial class AuthorityStore
             }
         }
 
-        StateDatabase.Execute(connection, transaction, "INSERT INTO audit_machine_state (fingerprint, epoch, highest, updated) VALUES ($fp, $epoch, $highest, $now) ON CONFLICT(fingerprint, epoch) DO UPDATE SET highest = $highest, updated = $now",
+        WithSecretsDatabase.Execute(connection, transaction, "INSERT INTO audit_machine_state (fingerprint, epoch, highest, updated) VALUES ($fp, $epoch, $highest, $now) ON CONFLICT(fingerprint, epoch) DO UPDATE SET highest = $highest, updated = $now",
             ("$fp", fingerprint), ("$epoch", epoch), ("$highest", highest), ("$now", now));
     }
 
     private static void AddGap(SqliteConnection connection, SqliteTransaction transaction, string fingerprint, string epoch, string kind, long from, long to, string now)
     {
-        StateDatabase.Execute(connection, transaction, "INSERT INTO audit_gaps (fingerprint, epoch, kind, from_sequence, to_sequence, detected, resolved) VALUES ($fp, $epoch, $kind, $from, $to, $now, NULL)",
+        WithSecretsDatabase.Execute(connection, transaction, "INSERT INTO audit_gaps (fingerprint, epoch, kind, from_sequence, to_sequence, detected, resolved) VALUES ($fp, $epoch, $kind, $from, $to, $now, NULL)",
             ("$fp", fingerprint), ("$epoch", epoch), ("$kind", kind), ("$from", from), ("$to", to), ("$now", now));
     }
 
@@ -298,7 +283,7 @@ public sealed partial class AuthorityStore
     /// <summary>The highest sequence number the authority has seen from the machine in its latest epoch (0: none).</summary>
     public long AuditHighestSequence(string fingerprint)
     {
-        return Read(connection => connection is null ? 0L : StateDatabase.Scalar(connection, null, "SELECT highest FROM audit_machine_state WHERE fingerprint = $fp ORDER BY rowid DESC LIMIT 1", ("$fp", fingerprint)) is { } value ? Convert.ToInt64(value, CultureInfo.InvariantCulture) : 0L);
+        return Read(connection => connection is null ? 0L : WithSecretsDatabase.Scalar(connection, null, "SELECT highest FROM audit_machine_state WHERE fingerprint = $fp ORDER BY rowid DESC LIMIT 1", ("$fp", fingerprint)) is { } value ? Convert.ToInt64(value, CultureInfo.InvariantCulture) : 0L);
     }
 
     /// <summary>The recorded gaps (holes and reused numbers), oldest first; by default only those still open.</summary>
@@ -387,7 +372,7 @@ public sealed partial class AuthorityStore
             {
                 if (!AuditEvent.TryParse(reader.GetString(0), out AuditEvent? parsed, out string? problem))
                 {
-                    throw new AuthorityDatabaseException("a stored audit event cannot be read (" + problem + "); delete authority.db to start over");
+                    throw new AuthorityDatabaseException("a stored audit event cannot be read (" + problem + "); delete with-secrets.db to start over");
                 }
 
                 return new AuditHistoryRecord(parsed!, ParseTime(reader.GetString(1)));

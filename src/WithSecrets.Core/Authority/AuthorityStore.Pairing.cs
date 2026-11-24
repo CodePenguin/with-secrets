@@ -35,12 +35,6 @@ public sealed record PairingConsumeResult(PairingOutcome Outcome, string Status,
 
 public sealed partial class AuthorityStore
 {
-    private const string InvitationSchema = """
-        CREATE TABLE IF NOT EXISTS pairing_invitations (
-            id TEXT PRIMARY KEY NOT NULL, created TEXT NOT NULL, expires TEXT NOT NULL, status TEXT NOT NULL, failed INTEGER NOT NULL,
-            ended TEXT, machine TEXT, request_digest TEXT, result TEXT);
-        """;
-
     private static PairingInvitationRecord ReadInvitation(SqliteDataReader reader) => new(reader.GetString(0), ParseTime(reader.GetString(1)), ParseTime(reader.GetString(2)),
         reader.GetString(3), reader.GetInt32(4), reader.IsDBNull(5) ? null : ParseTime(reader.GetString(5)), reader.IsDBNull(6) ? null : reader.GetString(6), reader.IsDBNull(7) ? null : reader.GetString(7), reader.IsDBNull(8) ? null : reader.GetString(8));
 
@@ -54,7 +48,7 @@ public sealed partial class AuthorityStore
         string now = Time(Now);
         foreach (string id in Query(connection, transaction, "SELECT id FROM pairing_invitations WHERE status = 'pending' AND expires <= $now", reader => reader.GetString(0), ("$now", now)))
         {
-            StateDatabase.Execute(connection, transaction, "UPDATE pairing_invitations SET status = 'expired', ended = $now WHERE id = $id", ("$now", now), ("$id", id));
+            WithSecretsDatabase.Execute(connection, transaction, "UPDATE pairing_invitations SET status = 'expired', ended = $now WHERE id = $id", ("$now", now), ("$id", id));
             Audit(connection, transaction, "pairing-invitation-expired", null, null, "authority", "invitation " + Short(id) + " expired unused");
         }
     }
@@ -91,7 +85,7 @@ public sealed partial class AuthorityStore
             IReadOnlyList<string> open = Query(connection, transaction, "SELECT id FROM pairing_invitations WHERE status = 'pending'", reader => reader.GetString(0));
             foreach (string id in open)
             {
-                StateDatabase.Execute(connection, transaction, "UPDATE pairing_invitations SET status = 'expired', ended = $now WHERE id = $id", ("$now", now), ("$id", id));
+                WithSecretsDatabase.Execute(connection, transaction, "UPDATE pairing_invitations SET status = 'expired', ended = $now WHERE id = $id", ("$now", now), ("$id", id));
                 Audit(connection, transaction, "pairing-invitation-expired", null, null, "authority", "invitation " + Short(id) + " ended: the service restarted and its key was only in memory");
             }
 
@@ -111,7 +105,7 @@ public sealed partial class AuthorityStore
                 return "too many invitations are open; wait for one to be used or to expire, or revoke one";
             }
 
-            StateDatabase.Execute(connection, transaction, "INSERT INTO pairing_invitations (id, created, expires, status, failed) VALUES ($id, $now, $expires, 'pending', 0)",
+            WithSecretsDatabase.Execute(connection, transaction, "INSERT INTO pairing_invitations (id, created, expires, status, failed) VALUES ($id, $now, $expires, 'pending', 0)",
                 ("$id", id), ("$now", now), ("$expires", Time(expires)));
             Audit(connection, transaction, "pairing-invitation-created", null, null, actor, "invitation " + Short(id) + ", expires " + Time(expires));
 
@@ -143,11 +137,11 @@ public sealed partial class AuthorityStore
             }
 
             int failed = invitation.Failed + 1;
-            StateDatabase.Execute(connection, transaction, "UPDATE pairing_invitations SET failed = $failed WHERE id = $id", ("$failed", failed), ("$id", id));
+            WithSecretsDatabase.Execute(connection, transaction, "UPDATE pairing_invitations SET failed = $failed WHERE id = $id", ("$failed", failed), ("$id", id));
             Audit(connection, transaction, "pairing-attempt-refused", null, null, "pairing", $"invitation {Short(id)}: {reason} (failure {failed} of {limit})");
             if (failed >= limit)
             {
-                StateDatabase.Execute(connection, transaction, "UPDATE pairing_invitations SET status = 'revoked', ended = $now WHERE id = $id", ("$now", Time(Now)), ("$id", id));
+                WithSecretsDatabase.Execute(connection, transaction, "UPDATE pairing_invitations SET status = 'revoked', ended = $now WHERE id = $id", ("$now", Time(Now)), ("$id", id));
                 Audit(connection, transaction, "pairing-invitation-withdrawn", null, null, "authority", "invitation " + Short(id) + " withdrawn after too many wrong proofs");
             }
 
@@ -161,7 +155,7 @@ public sealed partial class AuthorityStore
         return Write((connection, transaction) =>
         {
             ExpireIn(connection, transaction);
-            if (StateDatabase.Execute(connection, transaction, "UPDATE pairing_invitations SET status = 'revoked', ended = $now WHERE id = $id AND status = 'pending'", ("$now", Time(Now)), ("$id", id)) != 1)
+            if (WithSecretsDatabase.Execute(connection, transaction, "UPDATE pairing_invitations SET status = 'revoked', ended = $now WHERE id = $id AND status = 'pending'", ("$now", Time(Now)), ("$id", id)) != 1)
             {
                 return false;
             }
@@ -241,7 +235,7 @@ public sealed partial class AuthorityStore
             }
 
             string now = Time(Now);
-            if (StateDatabase.Execute(connection, transaction, "UPDATE pairing_invitations SET status = 'consumed', ended = $now, machine = $fp, request_digest = $digest, result = 'Pending' WHERE id = $id AND status = 'pending' AND expires > $now",
+            if (WithSecretsDatabase.Execute(connection, transaction, "UPDATE pairing_invitations SET status = 'consumed', ended = $now, machine = $fp, request_digest = $digest, result = 'Pending' WHERE id = $id AND status = 'pending' AND expires > $now",
                 ("$now", now), ("$fp", fingerprint), ("$digest", requestDigest), ("$id", invitationId)) != 1)
             {
                 return new PairingConsumeResult(PairingOutcome.InvitationRefused, "", "invitation cannot be used now");
@@ -250,14 +244,14 @@ public sealed partial class AuthorityStore
             Fault?.Invoke("pairing-after-consume");
             if (known is null)
             {
-                StateDatabase.Execute(connection, transaction, "INSERT INTO machines (fingerprint, public_key, host_name, friendly_name, status, security_revision, pending_host_name, created, updated) VALUES ($fp, $key, $host, NULL, 'Pending', 1, NULL, $now, $now)",
+                WithSecretsDatabase.Execute(connection, transaction, "INSERT INTO machines (fingerprint, public_key, host_name, friendly_name, status, security_revision, pending_host_name, created, updated) VALUES ($fp, $key, $host, NULL, 'Pending', 1, NULL, $now, $now)",
                     ("$fp", fingerprint), ("$key", Convert.ToBase64String(publicKey)), ("$host", hostName), ("$now", now));
                 History(connection, transaction, fingerprint, "registered", null, MachineStatus.Pending, 1, "pairing", "registered by pairing (invitation, certificate and proof of possession verified); host name " + hostName);
                 Audit(connection, transaction, "machine-registered", fingerprint, null, "pairing", "Pending; host name " + hostName + "; by pairing invitation " + Short(invitationId));
             }
             else
             {
-                StateDatabase.Execute(connection, transaction, "UPDATE machines SET host_name = $host, updated = $now WHERE fingerprint = $fp", ("$host", hostName), ("$now", now), ("$fp", fingerprint));
+                WithSecretsDatabase.Execute(connection, transaction, "UPDATE machines SET host_name = $host, updated = $now WHERE fingerprint = $fp", ("$host", hostName), ("$now", now), ("$fp", fingerprint));
                 History(connection, transaction, fingerprint, "pairing-refreshed", MachineStatus.Pending, MachineStatus.Pending, known.SecurityRevision, "pairing", "registered again by pairing; host name " + hostName);
                 Audit(connection, transaction, "machine-pairing-refreshed", fingerprint, null, "pairing", "Pending record refreshed; host name " + hostName + "; by pairing invitation " + Short(invitationId));
             }

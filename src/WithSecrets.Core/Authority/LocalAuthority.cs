@@ -14,6 +14,7 @@ public sealed class AuthorityKeyRing(AuthorityStore store, Func<int, ISigningKey
 {
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
     private readonly Lock _lock = new();
+    private readonly Lock _openLock = new();
     private readonly Dictionary<string, ISigningKey> _opened = new(StringComparer.Ordinal);
 
     /// <summary>While this is locked no key is used, made or replaced: <see cref="Current" />, <see cref="Rotate" /> and <see cref="Recover" /> throw <see cref="AuthorityLockedException" />. The public record is still readable.</summary>
@@ -36,7 +37,7 @@ public sealed class AuthorityKeyRing(AuthorityStore store, Func<int, ISigningKey
 
             ISigningKey first = open(1);
             AuthorityKeyRecord recorded = store.RecordFirstKey(first.PublicKey, "authority");
-            _opened[recorded.Fingerprint] = first;
+            Remember(recorded, first);
             KeyRecorded?.Invoke();
 
             return recorded;
@@ -47,36 +48,57 @@ public sealed class AuthorityKeyRing(AuthorityStore store, Func<int, ISigningKey
     public ISigningKey Current()
     {
         LockState?.EnsureUnlocked();
-        lock (_lock)
-        {
-            return Open(CurrentRecord());
-        }
+        return Open(store.ActiveKey() ?? CurrentRecord());
+    }
+
+    internal ISigningKey Current(AuthorityKeyRecord active)
+    {
+        LockState?.EnsureUnlocked();
+        return Open(active);
     }
 
     /// <summary>
-    /// The active key's public part as the key store holds it (not as authority.db says), for checking what the key signed. It does not sign and is not a use of the key,
-    /// so it works while locked; null when there is no key yet. A key store that disagrees with authority.db is an error, as everywhere.
+    /// The active key's public part as the key store holds it (not as with-secrets.db says), for checking what the key signed. It does not sign and is not a use of the key,
+    /// so it works while locked; null when there is no key yet. A key store that disagrees with with-secrets.db is an error, as everywhere.
     /// </summary>
     public byte[]? ActivePublicKey()
     {
-        lock (_lock)
+        return store.ActiveKey() is { } active ? PublicKey(active) : null;
+    }
+
+    internal byte[] PublicKey(AuthorityKeyRecord active) => Open(active).PublicKey;
+
+    private void Remember(AuthorityKeyRecord record, ISigningKey key)
+    {
+        lock (_openLock)
         {
-            return store.ActiveKey() is { } active ? Open(active).PublicKey : null;
+            if (!_opened.TryAdd(record.Fingerprint, key) && !ReferenceEquals(_opened[record.Fingerprint], key))
+            {
+                key.Dispose();
+            }
         }
     }
 
     private ISigningKey Open(AuthorityKeyRecord record)
     {
-        if (_opened.TryGetValue(record.Fingerprint, out ISigningKey? known))
+        lock (_openLock)
+        {
+            return OpenRecorded(record);
+        }
+    }
+
+    private ISigningKey OpenRecorded(AuthorityKeyRecord record)
+    {
+        if (_opened.TryGetValue(record.Fingerprint, out ISigningKey? known) && known.PublicKey.AsSpan().SequenceEqual(record.PublicKey))
         {
             return known;
         }
 
         ISigningKey key = open(record.Generation);
-        if (!key.PublicKey.AsSpan().SequenceEqual(record.PublicKey))
+        if (!key.PublicKey.AsSpan().SequenceEqual(record.PublicKey) || KeyIdentity.Fingerprint(key.PublicKey) != record.Fingerprint)
         {
             key.Dispose();
-            throw new AuthorityDatabaseException("the authority signing key in the key store is not the one authority.db names (generation " + record.Generation + "). Recover the authority key in the admin web app (with-secrets admin prints its link)");
+            throw new AuthorityDatabaseException("the authority signing key in the key store is not the one with-secrets.db names (generation " + record.Generation + "). Recover the authority key in the admin web app (with-secrets admin prints its link)");
         }
 
         _opened[record.Fingerprint] = key;
@@ -94,8 +116,8 @@ public sealed class AuthorityKeyRing(AuthorityStore store, Func<int, ISigningKey
             ISigningKey current = Open(active);
             ISigningKey next = (create ?? open)(active.Generation + 1);
             KeyTransition transition = KeyTransition.Create(current, next.PublicKey, _clock.GetUtcNow());
-            AuthorityKeyRecord recorded = store.RecordRotation(transition, actor);
-            _opened[recorded.Fingerprint] = next;
+            AuthorityKeyRecord recorded = store.RecordRotation(transition, actor, tx => GrantSeals.Reseal(tx, current.PublicKey, next));
+            Remember(recorded, next);
 
             return transition;
         }
@@ -110,7 +132,7 @@ public sealed class AuthorityKeyRing(AuthorityStore store, Func<int, ISigningKey
             AuthorityKeyRecord active = store.ActiveKey() ?? CurrentRecord();
             ISigningKey next = (create ?? open)(active.Generation + 1);
             AuthorityKeyRecord recorded = store.RecordRecovery(next.PublicKey, actor);
-            _opened[recorded.Fingerprint] = next;
+            Remember(recorded, next);
 
             return recorded;
         }
@@ -121,7 +143,7 @@ public sealed class AuthorityKeyRing(AuthorityStore store, Func<int, ISigningKey
 /// The authority of a local deployment: the host service and the authority in one process, through the same interface and the
 /// same signatures a remote authority will use. It verifies the machine's signature, status and host name, runs the approval the
 /// host offers for exactly that request digest, records the decision (with the machine's status and revision at that moment)
-/// in <c>authority.db</c> in one transaction, and answers with a response signed by the authority key. A retry of a request id
+/// in <c>with-secrets.db</c> in one transaction, and answers with a response signed by the authority key. A retry of a request id
 /// returns the committed answer and asks nobody again. It never sees or returns a secret value.
 /// </summary>
 public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, TimeProvider? clock = null) : IAuthority, IAuditSink
@@ -148,7 +170,17 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
     public static readonly TimeSpan ResponseLifetime = TimeSpan.FromSeconds(60);
 
     /// <summary>Checks the passkey assertions that back grants. Without one no grant is made or used (a grant counts only when a person's assertion backs its present state).</summary>
-    public IApprovalVerifier? Verifier { get; set; }
+    private IApprovalVerifier? _verifier;
+
+    public IApprovalVerifier? Verifier
+    {
+        get => _verifier;
+        set
+        {
+            _verifier = value;
+            store.Sealer = value is null ? null : new GrantSealer(store, keys, value);
+        }
+    }
 
     private static readonly TimeSpan ChallengeLifetime = TimeSpan.FromMinutes(2);
     private const int MaxChallenges = 64;
@@ -409,8 +441,14 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
                 return new AuthorityStore.GrantPlan(answer(GrantOps.None, GrantReasons.NoGrant, null, current.SecurityRevision), null, "", false);
             }
 
+            // A once-only grant was used by the approval that made it: it never covers another run (a row set active again in the database stays void).
+            if (grant.Usage != GrantUsage.Reusable)
+            {
+                return new AuthorityStore.GrantPlan(answer(GrantOps.None, GrantReasons.NoGrant, null, current.SecurityRevision), "grant-ignored", $"grant {grant.Id}: a once-only grant covers no further run", false);
+            }
+
             // A row that no person's assertion backs (written, changed or planted by anything else) is not a grant.
-            if (GrantEvidence.RowProblem(Verifier, grant) is { } rowProblem)
+            if (tx.SealProblem(grant) is { } rowProblem)
             {
                 return new AuthorityStore.GrantPlan(answer(GrantOps.None, GrantReasons.NoGrant, null, current.SecurityRevision), "grant-ignored", $"grant {grant.Id}: {rowProblem}", false);
             }
@@ -428,7 +466,7 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
             }
 
             return new AuthorityStore.GrantPlan(answer(GrantOps.Granted, GrantReasons.Ok, grant.Info, current.SecurityRevision), "grant-use", $"grant {grant.Id} revision {grant.Revision}", false);
-        });
+        }, replay: false);
     }
 
     private GrantResponse ApproveGrant(GrantEnvelope envelope, MachineRecord machine, CancellationToken cancel, Func<string, string, GrantInfo?, int, GrantResponse> answer, Func<string, int, GrantResponse> refuse)
@@ -476,7 +514,9 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
                 return new AuthorityStore.GrantPlan(refuse(cancelled ? ReasonCodes.Cancelled : answered.TimedOut ? ReasonCodes.ApprovalTimeout : ReasonCodes.UserDenied, current.SecurityRevision), "grant-denied", detail);
             }
 
-            if (answered.ReuseMinutes != ReuseOffer.Always && answered.ReuseMinutes is < 1 or > ReuseSettings.MaxMinutes)
+            // "Approve once" (no time) with the person's assertion records a consumed once-only grant; without one it is what it always was: no time chosen.
+            bool once = answered.ReuseMinutes == 0 && answered.Evidence is not null;
+            if (!once && answered.ReuseMinutes != ReuseOffer.Always && answered.ReuseMinutes is < 1 or > ReuseSettings.MaxMinutes)
             {
                 return new AuthorityStore.GrantPlan(refuse(GrantReasons.NoTime, current.SecurityRevision), "grant-denied", "no time was chosen on the approval page");
             }
@@ -488,18 +528,18 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
                 return new AuthorityStore.GrantPlan(refuse(GrantReasons.NoEvidence, current.SecurityRevision), "grant-denied", "the approval carried no passkey assertion");
             }
 
-            DateTimeOffset? pageIssued = GrantEvidence.Line(evidence.Text, ApprovalSummary.IssuedPrefix) is { } issuedText && DateTimeOffset.TryParseExact(issuedText, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTimeOffset parsed) ? parsed : null;
-            ApprovalCheck check = Verifier?.Verify(evidence, answered.ReuseMinutes) ?? new ApprovalCheck(false, "", false, "no verifier");
-            if (!check.Ok || pageIssued is null || now < pageIssued - GrantEvidence.Skew || now > pageIssued.Value.AddMinutes(ApprovalSettings.MaxTimeoutMinutes - 1)
-                || GrantEvidence.Line(evidence.Text, ApprovalSummary.RequestIdPrefix) != envelope.ScopeKey
-                || GrantEvidence.Line(evidence.Text, GrantEvidence.SecurityRevisionPrefix) != current.SecurityRevision.ToString(CultureInfo.InvariantCulture)
-                || GrantEvidence.Line(evidence.Text, GrantEvidence.ContentsPrefix) != GrantEvidence.ContentsKey(request.SecretNames, request.Program, request.WorkingDirectory))
+            if (ApproveEvidenceProblem(evidence, answered.ReuseMinutes, envelope.ScopeKey, current.SecurityRevision, request, now) is { } evidenceProblem)
             {
-                return new AuthorityStore.GrantPlan(refuse(GrantReasons.BadEvidence, current.SecurityRevision), "grant-denied", "the passkey assertion does not back this grant (" + (check.Ok ? "wrong text or time" : check.Detail) + ")");
+                return new AuthorityStore.GrantPlan(refuse(GrantReasons.BadEvidence, current.SecurityRevision), "grant-denied", evidenceProblem);
+            }
+
+            if (once)
+            {
+                return RecordOnce(tx, machine.Fingerprint, envelope.ScopeKey, request, evidence, current.SecurityRevision, approvedBy, now, answer);
             }
 
             DateTimeOffset? expires = answered.ReuseMinutes == ReuseOffer.Always ? null : now.AddMinutes(answered.ReuseMinutes);
-            StoredEvidence stored = new(GrantEvidence.ApproveKind, evidence.Nonce, evidence.Text, evidence.Proof, answered.ReuseMinutes);
+            PlainEvidence stored = new(GrantEvidence.ApproveKind, evidence, answered.ReuseMinutes);
             GrantRecord? existing = tx.FindByScope(machine.Fingerprint, envelope.ScopeKey);
             string names = GrantEvidence.NamesText(request.SecretNames);
             GrantRecord grant = existing is null
@@ -507,14 +547,128 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
                 : tx.SetExpiry(existing.Id, expires, approvedBy, stored, now, (request.Program, request.WorkingDirectory, names));
 
             return new AuthorityStore.GrantPlan(answer(GrantOps.Granted, GrantReasons.Ok, grant.Info, current.SecurityRevision), existing is null ? "grant-created" : "grant-updated", $"grant {grant.Id}, {(answered.ReuseMinutes == ReuseOffer.Always ? "no end" : answered.ReuseMinutes + " min")}, by {approvedBy}");
-        });
+        }, sealRefusal: current => SealRefusal(refuse(GrantReasons.BadEvidence, current?.SecurityRevision ?? 0)));
     }
 
+    /// <summary>The audit text of a grant that could not be sealed (no review key, no signing key, or evidence that does not back the row): constant, so no evidence text reaches the audit.</summary>
+    internal const string SealRefusedDetail = "the grant could not be sealed";
+
+    private static AuthorityStore.GrantPlan SealRefusal(GrantResponse refusal, bool store = true) => new(refusal, "grant-denied", SealRefusedDetail, store);
+
+    /// <summary>
+    /// Null when <paramref name="evidence" /> is a verified passkey assertion, made for <paramref name="minutes" /> (0: once), over a page issued just now that names
+    /// exactly this scope, this security revision and these contents; else why not. Once is never taken from a page that only makes a grant (it offers no once).
+    /// </summary>
+    private string? ApproveEvidenceProblem(ApprovalEvidence evidence, int minutes, string scopeKey, int securityRevision, LaunchRequest request, DateTimeOffset now)
+    {
+        DateTimeOffset? pageIssued = GrantEvidence.Line(evidence.Text, ApprovalSummary.IssuedPrefix) is { } issuedText && DateTimeOffset.TryParseExact(issuedText, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTimeOffset parsed) ? parsed : null;
+        ApprovalCheck check = Verifier?.Verify(evidence, minutes) ?? new ApprovalCheck(false, "", false, "no verifier");
+        if (!check.Ok || pageIssued is null || now < pageIssued - GrantEvidence.Skew || now > pageIssued.Value.AddMinutes(ApprovalSettings.MaxTimeoutMinutes - 1)
+            || GrantEvidence.Line(evidence.Text, ApprovalSummary.RequestIdPrefix) != scopeKey
+            || GrantEvidence.Line(evidence.Text, GrantEvidence.SecurityRevisionPrefix) != securityRevision.ToString(CultureInfo.InvariantCulture)
+            || GrantEvidence.Line(evidence.Text, GrantEvidence.ContentsPrefix) != GrantEvidence.ContentsKey(request.SecretNames, request.Program, request.WorkingDirectory)
+            || minutes == 0 && GrantEvidence.Line(evidence.Text, GrantEvidence.DecisionPrefix) == ApprovalQueue.GrantDecision)
+        {
+            return "the passkey assertion does not back this grant (" + (check.Ok ? "wrong text or time" : check.Detail) + ")";
+        }
+
+        return null;
+    }
+
+    /// <summary>The consumed once-only grant of an approval given once (its one run is that approval's): always a new row, never a change to an existing grant.</summary>
+    private static AuthorityStore.GrantPlan RecordOnce(AuthorityStore.GrantTx tx, string fingerprint, string scopeKey, LaunchRequest request, ApprovalEvidence evidence, int securityRevision, string approvedBy, DateTimeOffset now, Func<string, string, GrantInfo?, int, GrantResponse> answer)
+    {
+        PlainEvidence stored = new(GrantEvidence.ApproveKind, evidence, 0);
+        GrantRecord grant = tx.Create(fingerprint, scopeKey, request.Program, request.WorkingDirectory, GrantEvidence.NamesText(request.SecretNames), null, securityRevision, approvedBy, stored, now, GrantUsage.Once, consumed: true);
+
+        return new AuthorityStore.GrantPlan(answer(GrantOps.Recorded, GrantReasons.Ok, grant.Info, securityRevision), "grant-once-recorded", $"grant {grant.Id}, once, by {approvedBy}");
+    }
+
+    /// <summary>
+    /// Records the consumed once-only grant of a launch that a person approved once on the page shown here (remote mode: the page is the authority's, and the
+    /// machine's use envelope, already checked against the request, names the scope). The same checks as "Approve once" through <see cref="GrantAsync" />: the
+    /// machine still Trusted at the revision the page showed, and the person's assertion (made for once) over a page that names this scope, revision and
+    /// contents. Returns the signed answer; the launch goes on only when its outcome is <see cref="GrantOps.Recorded" />.
+    /// </summary>
+    public GrantResponse RecordOnceGrant(GrantEnvelope use, ApprovalDecision decision, int startRevision)
+    {
+        LaunchRequest request = use.Request;
+        string digest = request.Digest();
+        keys.Current();
+        GrantResponse Answer(string outcome, string reason, GrantInfo? grant, int revision)
+        {
+            DateTimeOffset issued = _clock.GetUtcNow();
+
+            return GrantResponse.Create(request.RequestId, digest, use.MachineFingerprint, GrantOps.Approve, outcome, reason, grant, revision, issued, issued + ResponseLifetime, keys.Current());
+        }
+
+        GrantResponse Refuse(string reason, int revision) => Answer(GrantOps.Denied, reason, null, revision);
+
+        MachineRecord? machine = store.Find(use.MachineFingerprint);
+        if (machine is null)
+        {
+            return Refuse(ReasonCodes.UnknownMachine, 0);
+        }
+
+        if (!use.Verify(machine.PublicKey))
+        {
+            return Refuse(ReasonCodes.BadSignature, machine.SecurityRevision);
+        }
+
+        if (!GrantOps.IsScopeKey(use.ScopeKey))
+        {
+            return Refuse(GrantReasons.BadScope, machine.SecurityRevision);
+        }
+
+        string detail = ApprovalSummary.Clean(decision.Detail);
+        detail = detail.Length > 200 ? detail[..200] : detail;
+        string keyName = AdminAudit.KeyName(decision.Detail);
+        string approvedBy = keyName.Length > 0 ? "passkey " + ApprovalSummary.Clean(keyName) : "approval page";
+
+        // Stored under its own id: the launch's request id belongs to the decision, and a retry returns this answer and records nothing twice.
+        return store.ApplyGrant("once-" + request.RequestId, digest, machine.Fingerprint, (tx, current) =>
+        {
+            keys.LockState?.EnsureUnlocked();
+            if (current is null || Problem(current, use.HostName) is not null)
+            {
+                return new AuthorityStore.GrantPlan(Refuse(current is null ? ReasonCodes.UnknownMachine : Problem(current, use.HostName)!, current?.SecurityRevision ?? 0), null, "", false);
+            }
+
+            if (current.SecurityRevision != startRevision)
+            {
+                return new AuthorityStore.GrantPlan(Refuse(ReasonCodes.AuthorizationChanged, current.SecurityRevision), "grant-denied", "the security revision changed while the approval was open");
+            }
+
+            if (!decision.Approved)
+            {
+                return new AuthorityStore.GrantPlan(Refuse(ReasonCodes.UserDenied, current.SecurityRevision), "grant-denied", detail);
+            }
+
+            if (decision.ReuseMinutes != 0)
+            {
+                return new AuthorityStore.GrantPlan(Refuse(GrantReasons.NoTime, current.SecurityRevision), "grant-denied", "a time was chosen where only once is offered");
+            }
+
+            DateTimeOffset now = _clock.GetUtcNow();
+            if (decision.Evidence is not { } evidence)
+            {
+                return new AuthorityStore.GrantPlan(Refuse(GrantReasons.NoEvidence, current.SecurityRevision), "grant-denied", "the approval carried no passkey assertion");
+            }
+
+            if (ApproveEvidenceProblem(evidence, 0, use.ScopeKey, current.SecurityRevision, request, now) is { } evidenceProblem)
+            {
+                return new AuthorityStore.GrantPlan(Refuse(GrantReasons.BadEvidence, current.SecurityRevision), "grant-denied", evidenceProblem);
+            }
+
+            return RecordOnce(tx, machine.Fingerprint, use.ScopeKey, request, evidence, current.SecurityRevision, approvedBy, now, Answer);
+        }, sealRefusal: current => SealRefusal(Refuse(GrantReasons.BadEvidence, current?.SecurityRevision ?? 0)));
+    }
 
     /// <summary>
     /// An administrator's extend, renew or revoke of a grant (the admin passkey approved it in the caller). Extend lengthens an active grant (by
     /// <see cref="GrantAdminCommand.Minutes" />, or makes it indefinite), renew gives an expired grant a new end counted from now, and revoke ends it and tells its
-    /// machine. The answer is signed and stored under the request id; a retry returns it. None of them touches the machine's security revision or any lease.
+    /// machine; replace makes a new grant in place of a consumed once-only one (see <see cref="ReplaceGrant" />). The answer is signed and stored under the request id; a retry
+    /// returns it. None of them touches the machine's security revision or any lease.
     /// </summary>
     public GrantResponse AdminGrant(GrantAdminCommand command)
     {
@@ -543,7 +697,7 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
             return done.Fingerprint == fingerprint && done.RequestDigest == digest ? done.Response : Refuse(ReasonCodes.RequestIdReused);
         }
 
-        if (command.Operation is not (GrantOps.Extend or GrantOps.Renew or GrantOps.Revoke))
+        if (command.Operation is not (GrantOps.Extend or GrantOps.Renew or GrantOps.Revoke or GrantOps.Replace))
         {
             return Refuse(GrantReasons.BadOperation);
         }
@@ -569,6 +723,11 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
             }
 
             DateTimeOffset now = _clock.GetUtcNow();
+            if (command.Operation == GrantOps.Replace)
+            {
+                return ReplaceGrant(tx, command, grant, machine, now, Answer, RefuseIn);
+            }
+
             if (grant.Status != "active")
             {
                 return new AuthorityStore.GrantPlan(RefuseIn(GrantReasons.NotActive), null, "", false);
@@ -580,7 +739,12 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
                 return new AuthorityStore.GrantPlan(RefuseIn(command.Evidence is null ? GrantReasons.NoEvidence : GrantReasons.BadEvidence), "grant-denied", $"grant {grant.Id}: {evidenceProblem}", false);
             }
 
-            StoredEvidence adminEvidence = new(GrantEvidence.AdminKind, command.Evidence!.Nonce, command.Evidence.Text, command.Evidence.Proof, 0);
+            if (command.Operation != GrantOps.Revoke && tx.SealProblem(grant) is { } rowProblem)
+            {
+                return new AuthorityStore.GrantPlan(RefuseIn(GrantReasons.BadEvidence), "grant-denied", $"grant {grant.Id}: {rowProblem}", false);
+            }
+
+            PlainEvidence adminEvidence = new(GrantEvidence.AdminKind, command.Evidence!, 0);
 
             switch (command.Operation)
             {
@@ -612,7 +776,59 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
 
                     return new AuthorityStore.GrantPlan(Answer(GrantOps.Renewed, GrantReasons.Ok, renewed.Info, revision), "grant-renewed", $"grant {grant.Id} by {command.Actor}; " + (command.Indefinite ? "indefinite" : $"{command.Minutes} min"));
             }
-        });
+        }, sealRefusal: machine => SealRefusal(Answer(GrantOps.Denied, GrantReasons.BadEvidence, null, machine?.SecurityRevision ?? 0), store: false));
+    }
+
+    /// <summary>
+    /// An administrator's replace of a consumed once-only grant (inside the transaction of <see cref="AdminGrant" />): a new reusable grant with the id the page named, for exactly the
+    /// original's scope (scope key, machine, program, folder, secret names, security revision), linked to it. Only for an original that a person's assertion backs, on a machine still at the
+    /// original's security revision, with no active grant for the scope, and only on an admin passkey's assertion over a page that names exactly this replacement. The original is not changed.
+    /// </summary>
+    private AuthorityStore.GrantPlan ReplaceGrant(AuthorityStore.GrantTx tx, GrantAdminCommand command, GrantRecord original, MachineRecord? machine, DateTimeOffset now, Func<string, string, GrantInfo?, int, GrantResponse> answer, Func<string, GrantResponse> refuse)
+    {
+        if (original.Status != "consumed" || original.Usage != GrantUsage.Once)
+        {
+            return new AuthorityStore.GrantPlan(refuse(GrantReasons.NotActive), null, "", false);
+        }
+
+        // A once row that no person's assertion backs (written, changed or planted by anything else) was never a grant, so there is nothing to replace.
+        if (tx.SealProblem(original) is { } rowProblem)
+        {
+            return new AuthorityStore.GrantPlan(refuse(GrantReasons.NotActive), "grant-denied", $"grant {original.Id}: not replaced: {rowProblem}", false);
+        }
+
+        // The approval the original carries was for the machine as it was then: a change of its security revision since (disable, untrust, ...) ends that authorization.
+        if (machine is not { Status: MachineStatus.Trusted } || machine.SecurityRevision != original.SecurityRevision)
+        {
+            return new AuthorityStore.GrantPlan(refuse(ReasonCodes.AuthorizationChanged), "grant-denied", $"grant {original.Id}: not replaced: the machine's security revision changed since its approval", false);
+        }
+
+        // Only an admin passkey's assertion over a page that names exactly this replacement (the new id, this original, its scope, the end) makes the grant; a page's new id is used once.
+        if (GrantEvidence.AdminProblem(Verifier, command, original, now) is { } evidenceProblem)
+        {
+            return new AuthorityStore.GrantPlan(refuse(command.Evidence is null ? GrantReasons.NoEvidence : GrantReasons.BadEvidence), "grant-denied", $"grant {original.Id}: {evidenceProblem}", false);
+        }
+
+        if (!GrantOps.IsGrantId(command.NewGrantId) || tx.Find(command.NewGrantId!) is not null)
+        {
+            return new AuthorityStore.GrantPlan(refuse(GrantReasons.BadEvidence), "grant-denied", $"grant {original.Id}: the new grant id of the page is not unused", false);
+        }
+
+        if (!command.Indefinite && command.NewEnd <= now)
+        {
+            return new AuthorityStore.GrantPlan(refuse(GrantReasons.NoTime), null, "", false);
+        }
+
+        if (tx.FindByScope(original.Fingerprint, original.ScopeKey) is { } active)
+        {
+            return new AuthorityStore.GrantPlan(refuse(GrantReasons.Exists), "grant-denied", $"grant {original.Id}: not replaced: grant {active.Id} is active for the scope", false);
+        }
+
+        PlainEvidence adminEvidence = new(GrantEvidence.AdminKind, command.Evidence!, 0);
+        GrantRecord made = tx.Create(original.Fingerprint, original.ScopeKey, original.Program, original.WorkingDirectory, original.SecretNames, command.Indefinite ? null : command.NewEnd, original.SecurityRevision, command.Actor, adminEvidence, now,
+            GrantUsage.Reusable, replaces: original.Id, id: command.NewGrantId);
+
+        return new AuthorityStore.GrantPlan(answer(GrantOps.Replaced, GrantReasons.Ok, made.Info, machine.SecurityRevision), "grant-replaced", $"grant {made.Id} replaces {original.Id} by {command.Actor}; " + (command.Indefinite ? "indefinite" : $"{command.Minutes} min"));
     }
 
     public Task<ReconcileResponse> ReconcileAsync(ReconcileEnvelope envelope, CancellationToken cancel = default)

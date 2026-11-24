@@ -1,19 +1,21 @@
 import { useEffect, useId, useReducer, useRef, useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { ApiError, api, setPendingAuthorization, type PendingAuthorization } from '../../api/client'
-import type { Authorization, AuthorizationResult } from '../../api/types'
+import type { Authorization, AuthorizationResult, ProviderValidation } from '../../api/types'
 import { Button, ButtonLink } from '../../components/Button'
 import { Dialog } from '../../components/Dialog'
 import { Field, checkClass, controlClass } from '../../components/Field'
 import { Facts } from '../../components/Card'
 import { Notice, ProblemAlert, useAnnounce } from '../../components/Feedback'
+import { fromBase64Url, prfOutput, sealPrf, toBase64Url, type SealedPrf } from '../../lib/passkey'
 import { BundleOnce } from '../pairing/BundleOnce'
 import { usePollInterval } from './poll'
 import type { FormValues, OperationDef, Prepared } from './operations'
 import styles from './OperationDialog.module.css'
 
 /** What a waiting dialog knows of its authorization: after a reload only the id (the rest is read from the service). */
-type Waiting = { id: string; operation: string; summary: string; done: string; link: string | null; parameters: ReadonlyArray<{ name: string; value: string }> | null; proof: { mode: string; payload: string } | null }
+type Waiting = { id: string; operation: string; summary: string; done: string; link: string | null; parameters: ReadonlyArray<{ name: string; value: string }> | null; proof: { mode: string; payload: string } | null; prfKey: string | null }
+type InlineProofBody = { proof: string; prf?: SealedPrf }
 
 type State =
   | { phase: 'form'; errors: Record<string, string> }
@@ -29,7 +31,7 @@ type Action =
   | { type: 'edited'; field: string }
   | { type: 'asking'; prepared: Prepared }
   | { type: 'created'; waiting: Waiting }
-  | { type: 'challenge'; proof: { mode: string; payload: string }; parameters: ReadonlyArray<{ name: string; value: string }> }
+  | { type: 'challenge'; proof: { mode: string; payload: string }; parameters: ReadonlyArray<{ name: string; value: string }>; prfKey: string | null }
   | { type: 'done'; summary: string; result: AuthorizationResult }
   | { type: 'failed'; error: unknown }
   | { type: 'uncertain'; error: unknown }
@@ -51,7 +53,7 @@ function reducer(state: State, action: Action): State {
     case 'created':
       return { phase: 'waiting', waiting: action.waiting, prepared: state.phase === 'asking' ? state.prepared : null }
     case 'challenge':
-      return state.phase === 'waiting' && state.waiting.proof === null ? { ...state, waiting: { ...state.waiting, proof: action.proof, parameters: action.parameters } } : state
+      return state.phase === 'waiting' && state.waiting.proof === null ? { ...state, waiting: { ...state.waiting, proof: action.proof, parameters: action.parameters, prfKey: action.prfKey } } : state
     case 'done':
       return { phase: 'done', summary: action.summary, result: action.result }
     case 'failed':
@@ -124,13 +126,13 @@ export function OperationDialog({ def, resume, onClose }: Props) {
   const hasFields = (def?.fields?.length ?? 0) > 0
   // What the dialog asks for as it opens, when nothing needs typing (or the initial values are already valid): it starts in 'asking', never showing a button that is about to be pressed for the person.
   const [auto] = useState<Prepared | null>(() => {
-    if (resume || !def || (hasFields && !def.autoPrepare)) return null
+    if (resume || !def || def.validate || (hasFields && !def.autoPrepare)) return null
     const first = def.prepare(def.initial ?? {})
 
     return 'errors' in first ? null : first
   })
   const initial: State = resume
-    ? { phase: 'waiting', waiting: { id: resume.id, operation: resume.operation, summary: resume.summary, done: resume.done, link: null, parameters: null, proof: null }, prepared: null }
+    ? { phase: 'waiting', waiting: { id: resume.id, operation: resume.operation, summary: resume.summary, done: resume.done, link: null, parameters: null, proof: null, prfKey: null }, prepared: null }
     : auto
       ? { phase: 'asking', prepared: auto }
       : hasFields
@@ -138,6 +140,11 @@ export function OperationDialog({ def, resume, onClose }: Props) {
         : { phase: 'review' }
   const [state, dispatch] = useReducer(reducer, initial)
   const [draft, setDraft] = useState<FormValues>(def?.initial ?? {})
+  const [validation, setValidation] = useState<ProviderValidation | null>(null)
+  const [validationError, setValidationError] = useState<unknown>(null)
+  const [validating, setValidating] = useState(false)
+  const [acceptWarnings, setAcceptWarnings] = useState(false)
+  const validationRequest = useRef<AbortController | null>(null)
   const [progress, setProgress] = useState<Progress>('idle')
   const [recoveryError, setRecoveryError] = useState<unknown>(null)
   // The person backed out of the passkey prompt: the request is still ready, and the page says so quietly (not as a failure).
@@ -150,7 +157,7 @@ export function OperationDialog({ def, resume, onClose }: Props) {
   const cancelInFlight = useRef(false)
   // True from the moment the assertion is handed to the proof POST: from then on the service may have applied the operation.
   const proofAttempted = useRef(false)
-  const retainedProof = useRef<{ id: string; proof: string } | null>(null)
+  const retainedProof = useRef<{ id: string; body: InlineProofBody } | null>(null)
   const autoStarted = useRef(false)
 
   useEffect(() => {
@@ -158,6 +165,7 @@ export function OperationDialog({ def, resume, onClose }: Props) {
 
     return () => {
       mounted.current = false
+      validationRequest.current?.abort()
     }
   }, [])
 
@@ -240,7 +248,7 @@ export function OperationDialog({ def, resume, onClose }: Props) {
             settle({ type: 'done', summary: waitingDone, result })
           }
         } else if (current.state === 'pending' && current.proof) {
-          dispatch({ type: 'challenge', proof: current.proof, parameters: current.parameters })
+          dispatch({ type: 'challenge', proof: current.proof, parameters: current.parameters, prfKey: current.prfKey })
           timer = setTimeout(() => void look(), pollMs)
         } else if (current.state === 'pending' || current.state === 'verified' || current.state === 'consumed') {
           timer = setTimeout(() => void look(), pollMs)
@@ -316,7 +324,7 @@ export function OperationDialog({ def, resume, onClose }: Props) {
         return
       }
       setPendingAuthorization({ id: made.id, operation: made.operation, title, summary: prepared.summary, done: prepared.done })
-      dispatch({ type: 'created', waiting: { id: made.id, operation: made.operation, summary: prepared.summary, done: prepared.done, link: null, parameters: made.parameters, proof: made.proof } })
+      dispatch({ type: 'created', waiting: { id: made.id, operation: made.operation, summary: prepared.summary, done: prepared.done, link: null, parameters: made.parameters, proof: made.proof, prfKey: made.prfKey } })
     } catch (error) {
       if (mounted.current) dispatch({ type: 'failed', error })
     }
@@ -334,18 +342,28 @@ export function OperationDialog({ def, resume, onClose }: Props) {
     setProgress('confirming')
     const controller = new AbortController()
     passkeyAbort.current = controller
-    let proof: string
+    let body: InlineProofBody
     try {
-      const payload = JSON.parse(waiting.proof.payload) as { bind: string; rpId: string; timeout: number }
-      const decode = (text: string) => Uint8Array.from(atob(text.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - text.length % 4) % 4)), (char) => char.charCodeAt(0))
-      const challenge = decode(payload.bind)
-      const credentialPromise = navigator.credentials.get({ publicKey: { challenge, rpId: payload.rpId, timeout: payload.timeout, userVerification: 'required' }, signal: controller.signal })
+      const payload = JSON.parse(waiting.proof.payload) as { bind: string; rpId: string; timeout: number; salt?: string | null }
+      const challenge = fromBase64Url(payload.bind)
+      const options: PublicKeyCredentialRequestOptions = { challenge, rpId: payload.rpId, timeout: payload.timeout, userVerification: 'required' }
+      if (waiting.prfKey && payload.salt) options.extensions = { prf: { eval: { first: fromBase64Url(payload.salt) } } }
+      const credentialPromise = navigator.credentials.get({ publicKey: options, signal: controller.signal })
       const credential = await credentialPromise
       if (credential === null) throw new ApiError(0, 'passkey-cancelled', 'Passkey not completed', 'The passkey prompt was cancelled. Nothing was changed.')
       const assertion = credential as PublicKeyCredential
       const response = assertion.response as AuthenticatorAssertionResponse
-      const encode = (bytes: ArrayBuffer) => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-      proof = JSON.stringify({ id: encode(assertion.rawId), authenticatorData: encode(response.authenticatorData), clientDataJSON: encode(response.clientDataJSON), signature: encode(response.signature) })
+      body = { proof: JSON.stringify({ id: toBase64Url(assertion.rawId), authenticatorData: toBase64Url(response.authenticatorData), clientDataJSON: toBase64Url(response.clientDataJSON), signature: toBase64Url(response.signature) }) }
+      if (waiting.prfKey && options.extensions) {
+        const output = prfOutput(assertion)
+        if (output !== null) {
+          try {
+            body.prf = await sealPrf(output, challenge, fromBase64Url(waiting.prfKey))
+          } finally {
+            output.fill(0)
+          }
+        }
+      }
     } catch (error) {
       // No proof has been sent: end this attempt.
       confirming.current = false
@@ -366,21 +384,21 @@ export function OperationDialog({ def, resume, onClose }: Props) {
 
     // From here on the service may have received the proof even if this page never sees the answer.
     proofAttempted.current = true
-    retainedProof.current = { id: waiting.id, proof }
+    retainedProof.current = { id: waiting.id, body }
     setProgress('checking')
-    await submitProof(waiting.id, proof)
+    await submitProof(waiting.id, body)
   }
 
   /**
    * Send an assertion that was already made. The service binds it to the one pending authorization and accepts a proof once, so repeating this request cannot apply the operation twice:
    * afterwards the authorization is consumed with its recorded result, or the repeated proof is refused.
    */
-  async function submitProof(id: string, proof: string) {
+  async function submitProof(id: string, body: InlineProofBody) {
     if (proofPostInFlight.current) return
     proofPostInFlight.current = true
     setProgress('checking')
     try {
-      await api.post('/api/v1/authorizations/{id}/proof', { path: { id }, body: { proof } })
+      await api.post('/api/v1/authorizations/{id}/proof', { path: { id }, body })
     } catch {
       // Ambiguous: the service may have accepted the proof and applied the operation. Keep the guard held and let the authoritative poll decide.
       setProgress('checking')
@@ -391,7 +409,7 @@ export function OperationDialog({ def, resume, onClose }: Props) {
 
   function retryProof() {
     if (!retainedProof.current) return
-    void submitProof(retainedProof.current.id, retainedProof.current.proof)
+    void submitProof(retainedProof.current.id, retainedProof.current.body)
   }
 
   async function cancelAfterAttempt(waiting: Waiting) {
@@ -450,12 +468,50 @@ export function OperationDialog({ def, resume, onClose }: Props) {
     onClose()
   }
 
-  function submitForm(event: FormEvent) {
+  function editField(field: string, value: string | boolean) {
+    setDraft((current) => ({ ...current, [field]: value }))
+    setValidation(null)
+    setValidationError(null)
+    setAcceptWarnings(false)
+    dispatch({ type: 'edited', field })
+  }
+
+  async function submitForm(event: FormEvent) {
     event.preventDefault()
-    if (!def || state.phase !== 'form') return
+    if (!def || state.phase !== 'form' || validationRequest.current) return
     const result = def.prepare(draft)
-    if ('errors' in result) dispatch({ type: 'invalid', errors: result.errors })
-    else void continueToPasskey(result)
+    if ('errors' in result) {
+      dispatch({ type: 'invalid', errors: result.errors })
+      return
+    }
+
+    if (!def.validate) {
+      await continueToPasskey(result)
+      return
+    }
+
+    if (validation) {
+      if (validation.ok && acceptWarnings) {
+        await continueToPasskey({ ...result, parameters: { ...result.parameters, 'confirm-warnings': 'yes' } })
+      }
+      return
+    }
+
+    const request = new AbortController()
+    validationRequest.current = request
+    setValidating(true)
+    setValidationError(null)
+    try {
+      const checked = await def.validate(result, request.signal)
+      if (request.signal.aborted) return
+      if (checked.ok && checked.issues.length === 0) await continueToPasskey(result)
+      else setValidation(checked)
+    } catch (error) {
+      if (!request.signal.aborted) setValidationError(error)
+    } finally {
+      validationRequest.current = null
+      if (!request.signal.aborted) setValidating(false)
+    }
   }
 
   const confirmVariant = def?.danger ? 'danger' : 'primary'
@@ -464,39 +520,50 @@ export function OperationDialog({ def, resume, onClose }: Props) {
   let footer
   if (state.phase === 'form' && def) {
     body = (
-      <form id={formId} onSubmit={submitForm} noValidate className={styles.form}>
+      <form id={formId} onSubmit={(event) => void submitForm(event)} noValidate className={styles.form}>
         {def.intro ? <p>{def.intro}</p> : null}
         {def.about ? <Facts items={def.about} /> : null}
         {def.warning ? <Notice kind="warning">{def.warning}</Notice> : null}
         {def.fields?.map((field, index) => (
           <Field key={field.name} label={field.label} hint={field.hint} error={state.errors[field.name]} required={field.required}>
-            {(control) =>
-              field.kind === 'checkbox' ? (
-                <input {...control} type="checkbox" className={checkClass} checked={draft[field.name] === true} onChange={(event) => {
-                    setDraft({ ...draft, [field.name]: event.target.checked })
-                    dispatch({ type: 'edited', field: field.name })
-                  }} />
-              ) : (
-                <input
-                  {...control}
-                  className={controlClass}
-                  type="text"
-                  inputMode={field.kind === 'number' ? 'numeric' : undefined}
-                  maxLength={field.maxLength}
-                  autoComplete="off"
-                  spellCheck={false}
-                  // eslint-disable-next-line jsx-a11y/no-autofocus -- the first field of a modal form
-                  autoFocus={index === 0}
-                  value={String(draft[field.name] ?? '')}
-                  onChange={(event) => {
-                    setDraft({ ...draft, [field.name]: event.target.value })
-                    dispatch({ type: 'edited', field: field.name })
-                  }}
-                />
-              )
-            }
+            {(control) => {
+              if (field.kind === 'checkbox') {
+                return <input {...control} type="checkbox" className={checkClass} disabled={validating} checked={draft[field.name] === true} onChange={(event) => editField(field.name, event.target.checked)} />
+              }
+
+              const input = {
+                ...control,
+                className: controlClass,
+                disabled: validating,
+                value: String(draft[field.name] ?? ''),
+                onChange: (event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => editField(field.name, event.target.value),
+              }
+              if (field.kind === 'select') {
+                return <select {...input}>{field.options?.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>
+              }
+              if (field.kind === 'textarea') {
+                return <textarea {...input} rows={5} maxLength={field.maxLength} autoComplete="off" spellCheck={false} />
+              }
+              // eslint-disable-next-line jsx-a11y/no-autofocus -- the first field of a modal form
+              return <input {...input} type="text" inputMode={field.kind === 'number' ? 'numeric' : undefined} maxLength={field.maxLength} autoComplete="off" spellCheck={false} autoFocus={index === 0} />
+            }}
           </Field>
         ))}
+        {validationError ? <ProblemAlert error={validationError} title="Validation could not finish" /> : null}
+        {validation ? (
+          <>
+            <div role={validation.ok ? 'status' : 'alert'}>
+              <Notice kind={validation.ok ? 'warning' : 'error'} title={validation.ok ? 'Provider warnings' : 'Fix the validation errors'}>
+                <ul>{validation.issues.map((issue, index) => <li key={index}>{issue.message}</li>)}</ul>
+              </Notice>
+            </div>
+            {validation.ok ? (
+              <Field label="Continue with these warnings">
+                {(control) => <input {...control} className={checkClass} type="checkbox" checked={acceptWarnings} onChange={(event) => setAcceptWarnings(event.target.checked)} />}
+              </Field>
+            ) : null}
+          </>
+        ) : null}
       </form>
     )
     footer = (
@@ -504,8 +571,8 @@ export function OperationDialog({ def, resume, onClose }: Props) {
         <Button key="cancel" onClick={close}>
           Cancel
         </Button>
-        <Button key="continue" variant={confirmVariant} type="submit" form={formId}>
-          Continue
+        <Button key="continue" variant={confirmVariant} type="submit" form={formId} disabled={validating || (validation !== null && (!validation.ok || !acceptWarnings))}>
+          {validating ? 'Validating…' : 'Continue'}
         </Button>
       </>
     )
@@ -621,7 +688,7 @@ export function OperationDialog({ def, resume, onClose }: Props) {
     body = (
       <>
         <Notice kind="ok" title="Done">
-          {state.summary}
+          {state.result.detail ?? state.summary}
         </Notice>
         {state.result.invitation ? <BundleOnce invitation={state.result.invitation} /> : null}
         {state.result.invitationGone ? (

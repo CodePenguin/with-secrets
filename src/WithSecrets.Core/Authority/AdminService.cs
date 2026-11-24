@@ -5,7 +5,7 @@ using System.Security.Cryptography;
 namespace WithSecrets;
 
 /// <summary>What the admin page and <c>GET /v1/status</c> report. Nothing here is sensitive.</summary>
-public sealed record AuthorityStatus(bool Locked, UnlockPolicy Policy);
+public sealed record AuthorityStatus(bool Locked, UnlockPolicy Policy, bool ReviewOpen);
 
 /// <summary>The answer to a request to start an operation: a link to the one-use passkey page, or why none was made.</summary>
 public sealed record AdminStart(string? Link, string? Error, int Status = 200);
@@ -16,7 +16,7 @@ public sealed record AdminCaller(AdminSession? Session);
 /// <summary>What the service needs to run the administration of the authority.</summary>
 public sealed record AdminServiceParts(AuthorityStore Store, AuthorityLock Lock, AdminAuthorizer Authorizer, Func<Action<string>, IAdminAsker> Askers, IUnlockProtection Protection, Action OnUnlocked, int Port,
     AuthorityKeyRing Keys, LocalAuthority Authority, HostConfigFile HostConfig, string? LocalFingerprint, IPasskeyAdmin? Passkeys, TimeProvider? Clock = null, PairingService? Pairing = null,
-    ApprovalQueue? Approvals = null, Func<IProofMethod?>? ApprovalProof = null);
+    ApprovalQueue? Approvals = null, Func<IProofMethod?>? ApprovalProof = null, ReviewKeys? Review = null);
 
 /// <summary>
 /// The authority's administration, served by the service on its own loopback port as a small server-rendered web app (<see cref="AdminWeb" />). Everything an administrator does lives here;
@@ -31,6 +31,7 @@ public sealed record AdminServiceParts(AuthorityStore Store, AuthorityLock Lock,
 public sealed partial class AdminService
 {
     public const string OpUnlock = "unlock";
+    public const string OpReviewUnlock = "review-unlock";
     public const string OpLock = "lock";
     public const string OpPolicyManual = "policy-manual";
     public const string OpPolicyUnattended = "policy-unattended";
@@ -110,6 +111,9 @@ public sealed partial class AdminService
 
     /// <summary>Entering and removing secrets in the web app. Set by the host service once the audit exists; null where the secret store cannot be changed from the service.</summary>
     internal SecretFlows? Secrets { get; set; }
+
+    /// <summary>Provider and mount administration. Set by the host service where a provider authority exists; null where there is none (a remote authority).</summary>
+    internal ProviderAdmin? Providers { get; set; }
 
     internal IProofMethod? ApprovalProof => _p.ApprovalProof?.Invoke();
 
@@ -225,7 +229,26 @@ public sealed partial class AdminService
     /// <summary>The authority's page, for the message of a refused run and the startup lines. Public; it carries nothing.</summary>
     public string PageUrl => $"http://localhost:{_p.Port}/admin";
 
-    public AuthorityStatus Status() => new(_p.Lock.IsLocked, _p.Store.GetUnlockPolicy());
+    public AuthorityStatus Status() => new(_p.Lock.IsLocked, _p.Store.GetUnlockPolicy(), _p.Lock.WhileUnlocked(() => _p.Review?.IsOpen == true));
+
+    internal (GrantReviewDto? Review, string? Problem, int Status) GrantReview(string id)
+    {
+        (GrantRecord? grant, string? problem, int status) = FindGrant(id);
+        if (grant is null)
+        {
+            return (null, problem, status);
+        }
+
+        if (grant.Status is "revoked" or "invalidated" || grant.ReviewKey is not { } key || grant.Evidence is not { } evidence)
+        {
+            return (new GrantReviewDto("none", null, GrantVerified(grant)), null, 200);
+        }
+
+        bool verified = GrantVerified(grant);
+        string? text = null;
+        _p.Lock.WhileUnlocked(() => (text = _p.Review?.TryDecrypt(evidence.Ciphertext, key)) is not null);
+        return (new GrantReviewDto(text is null ? "locked" : "open", text, verified), null, 200);
+    }
 
     /// <summary>The last operations and how they ended (names and outcomes only), newest first, for the dashboard of a session.</summary>
     internal IReadOnlyList<string> Recent => [.. _recent.Reverse()];
@@ -266,7 +289,7 @@ public sealed partial class AdminService
     }
 
     /// <summary>One start for <paramref name="key" /> (a caller, or the Lock lane of a caller); false when that caller already started 30 in the last minute. Other callers are not affected.</summary>
-    private bool TakeStart(string key)
+    internal bool TakeStart(string key)
     {
         lock (_gate)
         {
@@ -482,7 +505,7 @@ public sealed partial class AdminService
             failure = error is AuthorityDatabaseException ? "the authority database could not be written" : "the change failed";
         }
 
-        _p.Authorizer.Outcome(admin, failure is null ? "applied" : "failed: " + ApprovalSummary.Clean(failure));
+        _p.Authorizer.Outcome(admin, failure is not null ? "failed: " + ApprovalSummary.Clean(failure) : plan.Remark?.Value is { } remark ? "applied; " + ApprovalSummary.Clean(remark) : "applied");
         Note(plan.Operation + (failure is null ? ": applied" : ": failed"));
 
         return failure;
@@ -559,6 +582,11 @@ public sealed partial class AdminService
     }
 }
 
-/// <summary>One operation as it will be asked and applied: its name, the sentence the person reads, its parameters (all of them are signed), and what runs after the verified tap.</summary>
+/// <summary>
+/// One operation as it will be asked and applied: its name, the sentence the person reads, its parameters (all of them are signed), and what runs after the verified tap.
+/// <see cref="Remark" /> holds one constant line that <see cref="Apply" /> may leave about a change that was applied but whose aftermath did not complete (a provider that
+/// did not take a committed configuration); it becomes the detail of the applied outcome.
+/// </summary>
 internal sealed record AdminPlan(string Operation, string Sentence, IReadOnlyList<(string Name, string Value)> Parameters, Func<AdminAuthorization, string?> Apply, byte[]? Material = null,
-    Func<Action<string>, Func<string?>, (bool Ok, string Detail, string Actor)>? Delegated = null, Action<string>? OnRefused = null, System.Runtime.CompilerServices.StrongBox<InvitationCreatedDto?>? Output = null);
+    Func<Action<string>, Func<string?>, (bool Ok, string Detail, string Actor)>? Delegated = null, Action<string>? OnRefused = null, System.Runtime.CompilerServices.StrongBox<InvitationCreatedDto?>? Output = null,
+    System.Runtime.CompilerServices.StrongBox<string?>? Remark = null, bool WantsPrf = false);

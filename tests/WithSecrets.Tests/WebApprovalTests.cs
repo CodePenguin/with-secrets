@@ -621,7 +621,7 @@ internal static partial class WebApprovalTests
         FakeEnrollMethod admin = new() { Entries = [new("laptop", "localhost", when, true), new("phone", "localhost", when)] };
         (decision, _, announced) = await EnrollRun(client, admin, item => item.Unenroll("LAPTOP"), FakeProofMethod.Good);
         check(decision is { Approved: false, Detail: Enrollment.LastAdmin } && announced == 0 && admin.Calls().Length == 0, "enrollment: the last admin entry is never removed, and nothing is asked (" + decision?.Detail + ")");
-        check(Enrollment.LastAdmin.Contains("delete state.db", StringComparison.Ordinal) && Enrollment.LastAdmin.Contains("with-secrets admin", StringComparison.Ordinal) && Enrollment.LastAdmin.Contains("Also make this key an admin", StringComparison.Ordinal), "enrollment: the message says how to add another admin or start over");
+        check(Enrollment.LastAdmin.Contains("delete with-secrets.db", StringComparison.Ordinal) && Enrollment.LastAdmin.Contains("with-secrets admin", StringComparison.Ordinal) && Enrollment.LastAdmin.Contains("Also make this key an admin", StringComparison.Ordinal), "enrollment: the message says how to add another admin or start over");
         FakeEnrollMethod twoAdmins = new() { Entries = [new("laptop", "localhost", when, true), new("phone", "localhost", when, true)] };
         (decision, page, _) = await EnrollRun(client, twoAdmins, item => item.Unenroll("laptop"), FakeProofMethod.Good);
         check(decision is { Approved: true } && twoAdmins.Calls().SequenceEqual(["ask", "unenroll:laptop"]), "enrollment: an admin entry is removed when another admin stays (" + decision?.Detail + "; " + string.Join(",", twoAdmins.Calls()) + ")");
@@ -2530,7 +2530,7 @@ internal static partial class WebApprovalTests
         return JsonSerializer.Serialize(items.ToDictionary(item => item.Name, item => item.Value));
     }
 
-    /// <summary>The audit rows of an event in the store's state.db.</summary>
+    /// <summary>The audit rows of an event in the store's with-secrets.db.</summary>
     private static int AuditCount(SecretStore store, string eventName)
     {
         return TestAudit.TryRead(store.Database, 1000, null, out IReadOnlyList<AuditRow> rows, out _) ? rows.Count(row => row.Event == eventName) : -1;
@@ -2849,7 +2849,7 @@ internal static partial class WebApprovalTests
             using TestAuthenticator laptop = TestAuthenticator.ES256();
             int stores = 0;
 
-            // A state.db as the first-time setup leaves it (the laptop as the admin, the store key and vault in the first manifest), and these secrets stored (signed by the laptop).
+            // A with-secrets.db as the first-time setup leaves it (the laptop as the admin, the store key and vault in the first manifest), and these secrets stored (signed by the laptop).
             (PasskeyStore Passkeys, SecretStore Store) Fresh(IReadOnlyDictionary<string, string>? data = null)
             {
                 StateDatabase db = StateDatabase.InFolder(Path.Combine(folder, "state-" + Interlocked.Increment(ref stores)));
@@ -3040,7 +3040,7 @@ internal static partial class WebApprovalTests
                 check(removed.Result is { Code: RunCommand.Denied } && removed.SaveStatus == 403 && Stored(store).ContainsKey("A_NEW") && TestState.Current(store.Database)!.Version == version, "secrets: a removal approved by a non-admin key is denied and removes nothing (" + removed.Result?.Detail + ")");
             }
 
-            // Nothing enrolled, or a state.db that cannot be read: refused before anything starts.
+            // Nothing enrolled, or a with-secrets.db that cannot be read: refused before anything starts.
             {
                 StateDatabase emptyDb = StateDatabase.InFolder(Path.Combine(folder, "none"));
                 PasskeyStore none = new(emptyDb);
@@ -3058,14 +3058,14 @@ internal static partial class WebApprovalTests
                 SecretStore badStore = new(badDb);
                 set = SetRun(unreadable, badStore, good, laptop, goodValues);
                 removed = RemoveRun(unreadable, badStore, ["A_NEW"], laptop, true);
-                check(set.Result is { Code: not 0 } && set.Entry is null && removed.Result is { Code: not 0 } && removed.Removal is null, "secrets: an unreadable state.db is a denial before anything starts (" + set.Result?.Detail + ")");
+                check(set.Result is { Code: not 0 } && set.Entry is null && removed.Result is { Code: not 0 } && removed.Removal is null, "secrets: an unreadable with-secrets.db is a denial before anything starts (" + set.Result?.Detail + ")");
             }
 
             // A store that fails verification (a row swapped for another valid ciphertext): a set and a removal refuse, exit 4.
             {
                 (PasskeyStore passkeys, SecretStore store) = Fresh(new Dictionary<string, string> { ["A_NEW"] = ValueA });
                 StateDatabase db = store.Database;
-                db.Write((connection, transaction) => StateDatabase.Execute(connection, transaction, "UPDATE secrets SET ciphertext = $c WHERE name = 'A_NEW'", ("$c", DotenvxCipher.Instance.Encrypt("Attacker-Value-1", TestState.Current(db)!.Store))));
+                db.Write((connection, transaction) => WithSecretsDatabase.Execute(connection, transaction, "UPDATE secrets SET ciphertext = $c WHERE name = 'A_NEW'", ("$c", DotenvxCipher.Instance.Encrypt("Attacker-Value-1", TestState.Current(db)!.Store))));
                 EntryRun set = SetRun(passkeys, store, ["B_OLD"], laptop, Values(("B_OLD", ValueB)));
                 EntryRun removed = RemoveRun(passkeys, store, ["A_NEW"], laptop, true);
                 check(set.Result is { Code: RunCommand.StoreError } && set.Entry is null && removed.Result is { Code: RunCommand.StoreError } && removed.Removal is null && set.Result.Detail.Contains("failed verification", StringComparison.Ordinal), "secrets: a store that fails verification refuses a set and a removal (" + set.Result?.Detail + ")");
@@ -3098,8 +3098,8 @@ internal static partial class WebApprovalTests
                 check(run.Result is { Code: not 0 } && Stored(store).ContainsKey("C_KEEP") && TestState.Current(store.Database)!.Version == after.Version && AuditCount(store, "secrets-removed") == 1, "secrets: a removal whose write fails deletes nothing (" + run.Result?.Detail + ")");
             }
 
-            // No value anywhere: not in any text the flow showed or answered, not in any result, not in any state.db.
-            foreach (string file in Directory.GetFiles(folder, StateDatabase.FileName, SearchOption.AllDirectories))
+            // No value anywhere: not in any text the flow showed or answered, not in any result, not in any with-secrets.db.
+            foreach (string file in Directory.GetFiles(folder, WithSecretsDatabase.FileName, SearchOption.AllDirectories))
             {
                 seen.Add(StateDatabaseTests.AuditText(file));
                 seen.Add(Encoding.UTF8.GetString(File.ReadAllBytes(file)));
@@ -3107,7 +3107,7 @@ internal static partial class WebApprovalTests
 
             foreach (string value in new[] { ValueA, ValueB, OldB, longest, "Extra-Value-3" })
             {
-                check(seen.Count > 20 && !seen.Any(item => item.Contains(value, StringComparison.Ordinal)), "secrets: the value " + value[..5] + "... appears in no text, answer, result or state.db");
+                check(seen.Count > 20 && !seen.Any(item => item.Contains(value, StringComparison.Ordinal)), "secrets: the value " + value[..5] + "... appears in no text, answer, result or with-secrets.db");
             }
         }
         finally

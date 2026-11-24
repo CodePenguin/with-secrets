@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { pendingAuthorization, setPendingAuthorization } from '../../api/client'
@@ -316,14 +316,32 @@ describe('an administrative change', () => {
 
   it('every change asks for its own authorization (nothing is reused)', async () => {
     const user = userEvent.setup()
-    const fake = setup()
+    const fake = signedIn()
+    let nextId = 0
+    fake.on(inlinePath, () => {
+      const id = `auth-id-${++nextId}`
+      const path = `/api/v1/authorizations/${id}`
+      const pending = authorization({
+        id, link: null, proof: { mode: 'webauthn', payload: JSON.stringify({ bind: 'AQ', rpId: 'localhost', timeout: 60000 }) },
+      })
+      let proved = false
+      fake.on(`GET ${path}`, () => ({ body: proved ? { ...pending, state: 'consumed', result: applied } : pending }))
+      fake.on(`POST ${path}/proof`, () => {
+        proved = true
+        return { body: { ok: true } }
+      })
+      return { status: 201, body: pending }
+    })
+
+    renderApp('/machines')
     for (const round of [1, 2]) {
-      const dialog = await openApprove(user)
-      await user.click(await within(dialog).findByRole('button', { name: 'Approve machine' }, { timeout: 5000 }))
-      await user.click(await within(dialog).findByRole('button', { name: 'Close' }, { timeout: 5000 }))
+      await user.click(await screen.findByRole('button', { name: /^approve/i }))
+      const dialog = await screen.findByRole('dialog')
+      await user.click(await within(dialog).findByRole('button', { name: 'Approve machine' }))
+      await user.click(await within(dialog).findByRole('button', { name: 'Close' }))
       expect(fake.count(inlinePath)).toBe(round)
+      expect(fake.count(`POST /api/v1/authorizations/auth-id-${round}/proof`)).toBe(1)
       await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
-      cleanup()
     }
   })
 

@@ -808,7 +808,7 @@ public sealed class ApprovalQueue : IDisposable
         Unlock? unlock = null;
         if (flow.PrfState is not null)
         {
-            if (!TryOpenPrf(prfJson, flow, proof, out unlock))
+            if (!SealedPrf.TryOpen(prfJson, flow.PrfState, flow.ReviewBind, proof, out unlock))
             {
                 lock (_gate)
                 {
@@ -820,7 +820,8 @@ public sealed class ApprovalQueue : IDisposable
                 return (GetDetail(requestId, processed), null, null);
             }
         }
-        ApprovalDecision decision = ApprovalDecision.Allow(verified.Detail, reuseMinutes: minutes, evidence: minutes != 0 ? new ApprovalEvidence(flow.Nonce, flow.CanonicalText, proof) : null, unlock: unlock, actor: verified.Credential.Name, credential: verified.Credential);
+        // Every approval is a grant (once: a consumed once-only grant), so what was signed is kept for each of them, the time (0: once) included.
+        ApprovalDecision decision = ApprovalDecision.Allow(verified.Detail, reuseMinutes: minutes, evidence: new ApprovalEvidence(flow.Nonce, flow.CanonicalText, proof), unlock: unlock, actor: verified.Credential.Name, credential: verified.Credential);
         lock (_gate)
         {
             _flows.Remove(flowId);
@@ -835,37 +836,6 @@ public sealed class ApprovalQueue : IDisposable
         }
 
         return (GetDetail(requestId, processed), null, null);
-    }
-
-    private static bool TryOpenPrf(string? json, ProofFlow flow, string proof, out Unlock? unlock)
-    {
-        unlock = null;
-        byte[]? output = null;
-        try
-        {
-            if (json is null || flow.PrfState is null || PasskeyMethod.ResponseId(proof) is not { } credentialId) return false;
-            using JsonDocument document = JsonDocument.Parse(json);
-            JsonElement root = document.RootElement;
-            if (root.ValueKind != JsonValueKind.Object) return false;
-            string? epk = null, iv = null, ct = null;
-            int count = 0;
-            foreach (JsonProperty property in root.EnumerateObject())
-            {
-                count++;
-                if (property.Name == "epk" && epk is null && property.Value.ValueKind == JsonValueKind.String) epk = property.Value.GetString();
-                else if (property.Name == "iv" && iv is null && property.Value.ValueKind == JsonValueKind.String) iv = property.Value.GetString();
-                else if (property.Name == "ct" && ct is null && property.Value.ValueKind == JsonValueKind.String) ct = property.Value.GetString();
-                else return false;
-            }
-            if (count != 3 || string.IsNullOrEmpty(epk) || string.IsNullOrEmpty(iv) || string.IsNullOrEmpty(ct)) return false;
-            output = SecretCrypto.DecryptBytes(flow.PrfState, flow.ReviewBind, epk, iv, ct, SecretCrypto.PrfInfo);
-            if (output.Length != KeyVault.KeyBytes) return false;
-            unlock = new Unlock(credentialId, output);
-            output = null;
-            return true;
-        }
-        catch (Exception error) when (error is not OutOfMemoryException) { return false; }
-        finally { if (output is not null) CryptographicOperations.ZeroMemory(output); }
     }
 
     public (ApprovalDetailDto? Detail, string? ProblemCode, string? DetailText) Deny(

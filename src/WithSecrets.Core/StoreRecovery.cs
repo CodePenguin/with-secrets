@@ -10,24 +10,24 @@ namespace WithSecrets;
 /// <summary>
 /// What <c>--recover</c> carries from the old state into the new one while the person makes the new passkey: the old store key
 /// (UTF-8 hex text, in memory only; zeroed by <see cref="Dispose" />), the old ciphertext rows (already verified against the old
-/// signed hashes), the old settings (the form starts from them) and the names of the old and the renamed file.
+/// signed hashes), the old settings (the form starts from them) and the name of the database snapshot.
 /// </summary>
-internal sealed class RecoveryCarry(byte[] oldPrivateKey, IReadOnlyDictionary<string, string> oldRows, ToolSettings settings, string oldFileName, string recoveredName) : IDisposable
+internal sealed class RecoveryCarry(byte[] oldPrivateKey, byte[] oldReviewKey, string reviewPublicKey, IReadOnlyDictionary<string, string> oldRows, ToolSettings settings, string oldFileName, string recoveredName) : IDisposable
 {
     public ToolSettings Settings => settings;
 
     public string OldFileName => oldFileName;
 
-    /// <summary>The name the old file gets when everything else has worked: <c>state.db.recovered-&lt;UTC yyyyMMddHHmmss&gt;</c>.</summary>
+    /// <summary>The snapshot of the old database, named <c>with-secrets.db.recovered-&lt;UTC yyyyMMddHHmmss&gt;</c>.</summary>
     public string RecoveredName => recoveredName;
 
-    /// <summary>The administrative events of the recovery, recorded after the swap made the new state the store (see <see cref="StoreRecovery" />).</summary>
+    /// <summary>The administrative events written in the transaction that installs the recovered store.</summary>
     internal List<AdminEvent> Pending { get; } = [];
 
     public int Count => oldRows.Count;
 
     /// <summary>What the first page of the new passkey says about this setup, where it otherwise says "Admins: not set up yet".</summary>
-    public string PageNote => "Recovery: this replaces the store in " + oldFileName + " and makes new keys. The old admin keys stay only in the renamed old file (" + recoveredName + ").";
+    public string PageNote => "Recovery: this replaces the store in " + oldFileName + " and makes new keys. The old admin keys stay in the database copy (" + recoveredName + ").";
 
     /// <summary>
     /// Every old row decrypted with the old store key and encrypted again for <paramref name="newPublicKey" />, one row at a
@@ -47,7 +47,13 @@ internal sealed class RecoveryCarry(byte[] oldPrivateKey, IReadOnlyDictionary<st
         return rows;
     }
 
-    public void Dispose() => SecretValues.Clear(oldPrivateKey);
+    public ReviewKey WrapReview(byte[] masterKey) => new(reviewPublicKey, KeyVault.WrapReview(oldReviewKey, masterKey, reviewPublicKey));
+
+    public void Dispose()
+    {
+        SecretValues.Clear(oldPrivateKey);
+        SecretValues.Clear(oldReviewKey);
+    }
 }
 
 /// <summary>
@@ -57,10 +63,9 @@ internal sealed class RecoveryCarry(byte[] oldPrivateKey, IReadOnlyDictionary<st
 /// from the vault. The same call then continues as a first-run setup on a new, empty state next to the old file
 /// (a new passkey, new master key, new store key, vault and recovery code), holding only the old store key and the old
 /// ciphertext rows in between. The new store key's public key is made first; every old row is decrypted and encrypted again
-/// for it one at a time, and the new first manifest lists their hashes. At the final commit one transaction on the new file
-/// writes the manifest, the rows and the audit rows. Only then is the old file renamed to <c>state.db.recovered-&lt;UTC
-/// yyyyMMddHHmmss&gt;</c> (never deleted) and the new file put in place. Any failure leaves the old state.db as it was
-/// (a refusal adds one audit row to it) and no new file.
+/// for it one at a time, and the new first manifest lists their hashes. The old database is copied before a transaction
+/// replaces the manifest, sign counts and ciphertext and appends the recovery events in the live file. The authority
+/// and audit history are preserved.
 /// </summary>
 public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarget, EnrollmentTarget localTarget, Action<string> announce, Func<string?>? readCode)
 {
@@ -71,7 +76,7 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
     /// <summary>For tests: the time the renamed file is named after.</summary>
     internal Func<DateTimeOffset> Clock { get; set; } = () => DateTimeOffset.UtcNow;
 
-    /// <summary>For tests: runs after the new state is committed and before the files are swapped; it may throw.</summary>
+    /// <summary>For tests: runs after the scratch database is ready and before the live database is updated.</summary>
     internal Action? BeforeSwap { get; set; }
 
     public ConfigChange Run()
@@ -111,7 +116,7 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
 
         if (manifest is null)
         {
-            return Denied("There is nothing to recover: no state.db is set up. Set up with: with-secrets admin");
+            return Denied("There is nothing to recover: no secret store is set up. Set up with: with-secrets admin");
         }
 
         if (manifest.Recovery is null || manifest.Store.Length == 0)
@@ -148,18 +153,20 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
         }
 
         // Page 1: the recovery code. Nothing is changed by it.
-        byte[]? oldKey = AskCode(settings, manifest, out string? refused);
-        if (oldKey is null)
+        OpenedKeys? opened = AskCode(settings, manifest, out string? refused);
+        if (opened is null)
         {
             return Denied(refused ?? "the recovery code was not accepted; nothing was changed");
         }
 
-        // The carry owns the old key from here: it is zeroed on every path.
-        using RecoveryCarry carry = new(oldKey, rows, manifest.Settings, Path.GetFileName(db.FilePath), recoveredName);
+        // The carry owns both old private keys from here.
+        using RecoveryCarry carry = new(opened.Store, opened.Review, manifest.Review!.PublicKey, rows, manifest.Settings, Path.GetFileName(db.FilePath), recoveredName);
 
         // The new state is made in a file of its own, next to the old one, and only if the whole first setup works.
         StateDatabase fresh = new(newPath);
         ConfigChange made;
+        bool copied = false;
+        bool replaced = false;
         try
         {
             made = new FirstRunPage(fresh, primaryTarget, localTarget, announce, readCode) { Carry = carry }.Run();
@@ -170,22 +177,13 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
 
             BeforeSwap?.Invoke();
 
-            // The old store must be exactly what page 1 verified (a secret change meanwhile would be lost by the swap).
-            (Manifest? nowManifest, Dictionary<string, string> nowRows) = new SecretStore(db).Snapshot();
-            if (nowManifest is null || nowManifest.Version != manifest.Version || nowRows.Count != rows.Count || rows.Any(row => !nowRows.TryGetValue(row.Key, out string? value) || value != row.Value))
+            StateDatabase.RecoveryRows freshRows = fresh.ExportRecoveryRows();
+            db.Database.CopyTo(recoveredPath);
+            copied = true;
+            replaced = db.ReplaceRecoveredStore(manifest, rows, freshRows, carry.Pending);
+            if (!replaced)
             {
                 return Denied("the old store changed while you were recovering; run --recover again. Nothing was changed.");
-            }
-
-            if (Swap(db.FilePath, newPath, recoveredPath) is { } problem)
-            {
-                return new ConfigChange(RunCommand.StoreError, problem);
-            }
-
-            // The swap is the change: its events are recorded now. If they cannot be committed the store is already the new one, and the person is told.
-            if (carry.Pending.Any(item => !db.Audit.TryRecord(item)))
-            {
-                return new ConfigChange(RunCommand.AuditError, "the store was recovered (the old state is in " + recoveredName + "), but its audit events could not be committed to the audit outbox");
             }
         }
         catch (Exception)
@@ -194,11 +192,15 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
         }
         finally
         {
+            if (copied && !replaced)
+            {
+                DeleteFiles(recoveredPath);
+            }
             DeleteFiles(newPath);
         }
 
         return new ConfigChange(0, made.Detail + "\nRecovered " + carry.Count.ToString(CultureInfo.InvariantCulture) + (carry.Count == 1 ? " secret" : " secrets")
-            + " into the new store. The old state was renamed to " + recoveredName + ". Its admin keys are gone from the new state. The new recovery code was shown once, on the last page.");
+            + " into the new store. A copy of the old database is in " + recoveredName + ". Its admin keys are gone from the new state. The new recovery code was shown once, on the last page.");
     }
 
     private static bool Usable(EnrollmentTarget target)
@@ -233,63 +235,10 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
     }
 
     /// <summary>
-    /// The old file becomes <paramref name="recoveredPath" /> and the new file takes its place. If the second move fails the
-    /// first is undone. Null when both were done, else why not (the old file is then where it was).
-    /// </summary>
-    private static string? Swap(string oldPath, string newPath, string recoveredPath)
-    {
-        if (!File.Exists(newPath))
-        {
-            return "the new state was not made; the old state is unchanged";
-        }
-
-        List<(string From, string To)> moved = [];
-        try
-        {
-            foreach (string suffix in new[] { "", "-wal", "-shm" })
-            {
-                if (File.Exists(oldPath + suffix))
-                {
-                    File.Move(oldPath + suffix, recoveredPath + suffix, false);
-                    moved.Add((oldPath + suffix, recoveredPath + suffix));
-                }
-            }
-
-            foreach (string suffix in new[] { "", "-wal", "-shm" })
-            {
-                if (File.Exists(newPath + suffix))
-                {
-                    File.Move(newPath + suffix, oldPath + suffix, false);
-                    moved.Add((newPath + suffix, oldPath + suffix));
-                }
-            }
-
-            return null;
-        }
-        catch (Exception failure) when (failure is IOException or UnauthorizedAccessException)
-        {
-            // Undo, newest first: the old state is put back where it was.
-            for (int index = moved.Count - 1; index >= 0; index--)
-            {
-                try
-                {
-                    File.Move(moved[index].To, moved[index].From, true);
-                }
-                catch (Exception undo) when (undo is IOException or UnauthorizedAccessException)
-                {
-                    return "the files could not be swapped and could not be put back (" + undo.GetType().Name + "); the old state is in " + Path.GetFileName(recoveredPath);
-                }
-            }
-
-            return "the files could not be swapped (" + failure.GetType().Name + "); the old state is unchanged";
-        }
-    }
-
-    /// <summary>
-    /// Serves page 1 and waits for the code. The old store key bytes (the caller zeroes them), or null and why not. The master
+    /// Serves page 1 and waits for the code. The old store and review key bytes (the caller zeroes them), or null and why not. The master
     /// key is zeroed here.
     /// </summary>
-    private byte[]? AskCode(ApprovalSettings settings, Manifest manifest, out string? why)
+    private OpenedKeys? AskCode(ApprovalSettings settings, Manifest manifest, out string? why)
     {
         (byte[] serverKey, string publicKey) = SecretCrypto.NewServerKey();
         // The page after this one is the new store's first setup, served at the same place; this page's reply to the right code leads to it.
@@ -314,6 +263,8 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
         }
     }
 
+    private sealed record OpenedKeys(byte[] Store, byte[] Review);
+
     /// <summary>
     /// The state of page 1. Requests are handled one at a time under one lock. At most three codes are tried; a code that does
     /// not open the store, the time limit, Cancel and any error end it without a key.
@@ -327,7 +278,7 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
         private static readonly OneShotResponse Failed = new(500, "application/json", "{\"ok\":false}");
 
         private readonly Lock _gate = new();
-        private readonly TaskCompletionSource<byte[]?> _result = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<OpenedKeys?> _result = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private string? _why;
         private byte[]? _bind;
         private OneShotResponse? _page;
@@ -344,20 +295,20 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
             }
         }
 
-        public byte[]? Wait(TimeSpan timeout, out string? why)
+        public OpenedKeys? Wait(TimeSpan timeout, out string? why)
         {
             if (!_result.Task.Wait(timeout))
             {
                 Fail("no answer before the time limit; nothing was changed");
             }
 
-            byte[]? key = _result.Task.Result;
+            OpenedKeys? keys = _result.Task.Result;
             lock (_gate)
             {
                 why = _why;
             }
 
-            return key;
+            return keys;
         }
 
         public void Close()
@@ -441,6 +392,7 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
             byte[]? typed = null;
             byte[]? master = null;
             byte[]? key = null;
+            byte[]? reviewKey = null;
             try
             {
                 string text = SecretCrypto.Decrypt(serverKey, bind, members["epk"], members["iv"], members["ct"]);
@@ -454,22 +406,27 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
                 {
                     master = KeyVault.OpenRecovery(manifest, typed);
                     key = KeyVault.UnwrapVault(manifest.Vault, master, manifest.Store);
+                    ReviewKey review = manifest.Review!;
+                    reviewKey = KeyVault.UnwrapReview(review.Vault, master, review.PublicKey);
                 }
                 catch (CryptographicException)
                 {
                     return Wrong("That recovery code does not open this store.");
                 }
 
-                // The store key must be the private key of the signed public key.
-                if (DotenvxCipher.Instance.Derive(Encoding.UTF8.GetString(key)) != manifest.Store)
+                if (DotenvxCipher.Instance.Derive(Encoding.UTF8.GetString(key)) != manifest.Store
+                    || DotenvxCipher.Instance.Derive(Encoding.UTF8.GetString(reviewKey)) != manifest.Review!.PublicKey)
                 {
                     return Wrong("That recovery code does not open this store.");
                 }
 
                 // The next step's page is made now, after the code opened the store and before the command goes on.
                 string? next = takeNext?.Invoke();
-                _result.TrySetResult(key);
-                key = null;
+                if (_result.TrySetResult(new OpenedKeys(key, reviewKey)))
+                {
+                    key = null;
+                    reviewKey = null;
+                }
                 OneShotResponse reply = next is null ? Ok : new OneShotResponse(200, "application/json", JsonSerializer.Serialize(new { ok = true, next }));
 
                 // Kept for this one body: if the reply is lost, the same sealed code sent again gets it again (and opens nothing a second time).
@@ -488,6 +445,7 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
                 SecretValues.Clear(typed);
                 SecretValues.Clear(master);
                 SecretValues.Clear(key);
+                SecretValues.Clear(reviewKey);
             }
         }
 

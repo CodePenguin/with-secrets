@@ -309,7 +309,7 @@ internal static class OneFlowTests
             }
 
             ConfigChange result = flow.Result();
-            check(result.Code != 0 && RecoveryTests.Files(w.Folder).SequenceEqual(["state.db"]), "one flow safety: Cancel on the page reached by next ends the command and stores nothing (" + result.Detail + ")");
+            check(result.Code != 0 && RecoveryTests.Files(w.Folder).SequenceEqual(["with-secrets.db"]), "one flow safety: Cancel on the page reached by next ends the command and stores nothing (" + result.Detail + ")");
         }
 
         // The page reached by next is one-use: once its step is done, its token finds nothing; and the link before it stays dead.

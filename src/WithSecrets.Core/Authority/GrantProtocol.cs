@@ -38,6 +38,14 @@ public static class GrantOps
     public const string Renew = "renew";
     public const string Revoke = "revoke";
 
+    /// <summary>An administrator replaces a consumed once-only grant by a new one.</summary>
+    public const string Replace = "replace";
+
+    public const string Replaced = "replaced";
+
+    /// <summary>A grant made by the administrator for an approval that already happened (recorded, not asked for).</summary>
+    public const string Recorded = "recorded";
+
     public const string Granted = "granted";
     public const string None = "none";
     public const string Denied = "denied";
@@ -47,6 +55,19 @@ public static class GrantOps
 
     /// <summary>A scope key is the upper-case hex SHA-256 the host made from the request it approved (see <see cref="RequestFingerprint" />).</summary>
     public static bool IsScopeKey(string text) => text.Length == 64 && text.All(letter => letter is >= '0' and <= '9' or >= 'A' and <= 'F');
+
+    /// <summary>A new grant id: <c>g-</c> and 12 base64url characters (9 random bytes).</summary>
+    public static string NewGrantId() => "g-" + Convert.ToBase64String(RandomNumberGenerator.GetBytes(9)).Replace('+', '-').Replace('/', '_');
+
+    /// <summary>True for an id of the form <see cref="NewGrantId" /> makes.</summary>
+    public static bool IsGrantId(string? text) => text is { Length: 14 } && text.StartsWith("g-", StringComparison.Ordinal) && text[2..].All(letter => char.IsAsciiLetterOrDigit(letter) || letter is '-' or '_');
+}
+
+/// <summary>How many runs a grant covers: any number until it ends (reusable), or one run, after which it is consumed (once).</summary>
+public static class GrantUsage
+{
+    public const string Reusable = "reusable";
+    public const string Once = "once";
 }
 
 /// <summary>Reason codes that only grants use (see also <see cref="ReasonCodes" />).</summary>
@@ -57,6 +78,9 @@ public static class GrantReasons
     public const string NoTime = "no-time-chosen";
     public const string NotFound = "grant-not-found";
     public const string NotActive = "grant-not-active";
+
+    /// <summary>An active grant already covers the scope (a replace would make a second one).</summary>
+    public const string Exists = "grant-exists";
     public const string NotExpired = "grant-not-expired";
     public const string Expired = "grant-expired";
     public const string RevisionChanged = "grant-changed";
@@ -256,13 +280,13 @@ public sealed record GrantResponse(
 /// <summary>What the host needs to know about a grant: its id, scope key and revision, and when it ends (null: indefinite).</summary>
 public sealed record GrantInfo(string Id, string ScopeKey, int Revision, DateTimeOffset? Expires);
 
-/// <summary>A grant as the authority stores it. <see cref="Status"/> is active, revoked or invalidated; <see cref="Expires"/> null is an indefinite grant.</summary>
-public sealed record GrantRecord(string Id, string Fingerprint, string ScopeKey, string Program, string WorkingDirectory, string SecretNames, DateTimeOffset Created, DateTimeOffset Updated, DateTimeOffset? Expires, int Revision, int SecurityRevision, string Status, string ApprovedBy, DateTimeOffset? Revoked, StoredEvidence? Evidence = null)
+/// <summary>A grant as the authority stores it. <see cref="Status"/> is active, revoked, invalidated or consumed (a once-only grant after its run); <see cref="Expires"/> null is an indefinite grant.</summary>
+public sealed record GrantRecord(string Id, string Fingerprint, string ScopeKey, string Program, string WorkingDirectory, string SecretNames, DateTimeOffset Created, DateTimeOffset Updated, DateTimeOffset? Expires, int Revision, int SecurityRevision, string Status, string ApprovedBy, DateTimeOffset? Revoked, StoredEvidence? Evidence = null, string Usage = GrantUsage.Reusable, DateTimeOffset? Consumed = null, string? Replaces = null, string? ReviewKey = null, string? SealKey = null, byte[]? Seal = null)
 {
     public bool IsExpired(DateTimeOffset now) => Expires is { } at && now >= at;
 
-    /// <summary>Active and not past its end.</summary>
-    public bool IsUsable(DateTimeOffset now) => Status == "active" && !IsExpired(now);
+    /// <summary>True for an active, unexpired, reusable grant: a once-only row never authorizes a run, whatever its status says.</summary>
+    public bool IsUsable(DateTimeOffset now) => Status == "active" && Usage == GrantUsage.Reusable && !IsExpired(now);
 
     public GrantInfo Info => new(Id, ScopeKey, Revision, Expires);
 }
@@ -273,14 +297,15 @@ public sealed record PendingGrantEvent(long Sequence, string Fingerprint, string
 /// <summary>
 /// An administrator's change to a grant (extend, renew, revoke), made in the authority after the admin passkey approved the page.
 /// <see cref="RequestId" /> makes a retry return the committed answer. <see cref="ExpectedRevision" /> is the grant revision the page showed.
-/// <see cref="NewEnd" /> is the absolute end the page showed (extend, renew; null for indefinite or revoke) and <see cref="Evidence" /> the admin passkey's assertion over that page: the authority applies the change only if the evidence verifies and says exactly this.
+/// <see cref="NewEnd" /> is the absolute end the page showed (extend, renew, replace; null for indefinite or revoke) and <see cref="Evidence" /> the admin passkey's assertion over that page: the authority applies the change only if the evidence verifies and says exactly this.
+/// For replace, <see cref="GrantId" /> is the consumed once-only grant and <see cref="NewGrantId" /> the id the page gave the new grant.
 /// </summary>
-public sealed record GrantAdminCommand(string RequestId, string Operation, string GrantId, int? Minutes, bool Indefinite, int? ExpectedRevision, string Actor, DateTimeOffset? NewEnd = null, ApprovalEvidence? Evidence = null)
+public sealed record GrantAdminCommand(string RequestId, string Operation, string GrantId, int? Minutes, bool Indefinite, int? ExpectedRevision, string Actor, DateTimeOffset? NewEnd = null, ApprovalEvidence? Evidence = null, string? NewGrantId = null)
 {
     /// <summary>The digest of what is asked, so a request id cannot be reused for another change.</summary>
     public string Digest()
     {
-        string text = string.Join('\n', "with-secrets grant admin v1", Operation, GrantId, Minutes?.ToString(CultureInfo.InvariantCulture) ?? "", Indefinite ? "indefinite" : "", ExpectedRevision?.ToString(CultureInfo.InvariantCulture) ?? "", NewEnd is { } end ? CanonicalJson.Time(end) : "");
+        string text = string.Join('\n', "with-secrets grant admin v1", Operation, GrantId, Minutes?.ToString(CultureInfo.InvariantCulture) ?? "", Indefinite ? "indefinite" : "", ExpectedRevision?.ToString(CultureInfo.InvariantCulture) ?? "", NewEnd is { } end ? CanonicalJson.Time(end) : "", NewGrantId ?? "");
 
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)));
     }

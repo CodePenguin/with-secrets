@@ -120,16 +120,27 @@ export function ApprovalDialog({ requestId, onClose }: { requestId: string; onCl
 
   // The passkey challenge is asked for as the request opens (asking changes nothing), and again when it runs out.
   const expires = prepared?.challenge.expiresAt
+  // Deny drains requests already in flight before deciding the approval.
+  const challengeRequests = useRef(new Set<Promise<void>>())
   const prepareChallenge = useCallback(async () => {
+    const run = (async () => {
+      try {
+        const challenge = await api.post('/api/v1/approvals/{requestId}/challenge', { path: { requestId } })
+        setPrepared(await prepare(challenge, choices))
+      } catch (error) {
+        setProblem(failure(error))
+      }
+    })()
+    const requests = challengeRequests.current
+    requests.add(run)
     try {
-      const challenge = await api.post('/api/v1/approvals/{requestId}/challenge', { path: { requestId } })
-      setPrepared(await prepare(challenge, choices))
-    } catch (error) {
-      setProblem(failure(error))
+      await run
+    } finally {
+      requests.delete(run)
     }
   }, [requestId, choices])
   useEffect(() => {
-    if (!pending) return
+    if (!pending || phase !== 'idle' || busy.current) return
     if (prepared === null) {
       void prepareChallenge()
 
@@ -139,7 +150,7 @@ export function ApprovalDialog({ requestId, onClose }: { requestId: string; onCl
     const timer = setTimeout(() => setPrepared(null), Math.max(wait, 0))
 
     return () => clearTimeout(timer)
-  }, [pending, prepared, expires, prepareChallenge])
+  }, [pending, phase, prepared, expires, prepareChallenge])
 
   async function approve(minutes: number) {
     if (!prepared || busy.current) return
@@ -200,6 +211,7 @@ export function ApprovalDialog({ requestId, onClose }: { requestId: string; onCl
     setProblem(null)
     setPhase('denying')
     try {
+      await Promise.all(challengeRequests.current)
       await api.post('/api/v1/approvals/{requestId}/deny', { path: { requestId } })
       navigate('/access', { state: flash('Denied.') })
     } catch (error) {

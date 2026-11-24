@@ -25,7 +25,7 @@ internal sealed class CountingCipher : ISecretCipher
 }
 
 /// <summary>
-/// The secret store in state.db: one row per secret (the Dotenvx ciphertext), and the signed manifest has the store's public
+/// The secret store in with-secrets.db: one row per secret (the Dotenvx ciphertext), and the signed manifest has the store's public
 /// key and the SHA-256 of every ciphertext. Reads decrypt only the requested rows; a row that does not match its signed hash,
 /// a row without a hash and a hash without a row are a store that failed verification (exit 4).
 /// </summary>
@@ -63,9 +63,9 @@ internal static class SecretStoreTests
     public static string? Put(SecretStore store, IReadOnlyDictionary<string, string> values, IReadOnlyCollection<string>? removes = null)
     {
         Manifest current = TestState.Current(store.Database) ?? throw new InvalidOperationException("no manifest");
-        (string publicKey, string? vault) = KeyFor(store, current);
+        (string publicKey, string? vault, ReviewKey? review) = KeyFor(store, current);
         Dictionary<string, string> rows = values.ToDictionary(item => item.Key, item => store.Encrypt(item.Value, publicKey), StringComparer.Ordinal);
-        Manifest next = SecretStore.Next(current, publicKey, rows, removes ?? [], vault);
+        Manifest next = SecretStore.Next(current, publicKey, rows, removes ?? [], vault, review);
 
         // Like a first setup, the store has a recovery slot; a test knows its code (TestVault.RecoveryCode).
         next = next.Recovery is null && next.Store.Length > 0 ? next with { Recovery = TestVault.RecoverySlot(store.Database, next.Store) } : next;
@@ -76,16 +76,16 @@ internal static class SecretStoreTests
     }
 
     /// <summary>The store public key of <paramref name="manifest" /> (no vault); before the first secret, a new key pair and its vault under the state's master key.</summary>
-    public static (string PublicKey, string? Vault) KeyFor(SecretStore store, Manifest manifest)
+    private static (string PublicKey, string? Vault, ReviewKey? Review) KeyFor(SecretStore store, Manifest manifest)
     {
         if (manifest.Store.Length > 0)
         {
-            return (manifest.Store, null);
+            return (manifest.Store, null, null);
         }
 
         (string publicKey, string privateKey) = DotenvxCipher.Instance.NewKeyPair();
 
-        return (publicKey, TestVault.Vault(store.Database, privateKey, publicKey));
+        return (publicKey, TestVault.Vault(store.Database, privateKey, publicKey), KeyVault.NewReviewKey(TestVault.Master(store.Database)));
     }
 
     /// <summary>What the test admin's passkey releases at an approval for this state (null when it cannot).</summary>
@@ -105,10 +105,10 @@ internal static class SecretStoreTests
         return store.GetValues(names, with ?? unlock);
     }
 
-    /// <summary>A seeded state.db with a store over it.</summary>
+    /// <summary>A seeded with-secrets.db with a store over it.</summary>
     private static (StateDatabase Db, SecretStore Store, CountingCipher Cipher) NewStore(string root, string name)
     {
-        StateDatabase db = TestState.Seeded(Path.Combine(root, name, StateDatabase.FileName));
+        StateDatabase db = TestState.Seeded(Path.Combine(root, name, WithSecretsDatabase.FileName));
         CountingCipher cipher = new();
 
         return (db, new SecretStore(db, cipher), cipher);
@@ -167,10 +167,12 @@ internal static class SecretStoreTests
         (string publicKey, _) = DotenvxCipher.Instance.NewKeyPair();
         string hashB = new('b', 64);
         string hashA = new('a', 64);
-        string vault = KeyVault.WrapVault(Encoding.UTF8.GetBytes(DotenvxCipher.Instance.NewKeyPair().PrivateKey), KeyVault.NewMasterKey(), publicKey);
-        Manifest withSecrets = first.WithSecrets(publicKey, new Dictionary<string, string> { ["B_NAME"] = hashB, ["A_NAME"] = hashA }, vault);
+        byte[] master = KeyVault.NewMasterKey();
+        string vault = KeyVault.WrapVault(Encoding.UTF8.GetBytes(DotenvxCipher.Instance.NewKeyPair().PrivateKey), master, publicKey);
+        ReviewKey review = KeyVault.NewReviewKey(master);
+        Manifest withSecrets = first.WithSecrets(publicKey, new Dictionary<string, string> { ["B_NAME"] = hashB, ["A_NAME"] = hashA }, vault, review);
         string text = withSecrets.Canonical();
-        check(withSecrets.Version == 2 && text.Contains(",\"store\":\"" + publicKey + "\",\"vault\":\"" + vault + "\",\"secrets\":{\"A_NAME\":\"" + hashA + "\",\"B_NAME\":\"" + hashB + "\"},\"settings\":", StringComparison.Ordinal), "store manifest: the secrets are sorted by name, with the store key (" + text + ")");
+        check(withSecrets.Version == 2 && text.Contains(",\"secrets\":{\"A_NAME\":\"" + hashA + "\",\"B_NAME\":\"" + hashB + "\"},\"settings\":", StringComparison.Ordinal), "store manifest: the secrets are sorted by name");
         Manifest? parsed = Manifest.Parse(text, out string? error);
         check(parsed is not null && error is null && parsed.Store == publicKey && parsed.Secrets.Count == 2 && parsed.Secrets["A_NAME"] == hashA && parsed.Canonical() == text, "store manifest: round trip (" + error + ")");
         check(withSecrets.WithKey(TestAuthenticator.ES256().Record("localhost", "phone")).Secrets.Count == 2 && withSecrets.WithSettings(ToolSettings.Defaults).Store == publicKey, "store manifest: key and settings changes keep the store key and the hashes");
@@ -205,7 +207,7 @@ internal static class SecretStoreTests
         Manifest manifest = TestState.Current(db)!;
         check(manifest.Store.Length == 66 && manifest.Vault.Length > 0, "store: the first write made one key pair; the manifest has its public key and the vault");
         check(manifest.Version == 2 && manifest.Secrets.Keys.SequenceEqual(["A_NAME", "B_NAME", "C_NAME"]) && manifest.Secrets.All(item => item.Value == SecretStore.Hash(Row(db, item.Key))), "store: the manifest has the hash of every row");
-        check(Row(db, "A_NAME").StartsWith("encrypted:", StringComparison.Ordinal) && !File.ReadAllText(db.FilePath).Contains(ValueA, StringComparison.Ordinal), "store: a row is a Dotenvx ciphertext; no value is in state.db");
+        check(Row(db, "A_NAME").StartsWith("encrypted:", StringComparison.Ordinal) && !File.ReadAllText(db.FilePath).Contains(ValueA, StringComparison.Ordinal), "store: a row is a Dotenvx ciphertext; no value is in with-secrets.db");
         check(store.ListNames().SequenceEqual(["A_NAME", "B_NAME", "C_NAME"]) && cipher.Decrypts == 0, "store: --list reads names and decrypts nothing (no private key opened)");
 
         using (SecretValues values = Read(store, ["B_NAME"]))
@@ -283,8 +285,8 @@ internal static class SecretStoreTests
         }
 
         // Without a manifest, a secrets row is a tamper too.
-        StateDatabase bare = new(Path.Combine(root, "bare", StateDatabase.FileName));
-        bare.Write((connection, transaction) => StateDatabase.Execute(connection, transaction, "INSERT INTO secrets (name, ciphertext) VALUES ('A_NAME', 'encrypted:x')"));
+        StateDatabase bare = new(Path.Combine(root, "bare", WithSecretsDatabase.FileName));
+        bare.Write((connection, transaction) => WithSecretsDatabase.Execute(connection, transaction, "INSERT INTO secrets (name, ciphertext) VALUES ('A_NAME', 'encrypted:x')"));
         check(!new StateDatabase(bare.FilePath).TryCheck(out string? bareWhy) && Fails(() => new SecretStore(new StateDatabase(bare.FilePath)).ListNames(), out _), "store tamper: a secrets row without a manifest fails verification (" + bareWhy + ")");
     }
 
@@ -417,6 +419,6 @@ internal static class SecretStoreTests
         check(store.TryApply(current.Version, signed, rows, [], AdminEvent.Change("secrets-set", "test", admin.Name)) is null && Row(db, "B_NAME") == rows["B_NAME"], "store write: the same write succeeds when nothing fails");
         check(TestAudit.TryRead(db, 100, null, out IReadOnlyList<AuditRow> rowsDone, out _) && rowsDone.Count == before + 1, "store write: the audit row is written with it");
 
-        check(StateDatabase.SchemaVersion == 11, "store: the schema version is 11");
+        check(WithSecretsDatabase.SchemaVersion == 3, "store: the schema version is 3");
     }
 }

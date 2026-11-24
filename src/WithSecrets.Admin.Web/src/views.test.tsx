@@ -499,6 +499,14 @@ describe('settings and passkey context', () => {
     expect(screen.getByText('480 minutes, however busy')).toBeInTheDocument()
   })
 
+  it('shows whether review text is open or locked', async () => {
+    signedIn({ 'GET /api/v1/status': { body: status({ reviewOpen: true }) } })
+    renderApp('/settings')
+
+    expect(await screen.findByText('Review text')).toBeInTheDocument()
+    expect(await screen.findByText('open')).toBeInTheDocument()
+  })
+
   it('keeps zero audit retention visible as no limit in the page and the edit form', async () => {
     const user = userEvent.setup()
     signedIn({ 'GET /api/v1/settings': { body: settings({ auditRetentionDays: 0 }) } })

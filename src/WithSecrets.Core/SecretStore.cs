@@ -8,12 +8,15 @@ using Microsoft.Data.Sqlite;
 namespace WithSecrets;
 
 /// <summary>
-/// Where a run's secrets come from. <see cref="Label" /> names the source on the approval page (today only the global store,
-/// <see cref="SecretStore.GlobalLabel" />; a project file could be a second source later).
+/// Where a run's secrets come from. <see cref="Label" /> names the source on the approval page (the global store, <see cref="SecretStore.GlobalLabel" />);
+/// <see cref="LabelFor" /> names the source of one secret (a mounted secret's provider instance, see <see cref="ProviderSecretSource" />).
 /// </summary>
 public interface ISecretSource
 {
     string Label { get; }
+
+    /// <summary>The source of <paramref name="name" /> as the approval page shows it. Names only; nothing is read or decrypted.</summary>
+    string LabelFor(string name) => Label;
 
     /// <summary>The names of the secrets. Decrypts nothing.</summary>
     IReadOnlyList<string> ListNames();
@@ -120,7 +123,7 @@ public sealed class DotenvxCipher : ISecretCipher
 public sealed class SecretStoreException(string message, Exception? inner = null) : Exception(message, inner);
 
 /// <summary>
-/// The global secret store: table <c>secrets(name, ciphertext)</c> in state.db, one Dotenvx ciphertext per secret. The signed
+/// The global secret store: table <c>secrets(name, ciphertext)</c> in with-secrets.db, one Dotenvx ciphertext per secret. The signed
 /// manifest holds the store's public key and <see cref="Hash" /> of every ciphertext, because anyone with the public key can
 /// write a valid ciphertext: a row is used only when it matches its signed hash, and a row without a hash, or a hash without a
 /// row, is a store that failed verification. Every read checks every row's hash (no decrypt); <see cref="GetValues" /> then
@@ -169,37 +172,14 @@ public sealed class SecretStore(StateDatabase db, ISecretCipher? cipher = null) 
             Dictionary<string, string> rows = new(StringComparer.Ordinal);
             foreach (string name in names)
             {
-                rows[name] = StateDatabase.Scalar(connection!, transaction, "SELECT ciphertext FROM secrets WHERE name = $name", ("$name", name)) as string
+                rows[name] = WithSecretsDatabase.Scalar(connection!, transaction, "SELECT ciphertext FROM secrets WHERE name = $name", ("$name", name)) as string
                     ?? throw new SecretStoreException(name + " is not in the store");
             }
 
             return (manifest, rows);
         });
 
-        if (unlock is null || current is null)
-        {
-            throw new SecretStoreException("the approval did not release the secret store key (a passkey with PRF must approve), so nothing was decrypted");
-        }
-
-        byte[]? master = null;
-        byte[]? keyBytes = null;
-        string privateKey;
-        try
-        {
-            master = KeyVault.OpenMaster(current, unlock);
-            keyBytes = KeyVault.UnwrapVault(current.Vault, master, current.Store);
-            privateKey = Encoding.UTF8.GetString(keyBytes);
-        }
-        catch (Exception)
-        {
-            // Nothing about why: not which key, not which input.
-            throw new SecretStoreException("the secret store key cannot be opened with this approval, so nothing was decrypted");
-        }
-        finally
-        {
-            SecretValues.Clear(master);
-            SecretValues.Clear(keyBytes);
-        }
+        string privateKey = OpenStoreKey(current, unlock);
 
         Dictionary<string, byte[]> values = new(StringComparer.Ordinal);
         try
@@ -229,6 +209,38 @@ public sealed class SecretStore(StateDatabase db, ISecretCipher? cipher = null) 
         }
     }
 
+    /// <summary>
+    /// The store's private key (hex text) opened from the vault of <paramref name="current" /> by what the approving passkey released. The master key and the
+    /// key bytes are zeroed before this returns; the hex string cannot be wiped. Throws <see cref="SecretStoreException" /> (saying nothing about why) when it cannot.
+    /// </summary>
+    internal static string OpenStoreKey(Manifest? current, Unlock? unlock)
+    {
+        if (unlock is null || current is null)
+        {
+            throw new SecretStoreException("the approval did not release the secret store key (a passkey with PRF must approve), so nothing was decrypted");
+        }
+
+        byte[]? master = null;
+        byte[]? keyBytes = null;
+        try
+        {
+            master = KeyVault.OpenMaster(current, unlock);
+            keyBytes = KeyVault.UnwrapVault(current.Vault, master, current.Store);
+
+            return Encoding.UTF8.GetString(keyBytes);
+        }
+        catch (Exception)
+        {
+            // Nothing about why: not which key, not which input.
+            throw new SecretStoreException("the secret store key cannot be opened with this approval, so nothing was decrypted");
+        }
+        finally
+        {
+            SecretValues.Clear(master);
+            SecretValues.Clear(keyBytes);
+        }
+    }
+
     internal string Encrypt(string value, string publicKey) => _cipher.Encrypt(value, publicKey);
 
     /// <summary>
@@ -248,7 +260,7 @@ public sealed class SecretStore(StateDatabase db, ISecretCipher? cipher = null) 
     /// The next manifest: <paramref name="current" /> with <paramref name="publicKey" />, without <paramref name="removes" />,
     /// and with the hash of every ciphertext in <paramref name="rows" /> (new or replaced).
     /// </summary>
-    public static Manifest Next(Manifest current, string publicKey, IReadOnlyDictionary<string, string> rows, IReadOnlyCollection<string> removes, string? vault = null)
+    public static Manifest Next(Manifest current, string publicKey, IReadOnlyDictionary<string, string> rows, IReadOnlyCollection<string> removes, string? vault = null, ReviewKey? review = null)
     {
         Dictionary<string, string> secrets = new(current.Secrets.Where(item => !removes.Contains(item.Key)), StringComparer.Ordinal);
         foreach ((string name, string ciphertext) in rows)
@@ -256,7 +268,7 @@ public sealed class SecretStore(StateDatabase db, ISecretCipher? cipher = null) 
             secrets[name] = Hash(ciphertext);
         }
 
-        return current.WithSecrets(publicKey, secrets, vault);
+        return current.WithSecrets(publicKey, secrets, vault, review);
     }
 
     /// <summary>
@@ -265,7 +277,8 @@ public sealed class SecretStore(StateDatabase db, ISecretCipher? cipher = null) 
     /// <paramref name="rows" /> written, every row must then match the new manifest's hashes, and <paramref name="audit" /> is
     /// recorded in the signed audit (just before the commit; when it cannot be, nothing is written). Null when committed, else why not; then nothing was written.
     /// </summary>
-    internal string? TryApply(long expectedVersion, SignedManifest signed, IReadOnlyDictionary<string, string> rows, IReadOnlyCollection<string> removes, AdminEvent audit)
+    internal string? TryApply(long expectedVersion, SignedManifest signed, IReadOnlyDictionary<string, string> rows, IReadOnlyCollection<string> removes, AdminEvent audit,
+        Func<SqliteConnection, SqliteTransaction, string?>? alsoInTransaction = null)
     {
         try
         {
@@ -278,12 +291,12 @@ public sealed class SecretStore(StateDatabase db, ISecretCipher? cipher = null) 
 
                 foreach (string name in removes)
                 {
-                    StateDatabase.Execute(connection, transaction, "DELETE FROM secrets WHERE name = $name", ("$name", name));
+                    WithSecretsDatabase.Execute(connection, transaction, "DELETE FROM secrets WHERE name = $name", ("$name", name));
                 }
 
                 foreach ((string name, string ciphertext) in rows)
                 {
-                    StateDatabase.Execute(connection, transaction,
+                    WithSecretsDatabase.Execute(connection, transaction,
                         "INSERT INTO secrets (name, ciphertext) VALUES ($name, $ciphertext) ON CONFLICT (name) DO UPDATE SET ciphertext = excluded.ciphertext",
                         ("$name", name), ("$ciphertext", ciphertext));
                 }
@@ -293,8 +306,13 @@ public sealed class SecretStore(StateDatabase db, ISecretCipher? cipher = null) 
                     throw new Abort("the secrets do not match the new state (" + mismatch + "); nothing was stored");
                 }
 
+                if (alsoInTransaction?.Invoke(connection, transaction) is { } sideEffectProblem)
+                {
+                    throw new Abort(sideEffectProblem);
+                }
+
+                db.AppendAudit(connection, transaction, audit);
                 BeforeCommit?.Invoke();
-                db.AppendAudit(audit);
 
                 return null;
             });
@@ -344,7 +362,7 @@ public sealed class SecretStore(StateDatabase db, ISecretCipher? cipher = null) 
     internal static Dictionary<string, string> AllRows(SqliteConnection connection, SqliteTransaction? transaction)
     {
         Dictionary<string, string> rows = new(StringComparer.Ordinal);
-        using SqliteCommand command = StateDatabase.Command(connection, transaction, "SELECT name, ciphertext FROM secrets");
+        using SqliteCommand command = WithSecretsDatabase.Command(connection, transaction, "SELECT name, ciphertext FROM secrets");
         using SqliteDataReader reader = command.ExecuteReader();
         while (reader.Read())
         {

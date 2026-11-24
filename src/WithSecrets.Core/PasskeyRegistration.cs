@@ -20,6 +20,7 @@ namespace WithSecrets;
 /// <param name="Next">The new manifest that holds the new key, an admin or not (the page's box). An admin of the stored state signs it: the new key itself on the first run.</param>
 /// <param name="Commit">After the signed manifest and the right code: stores it (and anything that goes with it) and says how it went.</param>
 /// <param name="Reencrypt">Only for <c>--recover</c>: from the new store's public key, the old secrets re-encrypted for it (name to ciphertext). They go into the first manifest as hashes, and are stored with it by <paramref name="Commit" />.</param>
+/// <param name="WrapReview">Only for <c>--recover</c>: wraps the original review key under the new master key.</param>
 internal sealed record RegistrationPlan(
     string Prefix,
     string AnnouncePrefix,
@@ -28,7 +29,8 @@ internal sealed record RegistrationPlan(
     Func<string?> Accept,
     Func<PasskeyRecord, bool, Manifest> Next,
     Func<SignedManifest, PasskeyRecord, ApprovalDecision> Commit,
-    Func<string, IReadOnlyDictionary<string, string>>? Reencrypt = null);
+    Func<string, IReadOnlyDictionary<string, string>>? Reencrypt = null,
+    Func<byte[], ReviewKey>? WrapReview = null);
 
 /// <summary>An approval of a new manifest: the decision and, when approved, the manifest with the admin assertion over it.</summary>
 public sealed record ManifestApproval(ApprovalDecision Decision, SignedManifest? Signed);
@@ -604,7 +606,7 @@ internal static class PasskeyRegistration
                 string signer = PasskeyMethod.Signer(current!, signed);
 
                 return Commit(store.Database, signed, () => ApprovalDecision.Allow($"Added the passkey named \"{key.Name}\" for {key.RpId}" + (admin ? ", as an admin." : ".")),
-                    (connection, transaction) => store.Database.AppendAudit(AdminEvent.Change("key-enrolled",
+                    (connection, transaction) => store.Database.AppendAudit(connection, transaction, AdminEvent.Change("key-enrolled",
                         $"passkey \"{key.Name}\" added for {key.RpId}" + (admin ? " as an admin" : " (approves runs only)") + $"; admin passkey {signer} verified", signer)));
             });
 
@@ -635,7 +637,8 @@ internal static class PasskeyRegistration
                     recoveryCode = KeyVault.NewRecoveryCode();
                     KeySlot recovery = KeyVault.NewRecoverySlot(master, recoveryCode, publicKey);
                     IReadOnlyDictionary<string, string> rows = plan.Reencrypt?.Invoke(publicKey) ?? new Dictionary<string, string>();
-                    firstStore = new FirstStore(publicKey, KeyVault.WrapVault(privateKey, master, publicKey), recovery, recoveryCode, rows);
+                    ReviewKey review = plan?.WrapReview?.Invoke(master) ?? KeyVault.NewReviewKey(master);
+                    firstStore = new FirstStore(publicKey, KeyVault.WrapVault(privateKey, master, publicKey), review, recovery, recoveryCode, rows);
                     recoveryCode = null;
                 }
                 finally
@@ -725,7 +728,7 @@ internal static class PasskeyRegistration
     /// code itself, which only the last page ever shows; zeroed when the page ends) and, for <c>--recover</c>, the old secrets
     /// re-encrypted for the new store key.
     /// </summary>
-    private sealed record FirstStore(string PublicKey, string Vault, KeySlot Recovery, byte[] RecoveryCode, IReadOnlyDictionary<string, string> Rows);
+    private sealed record FirstStore(string PublicKey, string Vault, ReviewKey Review, KeySlot Recovery, byte[] RecoveryCode, IReadOnlyDictionary<string, string> Rows);
 
     /// <summary>
     /// What one registration page needs to give its new key a slot: the page's server key (private state, to open the PRF output
@@ -1231,6 +1234,7 @@ internal static class PasskeyRegistration
                     {
                         Store = firstStore.PublicKey,
                         Vault = firstStore.Vault,
+                        Review = firstStore.Review,
                         Recovery = firstStore.Recovery,
                         Secrets = new SortedDictionary<string, string>(firstStore.Rows.ToDictionary(item => item.Key, item => SecretStore.Hash(item.Value)), StringComparer.Ordinal),
                     };

@@ -12,6 +12,10 @@ export const keys = {
   approval: (id: string) => ['approvals', id] as const,
   settings: ['settings'] as const,
   passkeys: ['passkeys'] as const,
+  providers: ['providers'] as const,
+  providerTypes: ['provider-types'] as const,
+  providerMounts: (id: string) => ['providers', id, 'mounts'] as const,
+  mountEntries: (id: string) => ['mounts', id, 'entries'] as const,
   auditEvents: (filters: AuditFilters) => ['audit', 'events', filters] as const,
   auditChanges: (filters: AuditFilters) => ['audit', 'changes', filters] as const,
   auditGaps: (machine: string) => ['audit', 'gaps', machine] as const,
@@ -89,6 +93,22 @@ export function useSettings(enabled: boolean) {
 
 export function usePasskeys(enabled: boolean) {
   return useQuery({ queryKey: keys.passkeys, queryFn: () => api.get('/api/v1/passkeys'), enabled })
+}
+
+export function useProviders(enabled: boolean) {
+  return useQuery({ queryKey: keys.providers, queryFn: () => api.get('/api/v1/providers'), enabled, refetchInterval: 10_000 })
+}
+
+export function useProviderTypes(enabled: boolean) {
+  return useQuery({ queryKey: keys.providerTypes, queryFn: () => api.get('/api/v1/providers/types'), enabled })
+}
+
+export function useMounts(id: string, enabled: boolean) {
+  return useQuery({ queryKey: keys.providerMounts(id), queryFn: () => api.get('/api/v1/providers/{id}/mounts', { path: { id } }), enabled, refetchInterval: 10_000 })
+}
+
+export function useEntries(id: string) {
+  return useQuery({ queryKey: keys.mountEntries(id), queryFn: () => api.get('/api/v1/mounts/{id}/entries', { path: { id } }), refetchInterval: 10_000 })
 }
 
 export function useAuditEvents(filters: AuditFilters, enabled: boolean) {

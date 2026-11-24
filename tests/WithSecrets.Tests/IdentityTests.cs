@@ -299,10 +299,10 @@ internal static class IdentityTests
                 secrets.Add(Encoding.ASCII.GetBytes(Convert.ToBase64String(key.Pkcs8)));
             }
 
-            bool database = files.Any(file => Path.GetFileName(file) == AuthorityStore.FileName);
+            bool database = files.Any(file => Path.GetFileName(file) == WithSecretsDatabase.FileName);
             bool hostJson = files.Any(file => Path.GetFileName(file) == HostConfigFile.FileName);
             bool logged = files.Any(file => file.StartsWith(logs, StringComparison.OrdinalIgnoreCase));
-            check(database && hostJson && logged, "private material: authority.db, host.json and the log file all exist to be scanned (" + files.Length + " files)");
+            check(database && hostJson && logged, "private material: with-secrets.db, host.json and the log file all exist to be scanned (" + files.Length + " files)");
             List<string> leaks = [];
             foreach (string file in files)
             {
@@ -317,8 +317,8 @@ internal static class IdentityTests
 
             // Positive control: the scan does see public data, so an empty result means something.
             string publicText = Convert.ToBase64String(machine.PublicKey);
-            check(files.Where(file => Path.GetFileName(file).StartsWith(AuthorityStore.FileName, StringComparison.Ordinal)).Any(file => Contains(File.ReadAllBytes(file), Encoding.ASCII.GetBytes(Convert.ToBase64String(authority[1].PublicKey)))) && publicText.Length > 0,
-                "private material: positive control, the authority's public key is found in authority.db");
+            check(files.Where(file => Path.GetFileName(file).StartsWith(WithSecretsDatabase.FileName, StringComparison.Ordinal)).Any(file => Contains(File.ReadAllBytes(file), Encoding.ASCII.GetBytes(Convert.ToBase64String(authority[1].PublicKey)))) && publicText.Length > 0,
+                "private material: positive control, the authority's public key is found in with-secrets.db");
         }
         finally
         {

@@ -18,7 +18,7 @@ public enum AuthorizationState
 
 /// <summary>What an authorization looks like to the caller that asked for it (nothing in it authorizes anything by itself: only the verified tap does, and only for the one mutation it names).</summary>
 public sealed record AuthorizationView(string Id, string Operation, AuthorizationState State, string? Detail, string? Link, string Sentence, IReadOnlyList<(string Name, string Value)> Parameters, DateTimeOffset Created, DateTimeOffset Expires,
-    AuthorizationResult? Result = null, ProofStart? Proof = null);
+    AuthorizationResult? Result = null, ProofStart? Proof = null, string? PrfKey = null);
 
 /// <summary>
 /// How the change a tap authorized came out: <c>applied</c>, <c>started</c> (the operation's own passkey pages continue at <see cref="Link" />) or <c>failed</c> with a code and one safe line. The bundle of a new
@@ -126,6 +126,8 @@ public sealed partial class AdminService
 
     private static void Release(AuthorizationRecord record)
     {
+        record.InlineProof?.Dispose();
+        record.InlineProof = null;
         if (record.Plan.Material is not null)
         {
             CryptographicOperations.ZeroMemory(record.Plan.Material);
@@ -202,7 +204,7 @@ public sealed partial class AdminService
             return (null, new AdminStart(null, "too many requests; wait a minute", 429));
         }
 
-        AdminPlan? plan = Plan(op, args, out string? refusal, out int refusalStatus);
+        (AdminPlan? plan, string? refusal, int refusalStatus) = await PlanAsync(op, args, cancel);
         if (plan is null)
         {
             Refused(op, refusal ?? "refused", caller);
@@ -262,19 +264,20 @@ public sealed partial class AdminService
                     throw new ProofUnavailableException("no enrolled admin passkey can prove at this address");
                 }
 
-                record.InlineProof = _p.Authorizer.PrepareInline(plan.Sentence, plan.Operation, plan.Parameters, target, $"http://localhost:{_p.Port.ToString(CultureInfo.InvariantCulture)}");
-                record.Link = null;
+                InlineAdminProof prepared = _p.Authorizer.PrepareInline(plan.Sentence, plan.Operation, plan.Parameters, target, $"http://localhost:{_p.Port.ToString(CultureInfo.InvariantCulture)}", plan.WantsPrf);
                 lock (_authorizationGate)
                 {
                     if (record.State != AuthorizationState.Pending || !_authorizations.ContainsKey(id) || Volatile.Read(ref _epoch) != epoch)
                     {
+                        prepared.Dispose();
                         Release(record);
                         _authorizations.Remove(id);
                         return (null, new AdminStart(null, "the authority was locked while this was being started", 423));
                     }
-                }
 
-                return (View(record) with { Proof = record.InlineProof.Start }, new AdminStart(null, null));
+                    record.InlineProof = prepared;
+                    return (View(record), new AdminStart(null, null));
+                }
             }
             catch (ProofUnavailableException error)
             {
@@ -374,20 +377,39 @@ public sealed partial class AdminService
         AdminAuthorizer.PageText(record.Plan.Sentence, record.Plan.Operation, record.Plan.Parameters), record.Plan.Parameters, record.Created,
         record.State == AuthorizationState.Verified && record.VerifiedAt is { } verified ? verified + AuthorizationLifetime : record.Created.AddMinutes(ApprovalSettings.MaxTimeoutMinutes + 5),
         record.Outcome is { } outcome ? ResultOf(record, outcome, takeBundle) : null,
-        record.State == AuthorizationState.Pending ? record.InlineProof?.Start : null);
+        record.State == AuthorizationState.Pending ? record.InlineProof?.Start : null,
+        record.State == AuthorizationState.Pending ? record.InlineProof?.PrfKey : null);
 
-    internal bool? SubmitInlineProof(object owner, string id, string proof)
+    internal bool? SubmitInlineProof(object owner, string id, string proof, string? prfJson, out bool unexpectedPrf)
     {
+        unexpectedPrf = false;
         AuthorizationRecord? record;
+        InlineAdminProof prepared;
         lock (_authorizationGate)
         {
             SweepAuthorizations();
             if (!_authorizations.TryGetValue(id, out record) || !SameOwner(record.Owner, owner)) return null;
-            if (record.State != AuthorizationState.Pending || record.InlineProof is null || record.ProofChecking) return false;
+            if (prfJson is not null && !record.Plan.WantsPrf)
+            {
+                unexpectedPrf = true;
+                return false;
+            }
+
+            if (record.State != AuthorizationState.Pending || record.InlineProof is not { } pending || record.ProofChecking) return false;
+            prepared = pending;
+            record.InlineProof = null;
             record.ProofChecking = true;
         }
 
-        AdminAuthorization judged = _p.Authorizer.AcceptInline(record.InlineProof, record.Plan.Operation, record.Plan.Parameters, proof);
+        using InlineAdminProof proofState = prepared;
+        AdminAuthorization judged = _p.Authorizer.AcceptInline(prepared, record.Plan.Operation, record.Plan.Parameters, proof);
+        Unlock? opened = null;
+        if (judged.Ok && prepared.PrfState is { } state)
+        {
+            SealedPrf.TryOpen(prfJson, state, prepared.Context.Bind, proof, out opened);
+        }
+
+        using Unlock? unlock = opened;
         lock (_authorizationGate)
         {
             record.ProofChecking = false;
@@ -401,7 +423,7 @@ public sealed partial class AdminService
 
         if (judged.Ok)
         {
-            ApplyAtTap(record, CallerOf(owner));
+            ApplyAtTap(record, CallerOf(owner), unlock);
         }
 
         return judged.Ok;
@@ -499,7 +521,7 @@ public sealed partial class AdminService
     }
 
     /// <summary>Applies the plan that the verified tap authorized, once, and keeps how it came out. Runs on the passkey page's thread right after the tap is judged.</summary>
-    private void ApplyAtTap(AuthorizationRecord record, string caller)
+    private void ApplyAtTap(AuthorizationRecord record, string caller, Unlock? unlock = null)
     {
         if (!Claim(record))
         {
@@ -509,7 +531,7 @@ public sealed partial class AdminService
         MutationResult outcome;
         try
         {
-            AdminAuthorization result = record.Result!;
+            AdminAuthorization result = record.Result! with { Unlock = unlock };
             if (_p.Lock.IsLocked && record.Operation != OpUnlock)
             {
                 Refused(record.Operation, "the authority is locked", caller);
@@ -531,7 +553,7 @@ public sealed partial class AdminService
                         box.Value = null;
                     }
 
-                    outcome = new MutationResult(200, null, null, null, created);
+                    outcome = new MutationResult(200, null, record.Plan.Remark?.Value is { } remark ? ApprovalSummary.Clean(remark) : null, null, created);
                 }
             }
         }

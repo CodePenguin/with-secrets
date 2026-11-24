@@ -31,12 +31,12 @@ internal static class ApiTests
             await InlineAuthorizations(check, root);
             await ApiTapTimeTests.Run(check, root);
             await MachineFunctions(check, root);
+            await GrantReplace(check, root);
             await SettingsAndPasskeys(check, root);
             await Pending(check, root);
             await LockedState(check, root);
             await VersionsAndFallback(check, root);
             await WebApplication(check, root);
-            await OpenApiDocument(check, root);
             await ProblemsAndCanaries(check, root);
             await ApiHardeningTests.Run(check, root);
             await PairingAdminTests.Run(check, root);
@@ -55,6 +55,112 @@ internal static class ApiTests
                 // A stray temp file is harmless.
             }
         }
+    }
+
+    public static async Task Contract(Action<bool, string> check)
+    {
+        string root = Directory.CreateTempSubdirectory("ws-api-contract-").FullName;
+        try
+        {
+            await OpenApiDocument(check, root);
+            await ProviderRoutes(check, root);
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            Directory.Delete(root, true);
+        }
+    }
+
+    private static async Task ProviderRoutes(Action<bool, string> check, string root)
+    {
+        ProviderRegistry registry = new();
+        registry.RegisterType("test", "1.0", () => new FakeProviderAdapter
+        {
+            ValidateConfigurationHandler = _ => Task.FromResult<IReadOnlyList<ProviderValidationIssue>>([new("Check the test vault.", ValidationSeverity.Warning)]),
+            ListHandler = (_, _) => Task.FromResult(new ListSecretsResult([new ProviderSecretInfo("TOKEN", "ext-token", "Token metadata")], null, true)),
+        }, () => new FakeConfiguration());
+        using AdminApp app = new(root, providers: registry);
+        ProviderAuthority providers = app.Service.Providers!;
+        ProviderInstance instance = providers.Store.AddInstance("vault-one", "test", """{"label":"test"}""", TimeSpan.FromHours(1));
+        await providers.StartInstanceAsync(instance);
+        Mount mount = providers.Store.AddMount(instance.Id, MountKind.Tree, "team", "kv");
+        string providerPath = $"/api/v1/providers/{instance.Id:D}";
+        string mountPath = $"/api/v1/mounts/{mount.Id:D}";
+        AdminBrowser browser = await app.SignedIn();
+        JsonObject doc = app.Service.Admin.Api.Document;
+        JsonObject schemas = doc["components"]!["schemas"]!.AsObject();
+        string? Conform(string schema, string answer)
+        {
+            using JsonDocument json = JsonDocument.Parse(answer);
+            return ApiValidator.Validate(json.RootElement, S.Ref(schema), schemas);
+        }
+
+        foreach ((string path, string schema, string expected) in new (string, string, string)[]
+        {
+            ("/api/v1/providers/types", "ProviderTypeList", "1.0"),
+            ("/api/v1/providers", "ProviderList", "vault-one"),
+            (providerPath, "Provider", "vault-one"),
+            (providerPath + "/mounts", "MountList", "team"),
+            ("/api/v1/mounts", "MountList", "team"),
+            ("/api/v1/status", "Status", "\"providers\":true"),
+        })
+        {
+            (int status, string body, _) = await browser.GetAsync(path);
+            check(status == 200 && Conform(schema, body) is null && body.Contains(expected, StringComparison.Ordinal), "providers API: " + path + " returns its documented data");
+        }
+
+        string validateBody = JsonSerializer.Serialize(new { type = "test", config = """{"label":"test"}""" });
+        (int validated, string issues) = await browser.PostAsync("/api/v1/providers/validate", validateBody);
+        check(validated == 200 && Conform("ProviderValidation", issues) is null && issues.Contains("Check the test vault.", StringComparison.Ordinal), "providers API: configuration validation returns issues");
+        string escapedConfig = "{\"label\":\"" + new string('界', 1988) + "\"}";
+        (int large, _) = await browser.PostAsync("/api/v1/providers/validate", JsonSerializer.Serialize(new { type = "test", config = escapedConfig }));
+        check(escapedConfig.Length == 2000 && large == 200, "providers API: the configuration character limit works with escaped Unicode");
+
+        (int refreshed, string result) = await browser.SendAsync(HttpMethod.Post, mountPath + "/refresh", null);
+        check(refreshed == 200 && Conform("MountRefresh", result) is null && result.Contains("\"complete\":true", StringComparison.Ordinal), "providers API: refresh completes without a tap");
+        (int listed, string entries, _) = await browser.GetAsync(mountPath + "/entries");
+        check(listed == 200 && Conform("NamespaceEntryList", entries) is null && entries.Contains("team/TOKEN", StringComparison.Ordinal)
+            && !entries.Contains("\"value\"", StringComparison.Ordinal), "providers API: entries contain metadata only");
+        check(app.Service.Audit.Outbox.Pending(10000).Any(item => item.Outcome == "namespace-refreshed")
+            || app.Store.AuditHistory(new AuditQuery(Limit: 1000)).Any(item => item.Event.Outcome == "namespace-refreshed"), "providers API: refresh writes the admin audit event");
+
+        AdminBrowser limited = app.Browser();
+        check(await limited.SignInAsync(app.Phone), "providers API: approval-scoped browser can sign in");
+        (int validateDenied, string validateProblem) = await limited.PostAsync("/api/v1/providers/validate", validateBody);
+        (int refreshDenied, string refreshProblem) = await limited.SendAsync(HttpMethod.Post, mountPath + "/refresh", null);
+        check(validateDenied == 403 && Code(validateProblem) == "scope-required" && refreshDenied == 403 && Code(refreshProblem) == "scope-required",
+            "providers API: validation and refresh require admin.decide");
+
+        providers.Store.RemoveMount(mount.Id);
+        providers.Store.RemoveInstance(instance.Id);
+        (int afterUnmount, string formerEntries, _) = await browser.GetAsync(mountPath + "/entries");
+        (int afterRemoval, string formerMounts, _) = await browser.GetAsync(providerPath + "/mounts");
+        check(afterUnmount == 200 && formerEntries == "[]" && afterRemoval == 200 && formerMounts == "[]",
+            "providers API: list reads racing with a removal return empty results");
+        (int formerStatus, string formerProvider, _) = await browser.GetAsync(providerPath);
+        check(formerStatus == 404 && Code(formerProvider) == "not-found", "providers API: a removed provider instance is not found (" + formerStatus + ")");
+
+        using AdminApp remote = new(root);
+        AdminBrowser remoteBrowser = await remote.SignedIn();
+        foreach (string path in new[] { "/api/v1/providers/types", "/api/v1/providers", providerPath + "/mounts", "/api/v1/mounts", mountPath + "/entries" })
+        {
+            (int status, string body, _) = await remoteBrowser.GetAsync(path);
+            check(status == 200 && body == "[]", "providers API: unavailable provider authority returns an empty list at " + path);
+        }
+
+        (int noProvider, string noProviderBody, _) = await remoteBrowser.GetAsync(providerPath);
+        check(noProvider == 503 && Code(noProviderBody) == "internal-error", "providers API: one provider read where there is no provider authority is a 503 problem, not an empty array (" + noProvider + ")");
+        check(remote.Service.Admin.Api.Document["components"]!["schemas"]!["ProviderDetail"] is null
+            && remote.Service.Admin.Api.Document["paths"]!["/api/v1/providers/{id}"]!["get"]!["responses"]!["200"]!.ToJsonString().Contains("#/components/schemas/Provider\"", StringComparison.Ordinal),
+            "providers API: GET /providers/{id} documents one Provider (no array alternative)");
+        (int noValidate, string noValidateBody) = await remoteBrowser.PostAsync("/api/v1/providers/validate", validateBody);
+        (int noRefresh, string noRefreshBody) = await remoteBrowser.SendAsync(HttpMethod.Post, mountPath + "/refresh", null);
+        (int noChange, string noChangeBody) = await remoteBrowser.SendAsync(HttpMethod.Delete, mountPath, """{"authorization":"unused-id"}""");
+        check(noValidate == 503 && Code(noValidateBody) == "internal-error" && noRefresh == 503 && Code(noRefreshBody) == "internal-error"
+            && noChange == 503 && Code(noChangeBody) == "internal-error", "providers API: unavailable provider authority refuses changes with 503");
+        (_, string remoteStatus, _) = await remoteBrowser.GetAsync("/api/v1/status");
+        check(remoteStatus.Contains("\"providers\":false", StringComparison.Ordinal), "providers API: status advertises absent provider support");
     }
 
     private static async Task InlineAuthorizations(Action<bool, string> check, string root)
@@ -369,6 +475,8 @@ internal static class ApiTests
         AdminBrowser after = app.Browser();
         after.SetCookie(AdminSessions.SessionCookie, oldToken);
         check((await after.GetAsync("/api/v1/machines")).Status == 401 && app.Service.Admin.Sessions.Count == 0, "session: a service restart destroys every session");
+        // Stop the service before scanning the database and its sidecars on disk.
+        app.Service.Dispose();
         string files = string.Join("\n", Directory.EnumerateFiles(app.Machine.Folder, "*", SearchOption.AllDirectories).Where(file => !file.EndsWith("-shm", StringComparison.Ordinal)).Select(file =>
         {
             using FileStream stream = new(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
@@ -669,6 +777,171 @@ internal static class ApiTests
     }
 
     // ---- the machine functions of the old admin verbs ----
+
+    /// <summary>
+    /// Replace of a consumed once-only grant through the admin service (the plan op grant-replace, its page, the tap): offered only for a consumed once row that a person's assertion backs, and made only by
+    /// an admin key's tap with user verification. The route is not in the API yet, so the authorization is asked of the service as the API asks it.
+    /// </summary>
+    private static async Task GrantReplace(Action<bool, string> check, string root)
+    {
+        using AdminApp app = new(root);
+        AdminService admin = app.Service.Admin;
+        LocalAuthority authority = app.Machine.Deployment.Authority;
+        AdminSession session = new("t-replace", "laptop", SessionScope.Admin, app.Clock.GetUtcNow(), "c");
+        int revision = app.Store.Find(app.Fingerprint)!.SecurityRevision;
+        string scope = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("scope replace")));
+        const string reviewCanary = "<review-canary-7f3a>";
+
+        // A consumed once-only grant, recorded as "Approve once" records it (the person's assertion, for once, over the page that named this scope, revision and contents).
+        GrantRecord? Once(string requestId, string scopeKey)
+        {
+            LaunchRequest request = IdentityTests.Sample(requestId, app.Clock.GetUtcNow());
+            string text = string.Join('\n', GrantEvidence.ApproveLines(revision, scopeKey, contents: GrantEvidence.ContentsKey(request.SecretNames, request.Program, request.WorkingDirectory))) + "\n" + ApprovalSummary.RequestIdPrefix + scopeKey + "\nCommand: test " + reviewCanary + "\n" + ApprovalSummary.IssuedLine(app.Clock.GetUtcNow());
+            string nonce = "nonce-" + requestId;
+            ApprovalEvidence evidence = new(nonce, text, app.Phone.Assert(ReuseBinding.Challenge(RequestBinding.Compute(nonce, text), 0), TestState.Origin, "localhost", TestState.NextCount()));
+            GrantResponse recorded = authority.RecordOnceGrant(GrantEnvelope.Create(GrantOps.Use, request, scopeKey, app.Machine.HostName, app.Machine.Deployment.MachineKey), ApprovalDecision.Allow("approved with passkey phone", 0, evidence), revision);
+            GrantRecord? made = app.Store.FindGrant(recorded.GrantId);
+            check(recorded.Outcome == GrantOps.Recorded && made is { Status: "consumed", Usage: GrantUsage.Once }, "grant replace: a consumed once-only grant exists (" + recorded.Outcome + " " + recorded.ReasonCode + ")");
+
+            return made;
+        }
+
+        GrantRecord? once = Once("replace-1", scope);
+        // A second one, for another scope: it stays replaceable after the first is replaced.
+        GrantRecord? other = Once("replace-2", Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("scope replace other"))));
+        if (once is null || other is null)
+        {
+            return;
+        }
+
+        DateTimeOffset now = app.Clock.GetUtcNow();
+        check(admin.GrantView(once, now).Actions.SequenceEqual(["replace"]), "grant replace: the grants view offers a consumed once-only grant exactly replace (" + string.Join(",", admin.GrantView(once, now).Actions) + ")");
+        GrantRecord planted = once with { Id = "g-planted0002", Evidence = null };
+        check(admin.GrantView(planted, now).Actions.Count == 0, "grant replace: a consumed row without a person's assertion is offered nothing");
+        check(admin.GrantView(once, now).Verified && !admin.GrantView(planted, now).Verified, "grant view: a sealed row is verified, a planted copy under another id is not");
+
+        string Snapshot() => string.Join('|', app.Store.Grants().Select(row => row.Id + "/" + row.Status + "/" + row.Revision));
+        string before = Snapshot();
+        async Task<(AuthorizationView? View, AdminStart Start, int Tap, AuthorizationView? Settled)> Ask(TestAuthenticator? who, bool uv = true, params (string Name, string Value)[] args)
+        {
+            app.Clock.Advance(TimeSpan.FromSeconds(13));
+            (AuthorizationView? view, AdminStart start) = await admin.BeginAuthorizationAsync(session, "grant-replace", args.ToDictionary(item => item.Name, item => item.Value), CancellationToken.None);
+            if (view is null || start.Link is null || who is null)
+            {
+                return (view, start, 0, view);
+            }
+
+            Uri link = new(start.Link);
+            (int tap, _) = TestState.Approve(app.Http, "http://127.0.0.1:" + link.Port + link.AbsolutePath, "http://localhost:" + link.Port, "localhost", who, userVerified: uv);
+            AuthorizationView? settled = view;
+            for (int i = 0; i < 200; i++)
+            {
+                settled = admin.FindAuthorization(session, view.Id);
+                if (settled is null || settled.State is not (AuthorizationState.Pending or AuthorizationState.Verified) && (settled.State != AuthorizationState.Consumed || settled.Result is not null))
+                {
+                    break;
+                }
+
+                await Task.Delay(50);
+            }
+
+            return (view, start, tap, settled);
+        }
+
+        // Refused before any page: an active or planted grant, no time, a time and no end together.
+        check((await Ask(null, true, ("id", "g-none"), ("minutes", "60"))).Start.Link is null && (await Ask(null, true, ("id", once.Id), ("minutes", "0"))).Start.Link is null && (await Ask(null, true, ("id", once.Id), ("minutes", "5"), ("indefinite", "true"))).Start.Link is null,
+            "grant replace: an unknown grant, a time of 0, or a time and no end together, is refused before any page");
+
+        (AuthorizationView? View, AdminStart Start, int Tap, AuthorizationView? Settled) phone = await Ask(app.Phone, true, ("id", once.Id), ("minutes", "60"));
+        check(phone.Tap == 403 && Snapshot() == before, "grant replace: a key that is not an admin key is refused (403); nothing is made (" + phone.Tap + ")");
+        (AuthorizationView? View, AdminStart Start, int Tap, AuthorizationView? Settled) noUv = await Ask(app.Laptop, false, ("id", once.Id), ("minutes", "60"));
+        check(noUv.Tap == 403 && Snapshot() == before, "grant replace: the admin key without user verification makes nothing (" + noUv.Tap + ")");
+
+        (AuthorizationView? View, AdminStart Start, int Tap, AuthorizationView? Settled) ok = await Ask(app.Laptop, true, ("id", once.Id), ("minutes", "60"));
+        string newId = ok.View?.Parameters.FirstOrDefault(item => item.Name == "new-grant").Value ?? "";
+        GrantRecord? fresh = await HostServiceTests.WaitFor(() => app.Store.FindGrant(newId) is not null) ? app.Store.FindGrant(newId) : null;
+        check(ok.Tap == 200 && ok.Settled is { Result.Outcome: "applied" } && fresh is { Status: "active", Usage: GrantUsage.Reusable } && fresh.Replaces == once.Id && fresh.ScopeKey == once.ScopeKey && fresh.Expires == ok.View!.Created.AddMinutes(60),
+            "grant replace: the admin key's tap makes the new grant the page named, for the original's scope, ending 60 minutes after the page (" + ok.Tap + " " + ok.Settled?.Result?.Outcome + " " + ok.Settled?.Result?.Detail + ")");
+        check(ok.View is { } shown && shown.Sentence.Contains("Replaces: " + once.Id, StringComparison.Ordinal) && shown.Sentence.Contains("Grant id: " + newId, StringComparison.Ordinal) && shown.Sentence.Contains("New usage: reusable", StringComparison.Ordinal)
+            && shown.Parameters.Any(item => item.Name == "grant" && item.Value == once.Id) && shown.Parameters.Any(item => item.Name == "new-end"), "grant replace: the page (which the passkey signs) names the original, the new grant's id, its usage and its end");
+        check(GrantAuthorityTests.SameGrant(app.Store.FindGrant(once.Id), once) && admin.GrantView(once, app.Clock.GetUtcNow()).Actions.Count == 0 && AdminService.GrantProblem("replace", once, app.Clock.GetUtcNow(), app.Store) is { } covered && covered.Contains(newId, StringComparison.Ordinal),
+            "grant replace: the original is unchanged (consumed) and no longer offered replace while the new grant covers its scope, as the authority refuses it (grant-exists)");
+        check(admin.GrantView(other, app.Clock.GetUtcNow()).Actions.SequenceEqual(["replace"]), "grant replace: a used once-only grant of another scope is still offered replace");
+        check(app.Store.Audit().Any(entry => entry.Event == "grant-replaced" && entry.Detail.Contains("replaces " + once.Id + " by admin passkey laptop; 60 min", StringComparison.Ordinal)), "grant replace: the authority audit names the admin key that tapped");
+
+        // The session alone (no tap) changes nothing, and its authorization satisfies no mutation.
+        string settledState = Snapshot();
+        check((await Ask(null, true, ("id", once.Id), ("minutes", "60"))).Start.Link is null, "grant replace: replace of a grant whose scope an active grant covers is refused before any page");
+        (AuthorizationView? View, AdminStart Start, int Tap, AuthorizationView? Settled) untapped = await Ask(null, true, ("id", other.Id), ("indefinite", "true"));
+        MutationResult pending = untapped.View is null ? new MutationResult(0, null, null) : await admin.MutateAsync(session, "grant-replace", new Dictionary<string, string> { ["id"] = other.Id, ["indefinite"] = "true" }, untapped.View.Id, CancellationToken.None);
+        check(untapped.Start.Link is not null && pending is { Status: 403, Code: "authorization-pending" } && Snapshot() == settledState, "grant replace: a session without a tap replaces nothing (" + pending.Status + " " + pending.Code + ")");
+        admin.CancelAuthorization(session, untapped.View?.Id ?? "");
+
+        // Over HTTP: the list shows the used once-only grant and its action; the route replaces nothing without a tap-made authorization.
+        AdminBrowser b = await app.SignedIn();
+        string listed = (await b.GetAsync("/api/v1/grants")).Html;
+        string reviewPath = "/api/v1/grants/" + other.Id + "/review";
+        (int reviewStatus, string lockedReview, _) = await b.GetAsync(reviewPath);
+        using JsonDocument lockedReviewJson = JsonDocument.Parse(lockedReview);
+        check(reviewStatus == 200 && lockedReviewJson.RootElement.GetProperty("state").GetString() == "locked"
+            && lockedReviewJson.RootElement.GetProperty("text").ValueKind == JsonValueKind.Null && lockedReviewJson.RootElement.GetProperty("verified").GetBoolean()
+            && !listed.Contains(reviewCanary, StringComparison.Ordinal), "grant review API: a verified grant has no readable evidence while review is locked");
+
+        using Unlock release = TestVault.Unlock(app.State, app.Laptop)!;
+        check(app.Service.Review!.TryOpen(TestState.Current(app.State)!, release), "grant review API: the admin PRF opens the review key");
+        string logFolder = Path.Combine(root, "review-logs");
+        Directory.CreateDirectory(logFolder);
+        Capture capture = new();
+        string openReview;
+        AppLog.LogFolder = logFolder;
+        AppLog.Tap = capture;
+        AppLog.Configure(true);
+        try
+        {
+            (_, openReview, _) = await b.GetAsync(reviewPath);
+        }
+        finally
+        {
+            AppLog.Close();
+            AppLog.LogFolder = null;
+            AppLog.Tap = null;
+        }
+
+        string logged = capture.Everything() + "\n" + string.Join("\n", Directory.EnumerateFiles(logFolder, "with-secrets-*.log").Select(File.ReadAllText));
+        using JsonDocument openReviewJson = JsonDocument.Parse(openReview);
+        check(openReviewJson.RootElement.GetProperty("state").GetString() == "open" && openReviewJson.RootElement.GetProperty("text").GetString()!.Contains(reviewCanary, StringComparison.Ordinal)
+            && !AuditText(app.Store).Contains(reviewCanary, StringComparison.Ordinal) && !logged.Contains(reviewCanary, StringComparison.Ordinal),
+            "grant review API: only the review response holds the signed command text (no audit row, no log line or file: " + capture.Events.Count + " events)");
+        AdminBrowser approvalOnly = app.Browser();
+        check(await approvalOnly.SignInAsync(app.Phone), "grant review API: an approval-only browser can sign in");
+        (int forbidden, string forbiddenReview, _) = await approvalOnly.GetAsync(reviewPath);
+        check(forbidden == 403 && Code(forbiddenReview) == "admin-required", "grant review API: an approval-only session cannot read review text");
+        using (JsonDocument doc = JsonDocument.Parse(listed))
+        {
+            JsonElement row = doc.RootElement.GetProperty("items").EnumerateArray().First(item => item.GetProperty("id").GetString() == other.Id);
+            check(row.GetProperty("usage").GetString() == "once" && row.GetProperty("status").GetString() == "consumed" && row.GetProperty("consumed").ValueKind == JsonValueKind.String
+                && row.GetProperty("replaces").ValueKind == JsonValueKind.Null && row.GetProperty("actions").EnumerateArray().Select(item => item.GetString()).SequenceEqual(["replace"])
+                && row.GetProperty("ends").GetString() == "used " + CanonicalJson.Time(other.Consumed!.Value),
+                "grant replace: GET /grants shows usage once, status consumed, a consumed time, ends \"used <time>\", and the action replace");
+            JsonElement replacedRow = doc.RootElement.GetProperty("items").EnumerateArray().First(item => item.GetProperty("id").GetString() == once.Id);
+            check(replacedRow.GetProperty("actions").GetArrayLength() == 0, "grant replace: GET /grants offers no action for the used grant whose scope the new grant covers");
+        }
+
+        string httpBefore = Snapshot();
+        (HttpMethod method, string path, string json) = b.MutationRequest("grant-replace", null, ("id", other.Id), ("minutes", "30"));
+        (int status, string body) = await b.SendAsync(method, path, json);
+        check(path == "/api/v1/grants/" + other.Id + "/replace" && status is >= 400 and < 500 && Snapshot() == httpBefore, "grant replace: POST /grants/{id}/replace without an authorization is refused (" + status + ") and makes no row");
+
+        // The machine's authorization changed since the approval (disabled, then enabled at a new security revision): replace is not offered, as the authority refuses it (authorization-changed).
+        check(app.Store.Disable(app.Fingerprint, "test").Ok && admin.GrantView(other, app.Clock.GetUtcNow()).Actions.Count == 0, "grant replace: a used grant of a machine that is not Trusted is not offered replace");
+        (_, string endedReview, _) = await b.GetAsync("/api/v1/grants/" + newId + "/review");
+        using JsonDocument endedReviewJson = JsonDocument.Parse(endedReview);
+        check(endedReviewJson.RootElement.GetProperty("state").GetString() == "none" && endedReviewJson.RootElement.GetProperty("text").ValueKind == JsonValueKind.Null,
+            "grant review API: an invalidated reusable grant keeps no review text");
+        check(app.Store.Enable(app.Fingerprint, "test").Ok && app.Store.Find(app.Fingerprint)!.SecurityRevision != other.SecurityRevision && admin.GrantView(other, app.Clock.GetUtcNow()).Actions.Count == 0
+            && AdminService.GrantProblem("replace", other, app.Clock.GetUtcNow(), app.Store) is { } changed && changed.Contains("authorization changed", StringComparison.Ordinal),
+            "grant replace: a used grant made at an earlier security revision of its machine is not offered replace");
+    }
 
     private static async Task MachineFunctions(Action<bool, string> check, string root)
     {
@@ -1094,7 +1367,7 @@ internal static class ApiTests
                 if (method != "get")
                 {
                     described &= operation["requestBody"] is not null || method == "delete"
-                        || (operation["operationId"]?.GetValue<string>() is "createApprovalChallenge" or "denyApproval");
+                        || (operation["operationId"]?.GetValue<string>() is "createApprovalChallenge" or "denyApproval" or "refreshMount");
                 }
             }
         }

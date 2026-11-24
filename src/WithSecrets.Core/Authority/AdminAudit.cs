@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using Microsoft.Data.Sqlite;
 
 namespace WithSecrets;
 
@@ -17,6 +18,9 @@ internal sealed record AdminEvent(string Name, IReadOnlyList<string> Names, stri
 
     /// <summary>A change to the secret store ("secrets-set" or "secrets-removed"), approved by <paramref name="key" />. Names only.</summary>
     public static AdminEvent Secrets(string name, IReadOnlyList<string> names, string detail, string key) => new(name, names, detail, key);
+
+    /// <summary>A change to provider instances or mounts, or a namespace refresh ("provider-added", "mount-removed", "namespace-refreshed" and so on). Names and counts only: never configuration values.</summary>
+    public static AdminEvent Provider(string outcome, IReadOnlyList<string> names, string detail, string key) => new(outcome, names, detail, key);
 
     /// <summary>
     /// A change to the settings: the names of the settings that changed, "name old -> new" for each in the detail (no setting is secret), and the key that approved it.
@@ -59,11 +63,11 @@ internal sealed record AdminEvent(string Name, IReadOnlyList<string> Names, stri
 }
 
 /// <summary>
-/// Where administrative events go: the host audit (signed with the machine identity key, committed to <c>audit-outbox.db</c>, uploaded to the authority), the same road
+/// Where administrative events go: the host audit (signed with the machine identity key, committed to <c>with-secrets.db</c>, uploaded to the authority), the same road
 /// the run events take. There is no other audit log and no hash chain. An event that cannot be committed fails the change it belongs to: <see cref="Append" /> is called inside
 /// the change's own write transaction, just before it commits, and throws <see cref="StateDatabaseException" /> so the transaction is rolled back.
 /// </summary>
-public sealed class AdminAudit(Func<IHostAudit> source, string stateFile)
+public sealed class AdminAudit(Func<IHostAudit> source, WithSecretsDatabase database)
 {
     /// <summary>For tests: the machine key to sign with in a given store folder, so no real key store is touched. Null in production.</summary>
     internal static Func<string, ISigningKey>? KeyFactory { get; set; }
@@ -74,16 +78,16 @@ public sealed class AdminAudit(Func<IHostAudit> source, string stateFile)
     private IHostAudit? _audit;
 
     /// <summary>The production audit of the store in <paramref name="stateFile" />'s folder: the machine identity key of the platform key store and the outbox beside the state.</summary>
-    public static AdminAudit ForState(string stateFile)
+    public static AdminAudit ForDatabase(WithSecretsDatabase database)
     {
-        string folder = Path.GetDirectoryName(Path.GetFullPath(stateFile))!;
+        string folder = Path.GetDirectoryName(database.FilePath)!;
 
         return new AdminAudit(() =>
         {
             ISigningKey key = KeyFactory?.Invoke(folder) ?? MachineKeyStore.OpenOrCreate(folder, KeyNames.Machine, out _);
 
-            return new OutboxAudit(HostAuditOutbox.InFolder(folder, key));
-        }, stateFile);
+            return new OutboxAudit(new HostAuditOutbox(database, key));
+        }, database);
     }
 
     /// <summary>The approving key's name in a detail such as "passkey NAME verified" or "admin passkey NAME verified", or empty.</summary>
@@ -95,11 +99,24 @@ public sealed class AdminAudit(Func<IHostAudit> source, string stateFile)
     }
 
     /// <summary>Commits the event (signed, numbered); throws <see cref="StateDatabaseException" /> when it cannot, so the change being made is not made.</summary>
-    internal void Append(AdminEvent item)
+    internal void Append(SqliteConnection connection, SqliteTransaction transaction, AdminEvent item)
     {
-        if (!TryRecord(item))
+        try
         {
-            throw new StateDatabaseException("the audit event could not be committed, so nothing was changed");
+            GetAudit().RecordIn(connection, transaction, item.ToFacts());
+        }
+        catch (Exception failure) when (failure is not OutOfMemoryException)
+        {
+            AppLog.Warn("an administrative audit event could not be committed: {Type}", failure.GetType().Name);
+            throw new StateDatabaseException("the audit event could not be committed, so nothing was changed", failure);
+        }
+    }
+
+    private IHostAudit GetAudit()
+    {
+        lock (_lock)
+        {
+            return _audit ??= source();
         }
     }
 
@@ -107,13 +124,7 @@ public sealed class AdminAudit(Func<IHostAudit> source, string stateFile)
     {
         try
         {
-            IHostAudit audit;
-            lock (_lock)
-            {
-                audit = _audit ??= source();
-            }
-
-            return audit.TryRecord(item.ToFacts());
+            return GetAudit().TryRecord(item.ToFacts());
         }
         catch (Exception failure) when (failure is not OutOfMemoryException)
         {
@@ -126,17 +137,19 @@ public sealed class AdminAudit(Func<IHostAudit> source, string stateFile)
 
     /// <summary>
     /// A change that was refused or failed: the operation (such as "set-secrets"), the secret names it named (names only) and why. Best effort: false when it could not be written.
-    /// Nothing is written when there is no state.db yet, so a refusal never creates one.
+    /// Nothing is written when there is no with-secrets.db yet, so a refusal never creates one.
     /// </summary>
     internal bool TryWriteDenied(string command, IReadOnlyList<string> names, string reason)
     {
-        return File.Exists(stateFile) && TryRecord(new AdminEvent(AdminEvent.ChangeDenied, names, command + ": " + reason, ""));
+        return File.Exists(database.FilePath) && TryRecord(new AdminEvent(AdminEvent.ChangeDenied, names, command + ": " + reason, ""));
     }
 }
 
 /// <summary>An <see cref="IHostAudit" /> that only commits to the outbox (a command that is not the service; the service uploads what it finds there).</summary>
 internal sealed class OutboxAudit(HostAuditOutbox outbox) : IHostAudit
 {
+    public void RecordIn(SqliteConnection connection, SqliteTransaction transaction, AuditFacts facts) => outbox.AppendIn(connection, transaction, [facts]);
+
     public bool TryRecord(AuditFacts facts)
     {
         try

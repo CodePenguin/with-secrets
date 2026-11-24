@@ -123,6 +123,9 @@ public sealed class HostServiceOptions
 
     /// <summary>Called (with the port) when the machine listener starts after the service did: at the first approval that makes the authority signing key. Null: nothing is told.</summary>
     public Action<int>? MachineListenerStarted { get; init; }
+
+    /// <summary>For tests: the provider registry, with the adapter types a test registers. Default: a registry of the adapter types bundled with this release (none yet).</summary>
+    internal ProviderRegistry? ProviderRegistry { get; init; }
 }
 
 
@@ -176,6 +179,7 @@ public sealed class HostService : IDisposable
         // The authority starts LOCKED. The lock gates the authority signing key, the authority's decisions and grants, this host's runs and the memory it holds for a grant.
         // A host whose authority is remote has no authority lock of its own: the lock that matters is the authority's, enforced at its endpoint (a locked authority delivers nothing).
         Lock = options.Lock ?? new AuthorityLock();
+        Review = options.Deployment.Remote is null ? new ReviewKeys() : null;
         options.Deployment.Keys.LockState = Lock;
         Authorization.LockState = Authorization.IsRemote ? null : Lock;
         if (options.Deployment.Remote is { } remoteAuthority)
@@ -186,6 +190,7 @@ public sealed class HostService : IDisposable
 
         Lock.OnLock(reason =>
         {
+            Review?.Close();
             Volatile.Write(ref _ready, false);
             Authorization.Discard(reason);
 
@@ -200,7 +205,9 @@ public sealed class HostService : IDisposable
 
             return new TargetAdminAsker(primary, local);
         });
-        IPasskeyAdmin? passkeys = options.PasskeyAdminFactory?.Invoke() ?? (options.State is { } passkeyState ? new StatePasskeyAdmin(passkeyState) : null);
+        IPasskeyAdmin? passkeys = options.PasskeyAdminFactory?.Invoke() ?? (options.State is { } passkeyState
+            ? new StatePasskeyAdmin(passkeyState) { RekeyReview = Review is null ? null : RekeyGrantEvidence }
+            : null);
         IUnlockProtection protection = options.UnlockProtection ?? UnlockProtections.ForThisPlatform();
         options.Deployment.Store.EndOpenInvitations(); // an invitation's key is only in memory, so one made before this start can no longer be answered
         Pairing = new PairingService(options.Deployment.Store, options.Deployment.IdentityCertificate, () => MachineUrl, options.Deployment.Clock);
@@ -212,17 +219,64 @@ public sealed class HostService : IDisposable
             return EnrollmentTarget.FirstThatCanProve(proofPrimary, proofLocal)?.Method;
         };
         Admin = new AdminService(new AdminServiceParts(options.Deployment.Store, Lock, new AdminAuthorizer(options.Deployment.Store, verifier, options.Deployment.Clock), askers, protection, AfterUnlock, port,
-            options.Deployment.Keys, options.Deployment.Authority, options.Deployment.HostConfig, options.Deployment.Fingerprint, passkeys, options.Deployment.Clock, Pairing, Approvals, approvalProof));
+            options.Deployment.Keys, options.Deployment.Authority, options.Deployment.HostConfig, options.Deployment.Fingerprint, passkeys, options.Deployment.Clock, Pairing, Approvals, approvalProof, Review));
 
-        // The host's audit: events are signed with the machine key and committed to the outbox (beside authority.db) before a run decrypts anything; the uploader sends them on its own.
-        HostAuditOutbox outbox = HostAuditOutbox.InFolder(Path.GetDirectoryName(options.Deployment.Store.FilePath)!, options.Deployment.MachineKey, options.Deployment.Clock);
+        // The host's audit: events are signed with the machine key and committed to the outbox tables before a run decrypts anything; the uploader sends them on its own.
+        HostAuditOutbox outbox = new(options.Deployment.Store.Database, options.Deployment.MachineKey, options.Deployment.Clock);
         Audit = new HostAudit(outbox, new AuditUploader(outbox, () => options.Deployment.AuditSink, (ack, id, digest, cancel) => Authorization.VerifyAnswerAsync(ack, id, digest, cancel), Authorization.Fingerprint));
 
         // The human commands' and the admin app's events (type admin) take the same road as a run's: signed with the machine key, committed to this outbox, sent by this uploader.
-        options.State.Audit = new AdminAudit(() => Audit, options.State.FilePath);
+        options.State.Audit = new AdminAudit(() => Audit, options.State.Database);
         if (options.Store is SecretStore secretStore)
         {
             Admin.Secrets = new SecretFlows(secretStore, options.State.Audit, approvalProof, options.Deployment.Clock ?? TimeProvider.System);
+
+            // The authority's runs read the native store plus every mounted secret (10.3); a name no mount selects is served by the native store as before. A host whose
+            // authority is remote has none of this: the adapters run at the authority.
+            if (options.Deployment.Remote is null)
+            {
+                Providers = new ProviderAuthority(secretStore, options.Deployment.Store, options.Deployment.Keys, options.ProviderRegistry ?? new ProviderRegistry(authorityClock), Audit, authorityClock);
+                Admin.Providers = new ProviderAdmin(Providers, options.State.Audit);
+            }
+        }
+
+        _secrets = Providers?.Source ?? options.Store;
+    }
+
+    private readonly ISecretSource _secrets;
+
+    /// <summary>The authority's provider side (null for a host whose authority is remote, or a service built over a source that is not the native store).</summary>
+    internal ProviderAuthority? Providers { get; }
+
+    public ReviewKeys? Review { get; }
+
+    internal string? RekeyGrantEvidence(Microsoft.Data.Sqlite.SqliteConnection connection, Microsoft.Data.Sqlite.SqliteTransaction transaction, string oldReviewPrivate, string newReviewPublic)
+    {
+        try
+        {
+            Lock.EnsureUnlocked();
+            AuthorityStore.GrantTx grants = new(_options.Deployment.Store, connection, transaction);
+            if (grants.ActiveKey() is { } active)
+            {
+                ISigningKey key = _options.Deployment.Keys.Current(active);
+                GrantSeals.Rekey(grants, oldReviewPrivate, newReviewPublic, key);
+            }
+            else if (grants.Sealed().Count > 0)
+            {
+                return "the authority has no signing key; nothing was changed";
+            }
+
+            Lock.EnsureUnlocked();
+            if (Review is { } review)
+            {
+                WithSecretsDatabase.AfterCommit(transaction, review.Close);
+            }
+
+            return null;
+        }
+        catch (AuthorityLockedException)
+        {
+            return "the authority is locked; nothing was changed";
         }
     }
 
@@ -324,6 +378,8 @@ public sealed class HostService : IDisposable
                     service.StartupReconcile();
                 }
 
+                // The stored provider instances are in the registry, and the refresher runs, before any request is accepted.
+                service.Providers?.Start();
                 app.Run(service.Handle);
                 app.StartAsync().GetAwaiter().GetResult();
                 service._endpointStarted = true;
@@ -410,7 +466,7 @@ public sealed class HostService : IDisposable
                     return;
                 }
 
-                _launches = new AuthorityLaunchHandler(_options.Deployment.Authority, _options.Deployment.Keys, _options.Deployment.Store, _options.Store, MachineApprover, Lock, _options.Deployment.Clock, approvals: _options.UseApprovalQueueForMachineLaunches ? Approvals : null);
+                _launches = new AuthorityLaunchHandler(_options.Deployment.Authority, _options.Deployment.Keys, _options.Deployment.Store, _secrets, MachineApprover, Lock, _options.Deployment.Clock, approvals: _options.UseApprovalQueueForMachineLaunches ? Approvals : null);
                 endpoint.Pairing ??= new PairingHandler(Pairing);
                 endpoint.Audit ??= Audit;
                 _machineListener = MachineListener.Start(_options.Deployment.Authority, _options.Deployment.Keys, _options.Deployment.Store, _options.Deployment.Tls, endpoint, _launches);
@@ -1165,7 +1221,7 @@ public sealed class HostService : IDisposable
 
             ReuseOffer reuse = ReuseSettings.Load(_options.State);
             IApprover approver = Authorization.IsRemote ? new RefusingApprover("approval happens at the authority") : _options.ApproverFactory?.Invoke(settings, announce) ?? LocalApprover(announce);
-            RunCommand run = new(_options.Store, approver, stdout, stderr, reuse, keyProvider: _options.KeyProviderFactory?.Invoke(approver) ?? new HeldStoreKeyProvider(approver, Authorization, reuse.IsOn ? reuse.MaxMinutes : ReuseSettings.DefaultMaxMinutes));
+            RunCommand run = new(_secrets, approver, stdout, stderr, reuse, keyProvider: _options.KeyProviderFactory?.Invoke(approver) ?? new HeldStoreKeyProvider(approver, Authorization, reuse.IsOn ? reuse.MaxMinutes : ReuseSettings.DefaultMaxMinutes));
             int code = await run.ExecuteAsync(launch, context, approve);
             stdout.Complete();
             stderr.Complete();
@@ -1226,6 +1282,7 @@ public sealed class HostService : IDisposable
             _launches?.Dispose();
         }
 
+        Providers?.Dispose();
         Authorization.Keys.Dispose();
         CancellationTokenSource[] sources;
         lock (_lock)
@@ -1247,6 +1304,8 @@ public sealed class HostService : IDisposable
         }
 
         Admin.Secrets?.Dispose();
+        Admin.ClearAuthorizations();
+        Review?.Dispose();
         Approvals.Dispose();
 
         try

@@ -47,6 +47,7 @@ internal static class KeyVault
 {
     public const string SlotInfo = "with-secrets/v1 slot";
     public const string VaultContext = "with-secrets/v1 vault";
+    public const string ReviewContext = "with-secrets/v1 review";
     public const string RecoveryContext = "with-secrets/v1 recovery";
 
     /// <summary>The recovery code is 20 random bytes: 160 bits, 32 base32 characters.</summary>
@@ -119,6 +120,35 @@ internal static class KeyVault
 
         return Open(vault, masterKey, VaultAad(storePublicKey), NonceBytes + 1 + TagBytes, NonceBytes + MaxVaultKeyBytes + TagBytes);
     }
+
+    /// <summary>Creates a review key and retains only its public key and its master-key-wrapped private bytes.</summary>
+    public static ReviewKey NewReviewKey(byte[] masterKey)
+    {
+        (string publicKey, string privateText) = DotenvxCipher.Instance.NewKeyPair();
+        byte[] privateKey = Encoding.UTF8.GetBytes(privateText);
+        try
+        {
+            return new ReviewKey(publicKey, WrapReview(privateKey, masterKey, publicKey));
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(privateKey);
+        }
+    }
+
+    public static string WrapReview(byte[] reviewPrivateKey, byte[] masterKey, string reviewPublicKey)
+    {
+        Require(masterKey.Length == KeyBytes && reviewPrivateKey.Length is > 0 and <= MaxVaultKeyBytes);
+        return Seal(reviewPrivateKey, masterKey, ReviewAad(reviewPublicKey));
+    }
+
+    public static byte[] UnwrapReview(string vault, byte[] masterKey, string reviewPublicKey)
+    {
+        Require(masterKey.Length == KeyBytes);
+        return Open(vault, masterKey, ReviewAad(reviewPublicKey), NonceBytes + 1 + TagBytes, NonceBytes + MaxVaultKeyBytes + TagBytes);
+    }
+
+    private static byte[] ReviewAad(string publicKey) => [.. Encoding.UTF8.GetBytes(ReviewContext), .. Encoding.UTF8.GetBytes(publicKey)];
 
     /// <summary>A new recovery code: 20 random bytes (shown to the person as 8 groups of 4 base32 characters, see <see cref="RecoveryCode" />).</summary>
     public static byte[] NewRecoveryCode() => RandomNumberGenerator.GetBytes(RecoveryCodeBytes);

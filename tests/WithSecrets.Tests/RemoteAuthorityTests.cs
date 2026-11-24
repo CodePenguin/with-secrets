@@ -572,7 +572,7 @@ internal static partial class RemoteAuthorityTests
         MachineRequestEnvelope envelope = MachineRequestEnvelope.Create(request, machine.HostName, machine.MachineKey);
         AuthorityResponse decided = await remote.DecideAsync(envelope);
         check(decided.Decision == AuthorityDecision.Approved && decided.Verify(AuthorityKey(net)) && decided.RequestDigest == request.Digest() && presented == 1, "remote: a decision is the local authority's own signed, request-bound answer (the signed contracts are unchanged)");
-        check(net.Authority.Deployment.Store.GetProcessed(request.RequestId) is not null, "remote: the same persistence is used (the decision is in authority.db processed_requests)");
+        check(net.Authority.Deployment.Store.GetProcessed(request.RequestId) is not null, "remote: the same persistence is used (the decision is in with-secrets.db processed_requests)");
 
         GrantResponse grant = await remote.GrantAsync(GrantEnvelope.Create(GrantOps.Use, Request("req-grant-1"), new string('A', 64), machine.HostName, machine.MachineKey));
         check(grant.Verify(AuthorityKey(net)) && grant.Outcome == GrantOps.None, "remote: a grant query returns the authority's signed answer");

@@ -57,11 +57,14 @@ internal sealed partial class AdminApi
     public const string Version = "v1";
     public const string Prefix = "/api/v1";
     public const int MaxBody = 4096;
+    // A JSON string can use six bytes per UTF-16 code unit, plus the operation's other fields.
+    private const int ConfigurationBodyLimit = MaxBody + 6 * ProviderAdmin.MaxConfigurationLength;
 
     /// <summary>Every administrative operation, with the parameter names it takes. Both the authorization request and the mutation that spends it are checked against this one list.</summary>
     internal static readonly (string Operation, string[] Parameters)[] Operations =
     [
         (AdminService.OpUnlock, []),
+        (AdminService.OpReviewUnlock, []),
         (AdminService.OpLock, []),
         (AdminService.OpPolicyManual, []),
         (AdminService.OpPolicyUnattended, []),
@@ -78,21 +81,42 @@ internal sealed partial class AdminApi
         ("machine-host-change", ["fingerprint"]),
         ("grant-extend", ["id", "minutes", "indefinite"]),
         ("grant-renew", ["id", "minutes", "indefinite"]),
+        ("grant-replace", ["id", "minutes", "indefinite"]),
         ("grant-revoke", ["id"]),
         ("passkey-enroll", []),
         ("store-key-rotate", []),
         ("passkey-unenroll", ["name"]),
         ("pairing-create", []),
         ("pairing-revoke", ["id"]),
+        ("provider-add", ["name", "type", "config", "max-stale-seconds", "confirm-warnings"]),
+        ("provider-config", ["id", "revision", "config", "confirm-warnings"]),
+        ("provider-max-stale", ["id", "revision", "max-stale-seconds"]),
+        ("provider-remove", ["id", "revision"]),
+        ("mount-add", ["instance", "kind", "path", "base", "confirm-warnings"]),
+        ("mount-remove", ["id"]),
     ];
+
+    /// <summary>The parameters whose values may be longer than <see cref="MaxParameterLength" />, with their own limit.</summary>
+    private static readonly Dictionary<string, int> LongParameters = new(StringComparer.Ordinal) { ["config"] = ProviderAdmin.MaxConfigurationLength };
+
+    private const int MaxParameterLength = 300;
 
     private static readonly string[] AuditFilters = ["machine", "since", "until", "type", "outcome", "grant", "folder", "text", "last"];
 
     private static JsonObject ParameterSchema(string name) => name switch
     {
         "fingerprint" => S.Str(max: 80, min: 12, description: "The machine's fingerprint, or an unambiguous start of it (12 hex digits or more)."),
-        "id" => S.Str(max: 80, min: 4, description: "The grant's id, or an unambiguous start of it."),
-        "name" => S.Str(max: 40, min: 1, description: "A friendly name (a passkey's or a machine's)."),
+        "id" => S.Str(max: 80, min: 4, description: "The id of what the operation changes: a grant's id (or an unambiguous start of it), a pairing invitation's, or a provider instance's or mount's (its full id)."),
+        "name" => S.Str(max: 64, min: 1, description: "A name: a passkey's or a machine's friendly name (at most 40 characters), or a provider instance's (at most 64; leading and trailing spaces are dropped)."),
+        "type" => S.Str(max: 64, min: 1, description: "The provider type of the instance (one the service offers)."),
+        "config" => S.Str(max: ProviderAdmin.MaxConfigurationLength, min: 2, description: "The instance's configuration: a JSON object on one line. It is stored unencrypted and shown in the signed text, so it must hold no credential (a field such as tokenEnv may name the environment variable that holds one)."),
+        "max-stale-seconds" => S.Str(max: 5, min: 1, description: "How long a cached value may still be served while its provider is unavailable: whole seconds as text, 0 to 86400."),
+        "revision" => S.Str(max: 10, min: 1, description: "The revision of the provider instance as it was shown (whole number as text); the change is refused when it has moved."),
+        "instance" => S.Str(max: 36, min: 36, description: "The id of the provider instance the mount reads from."),
+        "kind" => S.Str(values: ["tree", "single"], description: "A tree mount (a folder of secret names) or a single secret name."),
+        "path" => S.Str(max: 200, min: 1, description: "The mount's logical path: the folder (tree) or the secret name (single)."),
+        "base" => S.Str(max: MaxParameterLength, description: "The provider path the mount reads (for a tree mount it may be empty: the provider's root)."),
+        "confirm-warnings" => S.Str(values: ["yes"], description: "Go on although the provider's validation reported warnings (it is signed)."),
         "confirm" => S.Str(max: 80, description: "The machine's full fingerprint, typed again to confirm."),
         "days" => S.Int(0, AuthorityStore.MaxAuditRetentionDays, description: "How many days audit events are kept; 0 keeps everything."),
         "idle" => S.Int(1, AuthorityStore.MaxSessionIdleMinutes, description: "Minutes without use that end a session."),
@@ -103,19 +127,21 @@ internal sealed partial class AdminApi
         _ => throw new InvalidOperationException("unknown parameter " + name),
     };
 
-    private static readonly string[] RequiredParameters = ["days", "idle", "absolute", "confirm", "policy"];
+    private static readonly string[] RequiredParameters = ["days", "idle", "absolute", "confirm", "policy", "type", "config", "max-stale-seconds", "revision", "instance", "kind", "path", "base"];
 
     /// <summary>A mutation route: the body names the parameters of the operation (those not in the path) and carries the authorization id.</summary>
     private ApiRoute Mutation(string method, string template, string operation, string id, string summary, string tag, params string[] body)
     {
         string[] pathParams = [.. template.Split('/').Where(part => part.StartsWith('{')).Select(part => part.Trim('{', '}'))];
-        string[] required = [.. body.Where(name => RequiredParameters.Contains(name) || (operation == "machine-rename" && name == "name"))];
+        string[] required = [.. body.Where(name => RequiredParameters.Contains(name) || (operation is "machine-rename" or "provider-add" && name == "name"))];
         List<(string, JsonObject)> members = [("authorization", S.Str(max: 64, min: 8, description: "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."))];
         members.AddRange(body.Select(name => (name, ParameterSchema(name))));
         JsonObject request = S.Obj(members, members.Select(item => item.Item1).Where(name => name != "authorization" && !required.Contains(name)));
 
         return new ApiRoute(method, Prefix + template, id, summary, tag, ApiAccess.Mutation, 200, "MutationResponse", request, [], operation == "" ? null : operation,
-            call => MutateAsync(call, operation, pathParams), operation is "passkey-enroll" or "passkey-unenroll" or "store-key-rotate" ? ["202"] : null);
+            call => AdminService.IsProviderOperation(operation) && admin.Providers is null ? Task.FromResult(ProvidersUnavailable()) : MutateAsync(call, operation, pathParams),
+            operation is "passkey-enroll" or "passkey-unenroll" or "store-key-rotate" ? ["202"] : null,
+            BodyLimit: body.Contains("config") ? ConfigurationBodyLimit : 0);
     }
 
     private static IReadOnlyList<ApiQuery> ApprovalQueries() =>
@@ -181,18 +207,21 @@ internal sealed partial class AdminApi
             new("GET", Prefix + "/machines/{fingerprint}", "getMachine", "One machine, by its fingerprint or an unambiguous start of it (read-only session).", "machines", ApiAccess.Read, 200, "Machine", null, [], null, GetMachineAsync),
             new("GET", Prefix + "/grants", "listGrants", "The grants and what can be done to each (read-only session).", "grants", ApiAccess.Read, 200, "GrantList", null, [], null, _ => Task.FromResult(new ApiResult(200, new { items = admin.GrantsView() }))),
             new("GET", Prefix + "/grants/{id}", "getGrant", "One grant, by its id or an unambiguous start of it (read-only session).", "grants", ApiAccess.Read, 200, "Grant", null, [], null, GetGrantAsync),
+            new("GET", Prefix + "/grants/{id}/review", "getGrantReview", "The signed approval text of a grant, available while review is open (state open, locked or none); an approval-only session gets 403 admin-required.", "grants", ApiAccess.Read, 200, "GrantReview", null, [], null, GetGrantReviewAsync),
             new("GET", Prefix + "/audit/events", "searchAuditEvents", "Search the host events the authority holds (authorization, launch and execution outcomes). Every filter is optional.", "audit", ApiAccess.Read, 200, "AuditEventList", null, AuditQueries(), null, AuditEventsAsync),
             new("GET", Prefix + "/audit/changes", "searchAuditChanges", "Search the authority's own audit history (administrator operations, machine and grant changes). Filters: machine, since, until, text, last.", "audit", ApiAccess.Read, 200, "AuditChangeList", null, AuditQueries(), null, AuditChangesAsync),
             new("GET", Prefix + "/audit/gaps", "listAuditGaps", "The open holes in a machine's audit numbering. Filter: machine.", "audit", ApiAccess.Read, 200, "AuditGapList", null, [new ApiQuery("machine", S.Str(max: 80), "A machine's fingerprint or the start of it.")], null, AuditGapsAsync),
             new("GET", Prefix + "/settings", "getSettings", "Audit retention, the unlock mode, the session timeouts and the authority key in use (read-only session).", "settings", ApiAccess.Read, 200, "Settings", null, [], null, _ => Task.FromResult(new ApiResult(200, admin.SettingsView()))),
             new("GET", Prefix + "/pairing/invitations", "listPairingInvitations", "The pairing invitations by status only (pending, consumed, expired or revoked); never a code or a bundle (read-only session).", "pairing", ApiAccess.Read, 200, "InvitationList", null, [], null, _ => Task.FromResult(new ApiResult(200, new { items = admin.InvitationsView() }))),
             new("GET", Prefix + "/passkeys", "listPasskeys", "The enrolled passkeys (names and kinds; no key material).", "passkeys", ApiAccess.Read, 200, "Passkeys", null, [], null, _ => Task.FromResult(new ApiResult(200, admin.PasskeysView()))),
-            new("POST", Prefix + "/authorizations", "createAuthorization", "Ask to authorize one change: answers the link of a one-use passkey page whose signed text names the operation and every security-relevant parameter, and the text to show. The tap (user verification) makes the authorization usable once, for exactly that operation and those parameters, for " + AdminService.LifetimeText + " seconds. It changes nothing by itself.", "authorizations", ApiAccess.Authorize, 201, "Authorization", AuthorizationRequest(), [], null, CreateAuthorizationAsync),
-            new("POST", Prefix + "/authorizations/inline", "createInlineAuthorization", "Prepare an operation-bound WebAuthn challenge for the SPA. This makes no change; submit its assertion to /authorizations/{id}/proof.", "authorizations", ApiAccess.Authorize, 201, "InlineAuthorization", AuthorizationRequest(), [], null, CreateInlineAuthorizationAsync),
-            new("POST", Prefix + "/authorizations/{id}/proof", "submitInlineAuthorizationProof", "Verify the assertion for this exact pending operation and apply it once when valid.", "authorizations", ApiAccess.Authorize, 200, "Done", S.Obj([("proof", S.Str(max: 12000))]), [], null, SubmitInlineAuthorizationProofAsync),
+            .. ProviderRoutes(),
+            new("POST", Prefix + "/authorizations", "createAuthorization", "Ask to authorize one change: answers the link of a one-use passkey page whose signed text names the operation and every security-relevant parameter, and the text to show. The tap (user verification) makes the authorization usable once, for exactly that operation and those parameters, for " + AdminService.LifetimeText + " seconds. It changes nothing by itself.", "authorizations", ApiAccess.Authorize, 201, "Authorization", AuthorizationRequest(), [], null, CreateAuthorizationAsync, BodyLimit: ConfigurationBodyLimit),
+            new("POST", Prefix + "/authorizations/inline", "createInlineAuthorization", "Prepare an operation-bound WebAuthn challenge for the SPA. This makes no change; submit its assertion to /authorizations/{id}/proof.", "authorizations", ApiAccess.Authorize, 201, "InlineAuthorization", AuthorizationRequest(), [], null, CreateInlineAuthorizationAsync, BodyLimit: ConfigurationBodyLimit),
+            new("POST", Prefix + "/authorizations/{id}/proof", "submitInlineAuthorizationProof", "Verify the assertion for this exact pending operation and apply it once when valid.", "authorizations", ApiAccess.Authorize, 200, "Done", S.Obj([("proof", S.Str(max: 12000)), ("prf", ApprovalPrfSchema())], ["prf"]), [], null, SubmitInlineAuthorizationProofAsync),
             new("GET", Prefix + "/authorizations/{id}", "getAuthorization", "Where an authorization stands (pending, verified, refused, consumed or expired) and, once its tap was verified, how the change it authorized came out (`result`: the service applies it at the tap, so this is readable after a reload or from another tab; a new invitation's bundle is given once, when collect=invitation is asked for or by the first retry of the mutation). Only for the caller it was made for (its session, or for the unlock its browser).", "authorizations", ApiAccess.Owner, 200, "Authorization", null, [new ApiQuery("collect", S.Str(values: ["invitation"]), "Give the bundle of a new invitation in this answer (once; it is never given again).")], null, GetAuthorizationAsync),
             new("DELETE", Prefix + "/authorizations/{id}", "cancelAuthorization", "Cancel an authorization whose passkey tap has not been made: a tap on its page afterwards changes nothing. Only for the caller it was made for. 409 when the tap was already judged (its change was made or refused and cannot be taken back).", "authorizations", ApiAccess.Owner, 200, "Done", null, [], null, CancelAuthorizationAsync),
             Mutation("POST", "/unlock", AdminService.OpUnlock, "unlockAuthority", "Unlock the authority (needs no session, but its own authorization).", "authority"),
+            Mutation("POST", "/review/unlock", AdminService.OpReviewUnlock, "unlockReview", "Open approved command text for review with an administrator passkey's key release.", "authority"),
             Mutation("POST", "/lock", AdminService.OpLock, "lockAuthority", "Lock the authority now: secret requests stop, held keys are discarded and every session and authorization ends.", "authority"),
             Mutation("PUT", "/settings/unlock-policy", "", "setUnlockPolicy", "Set the unlock mode (manual, or the weaker unattended mode).", "settings", "policy"),
             Mutation("PUT", "/settings/audit-retention", "set-audit-retention", "setAuditRetention", "Set how many days audit events are kept (0 keeps everything).", "settings", "days"),
@@ -208,6 +237,7 @@ internal sealed partial class AdminApi
             Mutation("POST", "/machines/{fingerprint}/approve-host-change", "machine-host-change", "approveMachineHostChange", "Accept the new host name a machine reported.", "machines"),
             Mutation("POST", "/grants/{id}/extend", "grant-extend", "extendGrant", "Extend a grant by minutes, or to no end.", "grants", "minutes", "indefinite"),
             Mutation("POST", "/grants/{id}/renew", "grant-renew", "renewGrant", "Renew an ended grant for minutes from now, or to no end.", "grants", "minutes", "indefinite"),
+            Mutation("POST", "/grants/{id}/replace", "grant-replace", "replaceGrant", "Make a new grant with the same scope as a used once-only grant.", "grants", "minutes", "indefinite"),
             Mutation("POST", "/grants/{id}/revoke", "grant-revoke", "revokeGrant", "Revoke a grant (it ends now and its machine is told).", "grants"),
             Mutation("POST", "/pairing/invitations", "pairing-create", "createPairingInvitation", "Create a one-time pairing invitation for a new machine. The answer carries the invitation bundle (address, identifier and pairing code) ONCE; it is never stored in readable form, never logged and cannot be read again.", "pairing"),
             Mutation("POST", "/pairing/invitations/{id}/revoke", "pairing-revoke", "revokePairingInvitation", "Revoke a pending pairing invitation (it can no longer be used).", "pairing"),
@@ -235,6 +265,6 @@ internal sealed partial class AdminApi
     private static JsonObject AuthorizationRequest() => S.Obj(
     [
         ("operation", S.Str(values: [.. Operations.Select(item => item.Operation)], description: "The operation to authorize.")),
-        ("parameters", S.Params(8, 300)),
+        ("parameters", S.Params(8, MaxParameterLength, LongParameters)),
     ], ["parameters"], "The operation and every parameter that the passkey will sign. The mutation that follows must repeat exactly these.");
 }

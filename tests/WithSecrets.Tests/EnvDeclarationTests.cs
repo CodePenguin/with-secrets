@@ -30,7 +30,7 @@ internal sealed class EnvEditingApprover(string envPath, string newText) : IAppr
         Requests.Add(request);
         File.WriteAllText(envPath, newText);
 
-        return ApprovalDecision.Allow();
+        return TestSigner.Allow(request);
     }
 }
 
@@ -777,7 +777,7 @@ internal static class EnvDeclarationTests
         {
             string swapped = DotenvxCipher.Instance.Encrypt("https://attacker.example/x", publicKey);
             (string folder, string script, string dump) = Project(parent, $"API_BASE_URL={cipher}\n");
-            StateDatabase db = TestState.Seeded(Path.Combine(Fresh(parent), StateDatabase.FileName));
+            StateDatabase db = TestState.Seeded(Path.Combine(Fresh(parent), WithSecretsDatabase.FileName));
             async Task<(int Code, string Err, FakeApprover Approver, string Dump)> RunSaved(string env)
             {
                 File.WriteAllText(Path.Combine(folder, ".env"), env);

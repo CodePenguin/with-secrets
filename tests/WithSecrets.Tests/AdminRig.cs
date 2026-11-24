@@ -99,9 +99,14 @@ internal sealed class AdminApp : IDisposable
     private readonly AdminWebAssets? _web;
     private readonly Func<IApprover>? _approver;
     private readonly bool _machineEndpoint;
+    private readonly ProviderRegistry? _providers;
+    private SecretStore? _native;
 
-    public AdminApp(string root, bool trusted = true, bool unlocked = true, int askSeconds = 4, IPasskeyAdmin? passkeys = null, bool protection = false, AdminWebAssets? web = null, AdminApp? restoreFrom = null, Func<IApprover>? approver = null, bool machineEndpoint = false)
+    /// <summary>With <paramref name="providers" />, the service runs over a native secret store (not the counting one) and composes its provider side over that registry.</summary>
+    public AdminApp(string root, bool trusted = true, bool unlocked = true, int askSeconds = 4, IPasskeyAdmin? passkeys = null, bool protection = false, AdminWebAssets? web = null, AdminApp? restoreFrom = null, Func<IApprover>? approver = null, bool machineEndpoint = false,
+        ProviderRegistry? providers = null)
     {
+        _providers = providers;
         _web = web;
         _approver = approver;
         _machineEndpoint = machineEndpoint;
@@ -109,9 +114,9 @@ internal sealed class AdminApp : IDisposable
         string machineFolder = Path.Combine(root, "app-" + Guid.NewGuid().ToString("N")[..8]);
         if (restoreFrom is not null)
         {
-            // A second machine: only the backup artifacts (the secret store and authority.db) come over, never host.json or a key; it has keys of its own.
+            // A second machine: only the backup artifacts (the secret store and with-secrets.db) come over, never host.json or a key; it has keys of its own.
             Directory.CreateDirectory(machineFolder);
-            File.Copy(restoreFrom.Store.FilePath, Path.Combine(machineFolder, AuthorityStore.FileName));
+            File.Copy(restoreFrom.Store.FilePath, Path.Combine(machineFolder, WithSecretsDatabase.FileName));
             trusted = false;
         }
 
@@ -121,18 +126,14 @@ internal sealed class AdminApp : IDisposable
             Machine.Deployment.EnrollAsync().GetAwaiter().GetResult();
         }
 
-        _rig = new HostServiceTests.Rig(root, startLocked: true, machine: Machine, seedState: restoreFrom is null ? null : folder =>
-        {
-            Directory.CreateDirectory(folder);
-            File.Copy(restoreFrom.State.FilePath, Path.Combine(folder, StateDatabase.FileName));
-        });
+        _rig = new HostServiceTests.Rig(root, startLocked: true, machine: Machine);
         _rig.Service.Dispose();
         Laptop = restoreFrom?.Laptop ?? TestAuthenticator.ES256();
         Phone = restoreFrom?.Phone ?? TestAuthenticator.ES256();
         if (restoreFrom is null)
         {
             DateTimeOffset created = new(2026, 11, 1, 10, 0, 0, TimeSpan.Zero);
-            TestState.Add(State, Laptop.Record("localhost", "laptop") with { Created = created });
+            TestState.Add(State, Laptop.Record("localhost", "laptop") with { Created = created }, withStore: true);
             TestState.Add(State, Phone.Record("localhost", "phone") with { Created = created });
         }
         Http = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false, UseCookies = false }) { Timeout = TimeSpan.FromSeconds(60) };
@@ -218,7 +219,8 @@ internal sealed class AdminApp : IDisposable
             CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(),
             Lock = unlocked ? AuthorityLock.UnlockedForTests() : null,
             State = State,
-            Store = _rig.Store,
+            Store = _providers is null ? _rig.Store : _native ??= new SecretStore(State),
+            ProviderRegistry = _providers,
             Deployment = Machine.Restart(),
             Port = 0,
             UnlockProtection = _protection,
@@ -226,7 +228,13 @@ internal sealed class AdminApp : IDisposable
             PasskeyAdminFactory = _passkeys is null ? null : () => _passkeys,
             WebAssets = _web,
             MachineEndpoint = _machineEndpoint ? new MachineListenerOptions { Port = 0 } : null,
-            ApproverFactory = _approver is null ? null : (_, _) => _approver(),
+            ApproverFactory = _approver is null ? null : (_, _) =>
+            {
+                // Every approval is a grant: the key test approvers sign with when a test names none (see TestSigner), after the keys of this state.
+                TestSigner.Enroll(State);
+
+                return _approver();
+            },
         });
         _rig.Service = Service;
     }

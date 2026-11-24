@@ -50,7 +50,7 @@ public static class AdminActions
     /// <summary>Pins the authority's current public key for this machine.</summary>
     public static void PinLocal(AuthorityKeyRing keys, HostConfigFile host, string machineFingerprint)
     {
-        // The key store must hold the key authority.db names: nothing is pinned on the strength of a database row alone.
+        // The key store must hold the key with-secrets.db names: nothing is pinned on the strength of a database row alone.
         keys.Current();
         AuthorityKeyRecord key = keys.CurrentRecord();
         host.Pin(machineFingerprint, new PinnedAuthorityKey(key.Fingerprint, key.PublicKey, DateTimeOffset.UtcNow));

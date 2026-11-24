@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.Playwright;
 
 namespace WithSecrets.E2E;
@@ -10,6 +11,92 @@ namespace WithSecrets.E2E;
 internal static class ScenariosSpa
 {
     private const string SecretValue = "s3cr3t-e2e-value-1";
+
+    private sealed class ProviderConfiguration : IAdapterConfiguration
+    {
+        public void Load(JsonDocument document) => _ = document.RootElement.GetProperty("label").GetString();
+    }
+
+    private sealed class TestProvider : ProviderAdapter<ProviderConfiguration>
+    {
+        protected override Task InitializeAsync(ProviderConfiguration configuration, AdapterInitializationContext context, CancellationToken cancellationToken)
+        {
+            context.StatusReporter.Report(new LifecycleChangedEvent(AdapterLifecycleState.Ready));
+            context.StatusReporter.Report(new HealthChangedEvent(AdapterHealthState.Healthy));
+            return Task.CompletedTask;
+        }
+
+        protected override Task UpdateConfigurationAsync(ProviderConfiguration configuration, CancellationToken cancellationToken) => Task.CompletedTask;
+        protected override Task<IReadOnlyList<ProviderValidationIssue>> ValidateConfigurationAsync(ProviderConfiguration configuration, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<ProviderValidationIssue>>([]);
+        protected override Task<IReadOnlyList<ProviderValidationIssue>> ValidateMountAsync(ProviderConfiguration configuration, string basePath, CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<ProviderValidationIssue>>([]);
+        public override Task ShutdownAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public override Task<IReadOnlyList<ProviderSecretResult>> RetrieveSecretsAsync(IReadOnlyList<ProviderSecretRequest> requests, CancellationToken cancellationToken) => throw new InvalidOperationException("Provider administration should not retrieve secret values.");
+        public override Task<ListSecretsResult> ListSecretsAsync(ListSecretsRequest request, CancellationToken cancellationToken) =>
+            Task.FromResult(new ListSecretsResult([new ProviderSecretInfo("TOKEN", "test-token", "Deployment token metadata")], null, true));
+    }
+
+    public static async Task Providers(Host host, S s)
+    {
+        using Rig rig = new();
+        await using Ctx c = await Ctx.NewAsync(host);
+        await Flows.Configure(rig, c);
+        ProviderRegistry registry = new();
+        registry.RegisterType("test", "1.0", () => new TestProvider(), () => new ProviderConfiguration());
+        using SpaApp app = new(rig, providers: registry);
+        await Spa.SignIn(c, app, s);
+        await Spa.GoTo(c, "Providers", "Providers");
+        ILocator dialog = Spa.Dialog(c);
+
+        async Task Complete(string expected)
+        {
+            string result = await Spa.Continue(c, s, dialog);
+            s.Check(result.Contains(expected, StringComparison.Ordinal), "provider administration applied: " + expected);
+            await dialog.GetByRole(AriaRole.Button, new() { Name = "Close", Exact = true }).ClickAsync();
+            await dialog.WaitForAsync(new() { State = WaitForSelectorState.Detached });
+        }
+
+        await Spa.Button(c, "Add provider", exact: true).ClickAsync();
+        await dialog.GetByLabel("Provider name").FillAsync("Build vault");
+        await dialog.GetByLabel("Configuration JSON").FillAsync("""{"label":"first-config-canary"}""");
+        await Complete("Added provider Build vault.");
+        await c.Page.GetByRole(AriaRole.Link, new() { Name = "Build vault" }).ClickAsync();
+        await Spa.Heading(c, "Build vault").WaitForAsync();
+        s.Check(await c.Page.GetByText("healthy", new() { Exact = true }).IsVisibleAsync(), "the registered adapter reports healthy");
+        await Spa.Axe(c, s, "provider detail");
+
+        await Spa.Button(c, "Change configuration Build vault").ClickAsync();
+        await dialog.GetByLabel("Configuration JSON").FillAsync("""{"label":"second-config-canary"}""");
+        await Complete("Configuration saved.");
+        await Spa.Button(c, "Change maximum staleness Build vault").ClickAsync();
+        await dialog.GetByLabel("Minutes", new() { Exact = true }).FillAsync("10");
+        await Complete("Cache policy saved.");
+
+        await Spa.Button(c, "Add mount Build vault").ClickAsync();
+        await dialog.GetByLabel("Logical path").FillAsync("team");
+        await dialog.GetByLabel("Provider path").FillAsync("kv");
+        await Complete("Added mount team.");
+        await Spa.Button(c, "Show entries for team").ClickAsync();
+        await c.Page.GetByText("team/TOKEN", new() { Exact = true }).WaitForAsync();
+        s.Check(await c.Page.GetByText("kv/TOKEN", new() { Exact = true }).IsVisibleAsync(), "the immediate reconciliation listed entry metadata");
+        await Spa.Button(c, "Refresh namespace team").ClickAsync();
+        await c.Page.GetByText("Namespace refreshed. Added", new() { Exact = false }).WaitForAsync();
+
+        await Spa.Button(c, "Remove mount team").ClickAsync();
+        await Complete("Removed mount team.");
+        await c.Page.GetByText("No mounts configured.").WaitForAsync();
+        await Spa.Button(c, "Remove provider Build vault").ClickAsync();
+        await Complete("Removed provider Build vault.");
+        await c.Page.GetByText("This provider instance is no longer available.").WaitForAsync();
+
+        await app.Service.Audit.Uploader.DrainAsync();
+        await Spa.GoTo(c, "Audit", "Audit");
+        foreach (string outcome in new[] { "provider-added", "provider-config-changed", "provider-max-stale-changed", "mount-added", "namespace-refreshed", "mount-removed", "provider-removed" })
+        {
+            await c.Page.GetByText("admin: " + outcome, new() { Exact = true }).First.WaitForAsync();
+        }
+        s.Check(!(await c.Page.ContentAsync()).Contains("config-canary", StringComparison.Ordinal), "the audit page omits configuration values");
+        s.NoProblems(c);
+    }
 
     public static async Task SignInAndOut(Host host, S s)
     {
@@ -290,7 +377,18 @@ internal static class ScenariosSpa
         s.Check(store.History(fp).Any(entry => entry.Kind == "host-name-mismatch") && store.Audit(100).Any(entry => entry.Actor.StartsWith("admin passkey", StringComparison.Ordinal) && entry.Detail.Contains("laptop-new", StringComparison.Ordinal)), "the history records the mismatch and the audit names the admin passkey that accepted the name");
         await dialog.GetByRole(AriaRole.Button, new() { Name = "Close" }).ClickAsync();
         await dialog.WaitForAsync(new() { State = WaitForSelectorState.Detached });
-        s.Check(await row.GetByText("New host name reported").CountAsync() == 0, "the warning is gone from the list");
+        // The list is refetched when the result is settled (the dialog invalidates every query); that answer can land after the dialog closes, so wait for it.
+        bool gone = true;
+        try
+        {
+            await row.GetByText("New host name reported").WaitForAsync(new() { State = WaitForSelectorState.Detached, Timeout = 10000 });
+        }
+        catch (TimeoutException)
+        {
+            gone = false;
+        }
+
+        s.Check(gone, "the warning is gone from the list");
         s.NoProblems(c);
     }
 
@@ -715,8 +813,8 @@ internal static class ScenariosSpa
         s.Check(await c.PasskeyCalls() == before + 1, "saving used the passkey exactly once");
         s.Check(rig.Store.ListNames().SequenceEqual(["E2E_SECRET"]), "state lists the secret name");
         s.Check(!(await c.Page.ContentAsync()).Contains(SecretValue, StringComparison.Ordinal), "the value is nowhere in the page");
-        s.Check(!(await Scenarios2.RawState(rig)).Contains(SecretValue, StringComparison.Ordinal), "state.db holds no plaintext of the value");
-        s.Check(rig.State.TryCheck(out _), "state.db passes its check");
+        s.Check(!(await Scenarios2.RawState(rig)).Contains(SecretValue, StringComparison.Ordinal), "with-secrets.db holds no plaintext of the value");
+        s.Check(rig.State.TryCheck(out _), "with-secrets.db passes its check");
         await c.Page.GetByRole(AriaRole.Heading, new() { Name = "E2E_SECRET", Level = 3 }).WaitForAsync();
 
         // A run gets the stored value (the output is redacted: the mask shows it was there).
@@ -742,7 +840,7 @@ internal static class ScenariosSpa
         await c.Page.GetByText("Removed E2E_SECRET.").First.WaitForAsync(new() { Timeout = 20000 });
         s.Check(await c.PasskeyCalls() == before + 1, "removing used the passkey exactly once");
         s.Check(rig.Store.ListNames().Count == 0, "state no longer lists the secret");
-        s.Check(!(await Scenarios2.RawState(rig)).Contains(SecretValue, StringComparison.Ordinal), "state.db still holds no plaintext");
+        s.Check(!(await Scenarios2.RawState(rig)).Contains(SecretValue, StringComparison.Ordinal), "with-secrets.db still holds no plaintext");
         await Spa.Axe(c, s, "secrets");
         AuditChecks.Expect(s, rig, "setup", "secrets-set", "authorization-approved", "launch-started", "execution-exited", "secrets-set", "secrets-removed");
         s.NoProblems(c);

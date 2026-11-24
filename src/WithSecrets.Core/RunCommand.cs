@@ -254,7 +254,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, TextWrit
 
         // A remote authority approves and decrypts: the authority's grants stand in for a local decision.
         bool remote = context.Authorization is { IsRemote: true };
-        Dictionary<string, string> sources = names.ToDictionary(name => name, _ => store.Label, StringComparer.Ordinal);
+        Dictionary<string, string> sources = names.ToDictionary(name => name, store.LabelFor, StringComparer.Ordinal);
         ApprovalRequest request = new(program, resolved, arguments, workingDirectory, reason, names, null, typedArguments, links, Sources: sources, Unlock: store.NeedsUnlock, Script: script, ProgramFile: programFile, Mappings: plan.Mappings, EnvFiles: plan.Files, EnvNames: [.. plan.Ordinary.Keys.Order(StringComparer.Ordinal)], EnvValues: plan.Ordinary, InheritedEnvironment: context.Environment, Decrypts: [.. encrypted.Select(value => value.ToItem())]);
         Fingerprint fingerprint = RequestFingerprint.Compute(request);
 
@@ -496,16 +496,24 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, TextWrit
                     return await Fail(Denied, "A file named in the command changed while the prompt was open, so nothing was run. Ask again.");
                 }
 
-                // A time was chosen instead of once: the same approval (one passkey tap) also makes the grant. If it cannot be made, nothing is run.
-                if (decision.ReuseMinutes != 0)
+                // A launch that was cancelled or expired while the page was open records nothing and decrypts nothing (the same check as below, before the record is asked for).
+                if (decision.ReuseMinutes == 0 && context.StaleReason() is { } staleBeforeRecord)
                 {
-                    string? grantProblem = await GrantFromRun(decision, context, grantScope);
-                    if (grantProblem is not null)
-                    {
-                        Record(AuditEventTypes.Launch, "failed", "grant-not-made");
+                    Record(AuditEventTypes.Launch, "cancelled", staleBeforeRecord.Replace(' ', '-'), runGrant);
 
-                        return await Fail(Denied, grantProblem);
-                    }
+                    return await Cancelled();
+                }
+
+                // Every approval is a grant. A time was chosen instead of once: the same approval (one passkey tap) also makes the grant. Once: it is recorded
+                // as a consumed once-only grant (it covers no further run). If either cannot be made, nothing is run.
+                string? grantProblem = decision.ReuseMinutes != 0 ? await GrantFromRun(decision, context, grantScope)
+                    : context.Authorization is { IsRemote: false } ? await OnceGrantFromRun(decision, context, grantScope)
+                    : null;
+                if (grantProblem is not null)
+                {
+                    Record(AuditEventTypes.Launch, "failed", "grant-not-made");
+
+                    return await Fail(Denied, grantProblem);
                 }
             }
 
@@ -720,20 +728,22 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, TextWrit
     }
 
     /// <summary>
-    /// The request as the person is asked: when they can choose a time here (the administration web app) and the settings offer times, it also says that a time
-    /// lets the agent run this exact command again, and carries what the grant's evidence must name (scope, security revision, contents).
+    /// The request as the person is asked. With a local authority whose revision is known it carries what the grant's evidence must name (scope, security revision,
+    /// contents): every approval is a grant, once included. When they can also choose a time here (the administration web app) and the settings offer times,
+    /// it offers them, so a time lets the agent run this exact command again.
     /// </summary>
     private ApprovalRequest OfferTime(ApprovalRequest request, LaunchContext context, string? grantScope)
     {
-        if (!approver.OffersTime || reuse is not { IsOn: true } times || grantScope is null || context.Authorization is not { IsRemote: false, KnownRevision: { } revision } || context.Request is not { } launch)
+        if (grantScope is null || context.Authorization is not { IsRemote: false, KnownRevision: { } revision } || context.Request is not { } launch)
         {
             return request;
         }
 
         List<string> lines = [.. request.ExtraLines ?? []];
         lines.AddRange(GrantEvidence.ApproveLines(revision, grantScope, contents: GrantEvidence.ContentsKey(launch.SecretNames, launch.Program, launch.WorkingDirectory)));
+        ApprovalRequest shown = request with { RequestId = grantScope, ExtraLines = lines };
 
-        return request with { RequestId = grantScope, Reuse = times, ExtraLines = lines };
+        return approver.OffersTime && reuse is { IsOn: true } times ? shown with { Reuse = times } : shown;
     }
 
     /// <summary>Makes the grant from the approval of a run that chose a time (the passkey assertion already signed it). Null when it was made, else why not.</summary>
@@ -747,6 +757,21 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, TextWrit
         // The approval's unlock material stays with the run that follows; the grant's approval must not zero it.
         LaunchRequest grantRequest = launch with { RequestId = "grant-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(12)).ToLowerInvariant() };
         GrantApproval result = await host.ApproveGrantAsync(grantRequest, grantScope, () => decision with { Unlock = null }, context.Cancel);
+
+        return result.Granted ? null : result.Message + " Nothing was run.";
+    }
+
+    /// <summary>Records the consumed once-only grant of a run approved once (the passkey assertion already signed it). Null when it was recorded, else why not.</summary>
+    private static async Task<string?> OnceGrantFromRun(ApprovalDecision decision, LaunchContext context, string? grantScope)
+    {
+        if (context.Authorization is not { } host || context.Request is not { } launch || grantScope is null)
+        {
+            return "the approval cannot be recorded here. Nothing was run.";
+        }
+
+        // As for a grant with a time: its own request id, and the run keeps the approval's unlock material.
+        LaunchRequest onceRequest = launch with { RequestId = "grant-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(12)).ToLowerInvariant() };
+        GrantApproval result = await host.RecordOnceGrantAsync(onceRequest, grantScope, decision, context.Cancel);
 
         return result.Granted ? null : result.Message + " Nothing was run.";
     }

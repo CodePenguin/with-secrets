@@ -36,7 +36,7 @@ internal static class Scenarios
 
         bool have = rig.State.TryManifest(out Manifest? manifest, out _);
         s.Check(have && manifest is { Recovery: not null } && manifest.Keys.Count == 1 && manifest.Keys[0].Admin, "state: signed manifest with one admin key and a recovery slot");
-        s.Check(rig.State.TryCheck(out _), "state.db passes its own check");
+        s.Check(rig.State.TryCheck(out _), "with-secrets.db passes its own check");
         AuditChecks.Expect(s, rig, "setup");
 
         bool dead;
@@ -442,7 +442,7 @@ internal static class Scenarios4
         await c.Click("#deny");
         s.Check(await again.Result.WaitAsync(TimeSpan.FromSeconds(30)) != 0, "--recover with the old code does not succeed");
         AuditChecks.Expect(s, rig, "setup", "secrets-set", "key-rotated", "change-denied");
-        s.Check(rig.State.TryManifest(out Manifest? after, out _) && after!.Keys.Count == 1 && !Directory.GetFiles(rig.Folder, "state.db.recovered-*").Any(), "state is unchanged by the refused recovery");
+        s.Check(rig.State.TryManifest(out Manifest? after, out _) && after!.Keys.Count == 1 && !Directory.GetFiles(rig.Folder, "with-secrets.db.recovered-*").Any(), "state is unchanged by the refused recovery");
 
         s.NoProblems(c);
     }
@@ -477,7 +477,8 @@ internal static class Scenarios5
         int exit = await c.TypeCodeAsync(cmd, code);
         s.Check(exit == 0, "--recover exit code 0");
         s.Check(!cmd.Err.Text.Contains(code) && !cmd.Err.Text.Contains(recovery) && !cmd.Err.Text.Contains(first.Recovery), "no code is printed on the terminal");
-        s.Check(Directory.GetFiles(rig.Folder, "state.db.recovered-*").Length == 1, "the old file was renamed (state.db.recovered-<time>), not deleted");
+        s.Check(Directory.GetFiles(rig.Folder, "with-secrets.db.recovered-*").Count(path => !path.EndsWith("-wal", StringComparison.Ordinal) && !path.EndsWith("-shm", StringComparison.Ordinal)) == 1,
+            "recovery takes one snapshot of the previous database");
         s.Check(rig.State.TryManifest(out Manifest? manifest, out _) && manifest!.Keys.Count == 1 && manifest.Recovery is not null, "new state: one key and a recovery slot");
         s.Check(rig.Store.ListNames().SequenceEqual(["E2E_SECRET"]), "the secret was carried over");
         // The folder holds the events of the first setup and its secret too; the recovery adds the setup of the new state and "recovered" (recorded when the swap succeeded).

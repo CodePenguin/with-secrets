@@ -25,7 +25,7 @@ public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget 
 
     /// <summary>Why the last admin entry cannot be removed, and the ways on.</summary>
     public const string LastAdmin = "The last admin passkey cannot be removed. First add another admin passkey (in the admin web app, and tick \"Also make this key an admin\"), "
-        + "or, with no other admin device, delete state.db and run with-secrets admin again.";
+        + "or, with no other admin device, delete with-secrets.db and run with-secrets admin again.";
 
     private IProofMethod Method => command.Method;
 

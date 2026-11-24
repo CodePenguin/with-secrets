@@ -395,7 +395,7 @@ internal static class LoggingTests
         check(!written && third.Events.Lines(LogEventLevel.Warning).Any(line => line.Contains("audit", StringComparison.OrdinalIgnoreCase)), "audit log: a failed write is a warning");
         string damaged = Path.Combine(root, "damaged");
         Directory.CreateDirectory(damaged);
-        File.WriteAllText(Path.Combine(damaged, "state.db"), "this is not a database");
+        File.WriteAllText(Path.Combine(damaged, "with-secrets.db"), "this is not a database");
         StateDatabase state = StateDatabase.InFolder(damaged);
         StringWriter stderr = new();
         int? code = state.Gate(stderr);

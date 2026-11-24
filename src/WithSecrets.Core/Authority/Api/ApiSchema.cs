@@ -133,13 +133,31 @@ internal static class S
         return schema;
     }
 
-    /// <summary>A free-form object whose members are all short text, numbers or true/false (the parameters of an operation).</summary>
-    public static JsonObject Params(int maxMembers, int maxLength) => new()
+    /// <summary>
+    /// A free-form object whose members are all short text, numbers or true/false (the parameters of an operation). A member named in <paramref name="longer" /> may be text
+    /// up to its own length instead.
+    /// </summary>
+    public static JsonObject Params(int maxMembers, int maxLength, IReadOnlyDictionary<string, int>? longer = null)
     {
-        ["type"] = "object",
-        ["maxProperties"] = maxMembers,
-        ["additionalProperties"] = new JsonObject { ["type"] = new JsonArray("string", "integer", "boolean"), ["maxLength"] = maxLength },
-    };
+        JsonObject schema = new()
+        {
+            ["type"] = "object",
+            ["maxProperties"] = maxMembers,
+            ["additionalProperties"] = new JsonObject { ["type"] = new JsonArray("string", "integer", "boolean"), ["maxLength"] = maxLength },
+        };
+        if (longer is { Count: > 0 })
+        {
+            JsonObject properties = [];
+            foreach ((string name, int length) in longer.OrderBy(item => item.Key, StringComparer.Ordinal))
+            {
+                properties[name] = new JsonObject { ["type"] = "string", ["maxLength"] = length };
+            }
+
+            schema["properties"] = properties;
+        }
+
+        return schema;
+    }
 }
 
 /// <summary>Checks a JSON value against a schema built with <see cref="S" />. Returns the first problem as a short sentence (naming the member, never echoing its value), or null.</summary>

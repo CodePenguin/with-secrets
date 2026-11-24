@@ -13,6 +13,7 @@ const links = [
   { to: '/', label: 'Overview', end: true },
   { to: '/access', label: 'Access', end: false },
   { to: '/secrets', label: 'Secrets', end: false },
+  { to: '/providers', label: 'Providers', end: false },
   { to: '/machines', label: 'Machines', end: false },
   { to: '/audit', label: 'Audit', end: false },
   { to: '/settings', label: 'Settings', end: false },
@@ -106,7 +107,7 @@ export function Shell() {
             Menu
           </button>
           <ul id="main-navigation-links">
-            {links.map((link) => (
+            {links.filter((link) => link.to !== '/providers' || (status.data?.capabilities?.providers && session.data?.capabilities.includes('admin.read'))).map((link) => (
               <li key={link.to}>
                 <NavLink
                   to={link.to}

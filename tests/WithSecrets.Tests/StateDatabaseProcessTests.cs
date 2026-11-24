@@ -4,7 +4,7 @@ using System.Security.Cryptography;
 namespace WithSecrets.Tests;
 
 /// <summary>
-/// The creation of state.db when several independent operating-system processes reach an empty store folder together. Threads in one process do not show what a lock between processes must: so every writer here is a
+/// The creation of with-secrets.db when several independent operating-system processes reach an empty store folder together. Threads in one process do not show what a lock between processes must: so every writer here is a
 /// process of its own (this test program started again in a child mode), they are released at the same moment by an explicit message on their standard input (nothing depends on timing), and what is checked is what the
 /// operating system gave them: every passkey is stored, the manifest verifies and its versions run without a gap. The lock itself is checked the same way: a process that dies holding it releases it, and a lock that is held
 /// or cannot be trusted refuses with a clear reason and changes nothing.
@@ -13,6 +13,7 @@ internal static class StateDatabaseProcessTests
 {
     private const int Writers = 5;
     private const int Rounds = 12;
+    private const int MixedWrites = 8;
 
     // ---- the child side
 
@@ -29,6 +30,20 @@ internal static class StateDatabaseProcessTests
                 Console.Out.Flush();
                 Thread.Sleep(Timeout.Infinite);
 
+                return 0;
+            }
+
+            if (args[0] == "--state-authority-writer")
+            {
+                Console.Out.WriteLine("READY");
+                Console.Out.Flush();
+                Console.In.ReadLine();
+                AuthorityStore authority = AuthorityStore.InFolder(folder);
+                for (int index = 0; index < MixedWrites; index++)
+                {
+                    authority.RecordPairingEvent("cross-process-pairing", null, "test");
+                }
+                Console.Out.WriteLine("MIXED DONE");
                 return 0;
             }
 
@@ -114,11 +129,12 @@ internal static class StateDatabaseProcessTests
     }
 
     /// <summary>Writer processes for one folder, all started and ready (each holds its own passkey), none released yet.</summary>
-    private sealed class Group(string folder, TestAuthenticator admin, List<Process> children) : IDisposable
+    private sealed class Group(string folder, TestAuthenticator admin, List<Process> children, int stateWriters) : IDisposable
     {
         public string Folder { get; } = folder;
 
         public List<Process> Children { get; } = children;
+        public int StateWriters { get; } = stateWriters;
 
         public TestAuthenticator Admin { get; } = admin;
 
@@ -138,7 +154,7 @@ internal static class StateDatabaseProcessTests
         }
     }
 
-    private static async Task<(Group Group, List<string> Problems)> Launch(string folder, int count)
+    private static async Task<(Group Group, List<string> Problems)> Launch(string folder, int count, int authorityWriters = 0)
     {
         Directory.CreateDirectory(folder);
         TestAuthenticator admin = TestAuthenticator.ES256();
@@ -150,6 +166,10 @@ internal static class StateDatabaseProcessTests
         {
             children.Add(Start("--state-writer", folder, key, id));
         }
+        for (int writer = 0; writer < authorityWriters; writer++)
+        {
+            children.Add(Start("--state-authority-writer", folder));
+        }
 
         foreach (Process child in children)
         {
@@ -160,7 +180,7 @@ internal static class StateDatabaseProcessTests
             }
         }
 
-        return (new Group(folder, admin, children), problems);
+        return (new Group(folder, admin, children, count), problems);
     }
 
     /// <summary>The message every writer is waiting for: they are released together.</summary>
@@ -177,12 +197,17 @@ internal static class StateDatabaseProcessTests
     private static async Task<List<string>> FinishAndVerify(Group group, List<string> problems)
     {
         List<string> ids = [];
+        int authorityFinished = 0;
         foreach (Process child in group.Children)
         {
             string? done = await Line(child);
             if (done is not null && done.StartsWith("DONE ", StringComparison.Ordinal))
             {
                 ids.Add(done[5..]);
+            }
+            else if (done == "MIXED DONE")
+            {
+                authorityFinished++;
             }
             else
             {
@@ -195,7 +220,7 @@ internal static class StateDatabaseProcessTests
             }
         }
 
-        int writers = group.Children.Count;
+        int writers = group.StateWriters;
         StateDatabase db = StateDatabase.InFolder(group.Folder);
         Manifest? manifest = TestState.Current(db);
         string[] stored = manifest is null ? [] : [.. manifest.Keys.Select(item => item.Id)];
@@ -203,6 +228,14 @@ internal static class StateDatabaseProcessTests
         if (manifest is null || manifest.Version != writers + 1 || stored.Length != writers + 1 || !allThere || !db.TryCheck(out string? checkError) || checkError is not null)
         {
             problems.Add($"{stored.Length} keys of {writers + 1}, version {manifest?.Version}, children's keys present: {allThere}");
+        }
+        if (group.Children.Count > writers)
+        {
+            int expected = group.Children.Count - writers;
+            if (authorityFinished != expected || AuthorityStore.InFolder(group.Folder).Audit().Count(item => item.Event == "cross-process-pairing") != expected * MixedWrites)
+            {
+                problems.Add("one or more authority writers lost changes during the state writes");
+            }
         }
 
         return problems;
@@ -217,7 +250,7 @@ internal static class StateDatabaseProcessTests
             List<string> problems = [];
             try
             {
-                (Group group, List<string> launched) = await Launch(Path.Combine(root, "proc-" + round), Writers);
+                (Group group, List<string> launched) = await Launch(Path.Combine(root, "proc-" + round), Writers, authorityWriters: round == 0 ? 3 : 0);
                 using (group)
                 {
                     problems.AddRange(launched);
@@ -262,7 +295,7 @@ internal static class StateDatabaseProcessTests
             bool madeEarly = false;
             while (DateTime.UtcNow < until && !madeEarly)
             {
-                madeEarly = File.Exists(Path.Combine(folder, "state.db"));
+                madeEarly = File.Exists(Path.Combine(folder, "with-secrets.db"));
                 await Task.Delay(20);
             }
 
@@ -276,7 +309,7 @@ internal static class StateDatabaseProcessTests
     {
         string folder = Path.Combine(root, "gate");
         Directory.CreateDirectory(folder);
-        string dbPath = Path.Combine(folder, "state.db");
+        string dbPath = Path.Combine(folder, "with-secrets.db");
         using Process holder = Start("--state-hold-gate", folder);
         string? held = await Line(holder);
         check(held == "HELD", "db gate: a process takes the creation lock (" + held + ")");
@@ -293,7 +326,7 @@ internal static class StateDatabaseProcessTests
             refused = error;
         }
 
-        string[] leftovers = [.. Directory.GetFileSystemEntries(folder).Select(Path.GetFileName).Where(name => name != "state.db.lock")!];
+        string[] leftovers = [.. Directory.GetFileSystemEntries(folder).Select(Path.GetFileName).Where(name => name != "with-secrets.db.lock")!];
         check(refused is StateDatabaseException && refused.Message.Contains("creation lock", StringComparison.Ordinal) && !File.Exists(dbPath) && leftovers.Length == 0, "db gate: while another process holds the creation lock, creating refuses with a clear reason and leaves no database and nothing else behind (" + refused?.Message + "; " + string.Join(",", leftovers) + ")");
 
         // The holder dies without releasing anything: the operating system releases the lock, and the next creator gets it.
@@ -310,7 +343,7 @@ internal static class StateDatabaseProcessTests
             created = false;
         }
 
-        check(created && File.Exists(dbPath) && File.Exists(Path.Combine(folder, "state.db.lock")) && next.TryCheck(out string? nextError) && nextError is null, "db gate: a process that dies while holding the creation lock releases it, and the next process creates the database (the lock file stays: it is never removed)");
+        check(created && File.Exists(dbPath) && File.Exists(Path.Combine(folder, "with-secrets.db.lock")) && next.TryCheck(out string? nextError) && nextError is null, "db gate: a process that dies while holding the creation lock releases it, and the next process creates the database (the lock file stays: it is never removed)");
 
         // An existing database never needs the gate: held by another process, reads and writes go on at once, and nothing is created again.
         using Process again = Start("--state-hold-gate", folder);
@@ -351,13 +384,13 @@ internal static class StateDatabaseProcessTests
         string made = Path.Combine(root, "gate-made");
         Directory.CreateDirectory(made);
         StateDatabase.InFolder(made).Write((_, _) => 0);
-        string lockPath = Path.Combine(made, "state.db.lock");
+        string lockPath = Path.Combine(made, "with-secrets.db.lock");
         check(File.Exists(lockPath) && File.GetUnixFileMode(lockPath) == (UnixFileMode.UserRead | UnixFileMode.UserWrite), "db gate: the lock file is made with owner-only permissions (" + (File.Exists(lockPath) ? Convert.ToString((int)File.GetUnixFileMode(lockPath), 8) : "missing") + ")");
 
         // A lock file that others can open is not trusted: refused, left as it is, no database made.
         string open = Path.Combine(root, "gate-open");
         Directory.CreateDirectory(open);
-        string openLock = Path.Combine(open, "state.db.lock");
+        string openLock = Path.Combine(open, "with-secrets.db.lock");
         File.WriteAllText(openLock, "");
         File.SetUnixFileMode(openLock, (UnixFileMode)Convert.ToInt32("666", 8));
         Exception? openRefused = null;
@@ -370,14 +403,14 @@ internal static class StateDatabaseProcessTests
             openRefused = error;
         }
 
-        check(openRefused is StateDatabaseException && openRefused.Message.Contains("lock file", StringComparison.Ordinal) && !File.Exists(Path.Combine(open, "state.db")) && File.GetUnixFileMode(openLock) == (UnixFileMode)Convert.ToInt32("666", 8), "db gate: a lock file that others can open is refused with the reason, is not changed and no database is made (" + openRefused?.Message + ")");
+        check(openRefused is StateDatabaseException && openRefused.Message.Contains("lock file", StringComparison.Ordinal) && !File.Exists(Path.Combine(open, "with-secrets.db")) && File.GetUnixFileMode(openLock) == (UnixFileMode)Convert.ToInt32("666", 8), "db gate: a lock file that others can open is refused with the reason, is not changed and no database is made (" + openRefused?.Message + ")");
 
         // A link in the place of the lock file is not followed.
         string linked = Path.Combine(root, "gate-link");
         Directory.CreateDirectory(linked);
         string victim = Path.Combine(root, "gate-victim.txt");
         File.WriteAllText(victim, "keep");
-        File.CreateSymbolicLink(Path.Combine(linked, "state.db.lock"), victim);
+        File.CreateSymbolicLink(Path.Combine(linked, "with-secrets.db.lock"), victim);
         Exception? linkRefused = null;
         try
         {
@@ -388,7 +421,7 @@ internal static class StateDatabaseProcessTests
             linkRefused = error;
         }
 
-        check(linkRefused is StateDatabaseException && File.ReadAllText(victim) == "keep" && !File.Exists(Path.Combine(linked, "state.db")), "db gate: a lock file that is a link is refused and what it points to is untouched (" + linkRefused?.Message + ")");
+        check(linkRefused is StateDatabaseException && File.ReadAllText(victim) == "keep" && !File.Exists(Path.Combine(linked, "with-secrets.db")), "db gate: a lock file that is a link is refused and what it points to is untouched (" + linkRefused?.Message + ")");
     }
 
     /// <summary>
@@ -406,7 +439,7 @@ internal static class StateDatabaseProcessTests
         {
             try
             {
-                using FileStream second = new(Path.Combine(folder, "state.db.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1);
+                using FileStream second = new(Path.Combine(folder, "with-secrets.db.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None, 1);
             }
             catch (IOException error)
             {
@@ -414,7 +447,7 @@ internal static class StateDatabaseProcessTests
             }
         }
 
-        check(contention is not null && StateDatabase.ClassifyFailure(contention) == StateDatabase.GateProbe.Excluded, "db gate verification: the refusal of a second open of a held lock file is recognized as the lock working (" + (contention is null ? "it opened" : "HRESULT 0x" + contention.HResult.ToString("X8", System.Globalization.CultureInfo.InvariantCulture)) + ")");
+        check(contention is not null && WithSecretsDatabase.ClassifyFailure(contention) == WithSecretsDatabase.GateProbe.Excluded, "db gate verification: the refusal of a second open of a held lock file is recognized as the lock working (" + (contention is null ? "it opened" : "HRESULT 0x" + contention.HResult.ToString("X8", System.Globalization.CultureInfo.InvariantCulture)) + ")");
 
         // Anything else is not proof. Failures that are not about the lock, made by hand: handle and memory exhaustion, a full disk, a plain I/O error, a lock violation (a byte range), no permission.
         Exception[] unrelated =
@@ -429,16 +462,16 @@ internal static class StateDatabaseProcessTests
             new OutOfMemoryException(),
             new InvalidOperationException("anything else"),
         ];
-        check(unrelated.All(error => StateDatabase.ClassifyFailure(error) == StateDatabase.GateProbe.Unverified), "db gate verification: handle exhaustion, a full disk, memory, permission, a byte-range lock and any other failure are not taken as proof that the lock works");
+        check(unrelated.All(error => WithSecretsDatabase.ClassifyFailure(error) == WithSecretsDatabase.GateProbe.Unverified), "db gate verification: handle exhaustion, a full disk, memory, permission, a byte-range lock and any other failure are not taken as proof that the lock works");
 
         // The other operating systems' answers are not this one's: each platform recognizes exactly its own.
         IOException otherPlatform = new("locked", OperatingSystem.IsWindows() ? 11 : OperatingSystem.IsMacOS() ? 11 : 35);
-        check(StateDatabase.ClassifyFailure(otherPlatform) == StateDatabase.GateProbe.Unverified, "db gate verification: the contention answer of another platform is not accepted here");
+        check(WithSecretsDatabase.ClassifyFailure(otherPlatform) == WithSecretsDatabase.GateProbe.Unverified, "db gate verification: the contention answer of another platform is not accepted here");
 
         // When locking cannot be verified, the creation stops: no database, no change. A second open that fails for another reason, and one that wrongly works.
         string failing = Path.Combine(root, "verify-fail");
         Directory.CreateDirectory(failing);
-        StateDatabase unverifiable = new(Path.Combine(failing, "state.db"), TimeSpan.FromSeconds(2)) { SecondGateOpen = () => throw new IOException("too many open files", OperatingSystem.IsWindows() ? unchecked((int)0x80070004) : 24) };
+        StateDatabase unverifiable = new(Path.Combine(failing, "with-secrets.db"), TimeSpan.FromSeconds(2)) { SecondGateOpen = () => throw new IOException("too many open files", OperatingSystem.IsWindows() ? unchecked((int)0x80070004) : 24) };
         Exception? refused = null;
         try
         {
@@ -450,12 +483,12 @@ internal static class StateDatabaseProcessTests
         }
 
         string[] after = [.. Directory.GetFileSystemEntries(failing).Select(Path.GetFileName)!];
-        check(refused is StateDatabaseException && refused.Message.Contains("could not be verified", StringComparison.Ordinal) && !File.Exists(Path.Combine(failing, "state.db")) && after.All(name => name == "state.db.lock"), "db gate verification: when the check fails for a reason other than the lock, creation stops with that diagnostic and no database or temporary file is made (" + refused?.Message + "; " + string.Join(",", after) + ")");
+        check(refused is StateDatabaseException && refused.Message.Contains("could not be verified", StringComparison.Ordinal) && !File.Exists(Path.Combine(failing, "with-secrets.db")) && after.All(name => name == "with-secrets.db.lock"), "db gate verification: when the check fails for a reason other than the lock, creation stops with that diagnostic and no database or temporary file is made (" + refused?.Message + "; " + string.Join(",", after) + ")");
 
         string working = Path.Combine(root, "verify-open");
         Directory.CreateDirectory(working);
-        string workingLock = Path.Combine(working, "state.db.lock");
-        StateDatabase excludesNobody = new(Path.Combine(working, "state.db"), TimeSpan.FromSeconds(2)) { SecondGateOpen = () => new FileStream(Path.Combine(root, "verify-open-other.tmp"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite, 1, FileOptions.DeleteOnClose) };
+        string workingLock = Path.Combine(working, "with-secrets.db.lock");
+        StateDatabase excludesNobody = new(Path.Combine(working, "with-secrets.db"), TimeSpan.FromSeconds(2)) { SecondGateOpen = () => new FileStream(Path.Combine(root, "verify-open-other.tmp"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite, 1, FileOptions.DeleteOnClose) };
         Exception? allowed = null;
         try
         {
@@ -466,5 +499,5 @@ internal static class StateDatabaseProcessTests
             allowed = error;
         }
 
-        check(allowed is StateDatabaseException && allowed.Message.Contains("does not exclude", StringComparison.Ordinal) && !File.Exists(Path.Combine(working, "state.db")) && File.Exists(workingLock), "db gate verification: a second open that works means the lock excludes nobody, and creation stops with that diagnostic (" + allowed?.Message + ")");
+        check(allowed is StateDatabaseException && allowed.Message.Contains("does not exclude", StringComparison.Ordinal) && !File.Exists(Path.Combine(working, "with-secrets.db")) && File.Exists(workingLock), "db gate verification: a second open that works means the lock excludes nobody, and creation stops with that diagnostic (" + allowed?.Message + ")");
     }}

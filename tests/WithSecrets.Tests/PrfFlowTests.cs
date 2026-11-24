@@ -169,7 +169,7 @@ internal static partial class WebApprovalTests
                 check(privateHex.Length == 64 && DotenvxCipher.Instance.Derive(privateHex) == after!.Store, "prf first set: the vault holds the private key of the stored public key, and the passkey's PRF output opens it");
                 byte[] privateAscii = Encoding.ASCII.GetBytes(privateHex);
                 SqliteConnection.ClearAllPools();
-                check(!FolderHolds(Path.GetDirectoryName(db.FilePath)!, privateAscii) && !FolderHolds(Path.GetDirectoryName(db.FilePath)!, Encoding.UTF8.GetBytes(privateHex.ToUpperInvariant())), "prf first set: the private key (hex) is in no file of the store folder: not in state.db, its WAL or anything else");
+                check(!FolderHolds(Path.GetDirectoryName(db.FilePath)!, privateAscii) && !FolderHolds(Path.GetDirectoryName(db.FilePath)!, Encoding.UTF8.GetBytes(privateHex.ToUpperInvariant())), "prf first set: the private key (hex) is in no file of the store folder: not in with-secrets.db, its WAL or anything else");
                 check(!FolderHolds(Path.GetDirectoryName(db.FilePath)!, master) && !FolderHolds(Path.GetDirectoryName(db.FilePath)!, Encoding.ASCII.GetBytes(Base64Url.EncodeToString(master))), "prf first set: the master key is in no file either");
                 check(!Shows([.. run.Seen, StateDatabaseTests.AuditText(db.FilePath), run.Result?.Detail ?? ""], privateAscii, master), "prf first set: the private key and the master key are in no page, reply, message or audit entry");
                 check(!Shows(run.Seen, privateAscii) && !run.Seen.Any(text => text.Contains(privateHex, StringComparison.OrdinalIgnoreCase)), "prf first set: no HTTP body has the private key");

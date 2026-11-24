@@ -38,7 +38,17 @@ public sealed class TargetAdminAsker(EnrollmentTarget primary, EnrollmentTarget 
 }
 
 /// <summary>Service-owned input retained until an inline SPA passkey assertion is judged.</summary>
-internal sealed record InlineAdminProof(string Ticket, ApprovalEvidence Evidence, ProofContext Context, IProofMethod Method, ProofStart Start, DateTimeOffset Issued);
+internal sealed record InlineAdminProof(string Ticket, ApprovalEvidence Evidence, ProofContext Context, IProofMethod Method, ProofStart Start, DateTimeOffset Issued,
+    byte[]? PrfState, string? PrfKey) : IDisposable
+{
+    public void Dispose()
+    {
+        if (PrfState is not null)
+        {
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(PrfState);
+        }
+    }
+}
 
 /// <summary>
 /// Proof that an administrator's fresh passkey tap authorized exactly one operation with exactly these parameters. Only <see cref="AdminAuthorizer" /> makes one; a store
@@ -75,7 +85,7 @@ public sealed class VerifiedAdmin
 }
 
 /// <summary>What <see cref="AdminAuthorizer.Authorize" /> came to. <see cref="Evidence" /> is the verified signed page, for an operation whose own authority re-checks it (a grant change).</summary>
-public sealed record AdminAuthorization(VerifiedAdmin? Admin, string Detail, ApprovalEvidence? Evidence = null, VerifiedCredential? Credential = null)
+public sealed record AdminAuthorization(VerifiedAdmin? Admin, string Detail, ApprovalEvidence? Evidence = null, VerifiedCredential? Credential = null, Unlock? Unlock = null)
 {
     public bool Ok => Admin is not null || Credential is not null;
 }
@@ -111,7 +121,7 @@ public sealed class AdminAuthorizer(AuthorityStore store, IApprovalVerifier veri
         return text.ToString();
     }
 
-    internal InlineAdminProof PrepareInline(string sentence, string operation, IReadOnlyList<(string Name, string Value)> parameters, EnrollmentTarget target, string origin)
+    internal InlineAdminProof PrepareInline(string sentence, string operation, IReadOnlyList<(string Name, string Value)> parameters, EnrollmentTarget target, string origin, bool wantsPrf = false)
     {
         string parameterText = Canonical(parameters);
         if (!Record(operation, "requested", "", parameterText))
@@ -131,7 +141,8 @@ public sealed class AdminAuthorizer(AuthorityStore store, IApprovalVerifier veri
         ProofStart start = target.Method.Start(context);
         if (start.Mode != "webauthn") throw new ProofUnavailableException("this proof method cannot be used inside the administration page");
 
-        return new InlineAdminProof(ticket, new ApprovalEvidence(nonce, text, ""), context, target.Method, start, issued);
+        (byte[]? state, string? key) = wantsPrf ? SecretCrypto.NewServerKey() : (null, null);
+        return new InlineAdminProof(ticket, new ApprovalEvidence(nonce, text, ""), context, target.Method, start, issued, state, key);
     }
 
     internal AdminAuthorization AcceptInline(InlineAdminProof prepared, string operation, IReadOnlyList<(string Name, string Value)> parameters, string proof)
@@ -251,7 +262,7 @@ public sealed class AdminAuthorizer(AuthorityStore store, IApprovalVerifier veri
             return Refuse(operation, "the approval was not signed by an enrolled admin key (" + check.Detail + ")", parameterText);
         }
 
-        // A proof is accepted once, and the record outlives a restart (it is kept in authority.db until the proof could no longer be fresh).
+        // A proof is accepted once, and the record outlives a restart (it is kept in with-secrets.db until the proof could no longer be fresh).
         bool first;
         try
         {

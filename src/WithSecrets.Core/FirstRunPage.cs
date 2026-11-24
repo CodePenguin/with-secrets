@@ -129,7 +129,7 @@ public sealed class FirstRunPage(StateDatabase db, EnrollmentTarget primaryTarge
                         {
                             foreach ((string name, string ciphertext) in carried)
                             {
-                                StateDatabase.Execute(connection, transaction, "INSERT INTO secrets (name, ciphertext) VALUES ($name, $ciphertext)", ("$name", name), ("$ciphertext", ciphertext));
+                                WithSecretsDatabase.Execute(connection, transaction, "INSERT INTO secrets (name, ciphertext) VALUES ($name, $ciphertext)", ("$name", name), ("$ciphertext", ciphertext));
                             }
 
                             if (SecretStore.Problem(db.CurrentManifest(connection, transaction), SecretStore.AllRows(connection, transaction)) is { } mismatch)
@@ -140,13 +140,13 @@ public sealed class FirstRunPage(StateDatabase db, EnrollmentTarget primaryTarge
                             AdminEvent setup = AdminEvent.Change("setup", $"first passkey \"{key.Name}\" (admin) added for {key.RpId}", key.Name);
                             if (Carry is { } carry)
                             {
-                                // A recovery builds the new state in a file of its own that only takes the old one's place when the swap succeeds: its events are recorded then, never for a state that was thrown away.
+                                // Recovery writes these events when it installs the recovered store in the live database.
                                 carry.Pending.Add(setup);
-                                carry.Pending.Add(AdminEvent.Change("recovered", $"recovered {carry.Count} secrets from {carry.OldFileName} (renamed to {carry.RecoveredName}); new keys made", key.Name));
+                                carry.Pending.Add(AdminEvent.Change("recovered", $"recovered {carry.Count} secrets from {carry.OldFileName} (copied to {carry.RecoveredName}); new keys made", key.Name));
                             }
                             else
                             {
-                                db.AppendAudit(setup);
+                                db.AppendAudit(connection, transaction, setup);
                             }
                         });
 
@@ -159,7 +159,8 @@ public sealed class FirstRunPage(StateDatabase db, EnrollmentTarget primaryTarge
                     return ApprovalDecision.Deny("the settings and the passkey could not be saved (" + error.Message + "); nothing was saved");
                 }
             },
-            Carry is null ? null : publicKey => carried = Carry.Reencrypt(publicKey));
+            Carry is { } recovery ? publicKey => carried = recovery.Reencrypt(publicKey) : null,
+            Carry is { } carryReview ? carryReview.WrapReview : null);
 
         ApprovalDecision decision = PasskeyRegistration.Run(passkeys, target.Approver.Settings, Enrollment.DefaultName, announce, readCode, plan);
 

@@ -1,3 +1,4 @@
+using System.Buffers.Text;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -22,6 +23,7 @@ internal static class AuthorityLockTests
         {
             await Startup(check, root);
             await Ceremonies(check, root);
+            await Review(check, root);
             await Unattended(check, root);
             await Origins(check, root);
             Store(check, root);
@@ -143,6 +145,82 @@ internal static class AuthorityLockTests
     }
 
     // ---- the startup lock ----
+
+    private static async Task Review(Action<bool, string> check, string root)
+    {
+        using AdminApp app = new(root, unlocked: false, protection: true);
+        ReviewKeys review = app.Service.Review!;
+        async Task<bool> StatusOpen()
+        {
+            using JsonDocument status = JsonDocument.Parse(await app.Http.GetStringAsync(app.Browser().Base + "/api/v1/status"));
+            return status.RootElement.GetProperty("reviewOpen").GetBoolean();
+        }
+
+        async Task<(int Proof, int Mutation, string State)> Tap(AdminBrowser browser, string op, TestAuthenticator who, bool withPrf)
+        {
+            await browser.LoadAsync();
+            (int prepared, string json) = await browser.PostAsync("/api/v1/authorizations/inline", AdminBrowser.AuthorizationBody(op));
+            if (prepared != 201)
+            {
+                return (0, prepared, json);
+            }
+
+            using JsonDocument created = JsonDocument.Parse(json);
+            JsonElement item = created.RootElement;
+            using JsonDocument options = JsonDocument.Parse(item.GetProperty("proof").GetProperty("payload").GetString()!);
+            JsonElement payload = options.RootElement;
+            byte[] bind = Base64Url.DecodeFromChars(payload.GetProperty("bind").GetString()!);
+            string proof = who.Assert(bind, browser.Origin, payload.GetProperty("rpId").GetString()!, TestState.NextCount());
+            string body = JsonSerializer.Serialize(new { proof });
+            if (withPrf)
+            {
+                byte[] output = who.Prf(Base64Url.DecodeFromChars(payload.GetProperty("salt").GetString()!))!;
+                try
+                {
+                    (string epk, string iv, string ct) = PrfBrowser.Seal(item.GetProperty("prfKey").GetString()!, bind, output);
+                    body = JsonSerializer.Serialize(new { proof, prf = new { epk, iv, ct } });
+                }
+                finally
+                {
+                    CryptographicOperations.ZeroMemory(output);
+                }
+            }
+
+            string id = item.GetProperty("id").GetString()!;
+            (int accepted, _) = await browser.PostAsync("/api/v1/authorizations/" + id + "/proof", body);
+            if (accepted != 200)
+            {
+                return (accepted, 0, "");
+            }
+
+            string route = op == AdminService.OpUnlock ? "/api/v1/unlock" : "/api/v1/review/unlock";
+            (int result, _) = await browser.PostAsync(route, JsonSerializer.Serialize(new { authorization = id }));
+            (_, string state, _) = await browser.GetAsync("/api/v1/authorizations/" + id);
+            return (accepted, result, state);
+        }
+
+        check(!review.IsOpen && !await StatusOpen(), "review: a new service starts with the review key closed");
+        check((await Tap(app.Browser(), AdminService.OpUnlock, app.Laptop, true)).Mutation == 200
+            && !app.Service.Lock.IsLocked && review.IsOpen && await StatusOpen(), "review: an inline admin unlock with PRF opens the review key");
+
+        app.Service.Lock.Lock("test");
+        check(!review.IsOpen && !await StatusOpen(), "review: locking wipes the review key");
+        (int proof, int mutation, string state) = await Tap(app.Browser(), AdminService.OpUnlock, app.Laptop, false);
+        check(proof == 200 && mutation == 200 && !app.Service.Lock.IsLocked && !review.IsOpen
+            && state.Contains("Review text stays locked", StringComparison.Ordinal), "review: an unlock without key release still unlocks the authority and reports that review stays closed");
+
+        AdminBrowser session = await app.SignedIn();
+        check((await Tap(session, AdminService.OpReviewUnlock, app.Phone, true)).Proof == 409 && !review.IsOpen, "review: an ordinary passkey does not open review");
+        check((await Tap(session, AdminService.OpReviewUnlock, app.Laptop, false)).Mutation == 409 && !review.IsOpen, "review: opening review requires key release");
+        Tapped allow = await session.OpAsync(AdminService.OpPolicyUnattended, app.Laptop);
+        check(allow.MutationStatus == 200, "review: an administrator can enable unattended unlock for the restart");
+        app.Start(unlocked: false);
+        check(app.Service.Lock.How == UnlockMethod.Unattended && app.Service.Review?.IsOpen == false && !await StatusOpen(), "review: unattended startup leaves the review key closed");
+        session = await app.SignedIn();
+        check((await Tap(session, AdminService.OpReviewUnlock, app.Laptop, true)).Mutation == 200
+            && app.Service.Review?.IsOpen == true && Attempts(app.Store, AdminService.OpReviewUnlock, "applied") == 1,
+            "review: an explicit admin tap after unattended startup opens review and is audited");
+    }
 
     private static async Task Startup(Action<bool, string> check, string root)
     {
@@ -380,7 +458,7 @@ internal static class AuthorityLockTests
 
         // Anything in doubt leaves it locked.
         second.Dispose();
-        // L1: the unattended policy is signed by the authority key. A plain write to authority.db (unsigned, or signed by nothing) cannot make a service unlock itself.
+        // L1: the unattended policy is signed by the authority key. A plain write to with-secrets.db (unsigned, or signed by nothing) cannot make a service unlock itself.
         string signature = (string)Scalar(store.FilePath, "SELECT value FROM authority_settings WHERE name = 'unlock_signature'")!;
         foreach ((string label, string sql) in new[] { ("no signature", "DELETE FROM authority_settings WHERE name = 'unlock_signature'"), ("a signature of other bytes", "UPDATE authority_settings SET value = 'AAAA' WHERE name = 'unlock_signature'") })
         {
@@ -531,6 +609,7 @@ internal static class AuthorityLockTests
     private sealed class StubVerifier(bool ok = true, bool admin = true) : IApprovalVerifier
     {
         public ApprovalCheck Verify(ApprovalEvidence evidence, int minutes) => new(ok, "stub-key", admin, ok ? "" : "bad signature");
+        public ApprovalCheck Signer(string proof) => new(ok, "stub-key", admin, "");
     }
 
     private sealed class StubAsker(Func<ApprovalPrompt, ApprovalDecision> answer) : IAdminAsker
@@ -571,7 +650,7 @@ internal static class AuthorityLockTests
         check(!Try(fine, new StubAsker(_ => ApprovalDecision.Allow("approved", 0, null, new Unlock("x", [1])))).Ok, "authorizer: unlock material in place of evidence authorizes nothing");
 
         // L4: the page's own ticket must be the one in the signed text, and a spent proof stays spent across a restart.
-        check(!Try(Make(), new StubAsker(prompt => Signed(prompt, "n1"))).Ok, "authorizer: a nonce spent before a restart (a new authorizer over the same authority.db) is still spent");
+        check(!Try(Make(), new StubAsker(prompt => Signed(prompt, "n1"))).Ok, "authorizer: a nonce spent before a restart (a new authorizer over the same with-secrets.db) is still spent");
         check(!Try(fine, new StubAsker(prompt => Signed(prompt, "n9", edit: text => System.Text.RegularExpressions.Regex.Replace(text, "Ticket: [0-9A-Fa-f]+", "Ticket: 0000")))).Ok, "authorizer: a signed text that carries another page's ticket is refused");
         check(!Try(fine, new StubAsker(prompt => Signed(prompt, "n10", edit: text => System.Text.RegularExpressions.Regex.Replace(text, "\nTicket: [0-9A-Fa-f]+", "")))).Ok, "authorizer: a signed text with no ticket line is refused");
         string? earlier = null;
@@ -582,7 +661,7 @@ internal static class AuthorityLockTests
             return ApprovalDecision.Deny("capture the first page's text");
         }));
         check(!Try(fine, new StubAsker(prompt => ApprovalDecision.Allow("approved", 0, new ApprovalEvidence("n11", earlier + "\n" + ApprovalSummary.IssuedLine(DateTimeOffset.UtcNow), "{}")))).Ok, "authorizer: a proof made on an earlier page (its text, its ticket) does not authorize a later one");
-        check(Convert.ToInt32(Scalar(store.FilePath, "SELECT COUNT(*) FROM admin_spent_nonces")) >= 1, "authorizer: spent nonces are kept in authority.db");
+        check(Convert.ToInt32(Scalar(store.FilePath, "SELECT COUNT(*) FROM admin_spent_nonces")) >= 1, "authorizer: spent nonces are kept in with-secrets.db");
 
         check(Attempts(store, Op, "requested") >= 13 && Attempts(store, Op, "authorized") == 1 && Attempts(store, Op, "refused") >= 11, "authorizer: every attempt and refusal is audited");
         check(store.Audit(1000).Where(entry => entry.Event == "admin-operation").All(entry => !entry.Detail.Contains("{}", StringComparison.Ordinal) && !entry.Detail.Contains("n1", StringComparison.Ordinal)), "authorizer: the audit carries no proof or nonce");
@@ -675,6 +754,8 @@ internal static class AuthorityLockTests
         using HostServiceTests.Rig rig = new(root, startLocked: false);
         rig.Service.Authorization.Keys.Hold(new Unlock("test-credential", prf), new HeldKeyBinding("g", "s", 1, null));
         rig.Service.Lock.Lock("test");
+        // Stop the background audit worker before reading the durable files directly.
+        rig.Service.Dispose();
         string prfText = Convert.ToHexString(prf);
         bool leaked = Directory.EnumerateFiles(rig.Machine.Folder).Where(file => !file.EndsWith("-shm", StringComparison.Ordinal)).Any(file =>
         {

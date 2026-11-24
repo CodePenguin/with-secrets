@@ -289,7 +289,7 @@ internal static class TestState
         {
             // Like a first setup: the store public key and its vault are in the first manifest.
             (string publicKey, string privateKey) = DotenvxCipher.Instance.NewKeyPair();
-            first = first with { Store = publicKey, Vault = TestVault.Vault(db, privateKey, publicKey) };
+            first = first with { Store = publicKey, Vault = TestVault.Vault(db, privateKey, publicKey), Review = KeyVault.NewReviewKey(TestVault.Master(db)) };
         }
 
         return Write(db, current is null ? first : current.WithKey(record, admin));
@@ -350,6 +350,20 @@ internal static class TestVault
 
     /// <summary>The master key of the state at this database (made on first use).</summary>
     public static byte[] Master(StateDatabase db) => Masters.GetOrAdd(Path.GetFullPath(db.FilePath), _ => KeyVault.NewMasterKey());
+
+    public static string ReviewText(StateDatabase db, GrantRecord row)
+    {
+        ReviewKey review = TestState.Current(db)!.Review!;
+        byte[] key = KeyVault.UnwrapReview(review.Vault, Master(db), review.PublicKey);
+        try
+        {
+            return DotenvxCipher.Instance.Decrypt(Encoding.UTF8.GetString(key), row.Evidence!.Ciphertext);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(key);
+        }
+    }
 
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte[]> Salts = new(StringComparer.Ordinal);
 

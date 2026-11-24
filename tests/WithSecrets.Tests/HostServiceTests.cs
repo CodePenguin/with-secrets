@@ -68,7 +68,7 @@ internal static class HostServiceTests
             Asked.Set();
             Release.Wait(TimeSpan.FromSeconds(30));
 
-            return approve ? ApprovalDecision.Allow() : ApprovalDecision.Deny("test denied");
+            return approve ? TestSigner.Allow(request) : ApprovalDecision.Deny("test denied");
         }
     }
 
@@ -94,7 +94,7 @@ internal static class HostServiceTests
                 return ApprovalDecision.Deny("cancelled by the client");
             }
 
-            return ApprovalDecision.Allow();
+            return TestSigner.Allow(request);
         }
     }
 
@@ -111,18 +111,18 @@ internal static class HostServiceTests
         private readonly string _dir;
         private int _ids;
 
-        public Rig(string parent, Dictionary<string, string>? values = null, Func<IApprover>? approver = null, TimeSpan? bodyTimeout = null, Action<PreparedChild>? afterPrepare = null, Action? afterCommit = null, bool trusted = true, TestMachine? machine = null, bool needsUnlock = false, Func<IApprover, IStoreKeyProvider>? keyProvider = null, IMonotonicClock? monotonic = null, TestAuthenticator? enrolled = null, TimeSpan? auditInterval = null, bool startLocked = false, IUnlockProtection? protection = null, Func<Action<string>, IAdminAsker>? adminAskers = null, Action<string>? seedState = null)
+        public Rig(string parent, Dictionary<string, string>? values = null, Func<IApprover>? approver = null, TimeSpan? bodyTimeout = null, Action<PreparedChild>? afterPrepare = null, Action? afterCommit = null, bool trusted = true, TestMachine? machine = null, bool needsUnlock = false, Func<IApprover, IStoreKeyProvider>? keyProvider = null, IMonotonicClock? monotonic = null, TestAuthenticator? enrolled = null, TimeSpan? auditInterval = null, bool startLocked = false, IUnlockProtection? protection = null, Func<Action<string>, IAdminAsker>? adminAskers = null)
         {
             _dir = Path.Combine(parent, "svc-" + Guid.NewGuid().ToString("N")[..8]);
             Work = Path.Combine(_dir, "work");
             Directory.CreateDirectory(Work);
-            seedState?.Invoke(Path.Combine(_dir, "state"));
-            State = StateDatabase.InFolder(Path.Combine(_dir, "state"));
-            Machine = machine ?? new TestMachine(Path.Combine(_dir, "state"), trusted);
+            string stateFolder = machine?.Folder ?? Path.Combine(_dir, "state");
+            Machine = machine ?? new TestMachine(stateFolder, trusted);
+            State = new StateDatabase(Machine.Deployment.Store.Database);
             if (enrolled is not null)
             {
                 // The key whose assertions back grants (the authority checks them against the signed manifest of this state).
-                TestState.Add(State, enrolled.Record("localhost", "grant-test") with { Created = DateTimeOffset.UtcNow });
+                TestState.Add(State, enrolled.Record("localhost", "grant-test") with { Created = DateTimeOffset.UtcNow }, withStore: true);
             }
 
             Store = new CountingStore(values ?? new Dictionary<string, string> { ["TOKEN"] = Value, ["OTHER_KEY"] = Other }, needsUnlock);
@@ -140,6 +140,9 @@ internal static class HostServiceTests
                 BodyTimeout = bodyTimeout ?? TimeSpan.FromSeconds(15),
                 ApproverFactory = (_, _) =>
                 {
+                    // Every approval is a grant: the key test approvers sign with when a test names none (see TestSigner). Enrolled when the first page is
+                    // made, so it comes after the keys a test sets up (it never takes the first, admin, place of a key the test adds).
+                    TestSigner.Enroll(State);
                     IApprover made = approver?.Invoke() ?? new FakeApprover(true);
                     Approvers.Add(made);
 
@@ -415,6 +418,7 @@ internal static class HostServiceTests
             await FixRound1(check, parent);
             await ClientAndCommandLine(check, parent);
             await Surfaces(check, parent);
+            await MixedWriters(check, parent);
         }
         finally
         {
@@ -427,6 +431,68 @@ internal static class HostServiceTests
                 // A child still holding a file: the temp folder is left.
             }
         }
+    }
+
+    /// <summary>One service process, one with-secrets.db: run events (outbox), authority audit rows and signed settings changes (state) written at once.</summary>
+    private static async Task MixedWriters(Action<bool, string> check, string parent)
+    {
+        using TestAuthenticator admin = TestAuthenticator.ES256();
+        using Rig rig = new(parent, enrolled: admin);
+        HostService service = rig.Service;
+        AuthorityStore store = rig.Machine.Deployment.Store;
+        long before = service.Audit.Outbox.LastSequence();
+        int failures = 0;
+        int settings = 0;
+        await Task.WhenAll(Enumerable.Range(0, 8).Select(task => Task.Run(() =>
+        {
+            for (int index = 0; index < 25; index++)
+            {
+                try
+                {
+                    if (task % 2 == 0)
+                    {
+                        if (!service.Audit.TryRecord(new AuditFacts(AuditEventTypes.Authorization, "approved", "approved", "mixed-" + task + "-" + index, "/work", "/work/show.sh", [], "", null)))
+                        {
+                            Interlocked.Increment(ref failures);
+                        }
+                    }
+                    else
+                    {
+                        store.RecordDeliveryEvent(rig.Machine.Fingerprint, "mixed-" + task + "-" + index, "mixed-delivery", "contention test");
+                        // One task changes the signed settings (a read-modify-write of the manifest, so one writer of it at a time).
+                        if (task == 1 && index % 5 == 0)
+                        {
+                            if (TestState.Setting(rig.State, "timeoutMinutes", (2 + index / 5).ToString(System.Globalization.CultureInfo.InvariantCulture)))
+                            {
+                                Interlocked.Increment(ref settings);
+                            }
+                            else
+                            {
+                                Interlocked.Increment(ref failures);
+                            }
+                        }
+                    }
+                }
+                catch (Exception)
+                {
+                    Interlocked.Increment(ref failures);
+                }
+            }
+        })));
+
+        // The uploader runs meanwhile: an event is either still in the outbox or already at the (local) authority. The outbox is read first, so none falls between.
+        const int expectedEvents = 4 * 25;
+        string machine = service.Authorization.Fingerprint;
+        Dictionary<string, AuditEvent> all = new(StringComparer.Ordinal);
+        foreach (AuditEvent item in service.Audit.Outbox.Pending(1000).Concat(store.AuditHistory(new AuditQuery(Limit: 1000)).Select(record => record.Event)))
+        {
+            all[item.EventId] = item;
+        }
+
+        long[] numbers = [.. all.Values.Where(item => item.MachineFingerprint == machine && item.Sequence > before).Select(item => item.Sequence).Order()];
+        check(failures == 0 && settings == 5 && store.Audit().Count(entry => entry.Event == "mixed-delivery") == 100 && TestState.Current(rig.State)!.Settings.TimeoutMinutes == 6
+            && service.Audit.Outbox.LastSequence() - before == expectedEvents && numbers.SequenceEqual(Enumerable.Range(1, expectedEvents).Select(i => before + i)),
+            "contention: mixed store, authority and outbox writers in one service process all commit, and the outbox numbers stay gapless (failures " + failures + ", settings " + settings + ", numbers " + numbers.Length + ")");
     }
 
     private static void Gate(Action<bool, string> check)
@@ -901,7 +967,7 @@ internal static class HostServiceTests
         {
             asked();
 
-            return barrier.SignalAndWait(TimeSpan.FromSeconds(15)) ? ApprovalDecision.Allow() : ApprovalDecision.Deny("the other client never asked");
+            return barrier.SignalAndWait(TimeSpan.FromSeconds(15)) ? TestSigner.Allow(request) : ApprovalDecision.Deny("the other client never asked");
         }
     }
 

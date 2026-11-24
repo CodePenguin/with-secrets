@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Text.Json;
 
 using Microsoft.Data.Sqlite;
+using static WithSecrets.WithSecretsDatabase;
 
 namespace WithSecrets;
 
@@ -10,7 +11,7 @@ namespace WithSecrets;
 public sealed class StateDatabaseException(string message, Exception? inner = null) : Exception(message, inner);
 
 /// <summary>
-/// <c>state.db</c> in the protected store folder: the signed manifest (passkeys and settings, see <see cref="Manifest" />), the
+/// <c>with-secrets.db</c> in the protected store folder: the signed manifest (passkeys and settings, see <see cref="Manifest" />), the
 /// sign counts and secrets, in SQLite. Every read of keys, settings or secrets verifies the manifest
 /// first (see <see cref="CurrentManifest" />); a state that fails verification can be used for nothing. Every
 /// write is one transaction that takes the write lock first (<c>BEGIN IMMEDIATE</c>), so two processes writing at once wait for
@@ -22,70 +23,41 @@ public sealed class StateDatabaseException(string message, Exception? inner = nu
 /// </summary>
 public sealed class StateDatabase
 {
-    public const string FileName = "state.db";
-    public const int SchemaVersion = 11;
-
-    public static readonly TimeSpan DefaultBusyTimeout = TimeSpan.FromSeconds(5);
-
-    /// <summary>
-    /// The tables. Keys and settings live only in the signed manifest (one row); sign counts sit beside it, outside the
-    /// signature, because every approval raises them. Each secret is one
-    /// row with its Dotenvx ciphertext; the manifest has the hash of each (see <see cref="SecretStore" />).
-    /// </summary>
-    private const string Schema = """
-        CREATE TABLE schema_version (version INTEGER NOT NULL);
-        CREATE TABLE manifest (
-            id INTEGER PRIMARY KEY NOT NULL, version INTEGER NOT NULL, text TEXT NOT NULL, bind TEXT NOT NULL,
-            credential_id TEXT NOT NULL, authenticator_data TEXT NOT NULL, client_data TEXT NOT NULL, signature TEXT NOT NULL);
-        CREATE TABLE sign_counts (id TEXT PRIMARY KEY NOT NULL, count INTEGER NOT NULL);
-        CREATE TABLE secrets (name TEXT PRIMARY KEY NOT NULL, ciphertext TEXT NOT NULL);
-        """;
-
-    /// <summary>
-    /// The tables a store holds, all of them (sqlite_sequence may or may not be there). Any other table, any view, trigger or
-    /// index other than SQLite's own primary-key indexes is an edit made outside the tool.
-    /// </summary>
-    private static readonly string[] Tables = ["manifest", "schema_version", "secrets", "sign_counts"];
-
     /// <summary>Manifests already verified in this process, by the stored row, so the signature is checked once per process.</summary>
     private static readonly ConcurrentDictionary<string, Manifest> Verified = new(StringComparer.Ordinal);
 
-    private readonly TimeSpan _busyTimeout;
-    private int _checked;
-
-    public StateDatabase(string path) : this(path, DefaultBusyTimeout)
+    public StateDatabase(string path) : this(new WithSecretsDatabase(path))
     {
     }
 
-    internal StateDatabase(string path, TimeSpan busyTimeout)
+    internal StateDatabase(string path, TimeSpan timeout) : this(new WithSecretsDatabase(path, timeout))
     {
-        FilePath = Path.GetFullPath(path);
-        _busyTimeout = busyTimeout;
     }
 
-    public string FilePath { get; }
+    internal Func<FileStream>? SecondGateOpen { init => Database.SecondGateOpen = value; }
+    internal IDisposable HoldCreationGateForTests() => Database.HoldCreationGateForTests();
+
+    public StateDatabase(WithSecretsDatabase database) => Database = database;
+
+    public WithSecretsDatabase Database { get; }
+    public string FilePath => Database.FilePath;
+    public string FileLabel => Database.FileLabel;
 
     private AdminAudit? _audit;
 
     /// <summary>
-    /// Where this store's administrative events go (the signed host audit; there is no audit table in state.db). By default the machine identity key of the platform key store
+    /// Where this store's administrative events go (the signed host audit in with-secrets.db). By default the machine identity key of the platform key store
     /// and the outbox beside the state, opened on first use; the host service puts its own audit here so that an event wakes its uploader.
     /// </summary>
     public AdminAudit Audit
     {
-        get => _audit ??= AdminAudit.ForState(FilePath);
+        get => _audit ??= AdminAudit.ForDatabase(Database);
         set => _audit = value;
     }
 
-    /// <summary>Records one administrative event inside the caller's write transaction (just before it commits); throws <see cref="StateDatabaseException" /> when it cannot be committed, which rolls the change back.</summary>
-    internal void AppendAudit(AdminEvent item) => Audit.Append(item);
+    internal void AppendAudit(SqliteConnection connection, SqliteTransaction transaction, AdminEvent item) => Audit.Append(connection, transaction, item);
 
-    /// <summary>The file name, for messages.</summary>
-    public string FileLabel => Path.GetFileName(FilePath);
-
-    private string Folder => Path.GetDirectoryName(FilePath)!;
-
-    public static StateDatabase InFolder(string folder) => new(Path.Combine(folder, FileName));
+    public static StateDatabase InFolder(string folder) => new(WithSecretsDatabase.InFolder(folder));
 
     /// <summary>The message for a state that fails verification. Never "not enrolled": deleting the file is the only way on.</summary>
     public string FailedMessage => $"state failed verification: delete {FileLabel} to start over (only if you did not edit it)";
@@ -178,21 +150,9 @@ public sealed class StateDatabase
     private Manifest? ReadManifest(SqliteConnection connection, SqliteTransaction? transaction)
     {
 
-        List<(string Type, string Name)> objects = [];
-        using (SqliteCommand command = Command(connection, transaction, "SELECT type, name FROM sqlite_master"))
-        using (SqliteDataReader reader = command.ExecuteReader())
+        if (WithSecretsDatabase.LayoutProblem(connection, transaction) is { } problem)
         {
-            while (reader.Read())
-            {
-                objects.Add((reader.GetString(0), reader.GetString(1)));
-            }
-        }
-
-        HashSet<string> tables = [.. objects.Where(item => item.Type == "table").Select(item => item.Name).Where(name => name != "sqlite_sequence")];
-        bool others = objects.Any(item => item.Type != "table" && !(item.Type == "index" && item.Name.StartsWith("sqlite_autoindex_", StringComparison.Ordinal)));
-        if (others || !tables.SetEquals(Tables))
-        {
-            throw Failed("the tables are not those of the store");
+            throw Failed("the tables are not those of the store: " + problem);
         }
 
         List<(long Version, SignedManifest Signed)> rows = [];
@@ -315,370 +275,77 @@ public sealed class StateDatabase
 
     private StateDatabaseException Failed(string why) => new(FailedMessage + " (" + why + ")");
 
-    /// <summary>Runs <paramref name="work" /> on an open connection, or with null when there is no database. Creates nothing.</summary>
-    internal T Read<T>(Func<SqliteConnection?, T> work)
+    internal sealed record RecoveryRows(string Text, long Version, string Bind, string CredentialId, string AuthenticatorData, string ClientData, string Signature,
+        IReadOnlyDictionary<string, long> Counts, IReadOnlyDictionary<string, string> Secrets);
+
+    internal RecoveryRows ExportRecoveryRows() => Read(connection =>
     {
-        return Use(false, work);
-    }
+        if (connection is null || CurrentManifest(connection, null) is null)
+        {
+            throw Failed("the recovered store has no manifest");
+        }
+
+        using SqliteCommand command = Command(connection, null, "SELECT text, version, bind, credential_id, authenticator_data, client_data, signature FROM manifest");
+        using SqliteDataReader reader = command.ExecuteReader();
+        reader.Read();
+        return new RecoveryRows(reader.GetString(0), reader.GetInt64(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetString(5), reader.GetString(6),
+            SignCounts(connection, null), SecretStore.AllRows(connection, null));
+    });
+
+    internal bool ReplaceRecoveredStore(Manifest expected, IReadOnlyDictionary<string, string> expectedSecrets, RecoveryRows recovered, IReadOnlyList<AdminEvent> events)
+        => Write((connection, transaction) =>
+    {
+        Manifest? current = CurrentManifest(connection, transaction);
+        Dictionary<string, string> currentSecrets = SecretStore.AllRows(connection, transaction);
+        if (current is null || current.Canonical() != expected.Canonical() || currentSecrets.Count != expectedSecrets.Count
+            || expectedSecrets.Any(row => !currentSecrets.TryGetValue(row.Key, out string? value) || value != row.Value))
+        {
+            return false;
+        }
+
+        Execute(connection, transaction, "DELETE FROM manifest; DELETE FROM sign_counts; DELETE FROM secrets;");
+        Execute(connection, transaction, "INSERT INTO manifest (id, version, text, bind, credential_id, authenticator_data, client_data, signature) VALUES (1, $version, $text, $bind, $id, $ad, $cd, $sig)",
+            ("$version", recovered.Version), ("$text", recovered.Text), ("$bind", recovered.Bind), ("$id", recovered.CredentialId),
+            ("$ad", recovered.AuthenticatorData), ("$cd", recovered.ClientData), ("$sig", recovered.Signature));
+        foreach ((string id, long count) in recovered.Counts)
+        {
+            Execute(connection, transaction, "INSERT INTO sign_counts (id, count) VALUES ($id, $count)", ("$id", id), ("$count", count));
+        }
+        foreach ((string name, string ciphertext) in recovered.Secrets)
+        {
+            Execute(connection, transaction, "INSERT INTO secrets (name, ciphertext) VALUES ($name, $ciphertext)", ("$name", name), ("$ciphertext", ciphertext));
+        }
+        if (SecretStore.Problem(CurrentManifest(connection, transaction), SecretStore.AllRows(connection, transaction)) is { } problem)
+        {
+            throw Failed(problem);
+        }
+        foreach (AdminEvent item in events)
+        {
+            AppendAudit(connection, transaction, item);
+        }
+        return true;
+    });
+
+    /// <summary>Runs <paramref name="work" /> on an open connection, or with null when there is no database. Creates nothing.</summary>
+    internal T Read<T>(Func<SqliteConnection?, T> work) => Use(() => Database.Read(work));
 
     /// <summary>One write transaction, committed when <paramref name="work" /> returns. Creates the database when it is missing.</summary>
-    internal T Write<T>(Func<SqliteConnection, SqliteTransaction, T> work)
-    {
-        return Use(true, connection =>
-        {
-            using SqliteTransaction transaction = connection!.BeginTransaction(deferred: false);
-            T result = work(connection, transaction);
-            transaction.Commit();
+    internal T Write<T>(Func<SqliteConnection, SqliteTransaction, T> work) => Use(() => Database.Write(work));
 
-            return result;
-        });
-    }
-
-    internal static SqliteCommand Command(SqliteConnection connection, SqliteTransaction? transaction, string sql, params (string Name, object? Value)[] parameters)
-    {
-        SqliteCommand command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = sql;
-        foreach ((string name, object? value) in parameters)
-        {
-            command.Parameters.AddWithValue(name, value ?? DBNull.Value);
-        }
-
-        return command;
-    }
-
-    internal static int Execute(SqliteConnection connection, SqliteTransaction? transaction, string sql, params (string Name, object? Value)[] parameters)
-    {
-        using SqliteCommand command = Command(connection, transaction, sql, parameters);
-
-        return command.ExecuteNonQuery();
-    }
-
-    internal static object? Scalar(SqliteConnection connection, SqliteTransaction? transaction, string sql, params (string Name, object? Value)[] parameters)
-    {
-        using SqliteCommand command = Command(connection, transaction, sql, parameters);
-
-        return command.ExecuteScalar();
-    }
-
-    private T Use<T>(bool create, Func<SqliteConnection?, T> work)
+    private T Use<T>(Func<T> work)
     {
         try
         {
-            using SqliteConnection? connection = Open(create);
-
-            return work(connection);
+            return work();
         }
-        catch (SqliteException failure)
+        catch (WithSecretsDatabaseException failure)
         {
-            throw new StateDatabaseException(Describe(failure), failure);
+            string detail = failure.InvalidLayout ? $"{FailedMessage} ({failure.Message})" : failure.Message;
+            throw new StateDatabaseException(detail, failure);
         }
-        catch (Exception failure) when (failure is IOException or UnauthorizedAccessException)
+        catch (Exception failure) when (failure is not (StateDatabaseException or OutOfMemoryException))
         {
-            throw new StateDatabaseException($"cannot read {FileLabel}: {failure.Message}", failure);
+            throw new StateDatabaseException("the state could not be used", failure);
         }
-        catch (Exception failure) when (failure is not StateDatabaseException)
-        {
-            // Anything else from reading the rows (a NULL or a wrong type in a hand-edited table): the store cannot be used.
-            throw new StateDatabaseException($"{FileLabel} holds data that cannot be read ({failure.Message}); fix or delete it", failure);
-        }
-    }
-
-    private string Describe(SqliteException failure)
-    {
-        return failure.SqliteErrorCode is 5 or 6
-            ? $"{FileLabel} is locked by another process; try again"
-            : $"cannot read {FileLabel}: {failure.Message}";
-    }
-
-    private SqliteConnection? Open(bool create)
-    {
-        if (!File.Exists(FilePath))
-        {
-            if (!create)
-            {
-                return null;
-            }
-
-            Create();
-        }
-
-        SqliteConnection connection = Connect(FilePath, SqliteOpenMode.ReadWrite);
-        try
-        {
-            connection.Open();
-            Execute(connection, null, "PRAGMA busy_timeout = " + (int)_busyTimeout.TotalMilliseconds);
-            if (Volatile.Read(ref _checked) == 0)
-            {
-                List<string> problems = [];
-                using (SqliteCommand check = Command(connection, null, "PRAGMA integrity_check"))
-                using (SqliteDataReader reader = check.ExecuteReader())
-                {
-                    while (reader.Read())
-                    {
-                        problems.Add(reader.GetString(0));
-                    }
-                }
-
-                if (problems is not ["ok"])
-                {
-                    string first = problems.Count == 0 ? "no result" : problems[0];
-                    throw new StateDatabaseException($"{FileLabel} is damaged ({first}); fix or delete it");
-                }
-            }
-
-            // A file with no schema (an empty file, or another database) is not our store, so it is not an empty one either.
-            long found = Version(connection, null);
-            if (found != SchemaVersion)
-            {
-                // Older or newer: never moved forward and never used.
-                throw new StateDatabaseException($"{FileLabel} is not of schema version {SchemaVersion}; delete {FileLabel} to start over");
-            }
-
-            Volatile.Write(ref _checked, 1);
-
-            return connection;
-        }
-        catch
-        {
-            connection.Dispose();
-            throw;
-        }
-    }
-
-    /// <summary>The one schema version row, or -1 when there is not exactly one.</summary>
-    private static long Version(SqliteConnection connection, SqliteTransaction? transaction)
-    {
-        using SqliteCommand version = Command(connection, transaction, "SELECT version FROM schema_version");
-        using SqliteDataReader reader = version.ExecuteReader();
-        if (!reader.Read())
-        {
-            return -1;
-        }
-
-        long value = reader.GetInt64(0);
-
-        return reader.Read() ? -1 : value;
-    }
-
-
-    /// <summary>
-    /// Builds the schema in a new file next to the database and moves it into place, so the database path only ever holds a
-    /// complete store. When another process made one first, that one is used.
-    /// </summary>
-    private void Create()
-    {
-        Directory.CreateDirectory(Folder);
-
-        // One creator at a time, across processes. The files of an earlier state.db are removed below only while there is no state.db; without this, a writer that saw no state.db a moment ago could remove the journal files of the
-        // one that has just made it and written its first key (the key was lost, found by the parallel first-creation test). Under the gate that check and the removal cannot overlap with another creator.
-        using FileStream gate = AcquireCreationGate();
-        if (File.Exists(FilePath))
-        {
-            return;
-        }
-
-        // A -wal or -shm left behind by an earlier state.db would be applied to the new file. Remove them, but only while there
-        // is still no state.db (another process may have just made one, and its journal files are its own).
-        foreach (string stale in new[] { FilePath + "-wal", FilePath + "-shm" })
-        {
-            if (!File.Exists(FilePath))
-            {
-                File.Delete(stale);
-            }
-        }
-
-        string temp = FilePath + "." + Guid.NewGuid().ToString("N") + ".new";
-        try
-        {
-            using (SqliteConnection connection = Connect(temp, SqliteOpenMode.ReadWriteCreate))
-            {
-                connection.Open();
-                Execute(connection, null, "PRAGMA journal_mode = WAL");
-                using SqliteTransaction transaction = connection.BeginTransaction(deferred: false);
-                Execute(connection, transaction, Schema);
-                Execute(connection, transaction, "INSERT INTO schema_version (version) VALUES ($version)", ("$version", SchemaVersion));
-                transaction.Commit();
-            }
-
-            try
-            {
-                File.Move(temp, FilePath, false);
-            }
-            catch (IOException) when (File.Exists(FilePath))
-            {
-                // Another process created it first: use that one.
-            }
-        }
-        finally
-        {
-            foreach (string leftover in new[] { temp, temp + "-wal", temp + "-shm" })
-            {
-                try
-                {
-                    File.Delete(leftover);
-                }
-                catch (Exception failure) when (failure is IOException or UnauthorizedAccessException)
-                {
-                    // A stray temporary file is harmless.
-                }
-            }
-        }
-    }
-
-    /// <summary>The lock file of the creation gate: one for the store folder, named for state.db whichever database file in the folder is being made (a recovery makes its new database under a temporary name; that must not leave a lock file of its own). It is coordination metadata (it holds nothing), lives in the same protected store folder and is never deleted or replaced.</summary>
-    private string GatePath => Path.Combine(Folder, FileName + ".lock");
-
-    /// <summary>
-    /// The creation gate: an exclusive lock, held by the operating system for as long as the returned stream is open, that serializes the first creation of state.db between independent processes (and threads). The lock file is
-    /// made once and never removed or replaced: a lock on a file that is unlinked while locked protects nothing, because the next process would make a new file at the same path and lock that one. The lock is a share-none open:
-    /// on Linux and macOS .NET takes flock(LOCK_EX) on the one file; on Windows it is the file's share mode. Either way the operating system releases it when the process ends, however it ends, so a crashed creator never blocks
-    /// the next. The gate is waited for as long as the busy timeout. What cannot be trusted is refused, not worked around: a lock file that is a link, is not a regular file, is not this user's, or is open to others (Unix),
-    /// and a lock that does not exclude (a file system or setting without locking: a second exclusive open of the file must be refused).
-    /// </summary>
-    private FileStream AcquireCreationGate()
-    {
-        Directory.CreateDirectory(Folder);
-        DateTime deadline = DateTime.UtcNow + _busyTimeout;
-        string lastBusy = "";
-        while (true)
-        {
-            CheckGateFile();
-            FileStream? stream = null;
-            try
-            {
-                stream = OpenGate();
-
-                // Prove that the lock excludes: a second exclusive open of the same file, made while this one is held, must be refused *because the file is locked*. Any other outcome is not proof: an open that succeeds means
-                // the lock excludes nobody, and an open that fails for another reason (no more file handles, no memory, no permission) says nothing about locking. Neither is used as a lock.
-                GateProbe probe = ClassifySecondOpen(SecondGateOpen);
-                if (probe == GateProbe.Allowed)
-                {
-                    throw new StateDatabaseException($"{FileLabel} cannot be created safely: the lock file {GatePath} does not exclude other processes on this file system (file locking is off or not supported there)");
-                }
-
-                if (probe == GateProbe.Unverified)
-                {
-                    throw new StateDatabaseException($"{FileLabel} cannot be created safely: it could not be verified that the lock file {GatePath} excludes other processes (the check failed for a reason other than the file being locked). Nothing was changed.");
-                }
-
-                CheckGateFile();
-
-                return stream;
-            }
-            catch (IOException busy)
-            {
-                stream?.Dispose();
-                lastBusy = busy.Message;
-                if (DateTime.UtcNow >= deadline)
-                {
-                    throw new StateDatabaseException($"{FileLabel} cannot be created: another process holds the creation lock {GatePath} ({lastBusy}). Nothing was changed; run again once the other with-secrets command has finished.", busy);
-                }
-
-                Thread.Sleep(5);
-            }
-            catch
-            {
-                stream?.Dispose();
-                throw;
-            }
-        }
-    }
-
-    private FileStream OpenGate()
-    {
-        FileStreamOptions options = new()
-        {
-            Mode = FileMode.OpenOrCreate,
-            Access = FileAccess.ReadWrite,
-            Share = FileShare.None,
-            BufferSize = 1,
-        };
-        if (!OperatingSystem.IsWindows())
-        {
-            options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
-        }
-
-        return new FileStream(GatePath, options);
-    }
-    /// <summary>What a second exclusive open of the held lock file showed.</summary>
-    internal enum GateProbe
-    {
-        /// <summary>Refused because the file is locked: the lock excludes.</summary>
-        Excluded,
-
-        /// <summary>It opened: the lock excludes nobody.</summary>
-        Allowed,
-
-        /// <summary>It failed for some other reason: nothing is known about the lock.</summary>
-        Unverified,
-    }
-
-    /// <summary>For tests: replaces the second open of the lock file in the check above (to make it fail in a way a test chooses).</summary>
-    internal Func<FileStream>? SecondGateOpen { get; init; }
-
-    /// <summary>Makes the second open (the given one, or the lock file again) and says what it showed. Never throws.</summary>
-    private GateProbe ClassifySecondOpen(Func<FileStream>? open)
-    {
-        try
-        {
-            using FileStream second = (open ?? OpenGate)();
-
-            return GateProbe.Allowed;
-        }
-        catch (Exception failure)
-        {
-            return ClassifyFailure(failure);
-        }
-    }
-
-    /// <summary>
-    /// The refusal that proves the lock: the operating system's own "locked by another" answer and no other. Linux and macOS: <c>flock</c> would block (EWOULDBLOCK: 11 on Linux, 35 on macOS), which .NET reports as an I/O error carrying
-    /// that errno. Windows: a sharing violation (ERROR_SHARING_VIOLATION, 32, HRESULT 0x80070020), which is what a share-none open of a file that is open says. Everything else (too many open files, disk full, no memory, no permission,
-    /// any other I/O error) is <see cref="GateProbe.Unverified" />. A lock violation (33) is a byte-range lock and does not count either.
-    /// </summary>
-    internal static GateProbe ClassifyFailure(Exception failure)
-    {
-        if (failure is not IOException io)
-        {
-            return GateProbe.Unverified;
-        }
-
-        bool contended = OperatingSystem.IsWindows() ? (uint)io.HResult == 0x80070020 : io.HResult == (OperatingSystem.IsMacOS() ? 35 : 11);
-
-        return contended ? GateProbe.Excluded : GateProbe.Unverified;
-    }
-    /// <summary>On Linux and macOS the lock file, when there is one, is a regular file of this user that nobody else can open. Throws otherwise (the file is not touched).</summary>
-    private void CheckGateFile()
-    {
-        if (OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
-        if (!File.Exists(GatePath) && !Directory.Exists(GatePath) && new FileInfo(GatePath).LinkTarget is null)
-        {
-            return;
-        }
-
-        UnixFileInfo? info = UnixFileInfo.Of(GatePath);
-        if (info is null || !info.IsRegularFile || info.Owner != UnixSocketEndpoint.EffectiveUserId() || (info.Permissions & 0x3F) != 0)
-        {
-            throw new StateDatabaseException($"{FileLabel} cannot be created safely: the lock file {GatePath} is not a regular file of this user that only this user can open, so it is not used (it is not changed either)");
-        }
-    }
-
-    /// <summary>For tests: takes the creation gate and holds it until the returned object is disposed (or the process ends).</summary>
-    internal IDisposable HoldCreationGateForTests() => AcquireCreationGate();
-    private SqliteConnection Connect(string path, SqliteOpenMode mode)
-    {
-        return new SqliteConnection(new SqliteConnectionStringBuilder
-        {
-            DataSource = path,
-            Mode = mode,
-            // No pool: every connection really closes, so the files are released and WAL is checkpointed at the end.
-            Pooling = false,
-            DefaultTimeout = Math.Max(1, (int)Math.Ceiling(_busyTimeout.TotalSeconds)),
-        }.ToString());
     }
 }

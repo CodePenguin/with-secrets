@@ -15,7 +15,7 @@ $previousOnly = $env:WS_ONLY
 Push-Location $repo
 try {
     $env:WS_UPDATE_OPENAPI = '1'
-    $env:WS_ONLY = 'Api'
+    $env:WS_ONLY = 'ApiContract'
     dotnet run --project tests\WithSecrets.Tests --property:BuildAdminWeb=false
     if ($LASTEXITCODE -ne 0) {
         throw "The .NET test harness failed while regenerating docs/api/openapi.json (exit $LASTEXITCODE)."

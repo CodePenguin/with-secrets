@@ -454,7 +454,7 @@ internal static partial class PairingTests
         PairingInvitationRecord? record = store.Invitation(created.Id);
         byte[] key = bundle.DeriveKey();
         check(record is { Status: "pending", Failed: 0 } && record.Expires - record.Created == PairingProtocol.InvitationLifetime && PairingProtocol.InvitationLifetime == TimeSpan.FromMinutes(10), "invitation: pending for a fixed 10 minutes");
-        check(FindIn(rig.Authority.Folder, [key]) is null && FindIn(rig.Authority.Folder, [Convert.FromBase64String(Convert.ToBase64String(key))]) is null, "invitation: K is held in memory only: neither K nor the code is in authority.db (or its journal)");
+        check(FindIn(rig.Authority.Folder, [key]) is null && FindIn(rig.Authority.Folder, [Convert.FromBase64String(Convert.ToBase64String(key))]) is null, "invitation: K is held in memory only: neither K nor the code is in with-secrets.db (or its journal)");
         string codeText = bundle.Format().Split(';')[3];
         check(FindIn(rig.Authority.Folder, [System.Buffers.Text.Base64Url.DecodeFromChars(codeText)]) is null && FindIn(rig.Authority.Folder, [Encoding.ASCII.GetBytes(bundle.Format())]) is null, "invitation: the pairing code and the bundle are not stored anywhere at the authority");
         check(created.Bundle.StartsWith("wsp1;https://127.0.0.1:", StringComparison.Ordinal) && bundle.InvitationId == created.Id && created.ToString().Contains(created.Id, StringComparison.Ordinal) && !created.ToString().Contains(created.Bundle, StringComparison.Ordinal), "invitation: the bundle carries the machine endpoint's address and the identifier, and prints without its code");
@@ -1178,7 +1178,7 @@ internal static partial class PairingTests
         check(paired.Ok && !wrongCode.Ok && wanted.All(item => events.Contains(item)), "audit: invitation creation, bootstrap, refusals, a wrong proof, consumption, the registration, revocation, expiry and the administrator's approval are all in the durable audit");
         check(audit.Where(entry => entry.Event.StartsWith("pairing-", StringComparison.Ordinal)).All(entry => entry.Detail.Length < 300), "audit: pairing rows are short and name an invitation by the start of its identifier only");
 
-        // No code, proof or key anywhere on disk (authority.db and its journal, host.json, certificates, the outbox) or in the output.
+        // No code, proof or key anywhere on disk (with-secrets.db and its journal, host.json, certificates, the outbox) or in the output.
         byte[][] secrets = [ExtractCode(bundle), bundle.DeriveKey(), ExtractCode(revokedBundle), revokedBundle.DeriveKey(), ExtractCode(expiredBundle), expiredBundle.DeriveKey(), Encoding.ASCII.GetBytes(bundle.Format()), Encoding.ASCII.GetBytes(revokedBundle.Format())];
         List<byte[]> proofs = [];
         foreach ((string step, byte[] body, string _) in requests)
@@ -1194,7 +1194,7 @@ internal static partial class PairingTests
 
         (int _, string bootBody) = await rig.Bootstrap(rig.NewIdentity(), created.Id);
         string? onDisk = FindIn(root, [.. secrets, .. proofs]);
-        check(onDisk is null, "canary: no pairing code, bundle, derived key or registration proof is in authority.db, its journal, host.json, any certificate file or the audit outbox" + (onDisk is null ? "" : " (found in " + onDisk + ")"));
+        check(onDisk is null, "canary: no pairing code, bundle, derived key or registration proof is in with-secrets.db, its journal, host.json, any certificate file or the audit outbox" + (onDisk is null ? "" : " (found in " + onDisk + ")"));
         string everything = string.Join('\n', audit.Select(entry => entry.Event + entry.Actor + entry.Detail + entry.Fingerprint)) + paired.Message + wrongCode.Message + string.Join('\n', rig.Store.History(host.Fingerprint).Select(entry => entry.Detail + entry.Actor));
         check(!Holds(everything, [.. secrets, .. proofs]) && !Holds(bootBody, secrets), "canary: nothing in the audit, history, results or the bootstrap answer holds a code, key or proof");
         _ = expired;

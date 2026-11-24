@@ -59,7 +59,7 @@ internal sealed class CopiedIdentityWatch(AuthorityStore store, Func<IHostAudit?
 
         try
         {
-            if (store.RecordCopyWarning(fingerprint, olderAddress, newerAddress, count, Window))
+            store.RecordCopyWarning(fingerprint, olderAddress, newerAddress, count, Window, (connection, transaction) =>
             {
                 Dictionary<string, string> metadata = new(StringComparer.Ordinal)
                 {
@@ -70,11 +70,9 @@ internal sealed class CopiedIdentityWatch(AuthorityStore store, Func<IHostAudit?
                     ["window-minutes"] = ((int)Window.TotalMinutes).ToString(CultureInfo.InvariantCulture),
                 };
                 string reason = $"the connection of machine {KeyIdentity.Display(fingerprint)[..19]} was superseded from a different address {count} times within {(int)Window.TotalMinutes} minutes; its identity may have been copied (not disabled)";
-                if (audit()?.TryRecord(new AuditFacts(AuditEventTypes.Admin, EventName, reason, "", "", "", [], Metadata: metadata)) != true)
-                {
-                    AppLog.Warn("the copied-identity audit event could not be committed");
-                }
-            }
+                return audit() is { } sink && HostAudit.TryRecordIn(sink, connection, transaction,
+                    new AuditFacts(AuditEventTypes.Admin, EventName, reason, "", "", "", [], Metadata: metadata));
+            });
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {

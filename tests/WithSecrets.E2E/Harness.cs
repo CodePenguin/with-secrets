@@ -645,7 +645,8 @@ internal sealed class Ctx : IAsyncDisposable
             bool bad = m.Type == "error" || m.Text.Contains("Content Security Policy", StringComparison.OrdinalIgnoreCase) || m.Text.Contains("Refused to", StringComparison.OrdinalIgnoreCase);
             if (bad && !_ignore.Any(i => m.Text.Contains(i, StringComparison.Ordinal)))
             {
-                Problems.Add("console " + m.Type + ": " + m.Text);
+                // The location names the request of a "Failed to load resource" error (ids shortened like the failed-request lines).
+                Problems.Add("console " + m.Type + ": " + m.Text + " at " + Regex.Replace(m.Location, "/[A-Za-z0-9_-]{20,}", "/<token>"));
             }
         };
         page.PageError += (_, e) => Problems.Add("pageerror: " + e);

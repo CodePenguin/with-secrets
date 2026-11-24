@@ -8,7 +8,7 @@ using Microsoft.Data.Sqlite;
 
 namespace WithSecrets.Tests;
 
-/// <summary>Settings in state.db, the first-run setup page, and the --port option.</summary>
+/// <summary>Settings in with-secrets.db, the first-run setup page, and the --port option.</summary>
 internal static class ConfigTests
 {
     public const string ConfigPrefix = "To set up with-secrets, open this link: ";
@@ -135,7 +135,7 @@ internal static class ConfigTests
         check(ReuseSettings.Load(db) == new ReuseOffer(600), "db settings: grant times from the manifest: the ceiling");
         check(!TestState.Settings(db, ToolSettings.Defaults with { TimeoutMinutes = 31 }) && ToolSettings.Load(db, out _).TimeoutMinutes == 12, "db settings: a manifest with a value out of its limits is never stored");
 
-        // Settings edited by hand in state.db: verification fails, so the defaults and an error; reuse is off.
+        // Settings edited by hand in with-secrets.db: verification fails, so the defaults and an error; reuse is off.
         ManifestTests.Execute(db.FilePath, "UPDATE manifest SET text = replace(text, '\"port\":8765', '\"port\":8766')");
         ToolSettings loaded = ToolSettings.Load(db, out string? why);
         check(loaded == ToolSettings.Defaults && why is not null && why.Contains("state failed verification", StringComparison.Ordinal), "db settings: an edited setting gives the defaults and a verification error (" + why + ")");
@@ -144,7 +144,7 @@ internal static class ConfigTests
 
         string garbage = Path.Combine(root, "garbage");
         Directory.CreateDirectory(garbage);
-        File.WriteAllText(Path.Combine(garbage, "state.db"), "not a database");
+        File.WriteAllText(Path.Combine(garbage, "with-secrets.db"), "not a database");
         StateDatabase unreadable = StateDatabase.InFolder(garbage);
         check(ToolSettings.Load(unreadable, out string? garbageError) == ToolSettings.Defaults && garbageError is not null, "db settings: an unreadable database gives the defaults and an error");
         check(ReuseSettings.Load(unreadable) == ReuseOffer.Off, "db settings: an unreadable database turns reuse off");
@@ -156,33 +156,33 @@ internal static class ConfigTests
         string path = SchemaOne(Path.Combine(root, "old-schema"));
         byte[] before = File.ReadAllBytes(path);
         StateDatabase db = new(path);
-        check(StateDatabase.SchemaVersion == 11, "db schema: the schema version is 11");
-        check(!db.TryCheck(out string? error) && error is not null && error.Contains("delete state.db to start over", StringComparison.Ordinal), "db schema: an older database is an error that says to delete state.db (" + error + ")");
+        check(WithSecretsDatabase.SchemaVersion == 3, "db schema: the schema version is 3");
+        check(!db.TryCheck(out string? error) && error is not null && error.Contains("delete with-secrets.db to start over", StringComparison.Ordinal), "db schema: an older database is an error that says to delete with-secrets.db (" + error + ")");
         check(!new PasskeyStore(db).TryAll(out _) && new PasskeyStore(db).All().Count == 0, "db schema: its passkeys are not used");
         check(ToolSettings.Load(db, out error) == ToolSettings.Defaults && error is not null && ReuseSettings.Load(db) == ReuseOffer.Off, "db schema: settings from it are an error");
         check(!new PasskeyStore(db).Add(new PasskeyRecord("k-new", "a2V5", -7, "localhost", "x", DateTimeOffset.UtcNow, 0)) && File.ReadAllBytes(path).AsSpan().SequenceEqual(before), "db schema: nothing is written to it");
 
         string newer = Path.Combine(root, "new-schema");
-        StateDatabase newerDb = TestState.Seeded(Path.Combine(newer, StateDatabase.FileName));
+        StateDatabase newerDb = TestState.Seeded(Path.Combine(newer, WithSecretsDatabase.FileName));
         check(newerDb.TryCheck(out _), "db schema: a current database");
         using (SqliteConnection connection = new(new SqliteConnectionStringBuilder { DataSource = newerDb.FilePath, Pooling = false }.ToString()))
         {
             connection.Open();
             using SqliteCommand command = connection.CreateCommand();
-            command.CommandText = "UPDATE schema_version SET version = " + (StateDatabase.SchemaVersion + 1);
+            command.CommandText = "UPDATE schema_version SET version = " + (WithSecretsDatabase.SchemaVersion + 1);
             command.ExecuteNonQuery();
         }
 
-        check(!StateDatabase.InFolder(newer).TryCheck(out string? newerError) && newerError is not null && newerError.Contains("delete state.db to start over", StringComparison.Ordinal), "db schema: a newer database is an error too (" + newerError + ")");
+        check(!StateDatabase.InFolder(newer).TryCheck(out string? newerError) && newerError is not null && newerError.Contains("delete with-secrets.db to start over", StringComparison.Ordinal), "db schema: a newer database is an error too (" + newerError + ")");
         ManifestTests.Execute(newerDb.FilePath, "UPDATE schema_version SET version = 4");
-        check(!StateDatabase.InFolder(newer).TryCheck(out string? fourError) && fourError is not null && fourError.Contains("delete state.db to start over", StringComparison.Ordinal), "db schema: a schema 4 database (unsigned grants) is an error that says to delete state.db (" + fourError + ")");
+        check(!StateDatabase.InFolder(newer).TryCheck(out string? fourError) && fourError is not null && fourError.Contains("delete with-secrets.db to start over", StringComparison.Ordinal), "db schema: a schema 4 database (unsigned grants) is an error that says to delete with-secrets.db (" + fourError + ")");
     }
 
-    /// <summary>A schema 1 state.db (as Task 13a made it) with one passkey enrolled. Returns its path.</summary>
+    /// <summary>An earlier store database with one passkey enrolled. Returns its path.</summary>
     private static string SchemaOne(string folder)
     {
         Directory.CreateDirectory(folder);
-        string path = Path.Combine(folder, "state.db");
+        string path = Path.Combine(folder, "with-secrets.db");
         using (SqliteConnection connection = new(new SqliteConnectionStringBuilder { DataSource = path, Pooling = false, Mode = SqliteOpenMode.ReadWriteCreate }.ToString()))
         {
             connection.Open();
@@ -501,7 +501,7 @@ internal static class ConfigTests
                 codes.Type(code);
             });
             check(run.Result is { Code: 0 }, "first-run setup: done (" + run.Result?.Detail + ")");
-            check(run.EmptyBeforeCode, "first-run setup: nothing is in state.db before the code is typed");
+            check(run.EmptyBeforeCode, "first-run setup: nothing is in with-secrets.db before the code is typed");
             check(run.Status == 200 && System.Text.RegularExpressions.Regex.IsMatch(run.Reply, "\"code\":\"[0-9]{6}\""), "first-run setup: the page gets a six-digit code (" + run.Reply + ")");
             check(!run.Lines.Any(line => System.Text.RegularExpressions.Regex.IsMatch(line, "(?<![0-9])[0-9]{6}(?![0-9])") && !line.StartsWith(ConfigPrefix, StringComparison.Ordinal)), "first-run setup: the code is never announced");
             check(run.Lines.Count == 1 && run.Lines[0].StartsWith(ConfigPrefix + "http://localhost:", StringComparison.Ordinal), "first-run setup: the terminal gets only the link (" + string.Join(" | ", run.Lines) + ")");
@@ -517,6 +517,7 @@ internal static class ConfigTests
                 using Unlock? released = TestVault.Unlock(db, laptop);
                 byte[]? master = null;
                 byte[]? privateKey = null;
+                byte[]? reviewKey = null;
                 try
                 {
                     master = first is not null && released is not null ? KeyVault.OpenMaster(first, released) : null;
@@ -529,17 +530,29 @@ internal static class ConfigTests
                     string stateFolder = Path.GetDirectoryName(db.FilePath)!;
                     bool leaked = privateKey is null || WebApprovalTests.FolderHolds(stateFolder, privateKey) || WebApprovalTests.FolderHolds(stateFolder, Encoding.UTF8.GetBytes(privateHex.ToUpperInvariant()))
                         || WebApprovalTests.FolderHolds(stateFolder, Convert.FromHexString(privateHex)) || WebApprovalTests.FolderHolds(stateFolder, Encoding.ASCII.GetBytes(Convert.ToBase64String(Convert.FromHexString(privateHex))));
-                    check(!leaked, "first-run setup: the store private key (hex, upper hex, raw, base64) is in no file of the store folder: not state.db, its WAL or anything else");
+                    check(!leaked, "first-run setup: the store private key (hex, upper hex, raw, base64) is in no file of the store folder: not with-secrets.db, its WAL or anything else");
                     check(!WebApprovalTests.FolderHolds(stateFolder, master!), "first-run setup: the master key is in no file either");
                     check(!Directory.EnumerateFiles(stateFolder, ".env*", SearchOption.AllDirectories).Any(), "first-run setup: no .env.keys or other key file");
                     string seen = StateDatabaseTests.AuditText(db.FilePath) + run.Reply + run.First + string.Join("|", run.Lines) + run.Result!.Detail + run.Page;
                     check(!seen.Contains(privateHex, StringComparison.OrdinalIgnoreCase), "first-run setup: the store private key is in no reply, page, audit entry or message");
+                    if (first?.Review is { } review && master is not null)
+                    {
+                        reviewKey = KeyVault.UnwrapReview(review.Vault, master, review.PublicKey);
+                        check(review.PublicKey != first.Store && DotenvxCipher.Instance.Derive(Encoding.UTF8.GetString(reviewKey)) == review.PublicKey
+                            && !WebApprovalTests.FolderHolds(stateFolder, reviewKey) && !seen.Contains(Encoding.UTF8.GetString(reviewKey), StringComparison.OrdinalIgnoreCase),
+                            "first-run setup: the independently generated review key is wrapped and its private part stays out of files and output");
+                    }
+                    else
+                    {
+                        check(false, "first-run setup: the review key is present with the store key");
+                    }
                     check(run.Page.Contains("prf", StringComparison.Ordinal) && run.Page.Contains("PRF", StringComparison.Ordinal), "first-run setup: the page asks for a PRF passkey");
                 }
                 finally
                 {
                     SecretValues.Clear(master);
                     SecretValues.Clear(privateKey);
+                    SecretValues.Clear(reviewKey);
                 }
 
                 string everything = StateDatabaseTests.AuditText(db.FilePath) + run.Reply + run.First + string.Join("|", run.Lines) + run.Result!.Detail;
@@ -609,7 +622,7 @@ internal static class ConfigTests
             check(run.Result is { Code: RunCommand.Denied }, $"first-run setup: {name}: denied ({run.Result?.Code} {run.Result?.Detail})");
             check(Empty(db), $"first-run setup: {name}: nothing stored");
             SqliteConnection.ClearAllPools();
-            check(!Directory.Exists(Path.GetDirectoryName(db.FilePath)!) || !Directory.EnumerateFiles(Path.GetDirectoryName(db.FilePath)!, "*", SearchOption.AllDirectories).Any(file => !Path.GetFileName(file).StartsWith(StateDatabase.FileName, StringComparison.Ordinal))
+            check(!Directory.Exists(Path.GetDirectoryName(db.FilePath)!) || !Directory.EnumerateFiles(Path.GetDirectoryName(db.FilePath)!, "*", SearchOption.AllDirectories).Any(file => !Path.GetFileName(file).StartsWith(WithSecretsDatabase.FileName, StringComparison.Ordinal))
                 && (!File.Exists(db.FilePath) || TestState.Current(db) is null), $"first-run setup: {name}: no store key, vault or key file is left");
         }
 

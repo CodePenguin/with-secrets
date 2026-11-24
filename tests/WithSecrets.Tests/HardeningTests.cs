@@ -292,6 +292,11 @@ internal static class HardeningTests
     {
         public List<AuditFacts> Recorded { get; } = [];
 
+        public void RecordIn(Microsoft.Data.Sqlite.SqliteConnection connection, Microsoft.Data.Sqlite.SqliteTransaction transaction, AuditFacts facts)
+        {
+            WithSecretsDatabase.AfterCommit(transaction, () => TryRecord(facts));
+        }
+
         public bool TryRecord(AuditFacts facts)
         {
             lock (Recorded)

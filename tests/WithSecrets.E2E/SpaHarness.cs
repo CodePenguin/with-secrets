@@ -6,9 +6,9 @@ namespace WithSecrets.E2E;
 /// <summary>The host service of a scenario, serving the embedded administration web application and the API on one loopback origin (a free port).</summary>
 internal sealed class SpaApp : IDisposable
 {
-    public SpaApp(Rig rig, bool unlocked = true, bool machineEndpoint = false, TimeSpan? timeLimit = null)
+    public SpaApp(Rig rig, bool unlocked = true, bool machineEndpoint = false, TimeSpan? timeLimit = null, ProviderRegistry? providers = null)
     {
-        Service = HostService.Start(new HostServiceOptions { CommandLineEndpoint = E2EEndpoint.Make(), Lock = unlocked ? AuthorityLock.UnlockedForTests() : null, State = rig.State, Store = rig.Store, Deployment = rig.Machine.Deployment, Port = 0, MachineEndpoint = machineEndpoint ? new MachineListenerOptions { Port = 0 } : null, TimeLimit = timeLimit ?? TimeSpan.FromSeconds(60) });
+        Service = HostService.Start(new HostServiceOptions { CommandLineEndpoint = E2EEndpoint.Make(), Lock = unlocked ? AuthorityLock.UnlockedForTests() : null, State = rig.State, Store = rig.Store, Deployment = rig.Machine.Deployment, Port = 0, MachineEndpoint = machineEndpoint ? new MachineListenerOptions { Port = 0 } : null, TimeLimit = timeLimit ?? TimeSpan.FromSeconds(60), ProviderRegistry = providers });
     }
 
     public HostService Service { get; }

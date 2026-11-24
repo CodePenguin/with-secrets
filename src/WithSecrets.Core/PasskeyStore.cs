@@ -112,7 +112,7 @@ public sealed class PasskeyStore
             return false;
         }
 
-        return StateDatabase.Execute(connection, transaction,
+        return WithSecretsDatabase.Execute(connection, transaction,
             "INSERT INTO sign_counts (id, count) VALUES ($id, $count) ON CONFLICT (id) DO UPDATE SET count = excluded.count WHERE excluded.count > sign_counts.count",
             ("$id", id), ("$count", (long)signCount)) > 0;
     }

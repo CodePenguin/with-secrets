@@ -2,6 +2,7 @@ using System.Buffers.Text;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Data.Sqlite;
 
 namespace WithSecrets;
 
@@ -32,6 +33,8 @@ public sealed class KeyRotation(StateDatabase db, SecretStore store, EnrollmentT
 
     /// <summary>Answers null while the rotation may go on and a short reason once it must not (the request was cancelled or the authority was locked); it is asked before the new state is written.</summary>
     public Func<string?>? StopReason { get; init; }
+
+    internal Func<SqliteConnection, SqliteTransaction, string, string, string?>? RekeyReview { get; init; }
 
     private const string Heading = "Rotate the keys";
     private const string SignHeading = "Confirm the key change";
@@ -146,6 +149,7 @@ public sealed class KeyRotation(StateDatabase db, SecretStore store, EnrollmentT
 
         byte[]? oldMaster = null;
         byte[]? oldKey = null;
+        byte[]? oldReview = null;
         byte[]? newMaster = null;
         byte[]? newKey = null;
         try
@@ -154,6 +158,10 @@ public sealed class KeyRotation(StateDatabase db, SecretStore store, EnrollmentT
             {
                 oldMaster = KeyVault.OpenMaster(manifest, unlock);
                 oldKey = KeyVault.UnwrapVault(manifest.Vault, oldMaster, manifest.Store);
+                if (manifest.Review is { } review)
+                {
+                    oldReview = KeyVault.UnwrapReview(review.Vault, oldMaster, review.PublicKey);
+                }
             }
             catch (CryptographicException)
             {
@@ -197,7 +205,8 @@ public sealed class KeyRotation(StateDatabase db, SecretStore store, EnrollmentT
                 hashes[name] = SecretStore.Hash(ciphertext);
             }
 
-            Manifest next = manifest.Rotated(kept, publicKey, vault, recovery, hashes);
+            ReviewKey nextReview = KeyVault.NewReviewKey(newMaster);
+            Manifest next = manifest.Rotated(kept, publicKey, vault, recovery, hashes, nextReview);
             string nextText = next.Canonical();
             List<string> removedNames = [.. manifest.Keys.Where(key => key.Id != signer.Id).Select(key => key.Name)];
             int calls = 0;
@@ -228,7 +237,16 @@ public sealed class KeyRotation(StateDatabase db, SecretStore store, EnrollmentT
                     string note = $"keys rotated; {removedNames.Count.ToString(CultureInfo.InvariantCulture)} key(s) removed"
                         + (removedNames.Count == 0 ? "" : ": " + string.Join(", ", removedNames.Select(ApprovalSummary.Clean))) + $"; {rows.Count.ToString(CultureInfo.InvariantCulture)} secret(s) encrypted again";
 
-                    return store.TryApply(manifest.Version, signed, rows, [], AdminEvent.Change("key-rotated", note, signer.Name));
+                    return store.TryApply(manifest.Version, signed, rows, [], AdminEvent.Change("key-rotated", note, signer.Name), (connection, transaction) =>
+                    {
+                        if (RekeyReview is { } rekey && oldReview is not null)
+                        {
+                            return rekey(connection, transaction, Encoding.UTF8.GetString(oldReview), nextReview.PublicKey);
+                        }
+
+                        return WithSecretsDatabase.Scalar(connection, transaction, "SELECT 1 FROM grants WHERE seal IS NOT NULL LIMIT 1") is null
+                            ? null : "the authority must re-encrypt the grant evidence; nothing was changed";
+                    });
                 },
                 recoveryText);
 
@@ -243,12 +261,13 @@ public sealed class KeyRotation(StateDatabase db, SecretStore store, EnrollmentT
             }
 
             return new ConfigChange(0, $"Rotated the keys. Kept: {signer.Name}. Removed: {(removedNames.Count == 0 ? "none" : string.Join(", ", removedNames))}. "
-                + $"{rows.Count.ToString(CultureInfo.InvariantCulture)} secret(s) encrypted again. The new recovery code is shown on the last page only once. If the page did not show it (lost connection), the old code is already dead: rotate again.");
+                + $"{rows.Count.ToString(CultureInfo.InvariantCulture)} secret(s) encrypted again. Tap to review again to open approved command text. The new recovery code is shown on the last page only once. If the page did not show it (lost connection), the old code is already dead: rotate again.");
         }
         finally
         {
             SecretValues.Clear(oldMaster);
             SecretValues.Clear(oldKey);
+            SecretValues.Clear(oldReview);
             SecretValues.Clear(newMaster);
             SecretValues.Clear(newKey);
         }
