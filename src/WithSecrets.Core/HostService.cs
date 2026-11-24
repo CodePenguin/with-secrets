@@ -131,6 +131,9 @@ public sealed class HostServiceOptions
     /// <summary>Seals a write-only token into the bundled 1Password provider configuration.</summary>
     public Func<string, string?>? SealOnePasswordConfiguration { get; init; }
 
+    /// <summary>Seals a write-only master password into the bundled LastPass provider configuration.</summary>
+    public Func<string, string, string?>? SealLastPassConfiguration { get; init; }
+
 
     /// <summary>For tests: the provider registry, with the adapter types a test registers. Default: a registry of the adapter types bundled with this release (none yet).</summary>
     internal ProviderRegistry? ProviderRegistry { get; init; }
@@ -246,7 +249,7 @@ public sealed class HostService : IDisposable
                 ProviderRegistry registry = options.ProviderRegistry ?? new ProviderRegistry(authorityClock);
                 options.ConfigureProviders?.Invoke(registry, Lock, review);
                 Providers = new ProviderAuthority(secretStore, options.Deployment.Store, options.Deployment.Keys, registry, Audit, authorityClock);
-                Admin.Providers = new ProviderAdmin(Providers, options.State.Audit, options.SealOnePasswordConfiguration);
+                Admin.Providers = new ProviderAdmin(Providers, options.State.Audit, options.SealOnePasswordConfiguration, options.SealLastPassConfiguration);
             }
         }
 

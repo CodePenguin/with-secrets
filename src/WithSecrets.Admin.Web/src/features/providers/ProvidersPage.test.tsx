@@ -78,6 +78,44 @@ describe('Providers page', () => {
     })
   })
 
+  it.each(['add', 'replace'] as const)('seals the LastPass master password before the %s authorization', async (mode) => {
+    const api = providerApi()
+    const seal = 'POST /api/v1/providers/lastpass/seal'
+    const config = '{"username":"user@example.test","encryptedConfiguration":"encrypted:fixture"}'
+    const masterPassword = 'lp_test_password'
+    const existing = { ...instance, type: 'lastpass', configuration: config, actions: ['config'] }
+    api.on('GET /api/v1/providers', { body: [existing] })
+    api.on('GET /api/v1/providers/types', { body: [{ type: 'test', adapterVersion: '1.0' }, { type: 'lastpass', adapterVersion: '1.0' }] })
+    api.on(seal, { body: { config } })
+    api.on(validate, { body: { ok: true, issues: [{ message: 'Check vault access.', severity: 'warning' }] } })
+    const user = userEvent.setup()
+    renderApp(mode === 'add' ? '/providers' : `/providers/${instance.id}`)
+    await user.click(await screen.findByRole('button', { name: mode === 'add' ? /^Add provider$/ : `Change configuration ${instance.name}` }))
+    const form = within(screen.getByRole('dialog'))
+    if (mode === 'add') {
+      await user.type(form.getByLabelText(/Provider name/), 'Team vault')
+      await user.selectOptions(form.getByLabelText(/Provider type/), 'lastpass')
+      await user.type(form.getByLabelText(/LastPass username/), 'user@example.test')
+    }
+    expect(form.queryByLabelText(/Configuration JSON/)).not.toBeInTheDocument()
+    const input = form.getByLabelText(/master password/)
+    expect(input).toHaveAttribute('type', 'password')
+    expect(input).toHaveValue('')
+    await user.type(input, masterPassword)
+    await user.click(form.getByRole('button', { name: 'Continue' }))
+    expect(await form.findByText('Check vault access.')).toBeVisible()
+    expect(input).toHaveValue('')
+    await user.click(form.getByRole('checkbox', { name: 'Continue with these warnings' }))
+    await user.click(form.getByRole('button', { name: 'Continue' }))
+    await waitFor(() => expect(api.count(authorize)).toBe(1))
+    expect(api.count(seal)).toBe(1)
+    expect(api.calls.filter((call) => JSON.stringify(call.body)?.includes(masterPassword)).map((call) => call.method + ' ' + call.path)).toEqual([seal])
+    expect(api.calls.find((call) => call.method + ' ' + call.path === authorize)?.body).toMatchObject({
+      operation: mode === 'add' ? 'provider-add' : 'provider-config',
+      parameters: { config, 'confirm-warnings': 'yes' },
+    })
+  })
+
   it.each(['add', 'replace'] as const)('seals the 1Password token before the %s authorization', async (mode) => {
     const api = providerApi()
     const seal = 'POST /api/v1/providers/onepassword/seal'

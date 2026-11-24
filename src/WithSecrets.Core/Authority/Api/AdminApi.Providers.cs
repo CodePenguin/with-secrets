@@ -21,6 +21,9 @@ internal sealed partial class AdminApi
             call => Task.FromResult(ProviderRead(call, (providers, id) => providers.Entries(id)))),
         new("POST", Prefix + "/providers/onepassword/seal", "sealOnePasswordConfiguration", "Seal a write-only 1Password token for provider configuration.", "providers",
             ApiAccess.Authorize, 200, "SealedProviderConfiguration", S.Obj([("serviceAccountToken", S.Str(min: 1, max: 2000))]), [], null, SealOnePasswordConfigurationAsync),
+        new("POST", Prefix + "/providers/lastpass/seal", "sealLastPassConfiguration", "Seal a write-only LastPass master password for provider configuration.", "providers",
+            ApiAccess.Authorize, 200, "SealedProviderConfiguration", S.Obj([("username", S.Str(min: 1, max: 256)), ("masterPassword", S.Str(min: 1, max: 8192))]), [], null, SealLastPassConfigurationAsync,
+            BodyLimit: MaxBody + 6 * (8192 + 256)),
         new("POST", Prefix + "/providers/validate", "validateProvider", "Validate a proposed provider configuration or mount path.", "providers", ApiAccess.Authorize, 200,
             "ProviderValidation", ProviderValidationBody(), [], null, ValidateProviderAsync, BodyLimit: ConfigurationBodyLimit),
         new("POST", Prefix + "/mounts/{id}/refresh", "refreshMount", "Refresh the namespace entries of a mount from its provider.", "providers", ApiAccess.Authorize, 200,
@@ -100,6 +103,37 @@ internal sealed partial class AdminApi
 
         return Task.FromResult(ProviderProblem(400, "configuration-not-sealed",
             "The 1Password configuration could not be sealed. Check the token and authority setup."));
+    }
+
+    private Task<ApiResult> SealLastPassConfigurationAsync(ApiCall call)
+    {
+        if (ProviderRequestProblem(call.Session) is { } refusal)
+        {
+            return Task.FromResult(refusal);
+        }
+
+        try
+        {
+            string username = call.Body!.Value.GetProperty("username").GetString()!;
+            string masterPassword = call.Body.Value.GetProperty("masterPassword").GetString()!;
+            string? config = admin.Providers!.SealLastPassConfiguration(username, masterPassword);
+            if (config is { Length: > ProviderAdmin.MaxConfigurationLength })
+            {
+                return Task.FromResult(ProviderProblem(400, "configuration-not-sealed",
+                    "The sealed LastPass configuration exceeds the provider configuration size limit."));
+            }
+            if (config is not null && ProviderAdmin.ConfigurationScreen(config) is null)
+            {
+                return Task.FromResult(new ApiResult(200, new { config }));
+            }
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            // The request contains the master password. Never include provider exception details.
+        }
+
+        return Task.FromResult(ProviderProblem(400, "configuration-not-sealed",
+            "The LastPass configuration could not be sealed. Check the account details and authority setup."));
     }
 
 

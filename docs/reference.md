@@ -82,6 +82,17 @@ For **Bitwarden Secrets Manager**, install `bws` on the authority service's PATH
 
 In the administration app, open **Providers** → **Add provider**, choose **Bitwarden Secrets Manager**, and enter the token variable name and server URL. Continue to validate the connection and approve the change with an admin passkey. Add a tree mount using the lowercase project UUID as the provider path. For a single-secret mount, use the project UUID followed by `/S_` and the lowercase secret UUID without hyphens.
 
+For **LastPass**, install `lpass` on the Linux or macOS authority and set `WITH_SECRETS_LASTPASS_EXECUTABLE` in the service environment to its absolute path. Restart the service after changing its environment. In **Providers** → **Add provider**, select **lastpass** and enter the account username and master password. The app seals the password to the authority's review key before requesting the approval tap. The authority and its review key must be open to use the provider. The CLI runs unattended, so sign-ins that require interactive verification and vault items that require a master-password reprompt are unsupported.
+
+Find the numeric vault item ID with `lpass ls --format=%ai` in an authenticated CLI session. Enter that ID as the provider path for a tree mount. For a single-secret mount, append the field path.
+
+| Field | Path suffix |
+| --- | --- |
+| Password | `/F_70617373776F7264` |
+| Username | `/F_757365726E616D65` |
+| URL | `/F_75726C` |
+| Note | `/F_6E6F7465` |
+
 The six operations below require a fresh, operation-bound administrator passkey tap. Adding or removing a mount ends the active grants for names that change source. The passkey review shows how many grants will end. A provider instance can be removed after its mounts have been removed.
 
 | Operation | API route | Audit outcome |

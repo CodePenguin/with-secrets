@@ -32,7 +32,10 @@ function maxStale(values: FormValues, errors: Record<string, string>): string {
 
 const onePassword = 'onepassword'
 const bitwarden = 'bitwarden'
+const lastPass = 'lastpass'
 const tokenField: FieldDef = { name: 'serviceAccountToken', label: '1Password service-account token', kind: 'password', maxLength: maxConfig }
+const lastPassUsernameField: FieldDef = { name: 'lastPassUsername', label: 'LastPass username', kind: 'text', maxLength: 256 }
+const lastPassPasswordField: FieldDef = { name: 'lastPassMasterPassword', label: 'LastPass master password', kind: 'password', maxLength: maxConfig }
 const jsonField: FieldDef = { name: 'config', label: 'Configuration JSON', kind: 'textarea', maxLength: maxConfig }
 const bitwardenDefaults = { tokenEnv: 'BWS_ACCESS_TOKEN', serverUrl: 'https://vault.bitwarden.com' }
 const bitwardenFields: FieldDef[] = [
@@ -44,6 +47,9 @@ const bitwardenFields: FieldDef[] = [
 
 function initialConfiguration(provider: Provider): FormValues {
   if (provider.type === onePassword) return {}
+  if (provider.type === lastPass) {
+    return { [lastPassUsernameField.name]: storedUsername(provider.configuration), sealedConfiguration: provider.configuration }
+  }
   if (provider.type !== bitwarden) return { config: provider.configuration }
 
   try {
@@ -77,11 +83,21 @@ function bitwardenConfiguration(values: FormValues, errors: Record<string, strin
 
 function providerConfiguration(type: string, values: FormValues, errors: Record<string, string>): string {
   if (type === bitwarden) return bitwardenConfiguration(values, errors)
-  if (type !== onePassword) return configuration(values, errors)
-  if (text(values, tokenField.name)) return '{}'
-  const sealed = text(values, 'sealedConfiguration')
-  if (!sealed) errors.serviceAccountToken = 'Enter a 1Password service-account token.'
-  return sealed
+  if (type === onePassword) {
+    if (text(values, tokenField.name)) return '{}'
+    const sealed = text(values, 'sealedConfiguration')
+    if (!sealed) errors.serviceAccountToken = 'Enter a 1Password service-account token.'
+    return sealed
+  }
+  if (type === lastPass) {
+    const username = text(values, lastPassUsernameField.name)
+    if (!username) errors.lastPassUsername = 'Enter a LastPass username.'
+    if (text(values, lastPassPasswordField.name)) return '{}'
+    const sealed = text(values, 'sealedConfiguration')
+    if (!sealed || storedUsername(sealed) !== username) errors.lastPassMasterPassword = 'Enter the master password for this LastPass username.'
+    return sealed
+  }
+  return configuration(values, errors)
 }
 
 async function sealOnePassword(prepared: Prepared, values: FormValues, signal: AbortSignal) {
@@ -92,6 +108,36 @@ async function sealOnePassword(prepared: Prepared, values: FormValues, signal: A
     prepared: { ...prepared, parameters: { ...prepared.parameters, config } },
     draft: { ...values, serviceAccountToken: '', sealedConfiguration: config },
   }
+}
+
+async function sealLastPass(prepared: Prepared, values: FormValues, signal: AbortSignal) {
+  const masterPassword = text(values, lastPassPasswordField.name)
+  if (!masterPassword) return { prepared, draft: values }
+  const username = text(values, lastPassUsernameField.name)
+  const { config } = await api.post('/api/v1/providers/lastpass/seal', { body: { username, masterPassword }, signal })
+  return {
+    prepared: { ...prepared, parameters: { ...prepared.parameters, config } },
+    draft: { ...values, lastPassMasterPassword: '', sealedConfiguration: config },
+  }
+}
+
+function storedUsername(configuration: string): string {
+  try {
+    const parsed: unknown = JSON.parse(configuration)
+    if (parsed && typeof parsed === 'object' && typeof (parsed as { username?: unknown }).username === 'string') {
+      return (parsed as { username: string }).username
+    }
+  } catch {
+    // A malformed stored configuration is shown as it is; the backend validation reports it.
+  }
+  return ''
+}
+
+async function prepareForValidation(prepared: Prepared, values: FormValues, signal: AbortSignal) {
+  const type = text(values, 'type')
+  if (type === onePassword) return sealOnePassword(prepared, values, signal)
+  if (type === lastPass) return sealLastPass(prepared, values, signal)
+  return { prepared, draft: values }
 }
 
 
@@ -124,7 +170,9 @@ export function addProvider(types: ProviderType[]): OperationDef {
         options: types.map(({ type }) => ({ value: type, label: type === bitwarden ? 'Bitwarden Secrets Manager' : type })) },
       { ...tokenField, visible: (values) => text(values, 'type') === onePassword },
       ...bitwardenFields.map((field) => ({ ...field, visible: (values: FormValues) => text(values, 'type') === bitwarden })),
-      { ...jsonField, visible: (values) => ![onePassword, bitwarden].includes(text(values, 'type')) },
+      { ...lastPassUsernameField, visible: (values) => text(values, 'type') === lastPass },
+      { ...lastPassPasswordField, visible: (values) => text(values, 'type') === lastPass },
+      { ...jsonField, visible: (values) => ![onePassword, bitwarden, lastPass].includes(text(values, 'type')) },
       ...durationFields,
     ],
     initial: { type: types[0]?.type ?? '', config: '{}', ...bitwardenDefaults, ...durationValues(3600) },
@@ -140,8 +188,7 @@ export function addProvider(types: ProviderType[]): OperationDef {
 
       return { operation: 'provider-add', parameters: { name, type, config, 'max-stale-seconds': seconds }, summary: `Add provider ${name}.`, done: `Added provider ${name}.` }
     },
-    prepareForValidation: (prepared, values, signal) => text(values, 'type') === onePassword
-      ? sealOnePassword(prepared, values, signal) : Promise.resolve({ prepared, draft: values }),
+    prepareForValidation,
     validate: ({ parameters }, signal) => api.post('/api/v1/providers/validate', { body: { type: String(parameters.type), config: String(parameters.config) }, signal }),
   }
 }
@@ -151,9 +198,11 @@ export function changeProviderConfig(provider: Provider): OperationDef {
     key: 'provider-config',
     title: 'Change configuration',
     confirmLabel: 'Save configuration',
-    warning: provider.type === onePassword ? undefined : credentialNotice,
+    warning: provider.type === onePassword || provider.type === lastPass ? undefined : credentialNotice,
     about: [['Provider', provider.name]],
-    fields: provider.type === bitwarden ? bitwardenFields : [provider.type === onePassword ? tokenField : jsonField],
+    fields: provider.type === bitwarden ? bitwardenFields
+      : provider.type === onePassword ? [tokenField]
+        : provider.type === lastPass ? [lastPassUsernameField, lastPassPasswordField] : [jsonField],
     initial: initialConfiguration(provider),
     prepare(values) {
       const errors: Record<string, string> = {}
@@ -162,7 +211,8 @@ export function changeProviderConfig(provider: Provider): OperationDef {
 
       return { operation: 'provider-config', parameters: { id: provider.id, revision: String(provider.revision), config }, summary: `Change configuration for ${provider.name}.`, done: 'Configuration saved.' }
     },
-    prepareForValidation: provider.type === onePassword ? sealOnePassword : undefined,
+    prepareForValidation: provider.type === onePassword ? sealOnePassword
+      : provider.type === lastPass ? sealLastPass : undefined,
     validate: ({ parameters }, signal) => api.post('/api/v1/providers/validate', { body: { type: provider.type, config: String(parameters.config) }, signal }),
   }
 }

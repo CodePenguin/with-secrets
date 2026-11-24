@@ -103,13 +103,16 @@ internal sealed class AdminApp : IDisposable
     private SecretStore? _native;
 
     private readonly Func<string, string?>? _sealOnePasswordConfiguration;
+    private readonly Func<string, string, string?>? _sealLastPassConfiguration;
 
     /// <summary>With <paramref name="providers" />, the service runs over a native secret store (not the counting one) and composes its provider side over that registry.</summary>
     public AdminApp(string root, bool trusted = true, bool unlocked = true, int askSeconds = 4, IPasskeyAdmin? passkeys = null, bool protection = false, AdminWebAssets? web = null, AdminApp? restoreFrom = null, Func<IApprover>? approver = null, bool machineEndpoint = false,
-        ProviderRegistry? providers = null, Func<string, string?>? sealOnePasswordConfiguration = null)
+        ProviderRegistry? providers = null, Func<string, string?>? sealOnePasswordConfiguration = null,
+        Func<string, string, string?>? sealLastPassConfiguration = null)
     {
         _providers = providers;
         _sealOnePasswordConfiguration = sealOnePasswordConfiguration;
+        _sealLastPassConfiguration = sealLastPassConfiguration;
         _web = web;
         _approver = approver;
         _machineEndpoint = machineEndpoint;
@@ -225,6 +228,7 @@ internal sealed class AdminApp : IDisposable
             Store = _providers is null ? _rig.Store : _native ??= new SecretStore(State),
             ProviderRegistry = _providers,
             SealOnePasswordConfiguration = _sealOnePasswordConfiguration,
+            SealLastPassConfiguration = _sealLastPassConfiguration,
             Deployment = Machine.Restart(),
             Port = 0,
             UnlockProtection = _protection,

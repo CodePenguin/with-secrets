@@ -11,7 +11,8 @@ namespace WithSecrets;
 /// operation (tap-bound) that writes through <see cref="ProviderStore" /> with <see cref="AdminAudit" />'s event committed in the same transaction. All text here is
 /// constant, a stored non-secret value or an adapter's own validation message; never configuration text or provider response text taken from an exception.
 /// </summary>
-internal sealed class ProviderAdmin(ProviderAuthority providers, AdminAudit audit, Func<string, string?>? sealOnePasswordConfiguration = null)
+internal sealed class ProviderAdmin(ProviderAuthority providers, AdminAudit audit, Func<string, string?>? sealOnePasswordConfiguration = null,
+    Func<string, string, string?>? sealLastPassConfiguration = null)
 {
     /// <summary>The longest configuration text accepted (it is signed into the page text, so it is bounded).</summary>
     internal const int MaxConfigurationLength = 2000;
@@ -24,6 +25,8 @@ internal sealed class ProviderAdmin(ProviderAuthority providers, AdminAudit audi
     private static readonly string[] CredentialMarks = ["token", "password", "secret", "apikey", "api_key", "credential", "privatekey"];
 
     public string? SealOnePasswordConfiguration(string token) => sealOnePasswordConfiguration?.Invoke(token);
+
+    public string? SealLastPassConfiguration(string username, string masterPassword) => sealLastPassConfiguration?.Invoke(username, masterPassword);
 
 
     public IReadOnlyList<ProviderTypeDto> Types() => [.. providers.Registry.Types().Select(item => new ProviderTypeDto(item.Type, item.AdapterVersion))];

@@ -114,6 +114,12 @@ internal static class Program
 
     private static int Main(string[] args)
     {
+        // The LastPass adapter starts this executable as its fake lpass, with the password on stdin.
+        if (Environment.GetEnvironmentVariable("WS_LPASS_FAKE") == "1")
+        {
+            return LastPassTests.FakeLpass(args);
+        }
+
         if (args is ["project" or "secret", .., "--output", "json"])
         {
             return BitwardenTests.FakeBws(args);
@@ -311,6 +317,11 @@ internal static class Program
         string[] only = (Environment.GetEnvironmentVariable("WS_ONLY") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         bool Wants(string suite) => only.Length == 0 || only.Contains(suite, StringComparer.OrdinalIgnoreCase);
 
+        if (Wants("LastPass"))
+        {
+            LastPassTests.Run(Check).GetAwaiter().GetResult();
+        }
+
         if (Wants("Bitwarden"))
         {
             BitwardenTests.Run(Check).GetAwaiter().GetResult();
@@ -320,7 +331,6 @@ internal static class Program
         {
             OnePasswordTests.Run(Check).GetAwaiter().GetResult();
         }
-
 
         if (Wants("EnvDeclarations"))
         {
