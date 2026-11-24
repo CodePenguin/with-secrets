@@ -858,7 +858,7 @@ Each mount records the provider instance UUID, the mount kind (`tree` or `single
 
 ### 10.3.1 Provider adapter contract and lifecycle
 
-**Status:** Contract built as specified below (`Providers/ProviderContract.cs`), with batch validation (`ProviderBatch`) and the registry (`ProviderRegistry`: types, instances, lifecycle, health, invalidation). No provider implementation ships yet.
+**Status:** Contract built as specified below (`Providers/ProviderContract.cs`), with batch validation (`ProviderBatch`) and the registry (`ProviderRegistry`: types, instances, lifecycle, health, invalidation). The authority bundles Bitwarden Secrets Manager and exposes its setup in the administration app.
 
 Provider adapters isolate provider-specific access behind the authority. Adapters execute in-process with the authority; they are not separate services or plugins loaded dynamically at runtime. The authority discovers and registers the adapters bundled with its release. Adapter implementations may be independently identified/versioned, but are distributed with and tied to an authority release.
 
@@ -1135,7 +1135,7 @@ Adapters use the existing `Microsoft.Extensions.Logging.ILogger` abstraction, wh
 - The adapter contract is a design boundary, not a promise that a provider is already implemented.
 - Provider-specific connection setup, authentication, retry/backoff strategy, and recovery are adapter responsibilities; global timeouts, cancellation, concurrency enforcement, cache policy, and status retention remain authority responsibilities.
 - Batch retrieval is mandatory for every adapter. The authority groups uncached reads by provider instance for each launch; adapters must preserve per-request result identity and coordinate authentication across the batch.
-- Registration is `ProviderRegistry.RegisterType(providerType, adapterVersion, factory, newConfiguration)` for each adapter bundled with the release (none yet); the authority adds each stored instance at start. The public API for declaring adapter concurrency constraints remains open.
+- Registration is `ProviderRegistry.RegisterType(providerType, adapterVersion, factory, newConfiguration)` for each bundled adapter. The local authority adds each stored instance at start. Bitwarden resolves `bws` from the authority service's PATH and reads the machine-account credential from the named service environment variable. The same environment binds the credential to its server before any CLI invocation. Locking the authority cancels calls from the retired unlock session.
 - Provider listing, mount validation, and retrieval must all resolve against the exact configured adapter instance selected by the mount. They must not search other providers or mounts.
 - The cache is keyed by provider instance ID plus opaque external secret ID, never by logical path. Grants and project permissions are evaluated against the requested logical path.
 - The core owns the association between provider external identity and logical references. Adapters supply external IDs and provider-relative paths; they never need to know core logical IDs.

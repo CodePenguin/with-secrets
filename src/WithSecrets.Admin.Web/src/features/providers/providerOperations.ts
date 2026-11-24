@@ -31,10 +31,52 @@ function maxStale(values: FormValues, errors: Record<string, string>): string {
 }
 
 const onePassword = 'onepassword'
+const bitwarden = 'bitwarden'
 const tokenField: FieldDef = { name: 'serviceAccountToken', label: '1Password service-account token', kind: 'password', maxLength: maxConfig }
 const jsonField: FieldDef = { name: 'config', label: 'Configuration JSON', kind: 'textarea', maxLength: maxConfig }
+const bitwardenDefaults = { tokenEnv: 'BWS_ACCESS_TOKEN', serverUrl: 'https://vault.bitwarden.com' }
+const bitwardenFields: FieldDef[] = [
+  { name: 'tokenEnv', label: 'Access token variable', kind: 'text', required: true, maxLength: 64,
+    hint: 'Enter the name of the variable on the authority service. Use BWS_ACCESS_TOKEN or a name beginning with WITH_SECRETS_BITWARDEN_TOKEN_.' },
+  { name: 'serverUrl', label: 'Server URL', kind: 'text', required: true, maxLength: maxConfig,
+    hint: 'For a server other than Bitwarden US, set the matching <token variable>_SERVER_URL in the authority service environment.' },
+]
+
+function initialConfiguration(provider: Provider): FormValues {
+  if (provider.type === onePassword) return {}
+  if (provider.type !== bitwarden) return { config: provider.configuration }
+
+  try {
+    const config = JSON.parse(provider.configuration) as { tokenEnv?: unknown; serverUrl?: unknown } | null
+    return {
+      tokenEnv: typeof config?.tokenEnv === 'string' ? config.tokenEnv : bitwardenDefaults.tokenEnv,
+      serverUrl: typeof config?.serverUrl === 'string' ? config.serverUrl : bitwardenDefaults.serverUrl,
+    }
+  } catch {
+    return { ...bitwardenDefaults }
+  }
+}
+
+function bitwardenConfiguration(values: FormValues, errors: Record<string, string>): string {
+  const tokenEnv = text(values, 'tokenEnv')
+  const serverUrl = text(values, 'serverUrl')
+  if (tokenEnv !== bitwardenDefaults.tokenEnv
+    && (!/^WITH_SECRETS_BITWARDEN_TOKEN_[A-Z0-9_]+$/.test(tokenEnv) || tokenEnv.length > 64 || tokenEnv.endsWith('_SERVER_URL'))) {
+    errors.tokenEnv = 'Enter a Bitwarden access token variable name.'
+  }
+  try {
+    const url = new URL(serverUrl)
+    if (!/^https:\/\//i.test(serverUrl) || url.username || url.password || /[?#]/.test(serverUrl)) throw new Error()
+  } catch {
+    errors.serverUrl = 'Enter an HTTPS URL without credentials, a query, or a fragment.'
+  }
+  const config = JSON.stringify({ tokenEnv, serverUrl })
+  if (config.length > maxConfig) errors.serverUrl = 'Use a shorter server URL.'
+  return config
+}
 
 function providerConfiguration(type: string, values: FormValues, errors: Record<string, string>): string {
+  if (type === bitwarden) return bitwardenConfiguration(values, errors)
   if (type !== onePassword) return configuration(values, errors)
   if (text(values, tokenField.name)) return '{}'
   const sealed = text(values, 'sealedConfiguration')
@@ -78,12 +120,14 @@ export function addProvider(types: ProviderType[]): OperationDef {
     warning: credentialNotice,
     fields: [
       { name: 'name', label: 'Provider name', kind: 'text', required: true, maxLength: 64 },
-      { name: 'type', label: 'Provider type', kind: 'select', required: true, options: types.map(({ type }) => ({ value: type, label: type })) },
+      { name: 'type', label: 'Provider type', kind: 'select', required: true,
+        options: types.map(({ type }) => ({ value: type, label: type === bitwarden ? 'Bitwarden Secrets Manager' : type })) },
       { ...tokenField, visible: (values) => text(values, 'type') === onePassword },
-      { ...jsonField, visible: (values) => text(values, 'type') !== onePassword },
+      ...bitwardenFields.map((field) => ({ ...field, visible: (values: FormValues) => text(values, 'type') === bitwarden })),
+      { ...jsonField, visible: (values) => ![onePassword, bitwarden].includes(text(values, 'type')) },
       ...durationFields,
     ],
-    initial: { type: types[0]?.type ?? '', config: '{}', ...durationValues(3600) },
+    initial: { type: types[0]?.type ?? '', config: '{}', ...bitwardenDefaults, ...durationValues(3600) },
     prepare(values) {
       const errors: Record<string, string> = {}
       const name = text(values, 'name')
@@ -109,8 +153,8 @@ export function changeProviderConfig(provider: Provider): OperationDef {
     confirmLabel: 'Save configuration',
     warning: provider.type === onePassword ? undefined : credentialNotice,
     about: [['Provider', provider.name]],
-    fields: [provider.type === onePassword ? tokenField : jsonField],
-    initial: provider.type === onePassword ? {} : { config: provider.configuration },
+    fields: provider.type === bitwarden ? bitwardenFields : [provider.type === onePassword ? tokenField : jsonField],
+    initial: initialConfiguration(provider),
     prepare(values) {
       const errors: Record<string, string> = {}
       const config = providerConfiguration(provider.type, values, errors)
@@ -160,7 +204,9 @@ export function addMount(provider: Provider): OperationDef {
     fields: [
       { name: 'kind', label: 'Mount kind', kind: 'select', options: [{ value: 'tree', label: 'Tree' }, { value: 'single', label: 'Single secret' }] },
       { name: 'path', label: 'Logical path', kind: 'text', required: true, maxLength: 200 },
-      { name: 'base', label: 'Provider path', kind: 'text', maxLength: 300, hint: 'For a tree mount, leave blank to use the provider root.' },
+      { name: 'base', label: 'Provider path', kind: 'text', maxLength: 300, hint: provider.type === bitwarden
+        ? 'Use a lowercase project UUID for a tree mount. For a single secret, append /S_ followed by the lowercase secret UUID without hyphens.'
+        : 'For a tree mount, leave blank to use the provider root.' },
     ],
     initial: { kind: 'tree' },
     prepare(values) {

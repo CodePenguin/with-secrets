@@ -114,6 +114,11 @@ internal static class Program
 
     private static int Main(string[] args)
     {
+        if (args is ["project" or "secret", .., "--output", "json"])
+        {
+            return BitwardenTests.FakeBws(args);
+        }
+
         if (Environment.GetEnvironmentVariable("OP_SERVICE_ACCOUNT_TOKEN") is OnePasswordTests.FakeToken or OnePasswordTests.SlowToken)
         {
             return OnePasswordTests.FakeOp(args);
@@ -305,6 +310,11 @@ internal static class Program
         // WS_ONLY=KeyVault,Manifest runs just those suites (a quick loop); unset runs all of them.
         string[] only = (Environment.GetEnvironmentVariable("WS_ONLY") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         bool Wants(string suite) => only.Length == 0 || only.Contains(suite, StringComparer.OrdinalIgnoreCase);
+
+        if (Wants("Bitwarden"))
+        {
+            BitwardenTests.Run(Check).GetAwaiter().GetResult();
+        }
 
         if (Wants("OnePassword"))
         {

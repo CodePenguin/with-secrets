@@ -132,6 +132,30 @@ describe('Providers page', () => {
     expect(within(navigation).queryByRole('link', { name: 'Providers' })).not.toBeInTheDocument()
   })
 
+  it('sets up Bitwarden through the provider validation and passkey approval flow', async () => {
+    const api = providerApi()
+    api.on('GET /api/v1/providers/types', { body: [{ type: 'test', adapterVersion: '1.0' }, { type: 'bitwarden', adapterVersion: '1.0' }] })
+    api.on(validate, { body: { ok: true, issues: [] } })
+    const user = userEvent.setup()
+    renderApp('/providers')
+    await user.click(await screen.findByRole('button', { name: /^Add provider$/ }))
+    const form = within(screen.getByRole('dialog'))
+    expect(form.getByLabelText(/Configuration JSON/)).toBeVisible()
+    await user.selectOptions(form.getByLabelText(/Provider type/), 'bitwarden')
+    expect(form.queryByLabelText(/Configuration JSON/)).not.toBeInTheDocument()
+    expect(form.getByLabelText(/Access token variable/)).toHaveValue('BWS_ACCESS_TOKEN')
+    expect(form.getByLabelText(/Server URL/)).toHaveValue('https://vault.bitwarden.com')
+    await user.type(form.getByLabelText(/Provider name/), 'Team Bitwarden')
+    await user.click(form.getByRole('button', { name: 'Continue' }))
+    await waitFor(() => expect(api.count(authorize)).toBe(1))
+    const config = '{"tokenEnv":"BWS_ACCESS_TOKEN","serverUrl":"https://vault.bitwarden.com"}'
+    expect(api.calls.find((call) => call.method + ' ' + call.path === validate)?.body).toEqual({ type: 'bitwarden', config })
+    expect(api.calls.find((call) => call.method + ' ' + call.path === authorize)?.body).toEqual({
+      operation: 'provider-add',
+      parameters: { name: 'Team Bitwarden', type: 'bitwarden', config, 'max-stale-seconds': '3600' },
+    })
+  })
+
   it('shows empty states for no providers and no mounts', async () => {
     const api = providerApi()
     api.on('GET /api/v1/providers', { body: [] })

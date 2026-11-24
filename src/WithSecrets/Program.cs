@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using WithSecrets.Bitwarden;
 using WithSecrets.OnePassword;
 
 namespace WithSecrets;
@@ -330,8 +331,12 @@ internal static class Program
                 Port = port.Value,
                 CommandLineEndpoint = LocalEndpoint.ForCommandLine(),
                 Deployment = deployment,
-                ConfigureProviders = (registry, authorityLock, review) => OnePasswordProvider.Register(registry, authorityLock, review,
-                    Environment.GetEnvironmentVariable(OnePasswordProvider.ExecutableVariable) ?? ""),
+                ConfigureProviders = (registry, authorityLock, review) =>
+                {
+                    BitwardenProvider.Register(registry, authorityLock);
+                    OnePasswordProvider.Register(registry, authorityLock, review,
+                        Environment.GetEnvironmentVariable(OnePasswordProvider.ExecutableVariable) ?? "");
+                },
                 SealOnePasswordConfiguration = token => state.TryManifest(out Manifest? manifest, out _) && manifest?.Review is { } reviewKey
                     ? OnePasswordProvider.SealConfiguration(token, reviewKey.PublicKey) : null,
                 MachineEndpoint = machineEndpoint,
