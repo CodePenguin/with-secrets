@@ -110,7 +110,7 @@ internal sealed partial class AdminApi
         "name" => S.Str(max: 64, min: 1, description: "A name: a passkey's or a machine's friendly name (at most 40 characters), or a provider instance's (at most 64; leading and trailing spaces are dropped)."),
         "type" => S.Str(max: 64, min: 1, description: "The provider type of the instance (one the service offers)."),
         "config" => S.Str(max: ProviderAdmin.MaxConfigurationLength, min: 2, description: "The instance's configuration: a JSON object on one line. It is stored unencrypted and shown in the signed text, so it must hold no credential (a field such as tokenEnv may name the environment variable that holds one)."),
-        "max-stale-seconds" => S.Str(max: 5, min: 1, description: "How long a cached value may still be served while its provider is unavailable: whole seconds as text, 0 to 86400."),
+        "max-stale-seconds" => S.Str(max: 5, min: 1, description: "Whole seconds as text, 0 to 86400. Zero fetches live values without a cache. A positive value enables the encrypted authority cache and sets the maximum age for outage fallback."),
         "revision" => S.Str(max: 10, min: 1, description: "The revision of the provider instance as it was shown (whole number as text); the change is refused when it has moved."),
         "instance" => S.Str(max: 36, min: 36, description: "The id of the provider instance the mount reads from."),
         "kind" => S.Str(values: ["tree", "single"], description: "A tree mount (a folder of secret names) or a single secret name."),

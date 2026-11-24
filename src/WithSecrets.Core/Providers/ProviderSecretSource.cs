@@ -35,7 +35,7 @@ public sealed record ProviderAudit(string Path, Guid InstanceId, string Instance
 /// The run's secret source: the native <see cref="SecretStore" /> plus every mounted secret (10.3). A name that a mount selects (ruling 2, mount over native) is
 /// served by that mount's namespace entry and nothing else; any other name goes to the native store unchanged. For mounted names, per provider instance: cache rows
 /// that verify and are younger than 75% of MaxStaleDuration are decrypted with the store key the approving passkey released (<see cref="RetrievalOutcomeKind.Cached" />);
-/// every other DISTINCT external id is requested in ONE retrieval batch for that instance; a success is cached (when the store has a key and the authority is
+/// every other DISTINCT external id is requested in ONE retrieval batch for that instance; a success is cached (when caching is enabled, the store has a key, and the authority is
 /// unlocked) and delivered (<see cref="RetrievalOutcomeKind.Fresh" />); a final Unavailable or RateLimited may be answered from the row read before the retrieval,
 /// re-verified, while within MaxStaleDuration (<see cref="RetrievalOutcomeKind.Stale" />); anything else fails the whole call. When the instance generation moved
 /// while its batch was in flight (an invalidation), the batch's results are discarded and the call fails closed. Every returned array belongs to the
@@ -267,13 +267,14 @@ public sealed class ProviderSecretSource(
             }
 
             DateTimeOffset started = clock.GetUtcNow();
+            bool cacheEnabled = instance.MaxStale > TimeSpan.Zero;
 
             Dictionary<string, Obtained> byExternal = new(StringComparer.Ordinal);
             Dictionary<string, CachedSecret?> before = new(StringComparer.Ordinal);
             List<(string ExternalId, ProviderSecretRequest Request)> requests = [];
             foreach (IGrouping<string, Selected> same in group.GroupBy(item => item.Entry.ExternalId, StringComparer.Ordinal))
             {
-                CachedSecret? row = cache.TryGet(instance.Id, same.Key, storeKey);
+                CachedSecret? row = cacheEnabled ? cache.TryGet(instance.Id, same.Key, storeKey) : null;
                 if (row is not null && Age(started, row) is { } age && ProviderPolicy.IsFreshEnough(age, instance.MaxStale))
                 {
                     byExternal[same.Key] = new Obtained(RetrievalOutcomeKind.Cached, Open(row), null);
@@ -300,7 +301,7 @@ public sealed class ProviderSecretSource(
                 }
 
                 bool current = invalidation.Generation(instance.Id) == generation;
-                if (current && fresh.Count > 0 && storeKey.Length > 0)
+                if (current && cacheEnabled && fresh.Count > 0 && storeKey.Length > 0)
                 {
                     try
                     {
@@ -357,6 +358,18 @@ public sealed class ProviderSecretSource(
             foreach (Selected item in group)
             {
                 obtained[Key(item)] = byExternal[item.Entry.ExternalId];
+            }
+        }
+
+        // A later provider batch can overlap an invalidation of an instance that already finished.
+        IReadOnlyDictionary<Guid, long> currentGenerations = providers.Generations();
+        foreach (Selected item in mounted)
+        {
+            (Guid instanceId, string externalId) = Key(item);
+            if (currentGenerations.GetValueOrDefault(instanceId) != generations.GetValueOrDefault(instanceId)
+                && obtained[(instanceId, externalId)].Outcome != RetrievalOutcomeKind.Failed)
+            {
+                obtained[(instanceId, externalId)] = new Obtained(RetrievalOutcomeKind.Failed, null, null, Invalidated: true);
             }
         }
 

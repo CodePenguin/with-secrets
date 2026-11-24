@@ -6,6 +6,7 @@ namespace WithSecrets.LastPass;
 public static class LastPassProvider
 {
     public const string ExecutableVariable = "WITH_SECRETS_LASTPASS_EXECUTABLE";
+    public const string AllowDiskCacheVariable = "WITH_SECRETS_LASTPASS_ALLOW_DISK_CACHE";
 
     public static void Register(ProviderRegistry registry, AuthorityLock authorityLock, ReviewKeys review, string executablePath)
     {

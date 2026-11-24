@@ -86,7 +86,7 @@ public sealed partial class AdminService
 
         string config = configuration!;
         string sentence = $"add the provider instance \"{name}\" of type {type}, with the configuration in the config parameter below. It is stored unencrypted and holds no credential; "
-            + $"mounted secrets of this instance are served only while it runs\nMaximum staleness: {seconds.ToString(CultureInfo.InvariantCulture)} seconds\n{ValidationLine(validation)}";
+            + $"mounted secrets of this instance are served only while it runs\n{CachePolicySummary(seconds)}\n{ValidationLine(validation)}";
         List<(string Name, string Value)> parameters = [("name", name), ("type", type), ("config", config), ("max-stale-seconds", seconds.ToString(CultureInfo.InvariantCulture))];
         AddConfirmation(parameters, confirmed);
         StrongBox<string?> remark = new();
@@ -171,6 +171,10 @@ public sealed partial class AdminService
         }), Remark: remark), null, 200);
     }
 
+    private static string CachePolicySummary(int seconds) => seconds == 0
+        ? "Every run fetches live values. WithSecrets caches no provider values."
+        : $"The authority caches encrypted provider values on disk and can serve them during a provider outage for up to {seconds.ToString(CultureInfo.InvariantCulture)} seconds after retrieval.";
+
     private ProviderPlanResult MaxStalePlan(ProviderAdmin providers, IReadOnlyDictionary<string, string> args)
     {
         if (CurrentInstance(providers, args) is not { } current)
@@ -192,7 +196,8 @@ public sealed partial class AdminService
         Guid id = current.Id;
         int revision = current.Revision;
         string sentence = $"set the maximum staleness of the provider instance \"{ApprovalSummary.Clean(current.Name)}\" from {before.ToString(CultureInfo.InvariantCulture)} to {seconds.ToString(CultureInfo.InvariantCulture)} seconds. "
-            + "This is policy only: the configuration and its revision, the cached values and the grants stay as they are\n"
+            + (seconds == 0 ? "Existing cached values are removed. " : "")
+            + CachePolicySummary(seconds) + "\n"
             + $"Instance: {id:D}, revision {revision.ToString(CultureInfo.InvariantCulture)}";
         List<(string Name, string Value)> parameters = [("id", id.ToString("D")), ("revision", revision.ToString(CultureInfo.InvariantCulture)), ("max-stale-seconds", seconds.ToString(CultureInfo.InvariantCulture))];
 

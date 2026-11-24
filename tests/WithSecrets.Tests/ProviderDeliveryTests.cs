@@ -306,6 +306,24 @@ internal static class ProviderDeliveryTests
 
     private static void Races(Action<bool, string> check)
     {
+        using (Rig rig = new(Hour))
+        {
+            rig.TryGet(out _, "team/ALPHA");
+            (ProviderInstance second, FakeProviderAdapter other) = rig.AddInstance("vault-two", TimeSpan.Zero);
+            Mount mount = rig.Providers.AddMount(second.Id, MountKind.Tree, "ops", "base");
+            rig.Entries(mount, ("ops/YANKEE", "base/YANKEE", "ext-y"));
+            other.Handler = (_, requests, _) =>
+            {
+                rig.Providers.SetMaxStale(rig.Instance.Id, TimeSpan.Zero);
+                return Task.FromResult<IReadOnlyList<ProviderSecretResult>>([Ok(requests[0], Bravo)]);
+            };
+
+            Dictionary<string, string>? got = rig.TryGet(out string error, "team/ALPHA", "ops/YANKEE");
+            check(got is null && rig.Invocations == 1 && other.Invocations.Count == 1 && rig.CacheRows() == 0
+                && error.Contains("team/ALPHA was invalidated", StringComparison.Ordinal),
+                "delivery: disabling an earlier provider's cache during a later provider batch fails closed (" + error + ")");
+        }
+
         // A call needs A/x and B/y; while A's batch is in flight a reconcile of instance B removes y. The baseline was taken before resolution: fail closed.
         using (Rig rig = new(Hour))
         {
@@ -469,11 +487,11 @@ internal static class ProviderDeliveryTests
         {
             rig.TryGet(out _, "team/ALPHA");
             rig.TryGet(out _, "team/ALPHA");
-            check(rig.Invocations == 2 && rig.CacheRows() == 1, "delivery: max stale 0: always fetches (the row is still persisted)");
+            check(rig.Invocations == 2 && rig.CacheRows() == 0, "delivery: live only fetches on each run without persisting a value");
             rig.Adapter.Fails("kv/ALPHA", ProviderErrorKind.Unavailable);
             Dictionary<string, string>? got = rig.TryGet(out string error, "team/ALPHA");
-            check(got is null && error.Contains("team/ALPHA", StringComparison.Ordinal) && error.Contains("Unavailable", StringComparison.Ordinal) && rig.CacheRows() == 1,
-                "delivery: max stale 0: outage fails closed even with a row (" + error + ")");
+            check(got is null && error.Contains("team/ALPHA", StringComparison.Ordinal) && error.Contains("Unavailable", StringComparison.Ordinal) && rig.CacheRows() == 0,
+                "delivery: live only fails closed during a provider outage (" + error + ")");
         }
 
         using (Rig rig = new(Hour))

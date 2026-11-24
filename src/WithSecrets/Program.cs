@@ -338,8 +338,11 @@ internal static class Program
                     BitwardenProvider.Register(registry, authorityLock);
                     OnePasswordProvider.Register(registry, authorityLock, review,
                         Environment.GetEnvironmentVariable(OnePasswordProvider.ExecutableVariable) ?? "");
-                    LastPassProvider.Register(registry, authorityLock, review,
-                        Environment.GetEnvironmentVariable(LastPassProvider.ExecutableVariable) ?? "");
+                    if (Environment.GetEnvironmentVariable(LastPassProvider.AllowDiskCacheVariable) == "1")
+                    {
+                        LastPassProvider.Register(registry, authorityLock, review,
+                            Environment.GetEnvironmentVariable(LastPassProvider.ExecutableVariable) ?? "");
+                    }
                     VaultProvider.Register(registry, authorityLock, review,
                         Environment.GetEnvironmentVariable(VaultProvider.AddressVariable) ?? "",
                         Environment.GetEnvironmentVariable(VaultProvider.MountVariable) ?? "secret",

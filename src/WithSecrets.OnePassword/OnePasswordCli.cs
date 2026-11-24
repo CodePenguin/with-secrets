@@ -31,6 +31,7 @@ internal sealed class OnePasswordCli(string executablePath, string token)
         }
 
         start.Environment["OP_SERVICE_ACCOUNT_TOKEN"] = token;
+        start.Environment["OP_CACHE"] = "false";
         using var process = new Process { StartInfo = start };
         try
         {

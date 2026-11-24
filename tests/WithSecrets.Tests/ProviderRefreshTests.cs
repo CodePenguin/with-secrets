@@ -233,7 +233,20 @@ internal static class ProviderRefreshTests
         {
             rig.Clock.Advance(TimeSpan.FromDays(100));
             await rig.Tick();
-            check(rig.Invocations == 0, "refresh: max stale 0 never refreshed");
+            check(rig.Invocations == 0 && rig.CacheRows() == 0, "refresh: live only has no stored row to refresh");
+        }
+
+        using (Rig rig = Single(Hour))
+        {
+            rig.Clock.Advance(TimeSpan.FromMinutes(50));
+            rig.Adapter.Handler = (_, requests, _) =>
+            {
+                rig.Providers.SetMaxStale(rig.Instance.Id, TimeSpan.Zero);
+                return Task.FromResult<IReadOnlyList<ProviderSecretResult>>(
+                    [.. requests.Select(request => new ProviderSecretResult(request.RequestId, new RetrieveSecretResult("new-alpha"u8.ToArray())))]);
+            };
+            await rig.Tick();
+            check(rig.Invocations == 1 && rig.CacheRows() == 0, "refresh: disabling the cache during retrieval prevents its result from repopulating the cache");
         }
 
         using (Rig rig = Single(Hour))

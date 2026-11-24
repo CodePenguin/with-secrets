@@ -5,7 +5,7 @@ import type { FieldDef, FormValues, OperationDef, Prepared } from '../authorizat
 const credentialNotice = 'Do not put passwords or tokens in the configuration. Use the dedicated token field when available.'
 const maxConfig = 2_000
 const durationFields: FieldDef[] = [
-  { name: 'hours', label: 'Hours', kind: 'number', hint: 'The maximum is 24 hours. Use zero to disable stale delivery.' },
+  { name: 'hours', label: 'Hours', kind: 'number', hint: 'Leave the duration at zero for live retrieval. A duration up to 24 hours enables encrypted caching on the authority and fallback during provider outages.' },
   { name: 'minutes', label: 'Minutes', kind: 'number' },
   { name: 'seconds', label: 'Seconds', kind: 'number' },
 ]
@@ -195,7 +195,7 @@ export function addProvider(types: ProviderType[]): OperationDef {
       { ...jsonField, visible: (values) => ![onePassword, bitwarden, lastPass, vault].includes(text(values, 'type')) },
       ...durationFields,
     ],
-    initial: { type: types[0]?.type ?? '', config: '{}', ...bitwardenDefaults, ...durationValues(3600) },
+    initial: { type: types[0]?.type ?? '', config: '{}', ...bitwardenDefaults, ...durationValues(0) },
     prepare(values) {
       const errors: Record<string, string> = {}
       const name = text(values, 'name')

@@ -114,19 +114,27 @@ public sealed class ProviderStore(AuthorityStore store)
     }
 
 
-    /// <summary>Policy only: nothing but max_stale_seconds changes, the revision stays.</summary>
+    /// <summary>Updates cache policy, purging the cache when disabled. The configuration revision stays.</summary>
     public ProviderInstance SetMaxStale(Guid id, TimeSpan maxStale, Action<SqliteConnection, SqliteTransaction>? beforeCommit = null)
     {
         long seconds = Seconds(maxStale);
 
-        return store.WriteTransaction((connection, transaction) =>
+        ProviderInstance changed = store.WriteTransaction((connection, transaction) =>
         {
             Require(connection, transaction, id);
+            BumpGeneration(id);
             WithSecretsDatabase.Execute(connection, transaction, "UPDATE provider_instances SET max_stale_seconds = $stale WHERE id = $id", ("$stale", seconds), ("$id", Id(id)));
+            if (seconds == 0)
+            {
+                WithSecretsDatabase.Execute(connection, transaction, "PRAGMA secure_delete = ON");
+                DeleteCacheCore(connection, transaction, id, null);
+            }
             beforeCommit?.Invoke(connection, transaction);
 
             return Require(connection, transaction, id);
         });
+        BumpGeneration(id);
+        return changed;
     }
 
     /// <summary>
@@ -412,7 +420,10 @@ public sealed class ProviderStore(AuthorityStore store)
         return store.WriteTransaction((connection, transaction) =>
         {
             store.Fault?.Invoke("provider-cache-check");
-            if (expectedGeneration is { } expected && Generation(instanceId) != expected)
+            if ((expectedGeneration is { } expected && Generation(instanceId) != expected)
+                || WithSecretsDatabase.Scalar(connection, transaction,
+                    "SELECT max_stale_seconds FROM provider_instances WHERE id = $id", ("$id", Id(instanceId))) is not long maxStaleSeconds
+                || maxStaleSeconds <= 0)
             {
                 return CacheWrite.Invalidated;
             }

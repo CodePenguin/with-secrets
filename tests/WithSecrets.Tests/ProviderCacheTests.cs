@@ -103,16 +103,42 @@ internal static class ProviderCacheTests
         Locked(check);
         Replacing(check);
         Generations(check);
+        UpgradeAndDisable(check);
         PlantedKey(check);
 
         return Task.CompletedTask;
+    }
+
+    private static void UpgradeAndDisable(Action<bool, string> check)
+    {
+        using Rig rig = new();
+        TimeSpan hour = TimeSpan.FromHours(1);
+        Guid id = rig.Store.AddInstance("legacy", "fake", "{}", hour).Id;
+        rig.Cache.PutAll(id, [("old", Bytes(Value))], T0, rig.PublicKey);
+        rig.Exec("PRAGMA user_version = 0");
+
+        ProviderStore reopened = new(new AuthorityStore(new WithSecretsDatabase(rig.Authority.FilePath)));
+        check(reopened.Instance(id)?.MaxStale == TimeSpan.Zero && rig.Rows() == 0, "cache: upgrade disables previous defaults and purges existing rows");
+
+        reopened.SetMaxStale(id, hour);
+        ProviderStore restarted = new(new AuthorityStore(new WithSecretsDatabase(rig.Authority.FilePath)));
+        check(restarted.Instance(id)?.MaxStale == hour, "cache: a post-upgrade opt-in survives restart");
+
+        ProviderCache cache = new(restarted, rig.Keys);
+        long generation = restarted.Generation(id);
+        cache.PutAll(id, [("opted-in", Bytes(Value))], T0, rig.PublicKey, generation);
+        restarted.SetMaxStale(id, TimeSpan.Zero);
+        check(rig.Rows() == 0
+            && cache.PutAll(id, [("in-flight", Bytes(Value))], T0, rig.PublicKey, generation) == CacheWrite.Invalidated
+            && cache.PutAll(id, [("disabled", Bytes(Value))], T0, rig.PublicKey) == CacheWrite.Invalidated
+            && rig.Rows() == 0, "cache: disabling purges rows and blocks both in-flight and later writes");
     }
 
     /// <summary>Final review I2: a seal verifies against the key store's active key, never against the public key a plain with-secrets.db write names.</summary>
     private static void PlantedKey(Action<bool, string> check)
     {
         using Rig rig = new();
-        Guid instance = Guid.NewGuid();
+        Guid instance = rig.Store.AddInstance("cache-test", "fake", "{}", TimeSpan.FromHours(1)).Id;
         rig.Cache.PutAll(instance, [("ext-1", Bytes(Value))], T0, rig.PublicKey);
         check(rig.Cache.TryGet(instance, "ext-1", rig.PublicKey) is not null, "cache: planted key: the genuine row verifies first");
 
@@ -144,7 +170,7 @@ internal static class ProviderCacheTests
     private static void RoundTrip(Action<bool, string> check)
     {
         using Rig rig = new();
-        Guid instance = Guid.NewGuid();
+        Guid instance = rig.Store.AddInstance("cache-test", "fake", "{}", TimeSpan.FromHours(1)).Id;
         rig.Cache.PutAll(instance, [("ext-1", Bytes(Value))], T0, rig.PublicKey);
         CachedSecret? row = rig.Cache.TryGet(instance, "ext-1", rig.PublicKey);
         check(row is not null && Text(rig.Cache.Decrypt(row, rig.PrivateKey)) == Value && row.LastVerified == T0 && row.InstanceId == instance && row.ExternalId == "ext-1"
@@ -182,7 +208,7 @@ internal static class ProviderCacheTests
     private static void Tampering(Action<bool, string> check)
     {
         using Rig rig = new();
-        Guid instance = Guid.NewGuid();
+        Guid instance = rig.Store.AddInstance("cache-test", "fake", "{}", TimeSpan.FromHours(1)).Id;
         rig.Cache.PutAll(instance, [("ext-1", Bytes(Value))], T0, rig.PublicKey);
 
         // A valid ciphertext of another value for the same store key (anyone with the public key can make one).
@@ -247,7 +273,7 @@ internal static class ProviderCacheTests
     private static void Locked(Action<bool, string> check)
     {
         using Rig rig = new();
-        Guid instance = Guid.NewGuid();
+        Guid instance = rig.Store.AddInstance("cache-test", "fake", "{}", TimeSpan.FromHours(1)).Id;
         rig.Cache.PutAll(instance, [("ext-1", Bytes(Value))], T0, rig.PublicKey);
         rig.Lock.Lock("test");
 
@@ -283,7 +309,7 @@ internal static class ProviderCacheTests
     private static void Replacing(Action<bool, string> check)
     {
         using Rig rig = new();
-        Guid instance = Guid.NewGuid();
+        Guid instance = rig.Store.AddInstance("cache-test", "fake", "{}", TimeSpan.FromHours(1)).Id;
         rig.Cache.PutAll(instance, [("ext-1", Bytes(Value))], T0, rig.PublicKey);
         rig.Cache.PutAll(instance, [("ext-1", Bytes("Rotated-Value-2"))], T0.AddMinutes(5), rig.PublicKey);
         CachedSecret? row = rig.Cache.TryGet(instance, "ext-1", rig.PublicKey);
@@ -291,7 +317,8 @@ internal static class ProviderCacheTests
             "cache: Put replaces, lastVerified updated");
 
         rig.Cache.PutAll(instance, [("ext-2", Bytes(Value))], T0, rig.PublicKey);
-        rig.Cache.PutAll(Guid.NewGuid(), [("ext-1", Bytes(Value))], T0, rig.PublicKey);
+        Guid other = rig.Store.AddInstance("other-cache-test", "fake", "{}", TimeSpan.FromHours(1)).Id;
+        rig.Cache.PutAll(other, [("ext-1", Bytes(Value))], T0, rig.PublicKey);
         check(rig.Rows() == 3, "cache: rows are keyed by (instance, external id)");
 
         // An older retrieval that commits after a newer one never replaces the newer row.
@@ -323,7 +350,7 @@ internal static class ProviderCacheTests
     private static void Generations(Action<bool, string> check)
     {
         using Rig rig = new();
-        Guid instance = Guid.NewGuid();
+        Guid instance = rig.Store.AddInstance("cache-test", "fake", "{}", TimeSpan.FromHours(1)).Id;
         long generation = rig.Store.Generation(instance);
         check(rig.Cache.PutAll(instance, [("ext-1", Bytes(Value))], T0, rig.PublicKey, generation) == CacheWrite.Written && rig.Rows() == 1, "cache: Put with the current generation writes");
 

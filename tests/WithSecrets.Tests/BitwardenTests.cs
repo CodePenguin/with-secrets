@@ -30,15 +30,18 @@ internal static class BitwardenTests
 
     internal static int FakeBws(string[] args)
     {
-        if (args is not [.., "--server-url", string server, "--output", "json"]
+        if (args is not [.., "--config-file", string configPath, "--profile", "default", "--output", "json"]
             || Environment.GetEnvironmentVariable("BWS_ACCESS_TOKEN") != Token
-            || Environment.GetEnvironmentVariable("BWS_SERVER_URL") is not null)
+            || Environment.GetEnvironmentVariable("BWS_SERVER_URL") is not null
+            || File.ReadAllLines(configPath) is not ["[profiles.default]", string serverSetting, "state_opt_out = true"]
+            || !serverSetting.StartsWith("server_base = ", StringComparison.Ordinal))
         {
             Console.Error.Write("private CLI detail");
             return 1;
         }
 
-        switch (args[..^4])
+        string? server = JsonSerializer.Deserialize<string>(serverSetting["server_base = ".Length..]);
+        switch (args[..^6])
         {
             case ["project", "list"] when server is DefaultServer or CustomServer:
                 Console.Write(JsonSerializer.Serialize(new[] { new { id = Project } }));

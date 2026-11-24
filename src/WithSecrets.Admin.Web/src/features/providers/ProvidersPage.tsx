@@ -20,7 +20,7 @@ const actions: Record<Provider['actions'][number], (provider: Provider) => Opera
 }
 
 function Duration({ seconds }: { seconds: number }) {
-  if (!seconds) return <>Disabled</>
+  if (!seconds) return <>Live only</>
   const parts = [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60]
     .map((value, index) => value ? `${value} ${['h', 'min', 's'][index]}` : '')
     .filter(Boolean)

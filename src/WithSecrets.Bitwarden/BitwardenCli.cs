@@ -11,6 +11,28 @@ internal sealed class BitwardenCli(string executablePath, string token, Uri serv
     {
         cancellationToken.ThrowIfCancellationRequested();
         EnsureUnlocked();
+        string configPath = Path.GetTempFileName();
+        try
+        {
+            string server = JsonSerializer.Serialize(BitwardenConfiguration.ServerArgument(serverUrl));
+            File.WriteAllText(configPath, $"[profiles.default]\nserver_base = {server}\nstate_opt_out = true\n");
+            return await RunWithConfigAsync(arguments, configPath, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            try
+            {
+                File.Delete(configPath);
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                // The temporary profile contains only the server address and a policy flag.
+            }
+        }
+    }
+
+    private async Task<byte[]> RunWithConfigAsync(string[] arguments, string configPath, CancellationToken cancellationToken)
+    {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, session);
         deadline.CancelAfter(ProviderPolicy.CommandTimeout);
         var start = new ProcessStartInfo(executablePath)
@@ -26,9 +48,11 @@ internal sealed class BitwardenCli(string executablePath, string token, Uri serv
             start.ArgumentList.Add(argument);
         }
 
-        // The CLI flag takes precedence over server settings in the service user's bws profile.
-        start.ArgumentList.Add("--server-url");
-        start.ArgumentList.Add(BitwardenConfiguration.ServerArgument(serverUrl));
+        // Use an isolated profile for both routing and state policy.
+        start.ArgumentList.Add("--config-file");
+        start.ArgumentList.Add(configPath);
+        start.ArgumentList.Add("--profile");
+        start.ArgumentList.Add("default");
         start.ArgumentList.Add("--output");
         start.ArgumentList.Add("json");
 

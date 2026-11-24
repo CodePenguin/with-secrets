@@ -288,7 +288,9 @@ internal static class ProviderAdminOperationsTests
         check(set.Applied && rig.Store.Instance(instance.Id) is { Revision: 1 } after && after.MaxStale == TimeSpan.FromSeconds(600) && rig.Count("SELECT COUNT(*) FROM provider_cache") == 1 && rig.Running(instance.Id).Calls.Count(call => call == "update") == 0,
             "provider-max-stale: policy only: the revision stays, the cache rows stay, the adapter is not touched (" + set.Detail + ")");
         check(rig.Events().Any(item => item.Outcome == "provider-max-stale-changed" && item.Arguments.Contains("vault-one")), "provider-max-stale: a provider-max-stale-changed event");
-        check((await rig.Ask("provider-max-stale", true, ("id", id), ("revision", "1"), ("max-stale-seconds", "0"))).Applied && rig.Store.Instance(instance.Id)!.MaxStale == TimeSpan.Zero, "provider-max-stale: 0 is allowed");
+        check((await rig.Ask("provider-max-stale", true, ("id", id), ("revision", "1"), ("max-stale-seconds", "0"))).Applied
+            && rig.Store.Instance(instance.Id)!.MaxStale == TimeSpan.Zero && rig.Count("SELECT COUNT(*) FROM provider_cache") == 0,
+            "provider-max-stale: approving live only purges the provider's cached rows");
 
         // Changed out of band between page and tap (the revision stays: the policy is not part of it): the signed "before" no longer holds.
         Asked planned = await rig.Ask("provider-max-stale", false, ("id", id), ("revision", "1"), ("max-stale-seconds", "120"));

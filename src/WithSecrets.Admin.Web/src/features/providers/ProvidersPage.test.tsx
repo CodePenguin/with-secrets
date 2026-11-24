@@ -74,7 +74,7 @@ describe('Providers page', () => {
     await waitFor(() => expect(api.count(authorize)).toBe(1))
     expect(api.calls.find((call) => call.method + ' ' + call.path === authorize)?.body).toEqual({
       operation: 'provider-add',
-      parameters: { name: 'New vault 2', type: 'test', config: '{}', 'max-stale-seconds': '3600', 'confirm-warnings': 'yes' },
+      parameters: { name: 'New vault 2', type: 'test', config: '{}', 'max-stale-seconds': '0', 'confirm-warnings': 'yes' },
     })
   })
 
@@ -195,7 +195,7 @@ describe('Providers page', () => {
     expect(api.calls.find((call) => call.method + ' ' + call.path === validate)?.body).toEqual({ type: 'bitwarden', config })
     expect(api.calls.find((call) => call.method + ' ' + call.path === authorize)?.body).toEqual({
       operation: 'provider-add',
-      parameters: { name: 'Team Bitwarden', type: 'bitwarden', config, 'max-stale-seconds': '3600' },
+      parameters: { name: 'Team Bitwarden', type: 'bitwarden', config, 'max-stale-seconds': '0' },
     })
   })
 

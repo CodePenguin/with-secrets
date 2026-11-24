@@ -22,7 +22,7 @@ public sealed class ProviderCache(ProviderStore store, AuthorityKeyRing keys, IS
     /// Encrypts each value (strict UTF-8, else <see cref="ArgumentException" /> before anything is signed) of one instance to <paramref name="storePublicKey" />, seals
     /// it with the active authority key (<see cref="AuthorityLockedException" /> while locked, before anything is written) and replaces the rows in ONE transaction,
     /// keeping a stored row with a NEWER lastVerified (<see cref="CacheWrite.Superseded" />). With <paramref name="expectedGeneration" />, nothing is written
-    /// (<see cref="CacheWrite.Invalidated" />) when the instance generation moved (checked inside that transaction).
+    /// (<see cref="CacheWrite.Invalidated" />) when the instance generation moved. The transaction also rejects writes when caching is disabled.
     /// </summary>
     public CacheWrite PutAll(Guid instanceId, IReadOnlyList<(string ExternalId, byte[] Value)> values, DateTimeOffset verifiedAt, string storePublicKey, long? expectedGeneration = null)
     {
@@ -122,7 +122,7 @@ public sealed class ProviderCache(ProviderStore store, AuthorityKeyRing keys, IS
     }
 }
 
-/// <summary>What a cache write did: wrote every row, wrote all but rows that a NEWER retrieval had already written (kept), or wrote nothing because the instance generation moved.</summary>
+/// <summary>Whether a write succeeded, kept a newer row, or skipped all rows because the instance changed or caching is disabled.</summary>
 public enum CacheWrite
 {
     Written,

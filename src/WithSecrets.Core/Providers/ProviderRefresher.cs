@@ -88,15 +88,21 @@ public sealed class ProviderRefresher(
         }
 
         // Baseline BEFORE any read, as delivery does: an invalidation after this point discards that instance's results.
-        IReadOnlyList<ProviderInstance> instances = store.Instances();
-        Dictionary<Guid, long> generations = instances.ToDictionary(instance => instance.Id, instance => invalidation.Generation(instance.Id));
+        IReadOnlyDictionary<Guid, long> generations = store.Generations();
+        ProviderInstance[] instances = [.. store.Instances().Where(instance => instance.MaxStale > TimeSpan.Zero)];
+        if (instances.Length == 0)
+        {
+            Forget([]);
+            return;
+        }
+
         DateTimeOffset now = clock.GetUtcNow();
         AfterBaseline?.Invoke();
         IReadOnlyList<(Guid InstanceId, string ExternalId, long LastVerified)> rows = store.CacheIndex();
         Forget(rows);
 
         // Only with something to refresh is the native manifest opened for the store key (a native-only deployment never reads it here).
-        if (rows.Count == 0 || !instances.Any(instance => instance.MaxStale > TimeSpan.Zero) || storePublicKey() is not { Length: > 0 } key)
+        if (rows.Count == 0 || storePublicKey() is not { Length: > 0 } key)
         {
             return;
         }
@@ -110,7 +116,7 @@ public sealed class ProviderRefresher(
             }
         }
 
-        foreach (ProviderInstance instance in instances.Where(instance => instance.MaxStale > TimeSpan.Zero))
+        foreach (ProviderInstance instance in instances)
         {
             cancel.ThrowIfCancellationRequested();
             if (cache.IsLocked)

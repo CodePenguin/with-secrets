@@ -334,6 +334,7 @@ public sealed partial class WithSecretsDatabase
             EnsureWal(connection);
             if (checking)
             {
+                UpgradeProviderCachePolicy(connection);
                 Volatile.Write(ref _checked, 1);
             }
             return connection;
@@ -343,6 +344,25 @@ public sealed partial class WithSecretsDatabase
             connection.Dispose();
             throw;
         }
+    }
+
+    private static void UpgradeProviderCachePolicy(SqliteConnection connection)
+    {
+        if (Scalar(connection, null, "PRAGMA user_version") is not 0L)
+        {
+            return;
+        }
+
+        using SqliteTransaction transaction = connection.BeginTransaction();
+        // A simultaneous opener may have upgraded while this connection was waiting for the writer.
+        if (Scalar(connection, transaction, "PRAGMA user_version") is 0L)
+        {
+            Execute(connection, transaction, "PRAGMA secure_delete = ON");
+            Execute(connection, transaction, "UPDATE provider_instances SET max_stale_seconds = 0 WHERE max_stale_seconds <> 0");
+            Execute(connection, transaction, "DELETE FROM provider_cache");
+            Execute(connection, transaction, "PRAGMA user_version = 1");
+        }
+        transaction.Commit();
     }
 
     private void CheckVersion(SqliteConnection connection)
@@ -380,6 +400,7 @@ public sealed partial class WithSecretsDatabase
                 EnsureWal(connection);
                 using SqliteTransaction transaction = connection.BeginTransaction();
                 Execute(connection, transaction, Schema);
+                Execute(connection, transaction, "PRAGMA user_version = 1");
                 Execute(connection, transaction, "INSERT INTO schema_version (version) VALUES ($version)", ("$version", SchemaVersion));
                 Execute(connection, transaction, "INSERT INTO outbox_counter (id, last_sequence, epoch, machine) VALUES (1, 0, $epoch, '')",
                     ("$epoch", Guid.NewGuid().ToString("N")));

@@ -15,7 +15,8 @@ internal static class OnePasswordTests
 
     internal static int FakeOp(string[] args)
     {
-        if (Environment.GetEnvironmentVariable("OP_CONNECT_HOST") is not null || Environment.GetEnvironmentVariable("OP_SESSION_test") is not null)
+        if (Environment.GetEnvironmentVariable("OP_CONNECT_HOST") is not null || Environment.GetEnvironmentVariable("OP_SESSION_test") is not null
+            || Environment.GetEnvironmentVariable("OP_CACHE") != "false")
         {
             return 3;
         }
