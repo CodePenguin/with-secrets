@@ -48,6 +48,28 @@ internal static class OnePasswordTests
             case ["item", "get", "invalid", ..]:
                 Console.Write("malformed canary");
                 break;
+            case ["vault", "get", "gone", ..]:
+            case ["item", "list", "--vault", "gone", ..]:
+                Console.Error.Write("\"gone\" isn't a vault in this account");
+                return 1;
+            case ["item", "get", "gone", ..]:
+                Console.Error.Write("\"gone\" isn't an item in the vault");
+                return 1;
+            case ["item", "get", "badauth", ..]:
+                Console.Error.Write("[ERROR] error initializing client: Signin credentials are not compatible with the provided user auth from server");
+                return 1;
+            case ["item", "get", "limited", ..]:
+                Console.Error.Write("Too many requests");
+                return 1;
+            case ["item", "get", "dupes", ..]:
+                // Field ids are unique only within a section: "dupe" occurs twice, "uniq" once.
+                Console.Write(JsonSerializer.Serialize(new
+                {
+                    id = "dupes",
+                    vault = new { id = "vault" },
+                    fields = new[] { new { id = "dupe", value = "one" }, new { id = "uniq", value = "two" }, new { id = "dupe", value = "three" } }
+                }));
+                break;
             case ["item", "get", "slow", ..]:
                 Thread.Sleep(TimeSpan.FromSeconds(20));
                 break;
@@ -126,6 +148,36 @@ internal static class OnePasswordTests
                 && results[requests[2].RequestId].Secret?.Value.Length == 0
                 && results[requests[3].RequestId].ErrorKind == ProviderErrorKind.InvalidResponse
                 && results[requests[4].RequestId].ErrorKind == ProviderErrorKind.InvalidConfiguration, "1Password returns the exact UTF-8 value and individual failures");
+
+            // CLI diagnostics become common kinds (the text itself is never returned); an unlisted item stays Unknown.
+            ProviderSecretRequest[] classified = [new(Guid.NewGuid(), "vault/gone/" + Leaf), new(Guid.NewGuid(), "vault/limited/" + Leaf),
+                new(Guid.NewGuid(), "vault/failure/" + Leaf)];
+            var classifiedResults = (await adapter.RetrieveSecretsAsync(classified, default)).ToDictionary(result => result.RequestId);
+            check(classifiedResults[classified[0].RequestId].ErrorKind == ProviderErrorKind.SecretNotFound
+                && classifiedResults[classified[1].RequestId].ErrorKind == ProviderErrorKind.RateLimited
+                && classifiedResults[classified[2].RequestId].ErrorKind == ProviderErrorKind.Unknown, "1Password classifies CLI failures by fixed diagnostics");
+            await Fails(ProviderErrorKind.AuthenticationFailed, () => adapter.RetrieveSecretsAsync([new(Guid.NewGuid(), "vault/badauth/" + Leaf)], default), check);
+            check(reporter.Events.OfType<HealthChangedEvent>().Last() is { State: AdapterHealthState.Misconfigured }, "1Password reports a refused credential as misconfigured");
+            check(reporter.Events.OfType<InvalidateProviderDataEvent>().Any(evt => evt.ExternalSecretIds?.SequenceEqual(["vault/gone/" + Leaf]) == true),
+                "1Password invalidates an item the CLI reports as removed");
+
+            // An id that occurs twice in an item names no single field: it is neither retrievable nor listed, the item's other fields still work.
+            ProviderSecretRequest[] ambiguous = [new(Guid.NewGuid(), "vault/dupes/F_64757065"), new(Guid.NewGuid(), "vault/dupes/F_756E6971")];
+            var ambiguousResults = (await adapter.RetrieveSecretsAsync(ambiguous, default)).ToDictionary(result => result.RequestId);
+            AdapterHealthState afterAmbiguous = reporter.Events.OfType<HealthChangedEvent>().Last().State;
+            ListSecretsResult dupes = await adapter.ListSecretsAsync(new("vault/dupes", null, null), default);
+            check(ambiguousResults[ambiguous[0].RequestId].ErrorKind == ProviderErrorKind.InvalidResponse
+                && ambiguousResults[ambiguous[1].RequestId].Secret?.Value.SequenceEqual("two"u8.ToArray()) == true
+                && dupes.Secrets.Select(secret => secret.Path).SequenceEqual(["F_756E6971"]), "1Password leaves an ambiguous field id out instead of failing the item");
+            check(!reporter.Events.OfType<InvalidateProviderDataEvent>().Any(evt => evt.ExternalSecretIds?.Any(id => id.Contains("dupes", StringComparison.Ordinal)) == true),
+                "1Password never treats an ambiguous field id as a removed secret");
+            check(afterAmbiguous == AdapterHealthState.Degraded
+                && (await adapter.ValidateMountAsync(config, "vault/dupes/F_64757065", default)).Single().Message.Contains("more than one", StringComparison.Ordinal),
+                "1Password degrades health on an ambiguous field id and says so when validating the mount");
+            check((await adapter.ValidateMountAsync(config, "gone", default)).Single().Target == "basePath"
+                && (await adapter.ListSecretsAsync(new("gone", null, null), default)).Secrets.Count == 0
+                && reporter.Events.OfType<HealthChangedEvent>().Last() is { State: AdapterHealthState.Healthy },
+                "1Password validates and lists an unknown vault as nothing found, not as a failure");
 
             check(reporter.Events.OfType<InvalidateProviderDataEvent>().Any(evt =>
                 evt.ExternalSecretIds?.SequenceEqual(["vault/item/F_61"]) == true),

@@ -79,7 +79,11 @@ internal sealed class LastPassCli(string executablePath, string username) : IAsy
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_disposed)
+            {
+                // The configuration was replaced while this call waited: a retry reaches the new connection.
+                throw new ProviderAdapterException(ProviderErrorKind.Unavailable, "The LastPass connection was replaced.");
+            }
             try
             {
                 _home ??= CreateHome();
@@ -249,15 +253,113 @@ internal sealed class LastPassCli(string executablePath, string username) : IAsy
         return CommandFailure.Other;
     }
 
+    private static readonly object SweepGate = new();
+    private static bool _swept;
+
+    /// <summary>
+    /// <c>ws-lpass-{user}-{host}-{pid}-</c>: the directory says which OS user, which host and which authority process own it, so a sweep never touches another user's directory,
+    /// a directory from another host or container sharing the folder, nor a live sibling (another LastPass instance of this same authority has its own directory but the same pid).
+    /// </summary>
+    private static string UserStem(string user)
+    {
+        string safe = new([.. user.Where(char.IsAsciiLetterOrDigit).Take(12)]);
+
+        string host = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Environment.MachineName)))[..6];
+
+        return "ws-lpass-" + (safe.Length == 0 ? "u" : safe) + "-" + host + "-";
+    }
+
+    private static readonly string ProcessNonce = Guid.NewGuid().ToString("N")[..6];
+
+    internal static string HomePrefix(string user, int pid, string nonce)
+    {
+        return UserStem(user) + pid.ToString(System.Globalization.CultureInfo.InvariantCulture) + "-" + nonce + "-";
+    }
+
+    /// <summary>
+    /// Deletes this user's home directories under <paramref name="root" /> that a crash left behind: those of a process that is gone, and those of the current pid under another
+    /// nonce (a restarted authority can get the same pid again, as in a container). Returns how many.
+    /// </summary>
+    internal static int SweepStaleHomes(string root, string user, Func<int, bool> processAlive, int ownPid, string ownNonce)
+    {
+        string stem = UserStem(user);
+        int swept = 0;
+        try
+        {
+            foreach (string directory in Directory.EnumerateDirectories(root, stem + "*"))
+            {
+                string[] parts = Path.GetFileName(directory)[stem.Length..].Split('-');
+                if (parts.Length < 3 || !int.TryParse(parts[0], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out int pid))
+                {
+                    continue;
+                }
+
+                bool stale = pid == ownPid ? parts[1] != ownNonce : !processAlive(pid);
+                if (!stale)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    Directory.Delete(directory, recursive: true);
+                    swept++;
+                }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+                {
+                    // Not ours to remove, or in use: leave it.
+                }
+            }
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+        }
+
+        return swept;
+    }
+
+    private static bool ProcessAlive(int pid)
+    {
+        try
+        {
+            using System.Diagnostics.Process process = System.Diagnostics.Process.GetProcessById(pid);
+
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            return true;
+        }
+    }
+
     private static string CreateHome()
     {
+        string root = OperatingSystem.IsWindows() ? Path.GetTempPath() : "/tmp";
+        lock (SweepGate)
+        {
+            if (!_swept)
+            {
+                _swept = true;
+                SweepStaleHomes(root, Environment.UserName, ProcessAlive, Environment.ProcessId, ProcessNonce);
+            }
+        }
+
+        string prefix = HomePrefix(Environment.UserName, Environment.ProcessId, ProcessNonce);
         if (OperatingSystem.IsWindows())
         {
-            return Directory.CreateTempSubdirectory("ws-lpass-").FullName;
+            return Directory.CreateTempSubdirectory(prefix).FullName;
         }
 
         // lpass still probes a Unix socket with its agent disabled. Keep LPASS_HOME short on macOS.
-        string path = Path.Combine("/tmp", "ws-lpass-" + Guid.NewGuid().ToString("N"));
+        string path = Path.Combine(root, prefix + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         return path;
     }

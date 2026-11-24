@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -12,7 +13,7 @@ public sealed class LastPassAdapter(
     string trustedExecutablePath,
     Func<CancellationToken> getAuthorityLockToken,
     Func<string, CancellationToken, ValueTask<string?>> decryptConfiguration,
-    Func<bool>? isPlatformSupported = null) : IProviderAdapter
+    Func<bool>? isPlatformSupported = null) : ProviderAdapter<LastPassConfiguration>
 {
     public const string ProviderType = "lastpass";
     public const string AdapterVersion = "1.0";
@@ -30,12 +31,9 @@ public sealed class LastPassAdapter(
     private Task _probe = Task.CompletedTask;
     private Task _cleanup = Task.CompletedTask;
 
-    public Type ConfigurationType => typeof(LastPassConfiguration);
-
-    public Task InitializeAsync(IAdapterConfiguration supplied, AdapterInitializationContext context, CancellationToken cancellationToken)
+    protected override Task InitializeAsync(LastPassConfiguration configuration, AdapterInitializationContext context, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        LastPassConfiguration configuration = RequireConfiguration(supplied);
         lock (_gate)
         {
             _status = context.StatusReporter;
@@ -46,10 +44,9 @@ public sealed class LastPassAdapter(
         return Task.CompletedTask;
     }
 
-    public Task UpdateConfigurationAsync(IAdapterConfiguration supplied, CancellationToken cancellationToken)
+    protected override Task UpdateConfigurationAsync(LastPassConfiguration configuration, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        LastPassConfiguration configuration = RequireConfiguration(supplied);
         lock (_gate)
         {
             if (_active is not null)
@@ -61,7 +58,7 @@ public sealed class LastPassAdapter(
         return Task.CompletedTask;
     }
 
-    public async Task ShutdownAsync(CancellationToken cancellationToken)
+    public override async Task ShutdownAsync(CancellationToken cancellationToken)
     {
         Task pending;
         lock (_gate)
@@ -76,11 +73,10 @@ public sealed class LastPassAdapter(
         await pending.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<IReadOnlyList<ProviderValidationIssue>> ValidateConfigurationAsync(
-        IAdapterConfiguration supplied, CancellationToken cancellationToken)
+    protected override async Task<IReadOnlyList<ProviderValidationIssue>> ValidateConfigurationAsync(
+        LastPassConfiguration configuration, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        LastPassConfiguration configuration = RequireConfiguration(supplied);
         IReadOnlyList<ProviderValidationIssue> issues = StaticValidate(configuration);
         if (issues.Count != 0)
         {
@@ -94,11 +90,10 @@ public sealed class LastPassAdapter(
         }).ConfigureAwait(false);
     }
 
-    public async Task<IReadOnlyList<ProviderValidationIssue>> ValidateMountAsync(
-        IAdapterConfiguration supplied, string basePath, CancellationToken cancellationToken)
+    protected override async Task<IReadOnlyList<ProviderValidationIssue>> ValidateMountAsync(
+        LastPassConfiguration configuration, string basePath, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        LastPassConfiguration configuration = RequireConfiguration(supplied);
         if (!TryPath(basePath, out string[] segments))
         {
             return [new("Use a LastPass account ID and field path.", ValidationSeverity.Error, "basePath")];
@@ -129,7 +124,61 @@ public sealed class LastPassAdapter(
         }).ConfigureAwait(false);
     }
 
-    public async Task<IReadOnlyList<ProviderSecretResult>> RetrieveSecretsAsync(
+    public override async Task<IReadOnlyList<ProviderSecretResult>> RetrieveSecretsAsync(
+        IReadOnlyList<ProviderSecretRequest> requests, CancellationToken cancellationToken)
+    {
+        LastPassConfiguration? configuration = Snapshot();
+        try
+        {
+            return await RetrieveAsync(requests, cancellationToken).ConfigureAwait(false);
+        }
+        catch (ProviderAdapterException error)
+        {
+            ReportFailure(configuration, error);
+            throw;
+        }
+    }
+
+    public override async Task<ListSecretsResult> ListSecretsAsync(ListSecretsRequest request, CancellationToken cancellationToken)
+    {
+        LastPassConfiguration? configuration = Snapshot();
+        try
+        {
+            return await ListAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+        catch (ProviderAdapterException error)
+        {
+            ReportFailure(configuration, error);
+            throw;
+        }
+    }
+
+    private LastPassConfiguration? Snapshot()
+    {
+        lock (_gate)
+        {
+            return _active;
+        }
+    }
+
+    /// <summary>A failed retrieval or listing is visible as health, unless the configuration has been replaced meanwhile. An unlock or secret-level failure says nothing about the provider.</summary>
+    private void ReportFailure(LastPassConfiguration? configuration, ProviderAdapterException error)
+    {
+        if (configuration is null || !ProviderPolicy.SaysAboutProvider(error.Kind))
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (ReferenceEquals(_active, configuration))
+            {
+                _status?.Report(new HealthChangedEvent(ProviderPolicy.HealthFor(error.Kind)));
+            }
+        }
+    }
+
+    private async Task<IReadOnlyList<ProviderSecretResult>> RetrieveAsync(
         IReadOnlyList<ProviderSecretRequest> requests, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -144,73 +193,96 @@ public sealed class LastPassAdapter(
         string password = await ResolvePasswordAsync(configuration, cancellationToken).ConfigureAwait(false);
         var parsed = requests.Select(request => (Request: request, Path: TryPath(request.Path, out string[] path) && path.Length == 2 ? path : null)).ToArray();
         List<ProviderSecretResult> results = [];
-        foreach (var group in parsed.GroupBy(entry => entry.Path is { } path ? path[0] : null))
+        List<ProviderAdapterException> failures = [];
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (group.Key is null)
+            foreach (var group in parsed.GroupBy(entry => entry.Path is { } path ? path[0] : null))
             {
-                results.AddRange(group.Select(entry => new ProviderSecretResult(entry.Request.RequestId, null, ProviderErrorKind.InvalidConfiguration)));
-                continue;
-            }
-
-            string account = group.Key;
-            try
-            {
-                results.AddRange(await cli.ReadJsonAsync(ShowArguments(account), password, root =>
+                cancellationToken.ThrowIfCancellationRequested();
+                if (group.Key is null)
                 {
-                    Dictionary<string, string> fields = ReadAccount(root, account);
-                    return group.Select(entry =>
+                    results.AddRange(group.Select(entry => new ProviderSecretResult(entry.Request.RequestId, null, ProviderErrorKind.InvalidConfiguration)));
+                    continue;
+                }
+
+                string account = group.Key;
+                try
+                {
+                    results.AddRange(await cli.ReadJsonAsync(ShowArguments(account), password, root =>
                     {
-                        Guid id = entry.Request.RequestId;
-                        if (!fields.TryGetValue(entry.Path![1], out string? value))
+                        Dictionary<string, string> fields = ReadAccount(root, account);
+                        return group.Select(entry =>
                         {
-                            return new ProviderSecretResult(id, null, ProviderErrorKind.SecretNotFound);
-                        }
+                            Guid id = entry.Request.RequestId;
+                            if (!fields.TryGetValue(entry.Path![1], out string? value))
+                            {
+                                return new ProviderSecretResult(id, null, ProviderErrorKind.SecretNotFound);
+                            }
 
-                        try
-                        {
-                            byte[] bytes = StrictUtf8.GetBytes(value);
-                            return new ProviderSecretResult(id, new RetrieveSecretResult(bytes));
-                        }
-                        catch (EncoderFallbackException)
-                        {
-                            return new ProviderSecretResult(id, null, ProviderErrorKind.InvalidResponse);
-                        }
-                    }).ToArray();
-                }, cancellationToken).ConfigureAwait(false));
-            }
-            catch (ProviderAdapterException error) when (error.Kind is not (ProviderErrorKind.InvalidConfiguration or ProviderErrorKind.AuthenticationFailed or ProviderErrorKind.InteractionRequired))
-            {
-                results.AddRange(group.Select(entry => new ProviderSecretResult(entry.Request.RequestId, null, error.Kind, error.ProviderCode, error.RetryAfter)));
-            }
-        }
-
-        cancellationToken.ThrowIfCancellationRequested();
-        string[] removed = results.Where(result => result.ErrorKind == ProviderErrorKind.SecretNotFound)
-            .Select(result => result.RequestId)
-            .Join(requests, id => id, request => request.RequestId, (_, request) => request.Path)
-            .Distinct(StringComparer.Ordinal)
-            .ToArray();
-        if (removed.Length != 0)
-        {
-            lock (_gate)
-            {
-                if (ReferenceEquals(_active, configuration))
+                            try
+                            {
+                                byte[] bytes = StrictUtf8.GetBytes(value);
+                                return new ProviderSecretResult(id, new RetrieveSecretResult(bytes));
+                            }
+                            catch (EncoderFallbackException)
+                            {
+                                return new ProviderSecretResult(id, null, ProviderErrorKind.InvalidResponse);
+                            }
+                        }).ToArray();
+                    }, cancellationToken).ConfigureAwait(false));
+                }
+                catch (ProviderAdapterException error) when (error.Kind is not (ProviderErrorKind.InvalidConfiguration or ProviderErrorKind.AuthenticationFailed or ProviderErrorKind.InteractionRequired))
                 {
-                    _status?.Report(new InvalidateProviderDataEvent(ExternalSecretIds: removed));
+                    failures.Add(error);
+                    results.AddRange(group.Select(entry => new ProviderSecretResult(entry.Request.RequestId, null, error.Kind, error.ProviderCode, error.RetryAfter)));
                 }
             }
-        }
 
-        cancellationToken.ThrowIfCancellationRequested();
-        if (results.Any(result => result.Secret is not null || result.ErrorKind == ProviderErrorKind.SecretNotFound))
-        {
-            ReportHealthy(configuration, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            string[] removed = results.Where(result => result.ErrorKind == ProviderErrorKind.SecretNotFound)
+                .Select(result => result.RequestId)
+                .Join(requests, id => id, request => request.RequestId, (_, request) => request.Path)
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            if (removed.Length != 0)
+            {
+                lock (_gate)
+                {
+                    if (ReferenceEquals(_active, configuration))
+                    {
+                        _status?.Report(new InvalidateProviderDataEvent(ExternalSecretIds: removed));
+                    }
+                }
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            ProviderAdapterException? first = failures.FirstOrDefault(error => ProviderPolicy.SaysAboutProvider(error.Kind));
+            if (first is not null)
+            {
+                ReportFailure(configuration, first);
+            }
+            else if (results.Any(result => result.Secret is not null || result.ErrorKind == ProviderErrorKind.SecretNotFound))
+            {
+                ReportHealthy(configuration, cancellationToken);
+            }
+
+            return results;
         }
-        return results;
+        catch
+        {
+            foreach (ProviderSecretResult result in results)
+            {
+                if (result.Secret is { } secret)
+                {
+                    CryptographicOperations.ZeroMemory(secret.Value);
+                }
+            }
+
+            throw;
+        }
     }
 
-    public async Task<ListSecretsResult> ListSecretsAsync(ListSecretsRequest request, CancellationToken cancellationToken)
+    private async Task<ListSecretsResult> ListAsync(ListSecretsRequest request, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (request.ContinuationToken is not null || !ValidId(request.Path)
@@ -319,12 +391,7 @@ public sealed class LastPassAdapter(
         }
         catch (ProviderAdapterException error)
         {
-            health = error.Kind switch
-            {
-                ProviderErrorKind.Unavailable => AdapterHealthState.Unavailable,
-                ProviderErrorKind.InvalidConfiguration or ProviderErrorKind.AuthenticationFailed or ProviderErrorKind.AccessDenied => AdapterHealthState.Misconfigured,
-                _ => AdapterHealthState.Degraded,
-            };
+            health = ProviderPolicy.HealthFor(error.Kind);
         }
 
         lock (_gate)
@@ -532,10 +599,6 @@ public sealed class LastPassAdapter(
     private static string? Field(JsonElement element, string name)
         => element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out JsonElement value)
             && value.ValueKind == JsonValueKind.String ? value.GetString()! : null;
-
-    private static LastPassConfiguration RequireConfiguration(IAdapterConfiguration configuration)
-        => configuration as LastPassConfiguration
-            ?? throw new ProviderAdapterException(ProviderErrorKind.InvalidConfiguration, "Expected LastPass adapter configuration.");
 
     private static string Leaf(string field) => "F_" + Convert.ToHexString(Encoding.ASCII.GetBytes(field));
 

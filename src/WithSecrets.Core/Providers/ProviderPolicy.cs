@@ -18,6 +18,12 @@ public static class ProviderPolicy
     /// <summary>The overall retrieval deadline for one provider instance batch.</summary>
     public static readonly TimeSpan Deadline = TimeSpan.FromSeconds(10);
 
+    /// <summary>The most one provider CLI invocation takes. Shorter than <see cref="Deadline" />, so a batch can retry a timed-out command.</summary>
+    public static readonly TimeSpan CommandTimeout = TimeSpan.FromSeconds(5);
+
+    /// <summary>The most provider CLI invocations an adapter runs at once for one batch.</summary>
+    public const int CommandConcurrency = 4;
+
     /// <summary>The wait before the second and third invocation.</summary>
     public static readonly TimeSpan[] Backoff = [TimeSpan.FromMilliseconds(200), TimeSpan.FromMilliseconds(400)];
 
@@ -36,6 +42,17 @@ public static class ProviderPolicy
 
         return null;
     }
+
+    /// <summary>The health a failed provider call says the provider is in.</summary>
+    public static AdapterHealthState HealthFor(ProviderErrorKind kind) => kind switch
+    {
+        ProviderErrorKind.Unavailable => AdapterHealthState.Unavailable,
+        ProviderErrorKind.InvalidConfiguration or ProviderErrorKind.AuthenticationFailed or ProviderErrorKind.AccessDenied => AdapterHealthState.Misconfigured,
+        _ => AdapterHealthState.Degraded,
+    };
+
+    /// <summary>False for a failure that says nothing about the provider: a locked authority, or a secret that is simply gone.</summary>
+    public static bool SaysAboutProvider(ProviderErrorKind kind) => kind is not (ProviderErrorKind.InteractionRequired or ProviderErrorKind.SecretNotFound);
 
     public static bool IsRetryable(ProviderErrorKind kind) => kind is ProviderErrorKind.Unavailable or ProviderErrorKind.RateLimited;
 

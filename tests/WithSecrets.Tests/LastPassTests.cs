@@ -109,8 +109,41 @@ internal static class LastPassTests
         return 0;
     }
 
+    /// <summary>A crashed authority's home directory is swept; another user's, a live process's and unrelated directories are not.</summary>
+    private static void StaleHomes(Action<bool, string> check)
+    {
+        string root = Path.Combine(Path.GetTempPath(), "ws-lpass-sweep-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            string Make(string name)
+            {
+                string path = Path.Combine(root, name);
+                Directory.CreateDirectory(path);
+
+                return path;
+            }
+
+            string dead = Make(LastPassCli.HomePrefix("alice", 111, "n1") + "a");
+            string live = Make(LastPassCli.HomePrefix("alice", 222, "n2") + "b");
+            string otherUser = Make(LastPassCli.HomePrefix("bob", 111, "n1") + "c");
+            string ownOld = Make(LastPassCli.HomePrefix("alice", 333, "old") + "e");
+            string ownCurrent = Make(LastPassCli.HomePrefix("alice", 333, "mine") + "f");
+            string unrelated = Make("something-else");
+            string malformed = Make("ws-lpass-alice-notapid-d");
+            int swept = LastPassCli.SweepStaleHomes(root, "alice", pid => pid == 222 || pid == 333, 333, "mine");
+            check(swept == 2 && !Directory.Exists(dead) && !Directory.Exists(ownOld) && Directory.Exists(ownCurrent) && Directory.Exists(live) && Directory.Exists(otherUser) && Directory.Exists(unrelated) && Directory.Exists(malformed),
+                "LastPass sweeps only this user's directories of a gone process or of this pid under an older nonce");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     public static async Task Run(Action<bool, string> check)
     {
+        StaleHomes(check);
         string? previousFake = Environment.GetEnvironmentVariable("WS_LPASS_FAKE");
         string? previousAskpass = Environment.GetEnvironmentVariable("LPASS_ASKPASS");
         string? previousHome = Environment.GetEnvironmentVariable("LPASS_HOME");

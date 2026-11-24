@@ -67,14 +67,14 @@ internal sealed class FakeProviderAdapter : ProviderAdapter<FakeConfiguration>
     public FakeProviderAdapter Returns(string path, string value)
     {
         byte[] bytes = Encoding.UTF8.GetBytes(value);
-        _script[path] = result => result with { Secret = new RetrieveSecretResult(bytes), ErrorKind = null };
+        _script[path] = result => result with { Secret = new RetrieveSecretResult([.. bytes]), ErrorKind = null };
 
         return this;
     }
 
     public FakeProviderAdapter ReturnsBytes(string path, byte[] bytes)
     {
-        _script[path] = result => result with { Secret = new RetrieveSecretResult(bytes), ErrorKind = null };
+        _script[path] = result => result with { Secret = new RetrieveSecretResult([.. bytes]), ErrorKind = null };
 
         return this;
     }

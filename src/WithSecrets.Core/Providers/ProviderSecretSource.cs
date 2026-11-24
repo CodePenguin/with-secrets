@@ -196,7 +196,7 @@ public sealed class ProviderSecretSource(
     private static string Describe(Selected item, Obtained outcome)
     {
         return outcome.Invalidated
-            ? item.Name + " was invalidated while it was being retrieved"
+            ? item.Name + " was invalidated while it was being retrieved" + (outcome.ErrorKind is { } why ? " (" + why + ")" : "")
             : item.Name + " could not be retrieved from its provider (" + (outcome.ErrorKind ?? ProviderErrorKind.Unknown) + ")";
     }
 
@@ -315,7 +315,17 @@ public sealed class ProviderSecretSource(
 
                 if (!current)
                 {
-                    Discard(group, obtained);
+                    // Raced an invalidation (possibly the adapter's own, for a secret it found removed): keep what each request failed with.
+                    Dictionary<string, ProviderErrorKind> kinds = new(StringComparer.Ordinal);
+                    foreach ((string externalId, ProviderSecretRequest request) in requests)
+                    {
+                        if (outcomes.GetValueOrDefault(request.RequestId) is RetrievalFailure failure)
+                        {
+                            kinds[externalId] = failure.Kind;
+                        }
+                    }
+
+                    Discard(group, obtained, kinds);
                     continue;
                 }
 
@@ -366,11 +376,12 @@ public sealed class ProviderSecretSource(
         return again is not null && again == before ? new Obtained(RetrievalOutcomeKind.Stale, open(again), kind) : null;
     }
 
-    private static void Discard(IGrouping<Guid, Selected> group, Dictionary<(Guid, string), Obtained> obtained)
+    private static void Discard(IGrouping<Guid, Selected> group, Dictionary<(Guid, string), Obtained> obtained, IReadOnlyDictionary<string, ProviderErrorKind>? kinds = null)
     {
         foreach (Selected item in group)
         {
-            obtained[Key(item)] = new Obtained(RetrievalOutcomeKind.Failed, null, null, Invalidated: true);
+            ProviderErrorKind? kind = kinds is not null && kinds.TryGetValue(item.Entry.ExternalId, out ProviderErrorKind known) ? known : null;
+            obtained[Key(item)] = new Obtained(RetrievalOutcomeKind.Failed, null, kind, Invalidated: true);
         }
     }
 

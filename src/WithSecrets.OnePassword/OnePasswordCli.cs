@@ -11,7 +11,7 @@ internal sealed class OnePasswordCli(string executablePath, string token)
     {
         cancellationToken.ThrowIfCancellationRequested();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        deadline.CancelAfter(ProviderPolicy.CommandTimeout);
         var start = new ProcessStartInfo(executablePath)
         {
             UseShellExecute = false,
@@ -46,11 +46,12 @@ internal sealed class OnePasswordCli(string executablePath, string token)
         }
 
         using var output = new MemoryStream();
+        using var diagnostics = new MemoryStream();
         try
         {
             process.StandardInput.Close();
-            Task stdout = CaptureAsync(process.StandardOutput.BaseStream, output, deadline.Token);
-            Task stderr = process.StandardError.BaseStream.CopyToAsync(Stream.Null, deadline.Token);
+            Task stdout = CaptureAsync(process.StandardOutput.BaseStream, output, MaxOutput, deadline.Token);
+            Task stderr = CaptureAsync(process.StandardError.BaseStream, diagnostics, CliFailureClassifier.MaxCapture, deadline.Token);
             await Task.WhenAll(stdout, stderr, process.WaitForExitAsync(deadline.Token)).ConfigureAwait(false);
             if (output.Length > MaxOutput)
             {
@@ -59,8 +60,9 @@ internal sealed class OnePasswordCli(string executablePath, string token)
 
             if (process.ExitCode != 0)
             {
-                // The CLI does not document a machine-readable read-error taxonomy.
-                throw new ProviderAdapterException(ProviderErrorKind.Unknown, "The 1Password CLI command failed.");
+                // The CLI does not document a machine-readable read-error taxonomy: fixed phrases only, anything else stays Unknown.
+                ProviderErrorKind kind = CliFailureClassifier.Classify(diagnostics.GetBuffer().AsSpan(0, (int)diagnostics.Length), FailureRules);
+                throw new ProviderAdapterException(kind, "The 1Password CLI command failed.");
             }
 
             return output.ToArray();
@@ -87,10 +89,34 @@ internal sealed class OnePasswordCli(string executablePath, string token)
             }
 
             System.Security.Cryptography.CryptographicOperations.ZeroMemory(output.GetBuffer().AsSpan(0, (int)output.Length));
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(diagnostics.GetBuffer().AsSpan(0, (int)diagnostics.Length));
         }
     }
 
-    private static async Task CaptureAsync(Stream input, MemoryStream output, CancellationToken cancellationToken)
+    // Most specific first. stderr is matched, never logged: it can carry vault metadata.
+    private static readonly (string Phrase, ProviderErrorKind Kind)[] FailureRules =
+    [
+        ("isn't an item", ProviderErrorKind.SecretNotFound),
+        ("isn't a vault", ProviderErrorKind.SecretNotFound),
+        ("too many requests", ProviderErrorKind.RateLimited),
+        ("rate limit", ProviderErrorKind.RateLimited),
+        ("invalid service account token", ProviderErrorKind.AuthenticationFailed),
+        ("unauthorized", ProviderErrorKind.AuthenticationFailed),
+        // Observed from op 2.42 with a malformed token, and with a well-formed token the server refused.
+        ("failed to decodesacredentials", ProviderErrorKind.AuthenticationFailed),
+        ("not compatible with the provided user auth", ProviderErrorKind.AuthenticationFailed),
+        ("forbidden", ProviderErrorKind.AccessDenied),
+        ("do not have access", ProviderErrorKind.AccessDenied),
+        ("no such host", ProviderErrorKind.Unavailable),
+        ("dial tcp", ProviderErrorKind.Unavailable),
+        ("connection refused", ProviderErrorKind.Unavailable),
+        ("network is unreachable", ProviderErrorKind.Unavailable),
+        ("timeout", ProviderErrorKind.Unavailable),
+        // The CLI prefixes its failed-request errors with "Network:" (seen with an unusable sign-in address).
+        ("network:", ProviderErrorKind.Unavailable),
+    ];
+
+    private static async Task CaptureAsync(Stream input, MemoryStream output, int maximum, CancellationToken cancellationToken)
     {
         byte[] buffer = new byte[8192];
         try
@@ -99,7 +125,7 @@ internal sealed class OnePasswordCli(string executablePath, string token)
             while ((count = await input.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) != 0)
             {
                 // Continue draining the pipe after the limit to avoid blocking the subprocess.
-                int remaining = MaxOutput + 1 - (int)output.Length;
+                int remaining = maximum + 1 - (int)output.Length;
                 output.Write(buffer.AsSpan(0, Math.Min(count, remaining)));
             }
         }

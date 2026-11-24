@@ -71,7 +71,7 @@ public sealed class BitwardenAdapter(string executablePath, Func<string, Uri, st
             }
             catch (ProviderAdapterException error) when (error.Kind == ProviderErrorKind.AuthenticationFailed)
             {
-                return [new("The Bitwarden token variable is missing or empty on the authority.", ValidationSeverity.Error, "tokenEnv")];
+                return [new("The Bitwarden token variable is missing or empty on the authority, or Bitwarden rejected the token.", ValidationSeverity.Error, "tokenEnv")];
             }
             catch (ProviderAdapterException error) when (error.ProviderCode == "server-url-mismatch")
             {
@@ -96,18 +96,26 @@ public sealed class BitwardenAdapter(string executablePath, Func<string, Uri, st
         }
 
         BitwardenCli cli = Open(configuration, cancellationToken);
-        if (path.Length == 1)
+        try
         {
-            await cli.ReadJsonAsync(["project", "get", project.ToString("D")], root =>
-                ReadId(root, "id") == project ? true : throw BitwardenCli.InvalidResponse(), cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            bool exists = await ReadSecretAsync(cli, secret, row => ReadProjects(row).Contains(project), cancellationToken).ConfigureAwait(false);
-            if (!exists)
+            if (path.Length == 1)
             {
-                return [new("The Bitwarden project does not contain that secret.", ValidationSeverity.Error, "basePath")];
+                await cli.ReadJsonAsync(["project", "get", project.ToString("D")], root =>
+                    ReadId(root, "id") == project ? true : throw BitwardenCli.InvalidResponse(), cancellationToken).ConfigureAwait(false);
             }
+            else
+            {
+                bool exists = await ReadSecretAsync(cli, secret, row => ReadProjects(row).Contains(project), cancellationToken).ConfigureAwait(false);
+                if (!exists)
+                {
+                    return [new("The Bitwarden project does not contain that secret.", ValidationSeverity.Error, "basePath")];
+                }
+            }
+        }
+        catch (ProviderAdapterException error) when (error.Kind == ProviderErrorKind.SecretNotFound)
+        {
+            // bws answers 404 for an unknown project or secret: a finding about the mount, not a failure to validate.
+            return [new(path.Length == 1 ? "The Bitwarden project was not found." : "The Bitwarden secret was not found.", ValidationSeverity.Error, "basePath")];
         }
 
         return [];
@@ -141,9 +149,14 @@ public sealed class BitwardenAdapter(string executablePath, Func<string, Uri, st
         try
         {
             BitwardenCli cli = Open(connection.Configuration, cancellationToken);
-            // bws supports one ID per get. Resolve the credential once and let bws reuse its session.
-            foreach (var group in pending.GroupBy(item => item.Secret))
+            // bws supports one ID per get: one process per secret, a few at a time, each task writing only its own result slots.
+            using var slots = new SemaphoreSlim(ProviderPolicy.CommandConcurrency);
+            var failures = new System.Collections.Concurrent.ConcurrentQueue<ProviderAdapterException>();
+            using var batch = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            ProviderAdapterException? fatal = null;
+            async Task ReadGroupAsync(IGrouping<Guid, (int Index, Guid Project, Guid Secret)> group)
             {
+                await slots.WaitAsync(batch.Token).ConfigureAwait(false);
                 try
                 {
                     await ReadSecretAsync(cli, group.Key, row =>
@@ -158,21 +171,52 @@ public sealed class BitwardenAdapter(string executablePath, Func<string, Uri, st
                         }
 
                         return true;
-                    }, cancellationToken).ConfigureAwait(false);
-                    ReportHealth(connection, AdapterHealthState.Healthy);
+                    }, batch.Token).ConfigureAwait(false);
                 }
                 catch (ProviderAdapterException error) when (error.Kind is not (ProviderErrorKind.InvalidConfiguration or ProviderErrorKind.InteractionRequired))
                 {
-                    ReportFailure(connection, error);
+                    failures.Enqueue(error);
                     foreach (var item in group)
                     {
                         results[item.Index] = new(requests[item.Index].RequestId, null, error.Kind);
                     }
                 }
+                catch (ProviderAdapterException error)
+                {
+                    Interlocked.CompareExchange(ref fatal, error, null);
+                    await batch.CancelAsync().ConfigureAwait(false);
+                    throw;
+                }
+                finally
+                {
+                    slots.Release();
+                }
+            }
+
+            try
+            {
+                await Task.WhenAll(pending.GroupBy(item => item.Secret).Select(ReadGroupAsync)).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (fatal is not null && !cancellationToken.IsCancellationRequested)
+            {
+                throw fatal;
             }
 
             cancellationToken.ThrowIfCancellationRequested();
             cli.EnsureUnlocked();
+
+            // One health report per batch: the first failure about the provider (a gone secret is not one), else healthy.
+            ProviderAdapterException? first = failures.FirstOrDefault(error => ProviderPolicy.SaysAboutProvider(error.Kind));
+            if (first is not null)
+            {
+                ReportFailure(connection, first);
+            }
+            else
+            {
+                ReportHealth(connection, AdapterHealthState.Healthy);
+            }
+
+            ReportRemoved(connection, requests, results);
             return results;
         }
         catch (Exception failure)
@@ -191,6 +235,27 @@ public sealed class BitwardenAdapter(string executablePath, Func<string, Uri, st
             }
 
             throw;
+        }
+    }
+
+    /// <summary>A secret the provider says is gone: its cached value and the grants that name it end (the same report 1Password and LastPass make).</summary>
+    private void ReportRemoved(Connection connection, IReadOnlyList<ProviderSecretRequest> requests, ProviderSecretResult[] results)
+    {
+        string[] removed = [.. results.Where(result => result?.ErrorKind == ProviderErrorKind.SecretNotFound)
+            .Select(result => result.RequestId)
+            .Join(requests, id => id, request => request.RequestId, (_, request) => request.Path)
+            .Distinct(StringComparer.Ordinal)];
+        if (removed.Length == 0)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (ReferenceEquals(connection, _active))
+            {
+                connection.Reporter.Report(new InvalidateProviderDataEvent(ExternalSecretIds: removed));
+            }
         }
     }
 
@@ -220,14 +285,22 @@ public sealed class BitwardenAdapter(string executablePath, Func<string, Uri, st
         {
             BitwardenCli cli = Open(connection.Configuration, cancellationToken);
             ProviderSecretInfo[] secrets;
-            if (request.Filter is not null)
+            try
             {
-                secrets = await ReadSecretAsync<ProviderSecretInfo[]>(cli, secret,
-                    row => ReadProjects(row).Contains(project) ? [SecretInfo(project, secret)] : [], cancellationToken).ConfigureAwait(false);
+                if (request.Filter is not null)
+                {
+                    secrets = await ReadSecretAsync<ProviderSecretInfo[]>(cli, secret,
+                        row => ReadProjects(row).Contains(project) ? [SecretInfo(project, secret)] : [], cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    secrets = await ListProjectAsync(cli, project, cancellationToken).ConfigureAwait(false);
+                }
             }
-            else
+            catch (ProviderAdapterException error) when (error.Kind == ProviderErrorKind.SecretNotFound)
             {
-                secrets = await ListProjectAsync(cli, project, cancellationToken).ConfigureAwait(false);
+                // An unknown project or secret has nothing to list.
+                secrets = [];
             }
 
             cancellationToken.ThrowIfCancellationRequested();
@@ -358,12 +431,12 @@ public sealed class BitwardenAdapter(string executablePath, Func<string, Uri, st
     }
 
     private void ReportFailure(Connection connection, ProviderAdapterException error)
-        => ReportHealth(connection, error.Kind switch
+    {
+        if (ProviderPolicy.SaysAboutProvider(error.Kind))
         {
-            ProviderErrorKind.InvalidConfiguration or ProviderErrorKind.AuthenticationFailed => AdapterHealthState.Misconfigured,
-            ProviderErrorKind.Unavailable => AdapterHealthState.Unavailable,
-            _ => AdapterHealthState.Degraded,
-        });
+            ReportHealth(connection, ProviderPolicy.HealthFor(error.Kind));
+        }
+    }
 
     private void ReportHealth(Connection connection, AdapterHealthState health)
     {

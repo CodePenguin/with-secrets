@@ -45,6 +45,44 @@ internal static class ProviderRetrievalTests
         await Retrieval(check);
         await Failures(check);
         await Cancellation(check);
+        await Wiping(check);
+        Classifier(check);
+    }
+
+    private static void Classifier(Action<bool, string> check)
+    {
+        (string, ProviderErrorKind)[] rules = [("not found", ProviderErrorKind.SecretNotFound), ("too many", ProviderErrorKind.RateLimited)];
+        byte[] Bytes(string text) => Encoding.UTF8.GetBytes(text);
+        check(CliFailureClassifier.Classify(Bytes("Error: Resource NOT FOUND"), rules) == ProviderErrorKind.SecretNotFound, "classifier: a phrase matches without regard to case");
+        check(CliFailureClassifier.Classify(Bytes("something else"), rules) == ProviderErrorKind.Unknown && CliFailureClassifier.Classify([], rules) == ProviderErrorKind.Unknown, "classifier: no phrase and no text are Unknown");
+        check(CliFailureClassifier.Classify(Bytes("too many requests" + new string('x', 6000)), rules) == ProviderErrorKind.RateLimited, "classifier: a phrase in the first 4096 bytes counts even when the text is longer");
+        check(CliFailureClassifier.Classify(Bytes(new string('x', 6000) + "Error: not found"), rules) == ProviderErrorKind.SecretNotFound, "classifier: a phrase in the tail of a long text counts");
+        check(CliFailureClassifier.Classify(Bytes(new string('x', 3000) + "not found" + new string('x', 3000)), rules) == ProviderErrorKind.Unknown, "classifier: a phrase between the head and the tail of a long text is not read");
+    }
+
+    /// <summary>The core keeps its own copy of a retrieved value and wipes the adapter's array (success and invalid UTF-8 alike).</summary>
+    private static async Task Wiping(Action<bool, string> check)
+    {
+        Rig rig = new();
+        byte[] good = Encoding.UTF8.GetBytes("value");
+        byte[] bad = [0xC3, 0x28];
+        ProviderSecretRequest goodRequest = Req("good");
+        ProviderSecretRequest badRequest = Req("bad");
+        rig.Adapter.Handler = (_, _, _) => Results(new ProviderSecretResult(goodRequest.RequestId, new RetrieveSecretResult(good)),
+            new ProviderSecretResult(badRequest.RequestId, new RetrieveSecretResult(bad)));
+        IReadOnlyDictionary<Guid, RetrievalOutcome> outcomes = await rig.Run([goodRequest, badRequest]);
+        check(IsValue(outcomes, goodRequest.RequestId, "value") && good.All(b => b == 0), "retrieval wipes the adapter's array once the core has copied it");
+        check(IsFailure(outcomes, badRequest.RequestId, ProviderErrorKind.InvalidResponse) && bad.All(b => b == 0), "retrieval wipes an invalid value instead of keeping it");
+
+        Rig malformed = new();
+        byte[] first = Encoding.UTF8.GetBytes("one");
+        byte[] second = Encoding.UTF8.GetBytes("two");
+        ProviderSecretRequest request = Req("twice");
+        malformed.Adapter.Handler = (_, _, _) => Results(new ProviderSecretResult(request.RequestId, new RetrieveSecretResult(first)),
+            new ProviderSecretResult(request.RequestId, new RetrieveSecretResult(second)));
+        IReadOnlyDictionary<Guid, RetrievalOutcome> rejected = await malformed.Run([request]);
+        check(IsFailure(rejected, request.RequestId, ProviderErrorKind.InvalidResponse) && first.All(b => b == 0) && second.All(b => b == 0),
+            "retrieval wipes every value of a batch it rejects");
     }
 
     private static ProviderSecretRequest Req(string path) => new(Guid.NewGuid(), path);

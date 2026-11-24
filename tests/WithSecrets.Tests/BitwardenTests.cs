@@ -15,6 +15,10 @@ internal static class BitwardenTests
     private const string MovedSecret = "b2222222-2222-4222-8222-222222222222";
     private const string WrongSecret = "b3333333-3333-4333-8333-333333333333";
     private const string SlowSecret = "b4444444-4444-4444-8444-444444444444";
+    private const string RefusedSecret = "b5555555-5555-4555-8555-555555555555";
+    private const string RefusedLeaf = "S_b5555555555545558555555555555555";
+    private const string GoneSecret = "b6666666-6666-4666-8666-666666666666";
+    private const string GoneLeaf = "S_b6666666666646668666666666666666";
     private const string Leaf = "S_b1111111111141118111111111111111";
     private const string MovedLeaf = "S_b2222222222242228222222222222222";
     private const string WrongLeaf = "S_b3333333333343338333333333333333";
@@ -57,6 +61,14 @@ internal static class BitwardenTests
             case ["secret", "get", WrongSecret] when server == DefaultServer:
                 Console.Write(JsonSerializer.Serialize(new { id = Secret, projectId = Project, value = Value }));
                 break;
+            case ["secret", "get", GoneSecret] when server == DefaultServer:
+                // The text bws 2.1.0 prints for an unknown secret.
+                Console.Error.Write("Error: \n   0: Received error message from server: [404 Not Found] {\"message\":\"Resource not found.\"}");
+                return 1;
+            case ["secret", "get", RefusedSecret] when server == DefaultServer:
+                // The text bws 2.1.0 prints for a token the server refused.
+                Console.Error.Write("Error: \n   0: Received error message from server: [400 Bad Request] {\"error\":\"invalid_client\"}");
+                return 1;
             case ["secret", "get", SlowSecret] when server == DefaultServer:
                 Thread.Sleep(TimeSpan.FromSeconds(20));
                 break;
@@ -152,7 +164,20 @@ internal static class BitwardenTests
                 && results[4].ErrorKind == ProviderErrorKind.InvalidResponse
                 && results[5].ErrorKind == ProviderErrorKind.InvalidConfiguration,
                 "Bitwarden reads requested IDs without listing their projects and verifies returned IDs and membership");
-            check(reporter.Events.Last() is HealthChangedEvent { State: AdapterHealthState.Degraded }, "Bitwarden reports an invalid response as degraded");
+            check(reporter.Events.OfType<HealthChangedEvent>().Last() is { State: AdapterHealthState.Degraded }, "Bitwarden reports an invalid response as degraded");
+            IReadOnlyList<ProviderSecretResult> refused = await adapter.RetrieveSecretsAsync([new(Guid.NewGuid(), Project + "/" + RefusedLeaf)], default);
+            check(refused.Single().ErrorKind == ProviderErrorKind.AuthenticationFailed && reporter.Events.OfType<HealthChangedEvent>().Last() is { State: AdapterHealthState.Misconfigured },
+                "Bitwarden classifies a refused token from the CLI diagnostics and reports it as misconfigured");
+
+            // An unknown secret is 404 from the CLI: a finding about the mount or a missing secret, never a failed validation or a provider health problem.
+            ProviderSecretRequest goneRequest = new(Guid.NewGuid(), Project + "/" + GoneLeaf);
+            IReadOnlyList<ProviderSecretResult> gone = await adapter.RetrieveSecretsAsync([goneRequest], default);
+            check(gone.Single().ErrorKind == ProviderErrorKind.SecretNotFound
+                && reporter.Events.OfType<HealthChangedEvent>().Last() is { State: AdapterHealthState.Healthy },
+                "Bitwarden reports a 404 as a missing secret without changing provider health");
+            check((await adapter.ValidateMountAsync(config, Project + "/" + GoneLeaf, default)).Single().Target == "basePath"
+                && (await adapter.ListSecretsAsync(new(Project, GoneLeaf, null), default)).Secrets.Count == 0,
+                "Bitwarden validates and lists an unknown secret as nothing found, not as a failure");
 
             Task<IReadOnlyList<ProviderSecretResult>> inProgress = adapter.RetrieveSecretsAsync([new(Guid.NewGuid(), Project + "/" + SlowLeaf)], default);
             authorityLock.Lock("test");

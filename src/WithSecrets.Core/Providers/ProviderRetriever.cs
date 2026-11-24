@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+
 namespace WithSecrets;
 
 public abstract record RetrievalOutcome;
@@ -36,7 +38,16 @@ public sealed class ProviderRetriever(Func<Guid, IProviderAdapter> adapters, Tim
 
                 // WaitAsync abandons an adapter that ignores its token, so the deadline holds.
                 IReadOnlyList<ProviderSecretResult> results = await adapter.RetrieveSecretsAsync(outstanding, linked.Token).WaitAsync(linked.Token).ConfigureAwait(false);
-                results = ProviderBatch.Validate(outstanding, results);
+                try
+                {
+                    results = ProviderBatch.Validate(outstanding, results);
+                }
+                catch (ProviderAdapterException)
+                {
+                    WipeAll(results);
+                    throw;
+                }
+
                 outstanding = Apply(outstanding, results, outcomes, out retryAfter);
             }
             catch (OperationCanceledException)
@@ -117,7 +128,10 @@ public sealed class ProviderRetriever(Func<Guid, IProviderAdapter> adapters, Tim
             ProviderSecretResult result = results[index];
             if (result.Secret is { } secret)
             {
-                outcomes[request.RequestId] = Judge([.. secret.Value]);
+                // The core keeps its own copy; the adapter's array is wiped as soon as it has been copied.
+                byte[] owned = [.. secret.Value];
+                CryptographicOperations.ZeroMemory(secret.Value);
+                outcomes[request.RequestId] = Judge(owned);
 
                 continue;
             }
@@ -137,6 +151,17 @@ public sealed class ProviderRetriever(Func<Guid, IProviderAdapter> adapters, Tim
         return again;
     }
 
+    private static void WipeAll(IReadOnlyList<ProviderSecretResult> results)
+    {
+        foreach (ProviderSecretResult result in results)
+        {
+            if (result.Secret?.Value is { } value)
+            {
+                CryptographicOperations.ZeroMemory(value);
+            }
+        }
+    }
+
     private static RetrievalOutcome Judge(byte[] value)
     {
         if (value.Length == 0)
@@ -144,7 +169,14 @@ public sealed class ProviderRetriever(Func<Guid, IProviderAdapter> adapters, Tim
             return new RetrievalFailure(ProviderErrorKind.SecretNotFound, null);
         }
 
-        return ProviderBatch.IsStrictUtf8(value) ? new RetrievalSuccess(value) : new RetrievalFailure(ProviderErrorKind.InvalidResponse, null);
+        if (ProviderBatch.IsStrictUtf8(value))
+        {
+            return new RetrievalSuccess(value);
+        }
+
+        CryptographicOperations.ZeroMemory(value);
+
+        return new RetrievalFailure(ProviderErrorKind.InvalidResponse, null);
     }
 
     private static List<ProviderSecretRequest> Retryable(

@@ -12,7 +12,7 @@ internal sealed class BitwardenCli(string executablePath, string token, Uri serv
         cancellationToken.ThrowIfCancellationRequested();
         EnsureUnlocked();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, session);
-        deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        deadline.CancelAfter(ProviderPolicy.CommandTimeout);
         var start = new ProcessStartInfo(executablePath)
         {
             UseShellExecute = false,
@@ -55,11 +55,12 @@ internal sealed class BitwardenCli(string executablePath, string token, Uri serv
         }
 
         using var output = new MemoryStream();
+        using var diagnostics = new MemoryStream();
         try
         {
             process.StandardInput.Close();
-            Task stdout = CaptureAsync(process.StandardOutput.BaseStream, output, deadline.Token);
-            Task stderr = process.StandardError.BaseStream.CopyToAsync(Stream.Null, deadline.Token);
+            Task stdout = CaptureAsync(process.StandardOutput.BaseStream, output, MaxOutput, deadline.Token);
+            Task stderr = CaptureAsync(process.StandardError.BaseStream, diagnostics, CliFailureClassifier.MaxCapture, deadline.Token);
             await Task.WhenAll(stdout, stderr, process.WaitForExitAsync(deadline.Token)).ConfigureAwait(false);
             EnsureUnlocked();
             if (output.Length > MaxOutput)
@@ -69,8 +70,9 @@ internal sealed class BitwardenCli(string executablePath, string token, Uri serv
 
             if (process.ExitCode != 0)
             {
-                // The CLI does not document a machine-readable read-error taxonomy.
-                throw new ProviderAdapterException(ProviderErrorKind.Unknown, "The Bitwarden Secrets Manager CLI command failed.");
+                // The CLI does not document a machine-readable read-error taxonomy: fixed phrases only, anything else stays Unknown.
+                ProviderErrorKind kind = CliFailureClassifier.Classify(diagnostics.GetBuffer().AsSpan(0, (int)diagnostics.Length), FailureRules);
+                throw new ProviderAdapterException(kind, "The Bitwarden Secrets Manager CLI command failed.");
             }
 
             return output.ToArray();
@@ -98,10 +100,31 @@ internal sealed class BitwardenCli(string executablePath, string token, Uri serv
             }
 
             System.Security.Cryptography.CryptographicOperations.ZeroMemory(output.GetBuffer().AsSpan(0, (int)output.Length));
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(diagnostics.GetBuffer().AsSpan(0, (int)diagnostics.Length));
         }
     }
 
-    private static async Task CaptureAsync(Stream input, MemoryStream output, CancellationToken cancellationToken)
+    // Most specific first. stderr is matched, never logged: it can carry project metadata.
+    private static readonly (string Phrase, ProviderErrorKind Kind)[] FailureRules =
+    [
+        ("resource not found", ProviderErrorKind.SecretNotFound),
+        ("too many requests", ProviderErrorKind.RateLimited),
+        ("[429", ProviderErrorKind.RateLimited),
+        // Observed from bws 2.1.0: a token the server refused, and a token without a decryption key.
+        ("invalid_client", ProviderErrorKind.AuthenticationFailed),
+        ("doesn't contain a decryption key", ProviderErrorKind.AuthenticationFailed),
+        ("unauthorized", ProviderErrorKind.AuthenticationFailed),
+        ("[401", ProviderErrorKind.AuthenticationFailed),
+        ("forbidden", ProviderErrorKind.AccessDenied),
+        ("[403", ProviderErrorKind.AccessDenied),
+        // Observed from bws 2.1.0 for a refused connection ("tcp connect error") and an unknown host ("dns error").
+        ("error sending request", ProviderErrorKind.Unavailable),
+        ("dns error", ProviderErrorKind.Unavailable),
+        ("connection refused", ProviderErrorKind.Unavailable),
+        ("timed out", ProviderErrorKind.Unavailable),
+    ];
+
+    private static async Task CaptureAsync(Stream input, MemoryStream output, int maximum, CancellationToken cancellationToken)
     {
         byte[] buffer = new byte[8192];
         try
@@ -110,7 +133,7 @@ internal sealed class BitwardenCli(string executablePath, string token, Uri serv
             while ((count = await input.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) != 0)
             {
                 // Continue draining the pipe after the limit to avoid blocking the subprocess.
-                int remaining = MaxOutput + 1 - (int)output.Length;
+                int remaining = maximum + 1 - (int)output.Length;
                 output.Write(buffer.AsSpan(0, Math.Min(count, remaining)));
             }
         }
