@@ -116,14 +116,19 @@ describe('Providers page', () => {
     })
   })
 
-  it.each(['add', 'replace'] as const)('seals the 1Password token before the %s authorization', async (mode) => {
+  it.each([
+    ['onepassword', 'add', /service-account token/],
+    ['onepassword', 'replace', /service-account token/],
+    ['vault', 'add', /Vault token/],
+    ['vault', 'replace', /Vault token/],
+  ] as const)('seals the %s token before the %s authorization', async (type, mode, tokenLabel) => {
     const api = providerApi()
-    const seal = 'POST /api/v1/providers/onepassword/seal'
+    const seal = `POST /api/v1/providers/${type}/seal`
     const config = '{"encryptedConfiguration":"encrypted:fixture"}'
     const token = 'ops_test_token'
-    const existing = { ...instance, type: 'onepassword', configuration: config, actions: ['config'] }
+    const existing = { ...instance, type, configuration: config, actions: ['config'] }
     api.on('GET /api/v1/providers', { body: [existing] })
-    api.on('GET /api/v1/providers/types', { body: [{ type: 'test', adapterVersion: '1.0' }, { type: 'onepassword', adapterVersion: '1.0' }] })
+    api.on('GET /api/v1/providers/types', { body: [{ type: 'test', adapterVersion: '1.0' }, { type, adapterVersion: '1.0' }] })
     api.on(seal, { body: { config } })
     api.on(validate, { body: { ok: true, issues: [{ message: 'Check vault access.', severity: 'warning' }] } })
     const user = userEvent.setup()
@@ -132,10 +137,10 @@ describe('Providers page', () => {
     const form = within(screen.getByRole('dialog'))
     if (mode === 'add') {
       await user.type(form.getByLabelText(/Provider name/), 'Team vault')
-      await user.selectOptions(form.getByLabelText(/Provider type/), 'onepassword')
+      await user.selectOptions(form.getByLabelText(/Provider type/), type)
     }
     expect(form.queryByLabelText(/Configuration JSON/)).not.toBeInTheDocument()
-    const input = form.getByLabelText(/service-account token/)
+    const input = form.getByLabelText(tokenLabel)
     expect(input).toHaveAttribute('type', 'password')
     expect(input).toHaveValue('')
     await user.type(input, token)

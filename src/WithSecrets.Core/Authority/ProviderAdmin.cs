@@ -12,7 +12,7 @@ namespace WithSecrets;
 /// constant, a stored non-secret value or an adapter's own validation message; never configuration text or provider response text taken from an exception.
 /// </summary>
 internal sealed class ProviderAdmin(ProviderAuthority providers, AdminAudit audit, Func<string, string?>? sealOnePasswordConfiguration = null,
-    Func<string, string, string?>? sealLastPassConfiguration = null)
+    Func<string, string, string?>? sealLastPassConfiguration = null, Func<string, string?>? sealVaultConfiguration = null)
 {
     /// <summary>The longest configuration text accepted (it is signed into the page text, so it is bounded).</summary>
     internal const int MaxConfigurationLength = 2000;
@@ -25,6 +25,8 @@ internal sealed class ProviderAdmin(ProviderAuthority providers, AdminAudit audi
     private static readonly string[] CredentialMarks = ["token", "password", "secret", "apikey", "api_key", "credential", "privatekey"];
 
     public string? SealOnePasswordConfiguration(string token) => sealOnePasswordConfiguration?.Invoke(token);
+
+    public string? SealVaultConfiguration(string token) => sealVaultConfiguration?.Invoke(token);
 
     public string? SealLastPassConfiguration(string username, string masterPassword) => sealLastPassConfiguration?.Invoke(username, masterPassword);
 
@@ -62,20 +64,20 @@ internal sealed class ProviderAdmin(ProviderAuthority providers, AdminAudit audi
     public IReadOnlyList<string> MountActions(Mount mount) => IsRegistered(mount.InstanceId) ? ["remove", "refresh"] : ["remove"];
 
     /// <summary>Validates a configuration that is not stored yet through a temporary adapter of the type. Errors block saving; warnings need confirming.</summary>
-    public async Task<ValidationDto> ValidateConfigurationAsync(string type, string configuration, CancellationToken cancellationToken, string? mountBase = null)
+    public async Task<ValidationDto> ValidateConfigurationAsync(string type, string configuration, CancellationToken cancellationToken, string? mountBase = null, MountKind? mountKind = null)
     {
-        return Issues(await providers.Registry.ValidateProposedAsync(type, configuration, mountBase, NullLogger.Instance, cancellationToken).ConfigureAwait(false));
+        return Issues(await providers.Registry.ValidateProposedAsync(type, configuration, mountBase, NullLogger.Instance, cancellationToken, mountKind).ConfigureAwait(false));
     }
 
     /// <summary>Validates a mount's provider path against an instance, with the proposed configuration when one is given (a configuration change planned together with the mount), else the stored one.</summary>
-    public async Task<ValidationDto> ValidateMountAsync(Guid instanceId, string? proposedConfiguration, string basePath, CancellationToken cancellationToken)
+    public async Task<ValidationDto> ValidateMountAsync(Guid instanceId, string? proposedConfiguration, string basePath, CancellationToken cancellationToken, MountKind? mountKind = null)
     {
         if (providers.Store.Instance(instanceId) is not { } instance)
         {
             return Issues([new ProviderValidationIssue("The provider instance does not exist.", ValidationSeverity.Error)]);
         }
 
-        return Issues(await providers.Registry.ValidateProposedAsync(instance.ProviderType, proposedConfiguration ?? instance.Configuration, basePath, NullLogger.Instance, cancellationToken).ConfigureAwait(false));
+        return Issues(await providers.Registry.ValidateProposedAsync(instance.ProviderType, proposedConfiguration ?? instance.Configuration, basePath, NullLogger.Instance, cancellationToken, mountKind).ConfigureAwait(false));
     }
 
     /// <summary>

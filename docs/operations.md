@@ -87,6 +87,30 @@ A Docker secret appears as `/run/secrets/with-secrets-pairing`, which `with-secr
 - **Grants:** created with `with-secrets approve ...` on the page; Extend, Renew, Revoke in the app.
 - **Audit:** the **Audit** view searches the signed events (machine, project, time, type, outcome). This is the only audit log: run events (authorization, launch, execution) and administrative events (type `admin`: store changes, key rotation, enrollment, recovery, revocation, settings, passkey changes, refused changes; names only). Each event may carry signed **metadata** (names and fingerprints only: secret names, variable mapping, `.env` files, `decrypts` as `VARIABLE=KEY:FINGERPRINT` for Dotenvx encrypted values (the key secret's name and the first 12 hex characters of the SHA-256 of the ciphertext, never a value, a ciphertext or a key), file fingerprints, approving key, reuse minutes), shown read-only in the event list. There is no hash chain; integrity comes from the machine signature, the unique id, the per-machine sequence and the authority's acknowledgement. The `--audit` command is gone.
 
+### HashiCorp Vault
+
+Configure these settings in the authority service environment before starting it.
+
+| Variable | Value |
+| --- | --- |
+| `WITH_SECRETS_VAULT_ADDR` | Trusted HTTPS Vault address, for example `https://vault.example.com:8200`. Use an endpoint that serves requests directly and a certificate trusted by the authority host. |
+| `WITH_SECRETS_VAULT_MOUNT` | KV v2 engine mount path. Defaults to `secret`. |
+| `WITH_SECRETS_VAULT_NAMESPACE` | Optional Vault namespace, for example `teams/payments`. |
+
+In **Admin → Providers**, add **HashiCorp Vault** and enter a Vault token in the password field. The authority seals it to its review key. Use the provider's **Change configuration** action to replace the token before it expires. Vault instances use the same server, namespace, and KV engine settings on a given authority.
+
+The token needs `read` on `auth/token/lookup-self` and on the engine's `data/<document>` and `subkeys/<document>` paths for the documents you expose. Folder trees also need `list` on the engine's `metadata/<folder>` paths. Use a Vault version with the [KV v2 subkeys endpoint](https://developer.hashicorp.com/vault/api-docs/secret/kv/kv-v2#read-secret-subkeys). Discovery uses field names from that endpoint, and retrieval reads the latest version.
+
+Provider paths are relative to the Vault engine mount. Given a document at `apps/db` with a field named `PASSWORD`:
+
+| Mount kind | Provider path | Example logical name |
+| --- | --- | --- |
+| Single secret at `DB_PASSWORD` | `apps/db/PASSWORD` | `DB_PASSWORD` |
+| Document tree at `db` | `apps/db` | `db/PASSWORD` |
+| Folder tree at `services` | `apps/` | `services/db/PASSWORD` |
+
+Leave the provider path blank for a tree over the KV engine root. Document and field segments may use ASCII letters, digits, underscores, dots, and hyphens. Tree entries also follow the logical secret-name rules. String values are returned as UTF-8 text, and other values as JSON text.
+
 ## 4. Backup and restore
 
 **What to back up.** Stop the service and any other with-secrets commands, then copy `with-secrets.db` from `%USERPROFILE%\.with-secrets`. The file holds the encrypted store and signed manifest, authority state, provider data, uploaded audit history, and pending signed audit events. Keep the backup private and store the recovery code separately.

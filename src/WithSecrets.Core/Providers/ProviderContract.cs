@@ -165,6 +165,13 @@ public interface IProviderAdapter
         string basePath,
         CancellationToken cancellationToken);
 
+    Task<IReadOnlyList<ProviderValidationIssue>> ValidateMountAsync(
+        IAdapterConfiguration configuration,
+        string basePath,
+        MountKind? kind,
+        CancellationToken cancellationToken)
+        => ValidateMountAsync(configuration, basePath, cancellationToken);
+
     Task<IReadOnlyList<ProviderSecretResult>> RetrieveSecretsAsync(
         IReadOnlyList<ProviderSecretRequest> requests,
         CancellationToken cancellationToken);
@@ -204,6 +211,14 @@ public abstract class ProviderAdapter<TConfiguration> : IProviderAdapter
 
     public Task<IReadOnlyList<ProviderValidationIssue>> ValidateMountAsync(IAdapterConfiguration configuration, string basePath, CancellationToken cancellationToken)
         => ValidateMountAsync(Typed(configuration), basePath, cancellationToken);
+
+    public Task<IReadOnlyList<ProviderValidationIssue>> ValidateMountAsync(
+        IAdapterConfiguration configuration, string basePath, MountKind? kind, CancellationToken cancellationToken)
+        => ValidateMountAsync(Typed(configuration), basePath, kind, cancellationToken);
+
+    protected virtual Task<IReadOnlyList<ProviderValidationIssue>> ValidateMountAsync(
+        TConfiguration configuration, string basePath, MountKind? kind, CancellationToken cancellationToken)
+        => ValidateMountAsync(configuration, basePath, cancellationToken);
 
     public abstract Task ShutdownAsync(CancellationToken cancellationToken);
 

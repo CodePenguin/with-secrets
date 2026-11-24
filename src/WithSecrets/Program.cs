@@ -3,6 +3,7 @@ using System.Text;
 using WithSecrets.Bitwarden;
 using WithSecrets.LastPass;
 using WithSecrets.OnePassword;
+using WithSecrets.Vault;
 
 namespace WithSecrets;
 
@@ -339,11 +340,17 @@ internal static class Program
                         Environment.GetEnvironmentVariable(OnePasswordProvider.ExecutableVariable) ?? "");
                     LastPassProvider.Register(registry, authorityLock, review,
                         Environment.GetEnvironmentVariable(LastPassProvider.ExecutableVariable) ?? "");
+                    VaultProvider.Register(registry, authorityLock, review,
+                        Environment.GetEnvironmentVariable(VaultProvider.AddressVariable) ?? "",
+                        Environment.GetEnvironmentVariable(VaultProvider.MountVariable) ?? "secret",
+                        Environment.GetEnvironmentVariable(VaultProvider.NamespaceVariable));
                 },
                 SealOnePasswordConfiguration = token => state.TryManifest(out Manifest? manifest, out _) && manifest?.Review is { } reviewKey
                     ? OnePasswordProvider.SealConfiguration(token, reviewKey.PublicKey) : null,
                 SealLastPassConfiguration = (username, masterPassword) => state.TryManifest(out Manifest? manifest, out _) && manifest?.Review is { } reviewKey
                     ? LastPassProvider.SealConfiguration(username, masterPassword, reviewKey.PublicKey) : null,
+                SealVaultConfiguration = token => state.TryManifest(out Manifest? manifest, out _) && manifest?.Review is { } reviewKey
+                    ? VaultProvider.SealConfiguration(token, reviewKey.PublicKey) : null,
                 MachineEndpoint = machineEndpoint,
                 MachineListenerStarted = port => TerminalPrompt.Line($"with-secrets service: machine listener now on {machineEndpoint!.Bind}:{port} (the authority signing key was made by the first approval; no restart was needed)."),
             });

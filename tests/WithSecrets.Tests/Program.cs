@@ -332,6 +332,11 @@ internal static class Program
             OnePasswordTests.Run(Check).GetAwaiter().GetResult();
         }
 
+        if (Wants("Vault"))
+        {
+            VaultTests.Run(Check).GetAwaiter().GetResult();
+        }
+
         if (Wants("EnvDeclarations"))
         {
             EnvDeclarationTests.Run(Check).GetAwaiter().GetResult();

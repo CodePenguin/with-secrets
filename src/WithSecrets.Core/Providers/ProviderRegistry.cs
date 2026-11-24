@@ -249,7 +249,7 @@ public sealed class ProviderRegistry(TimeProvider? clock = null)
     /// down whatever happens. An unregistered type, a configuration that cannot be loaded, an initialization or validation that fails or overruns each become ONE Error
     /// issue with a constant message: neither configuration text nor an exception text is ever returned. Only the adapter's own issues are passed on as they are.
     /// </summary>
-    public async Task<IReadOnlyList<ProviderValidationIssue>> ValidateProposedAsync(string providerType, string configurationJson, string? mountBasePath, ILogger logger, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<ProviderValidationIssue>> ValidateProposedAsync(string providerType, string configurationJson, string? mountBasePath, ILogger logger, CancellationToken cancellationToken, MountKind? mountKind = null)
     {
         ProviderType? type;
         lock (_gate)
@@ -279,7 +279,7 @@ public sealed class ProviderRegistry(TimeProvider? clock = null)
                 List<ProviderValidationIssue> issues = [.. await validating.ValidateConfigurationAsync(configuration, token).ConfigureAwait(false)];
                 if (mountBasePath is not null)
                 {
-                    issues.AddRange(await validating.ValidateMountAsync(configuration, mountBasePath, token).ConfigureAwait(false));
+                    issues.AddRange(await validating.ValidateMountAsync(configuration, mountBasePath, mountKind, token).ConfigureAwait(false));
                 }
 
                 return issues;

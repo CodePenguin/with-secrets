@@ -85,7 +85,8 @@ internal static class ApiTests
         var (publicKey, privateKey) = DotenvxCipher.Instance.NewKeyPair();
         using AdminApp app = new(root, providers: registry,
             sealOnePasswordConfiguration: supplied => OnePassword.OnePasswordProvider.SealConfiguration(supplied, publicKey),
-            sealLastPassConfiguration: (username, password) => LastPass.LastPassProvider.SealConfiguration(username, password, publicKey));
+            sealLastPassConfiguration: (username, password) => LastPass.LastPassProvider.SealConfiguration(username, password, publicKey),
+            sealVaultConfiguration: supplied => Vault.VaultProvider.SealConfiguration(supplied, publicKey));
         ProviderAuthority providers = app.Service.Providers!;
         ProviderInstance instance = providers.Store.AddInstance("vault-one", "test", """{"label":"test"}""", TimeSpan.FromHours(1));
         await providers.StartInstanceAsync(instance);
@@ -134,6 +135,11 @@ internal static class ApiTests
         (int invalidToken, string tokenProblem) = await browser.PostAsync(sealPath, """{"serviceAccountToken":"invalid token canary"}""");
         check(invalidToken == 400 && !tokenProblem.Contains("canary", StringComparison.Ordinal),
             "providers API: a refused token is not echoed");
+
+        (int vaultStatus, string vaultBody) = await browser.PostAsync("/api/v1/providers/vault/seal", JsonSerializer.Serialize(new { token }));
+        check(vaultStatus == 200 && Conform("SealedProviderConfiguration", vaultBody) is null
+            && !vaultBody.Contains(token, StringComparison.Ordinal) && providers.Store.Instances().Count == 1,
+            "providers API: Vault sealing returns ciphertext and leaves stored instances untouched");
 
         const string lastPassSealPath = "/api/v1/providers/lastpass/seal";
         string lastPassBody = JsonSerializer.Serialize(new { username = "user@example.test", masterPassword });

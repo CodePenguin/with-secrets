@@ -302,7 +302,7 @@ public sealed partial class AdminService
             return Refuse($"a {kindName} mount at \"{path}\" already exists");
         }
 
-        ValidationDto validation = await providers.ValidateMountAsync(instanceId, null, basePath, cancel);
+        ValidationDto validation = await providers.ValidateMountAsync(instanceId, null, basePath, cancel, mountKind);
         if (ValidationProblem(validation, confirmed, "mount") is { } refused)
         {
             return Refuse(refused);
@@ -329,7 +329,7 @@ public sealed partial class AdminService
                 return $"a {kindName} mount at \"{path}\" exists now; nothing was added";
             }
 
-            if (AppliedValidationProblem(Wait(providers.ValidateMountAsync(instanceId, null, basePath, CancellationToken.None)), confirmed, Warnings(validation), "mount") is { } late)
+            if (AppliedValidationProblem(Wait(providers.ValidateMountAsync(instanceId, null, basePath, CancellationToken.None, mountKind)), confirmed, Warnings(validation), "mount") is { } late)
             {
                 return "nothing was added: " + late;
             }

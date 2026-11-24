@@ -21,6 +21,8 @@ internal sealed partial class AdminApi
             call => Task.FromResult(ProviderRead(call, (providers, id) => providers.Entries(id)))),
         new("POST", Prefix + "/providers/onepassword/seal", "sealOnePasswordConfiguration", "Seal a write-only 1Password token for provider configuration.", "providers",
             ApiAccess.Authorize, 200, "SealedProviderConfiguration", S.Obj([("serviceAccountToken", S.Str(min: 1, max: 2000))]), [], null, SealOnePasswordConfigurationAsync),
+        new("POST", Prefix + "/providers/vault/seal", "sealVaultConfiguration", "Seal a write-only HashiCorp Vault token for provider configuration.", "providers",
+            ApiAccess.Authorize, 200, "SealedProviderConfiguration", S.Obj([("token", S.Str(min: 1, max: 2000))]), [], null, SealVaultConfigurationAsync),
         new("POST", Prefix + "/providers/lastpass/seal", "sealLastPassConfiguration", "Seal a write-only LastPass master password for provider configuration.", "providers",
             ApiAccess.Authorize, 200, "SealedProviderConfiguration", S.Obj([("username", S.Str(min: 1, max: 256)), ("masterPassword", S.Str(min: 1, max: 8192))]), [], null, SealLastPassConfigurationAsync,
             BodyLimit: MaxBody + 6 * (8192 + 256)),
@@ -39,8 +41,8 @@ internal sealed partial class AdminApi
     private static JsonObject ProviderValidationBody() => new()
     {
         ["oneOf"] = new JsonArray(
-            S.Obj([("type", ParameterSchema("type")), ("config", ParameterSchema("config")), ("mountBase", ParameterSchema("base"))], ["mountBase"]),
-            S.Obj([("instance", ParameterSchema("instance")), ("config", ParameterSchema("config")), ("mountBase", ParameterSchema("base"))], ["config"])),
+            S.Obj([("type", ParameterSchema("type")), ("config", ParameterSchema("config")), ("mountBase", ParameterSchema("base")), ("mountKind", ParameterSchema("kind"))], ["mountBase", "mountKind"]),
+            S.Obj([("instance", ParameterSchema("instance")), ("config", ParameterSchema("config")), ("mountBase", ParameterSchema("base")), ("mountKind", ParameterSchema("kind"))], ["config", "mountKind"])),
     };
 
     // One item is never an empty list: where there is no provider authority there is no item to answer with.
@@ -81,6 +83,12 @@ internal sealed partial class AdminApi
     }
 
     private Task<ApiResult> SealOnePasswordConfigurationAsync(ApiCall call)
+        => SealProviderTokenAsync(call, "serviceAccountToken", "1Password", (providers, token) => providers.SealOnePasswordConfiguration(token));
+
+    private Task<ApiResult> SealVaultConfigurationAsync(ApiCall call)
+        => SealProviderTokenAsync(call, "token", "Vault", (providers, token) => providers.SealVaultConfiguration(token));
+
+    private Task<ApiResult> SealProviderTokenAsync(ApiCall call, string field, string providerName, Func<ProviderAdmin, string, string?> seal)
     {
         if (ProviderRequestProblem(call.Session) is { } refusal)
         {
@@ -89,8 +97,8 @@ internal sealed partial class AdminApi
 
         try
         {
-            string token = call.Body!.Value.GetProperty("serviceAccountToken").GetString()!;
-            string? config = admin.Providers!.SealOnePasswordConfiguration(token);
+            string token = call.Body!.Value.GetProperty(field).GetString()!;
+            string? config = seal(admin.Providers!, token);
             if (config is not null && ProviderAdmin.ConfigurationScreen(config) is null)
             {
                 return Task.FromResult(new ApiResult(200, new { config }));
@@ -102,7 +110,7 @@ internal sealed partial class AdminApi
         }
 
         return Task.FromResult(ProviderProblem(400, "configuration-not-sealed",
-            "The 1Password configuration could not be sealed. Check the token and authority setup."));
+            $"The {providerName} configuration could not be sealed. Check the token and authority setup."));
     }
 
     private Task<ApiResult> SealLastPassConfigurationAsync(ApiCall call)
@@ -147,6 +155,12 @@ internal sealed partial class AdminApi
         JsonElement body = call.Body!.Value;
         string? config = body.TryGetProperty("config", out JsonElement proposed) ? proposed.GetString() : null;
         string? mountBase = body.TryGetProperty("mountBase", out JsonElement path) ? path.GetString() : null;
+        MountKind? mountKind = body.TryGetProperty("mountKind", out JsonElement kind) ? kind.GetString() switch
+        {
+            "tree" => MountKind.Tree,
+            "single" => MountKind.Single,
+            _ => null,
+        } : null;
         if (config is not null && ProviderAdmin.ConfigurationScreen(config) is { } problem)
         {
             return new ApiResult(200, new ValidationDto(false, [new ValidationIssueDto(problem, "error", "config", null)]));
@@ -156,7 +170,7 @@ internal sealed partial class AdminApi
         ProviderAdmin providers = admin.Providers!;
         if (body.TryGetProperty("type", out JsonElement type))
         {
-            return new ApiResult(200, await providers.ValidateConfigurationAsync(type.GetString()!, config!, cancel, mountBase));
+            return new ApiResult(200, await providers.ValidateConfigurationAsync(type.GetString()!, config!, cancel, mountBase, mountKind));
         }
 
         if (!Guid.TryParseExact(body.GetProperty("instance").GetString(), "D", out Guid id))
@@ -164,7 +178,7 @@ internal sealed partial class AdminApi
             return ProviderProblem(400, "invalid-request", "give the provider instance id");
         }
 
-        return new ApiResult(200, await providers.ValidateMountAsync(id, config, mountBase!, cancel));
+        return new ApiResult(200, await providers.ValidateMountAsync(id, config, mountBase!, cancel, mountKind));
     }
 
     private async Task<ApiResult> RefreshMountAsync(ApiCall call)

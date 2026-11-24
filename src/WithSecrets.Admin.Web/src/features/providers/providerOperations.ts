@@ -33,7 +33,9 @@ function maxStale(values: FormValues, errors: Record<string, string>): string {
 const onePassword = 'onepassword'
 const bitwarden = 'bitwarden'
 const lastPass = 'lastpass'
+const vault = 'vault'
 const tokenField: FieldDef = { name: 'serviceAccountToken', label: '1Password service-account token', kind: 'password', maxLength: maxConfig }
+const vaultTokenField: FieldDef = { name: 'vaultToken', label: 'Vault token', kind: 'password', maxLength: maxConfig }
 const lastPassUsernameField: FieldDef = { name: 'lastPassUsername', label: 'LastPass username', kind: 'text', maxLength: 256 }
 const lastPassPasswordField: FieldDef = { name: 'lastPassMasterPassword', label: 'LastPass master password', kind: 'password', maxLength: maxConfig }
 const jsonField: FieldDef = { name: 'config', label: 'Configuration JSON', kind: 'textarea', maxLength: maxConfig }
@@ -46,7 +48,7 @@ const bitwardenFields: FieldDef[] = [
 ]
 
 function initialConfiguration(provider: Provider): FormValues {
-  if (provider.type === onePassword) return {}
+  if (provider.type === onePassword || provider.type === vault) return {}
   if (provider.type === lastPass) {
     return { [lastPassUsernameField.name]: storedUsername(provider.configuration), sealedConfiguration: provider.configuration }
   }
@@ -89,6 +91,12 @@ function providerConfiguration(type: string, values: FormValues, errors: Record<
     if (!sealed) errors.serviceAccountToken = 'Enter a 1Password service-account token.'
     return sealed
   }
+  if (type === vault) {
+    if (text(values, vaultTokenField.name)) return '{}'
+    const sealed = text(values, 'sealedVaultConfiguration')
+    if (!sealed) errors.vaultToken = 'Enter a Vault token.'
+    return sealed
+  }
   if (type === lastPass) {
     const username = text(values, lastPassUsernameField.name)
     if (!username) errors.lastPassUsername = 'Enter a LastPass username.'
@@ -107,6 +115,16 @@ async function sealOnePassword(prepared: Prepared, values: FormValues, signal: A
   return {
     prepared: { ...prepared, parameters: { ...prepared.parameters, config } },
     draft: { ...values, serviceAccountToken: '', sealedConfiguration: config },
+  }
+}
+
+async function sealVault(prepared: Prepared, values: FormValues, signal: AbortSignal) {
+  const token = text(values, vaultTokenField.name)
+  if (!token) return { prepared, draft: values }
+  const { config } = await api.post('/api/v1/providers/vault/seal', { body: { token }, signal })
+  return {
+    prepared: { ...prepared, parameters: { ...prepared.parameters, config } },
+    draft: { ...values, vaultToken: '', sealedVaultConfiguration: config },
   }
 }
 
@@ -136,6 +154,7 @@ function storedUsername(configuration: string): string {
 async function prepareForValidation(prepared: Prepared, values: FormValues, signal: AbortSignal) {
   const type = text(values, 'type')
   if (type === onePassword) return sealOnePassword(prepared, values, signal)
+  if (type === vault) return sealVault(prepared, values, signal)
   if (type === lastPass) return sealLastPass(prepared, values, signal)
   return { prepared, draft: values }
 }
@@ -167,12 +186,13 @@ export function addProvider(types: ProviderType[]): OperationDef {
     fields: [
       { name: 'name', label: 'Provider name', kind: 'text', required: true, maxLength: 64 },
       { name: 'type', label: 'Provider type', kind: 'select', required: true,
-        options: types.map(({ type }) => ({ value: type, label: type === bitwarden ? 'Bitwarden Secrets Manager' : type })) },
+        options: types.map(({ type }) => ({ value: type, label: type === bitwarden ? 'Bitwarden Secrets Manager' : type === vault ? 'HashiCorp Vault' : type })) },
       { ...tokenField, visible: (values) => text(values, 'type') === onePassword },
+      { ...vaultTokenField, visible: (values) => text(values, 'type') === vault },
       ...bitwardenFields.map((field) => ({ ...field, visible: (values: FormValues) => text(values, 'type') === bitwarden })),
       { ...lastPassUsernameField, visible: (values) => text(values, 'type') === lastPass },
       { ...lastPassPasswordField, visible: (values) => text(values, 'type') === lastPass },
-      { ...jsonField, visible: (values) => ![onePassword, bitwarden, lastPass].includes(text(values, 'type')) },
+      { ...jsonField, visible: (values) => ![onePassword, bitwarden, lastPass, vault].includes(text(values, 'type')) },
       ...durationFields,
     ],
     initial: { type: types[0]?.type ?? '', config: '{}', ...bitwardenDefaults, ...durationValues(3600) },
@@ -198,11 +218,12 @@ export function changeProviderConfig(provider: Provider): OperationDef {
     key: 'provider-config',
     title: 'Change configuration',
     confirmLabel: 'Save configuration',
-    warning: provider.type === onePassword || provider.type === lastPass ? undefined : credentialNotice,
+    warning: [onePassword, lastPass, vault].includes(provider.type) ? undefined : credentialNotice,
     about: [['Provider', provider.name]],
     fields: provider.type === bitwarden ? bitwardenFields
       : provider.type === onePassword ? [tokenField]
-        : provider.type === lastPass ? [lastPassUsernameField, lastPassPasswordField] : [jsonField],
+        : provider.type === vault ? [vaultTokenField]
+          : provider.type === lastPass ? [lastPassUsernameField, lastPassPasswordField] : [jsonField],
     initial: initialConfiguration(provider),
     prepare(values) {
       const errors: Record<string, string> = {}
@@ -212,7 +233,8 @@ export function changeProviderConfig(provider: Provider): OperationDef {
       return { operation: 'provider-config', parameters: { id: provider.id, revision: String(provider.revision), config }, summary: `Change configuration for ${provider.name}.`, done: 'Configuration saved.' }
     },
     prepareForValidation: provider.type === onePassword ? sealOnePassword
-      : provider.type === lastPass ? sealLastPass : undefined,
+      : provider.type === vault ? sealVault
+        : provider.type === lastPass ? sealLastPass : undefined,
     validate: ({ parameters }, signal) => api.post('/api/v1/providers/validate', { body: { type: provider.type, config: String(parameters.config) }, signal }),
   }
 }
@@ -256,7 +278,9 @@ export function addMount(provider: Provider): OperationDef {
       { name: 'path', label: 'Logical path', kind: 'text', required: true, maxLength: 200 },
       { name: 'base', label: 'Provider path', kind: 'text', maxLength: 300, hint: provider.type === bitwarden
         ? 'Use a lowercase project UUID for a tree mount. For a single secret, append /S_ followed by the lowercase secret UUID without hyphens.'
-        : 'For a tree mount, leave blank to use the provider root.' },
+        : provider.type === vault
+          ? 'Use a document path for its fields, end a folder path with /, or leave it blank for the KV mount root. For a single secret, use document/field.'
+          : 'For a tree mount, leave blank to use the provider root.' },
     ],
     initial: { kind: 'tree' },
     prepare(values) {
@@ -271,7 +295,7 @@ export function addMount(provider: Provider): OperationDef {
 
       return { operation: 'mount-add', parameters: { instance: provider.id, kind, path, base }, summary: `Mount ${provider.name} at ${path}.`, done: `Added mount ${path}.` }
     },
-    validate: ({ parameters }, signal) => api.post('/api/v1/providers/validate', { body: { instance: provider.id, mountBase: String(parameters.base) }, signal }),
+    validate: ({ parameters }, signal) => api.post('/api/v1/providers/validate', { body: { instance: provider.id, mountBase: String(parameters.base), mountKind: parameters.kind === 'single' ? 'single' : 'tree' }, signal }),
   }
 }
 
