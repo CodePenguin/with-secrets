@@ -103,18 +103,19 @@ internal sealed class AdminApp : IDisposable
     private SecretStore? _native;
 
     private readonly Func<string, string?>? _sealOnePasswordConfiguration;
-    private readonly Func<string, string, string?>? _sealLastPassConfiguration;
     private readonly Func<string, string?>? _sealVaultConfiguration;
+    private readonly Func<InteractiveProviderRefreshRequest, ISigningKey, CancellationToken, Task<IInteractiveProviderRefresh>>? _launchInteractiveRefresh;
 
     /// <summary>With <paramref name="providers" />, the service runs over a native secret store (not the counting one) and composes its provider side over that registry.</summary>
     public AdminApp(string root, bool trusted = true, bool unlocked = true, int askSeconds = 4, IPasskeyAdmin? passkeys = null, bool protection = false, AdminWebAssets? web = null, AdminApp? restoreFrom = null, Func<IApprover>? approver = null, bool machineEndpoint = false,
         ProviderRegistry? providers = null, Func<string, string?>? sealOnePasswordConfiguration = null,
-        Func<string, string, string?>? sealLastPassConfiguration = null, Func<string, string?>? sealVaultConfiguration = null)
+        Func<string, string?>? sealVaultConfiguration = null,
+        Func<InteractiveProviderRefreshRequest, ISigningKey, CancellationToken, Task<IInteractiveProviderRefresh>>? launchInteractiveRefresh = null)
     {
         _providers = providers;
         _sealOnePasswordConfiguration = sealOnePasswordConfiguration;
-        _sealLastPassConfiguration = sealLastPassConfiguration;
         _sealVaultConfiguration = sealVaultConfiguration;
+        _launchInteractiveRefresh = launchInteractiveRefresh;
         _web = web;
         _approver = approver;
         _machineEndpoint = machineEndpoint;
@@ -231,7 +232,7 @@ internal sealed class AdminApp : IDisposable
             ProviderRegistry = _providers,
             SealOnePasswordConfiguration = _sealOnePasswordConfiguration,
             SealVaultConfiguration = _sealVaultConfiguration,
-            SealLastPassConfiguration = _sealLastPassConfiguration,
+            LaunchInteractiveRefresh = _launchInteractiveRefresh,
             Deployment = Machine.Restart(),
             Port = 0,
             UnlockProtection = _protection,

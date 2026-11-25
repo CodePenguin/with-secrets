@@ -129,15 +129,13 @@ public sealed class HostServiceOptions
     /// <summary>Registers host-bundled providers with the local authority's lock and review key.</summary>
     public Action<ProviderRegistry, AuthorityLock, ReviewKeys>? ConfigureProviders { get; init; }
 
+    public Func<InteractiveProviderRefreshRequest, ISigningKey, CancellationToken, Task<IInteractiveProviderRefresh>>? LaunchInteractiveRefresh { get; init; }
 
     /// <summary>Seals a write-only token into the bundled 1Password provider configuration.</summary>
     public Func<string, string?>? SealOnePasswordConfiguration { get; init; }
 
     /// <summary>Seals a write-only token into the bundled Vault provider configuration.</summary>
     public Func<string, string?>? SealVaultConfiguration { get; init; }
-
-    /// <summary>Seals a write-only master password into the bundled LastPass provider configuration.</summary>
-    public Func<string, string, string?>? SealLastPassConfiguration { get; init; }
 
 
     /// <summary>For tests: the provider registry, with the adapter types a test registers. Default: a registry of the adapter types bundled with this release (none yet).</summary>
@@ -256,7 +254,10 @@ public sealed class HostService : IDisposable
                 options.ConfigureProviders?.Invoke(registry, Lock, review);
                 Providers = new ProviderAuthority(secretStore, options.Deployment.Store, options.Deployment.Keys, registry, Audit, authorityClock);
                 Admin.Providers = new ProviderAdmin(Providers, options.State.Audit, options.SealOnePasswordConfiguration,
-                    options.SealLastPassConfiguration, options.SealVaultConfiguration);
+                    options.SealVaultConfiguration, options.LaunchInteractiveRefresh is not null);
+                if (options.LaunchInteractiveRefresh is { } launch)
+                    Admin.InteractiveRefreshes = new(Providers, options.State.Audit, options.Deployment.Keys, authorityClock,
+                        () => secretStore.Current().Manifest?.Store, launch);
             }
         }
 
@@ -1427,6 +1428,7 @@ public sealed class HostService : IDisposable
             _launches?.Dispose();
         }
 
+        Admin.InteractiveRefreshes?.CancelAll();
         Providers?.Dispose();
         Authorization.Keys.Dispose();
         CancellationTokenSource[] sources;

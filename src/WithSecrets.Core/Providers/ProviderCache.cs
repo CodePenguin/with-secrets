@@ -53,6 +53,21 @@ public sealed class ProviderCache(ProviderStore store, AuthorityKeyRing keys, IS
     /// <summary>True while the authority is locked: nothing is signed, served or refreshed then.</summary>
     public bool IsLocked => keys.LockState?.IsLocked == true;
 
+    internal CacheWrite PutInteractive(Guid instanceId, IReadOnlyDictionary<string, string> ciphertexts,
+        DateTimeOffset verifiedAt, string storePublicKey, long generation,
+        Action<Microsoft.Data.Sqlite.SqliteConnection, Microsoft.Data.Sqlite.SqliteTransaction> appendAudit)
+    {
+        ISigningKey key = keys.Current();
+        string fingerprint = KeyIdentity.Fingerprint(key.PublicKey);
+        List<(string, CacheRow)> rows = [];
+        foreach ((string externalId, string ciphertext) in ciphertexts)
+        {
+            byte[] signature = key.Sign(Seal(instanceId, externalId, verifiedAt, SecretStore.Hash(ciphertext), storePublicKey, fingerprint));
+            rows.Add((externalId, new CacheRow(ciphertext, verifiedAt.UtcTicks, storePublicKey, fingerprint, signature)));
+        }
+        return store.WriteCache(instanceId, rows, generation, storePublicKey, appendAudit);
+    }
+
     /// <summary>
     /// The row of (instance, external id) when it verifies: sealed by the active authority key as the key store holds it, the ciphertext matching its sealed hash, and for
     /// <paramref name="currentStorePublicKey" />. Null for a missing row, a bad or non-active-key seal, a hash mismatch, another store key, an unreadable row,

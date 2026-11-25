@@ -19,7 +19,8 @@ public sealed class ProviderRefresher(
     ProviderInvalidation invalidation,
     TimeProvider clock,
     ILogger logger,
-    Func<TimeSpan, CancellationToken, Task>? delay = null)
+    Func<TimeSpan, CancellationToken, Task>? delay = null,
+    Func<string, bool>? interactive = null)
 {
     private static readonly TimeSpan FirstBackoff = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan MaxBackoff = TimeSpan.FromMinutes(15);
@@ -89,7 +90,8 @@ public sealed class ProviderRefresher(
 
         // Baseline BEFORE any read, as delivery does: an invalidation after this point discards that instance's results.
         IReadOnlyDictionary<Guid, long> generations = store.Generations();
-        ProviderInstance[] instances = [.. store.Instances().Where(instance => instance.MaxStale > TimeSpan.Zero)];
+        ProviderInstance[] instances = [.. store.Instances().Where(instance => instance.MaxStale > TimeSpan.Zero
+            && interactive?.Invoke(instance.ProviderType) != true)];
         if (instances.Length == 0)
         {
             Forget([]);

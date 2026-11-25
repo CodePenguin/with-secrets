@@ -63,8 +63,27 @@ public sealed partial class AdminService
     /// The plan of an operation, or why there is none. The provider and mount operations are planned asynchronously: their plan validates the proposed configuration or
     /// mount through the provider's adapter before any page exists.
     /// </summary>
-    private async Task<(AdminPlan? Plan, string? Refusal, int Status)> PlanAsync(string op, IReadOnlyDictionary<string, string> args, CancellationToken cancel)
+    private async Task<(AdminPlan? Plan, string? Refusal, int Status)> PlanAsync(object owner, string op, IReadOnlyDictionary<string, string> args, CancellationToken cancel)
     {
+        if (op == "provider-refresh-values" && !_p.Lock.IsLocked)
+        {
+            if (owner is not AdminSession session || InteractiveRefreshes is not { } refreshes
+                || !Guid.TryParseExact(Arg(args, "id"), "D", out Guid id)
+                || !refreshes.TryDescribe(id, session, out string sentence, out (string, string)[] parameters))
+                return (null, "The terminal has not returned an active staged refresh for this session.", 409);
+
+            string digest = parameters[2].Item2;
+            return (new AdminPlan(op, sentence, parameters, authorization => ProviderChange(() =>
+            {
+                string? refusal = null;
+                return _p.Lock.WhileUnlocked(() =>
+                {
+                    refusal = refreshes.Commit(id, session, digest, authorization.Admin!.Signer);
+                    return true;
+                }) ? refusal : "The authority is locked.";
+            })), null, 200);
+        }
+
         if (IsProviderOperation(op) && !_p.Lock.IsLocked)
         {
             return await ProviderPlanAsync(op, args, cancel);

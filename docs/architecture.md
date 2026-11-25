@@ -838,6 +838,8 @@ Ruling: mounted names share the store-name syntax. A logical path is exactly a s
 
 **First-party providers and storage.** The default store writes compact JWE through Microsoft IdentityModel. Project dotenvx resolution is a launch-host integration and follows the approval boundary in 10.1. Armor remains a possible separate provider if unattended access to hosted values is verified.
 
+LastPass uses a native terminal for an explicit refresh and serves the approved encrypted values through the provider cache.
+
 ### 10.3.1 Provider adapter contract and lifecycle
 
 **Status:** Contract built as specified below (`Providers/ProviderContract.cs`), with batch validation (`ProviderBatch`) and the registry (`ProviderRegistry`: types, instances, lifecycle, health, invalidation). The authority bundles Bitwarden Secrets Manager and exposes its setup in the administration app.

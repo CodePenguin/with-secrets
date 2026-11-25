@@ -8,3 +8,8 @@
   padding-inline-start: var(--space-5);
   overflow-wrap: anywhere;
 }
+.matchingCode {
+  font-size: 1.4em;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+}

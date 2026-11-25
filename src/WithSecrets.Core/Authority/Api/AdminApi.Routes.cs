@@ -91,6 +91,7 @@ internal sealed partial class AdminApi
         ("provider-add", ["name", "type", "config", "max-stale-seconds", "confirm-warnings"]),
         ("provider-config", ["id", "revision", "config", "confirm-warnings"]),
         ("provider-max-stale", ["id", "revision", "max-stale-seconds"]),
+        ("provider-refresh-values", ["id"]),
         ("provider-remove", ["id", "revision"]),
         ("mount-add", ["instance", "kind", "path", "base", "confirm-warnings"]),
         ("mount-remove", ["id"]),

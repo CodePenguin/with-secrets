@@ -101,6 +101,7 @@ public sealed partial class AdminService
             ClearAuthorizations();
             CancelPending();
             Secrets?.CancelAll();
+            InteractiveRefreshes?.CancelAll();
         });
     }
 
@@ -114,6 +115,8 @@ public sealed partial class AdminService
 
     /// <summary>Provider and mount administration. Set by the host service where a provider authority exists; null where there is none (a remote authority).</summary>
     internal ProviderAdmin? Providers { get; set; }
+
+    internal InteractiveRefreshes? InteractiveRefreshes { get; set; }
 
     internal IProofMethod? ApprovalProof => _p.ApprovalProof?.Invoke();
 
@@ -579,6 +582,7 @@ public sealed partial class AdminService
 
         // What the session had open (a secret entry with its key and sealed values) ends with it.
         Secrets?.CancelSession(session.Id);
+        InteractiveRefreshes?.CancelSession(session.Id);
     }
 }
 

@@ -32,12 +32,19 @@ function maxStale(values: FormValues, errors: Record<string, string>): string {
 
 const onePassword = 'onepassword'
 const bitwarden = 'bitwarden'
-const lastPass = 'lastpass'
+export const lastPassRefresh = 'lastpass-refresh'
+export const lastPassFields: Record<string, string> = {
+  F_70617373776F7264: 'password',
+  F_757365726E616D65: 'username',
+  F_6E6F7465: 'note',
+  F_75726C: 'url',
+}
 const vault = 'vault'
 const tokenField: FieldDef = { name: 'serviceAccountToken', label: '1Password service-account token', kind: 'password', maxLength: maxConfig }
 const vaultTokenField: FieldDef = { name: 'vaultToken', label: 'Vault token', kind: 'password', maxLength: maxConfig }
-const lastPassUsernameField: FieldDef = { name: 'lastPassUsername', label: 'LastPass username', kind: 'text', maxLength: 256 }
-const lastPassPasswordField: FieldDef = { name: 'lastPassMasterPassword', label: 'LastPass master password', kind: 'password', maxLength: maxConfig }
+const lastPassUsernameField: FieldDef = { name: 'lastPassUsername', label: 'LastPass account email', kind: 'text', maxLength: 256 }
+const lastPassRegionField: FieldDef = { name: 'lastPassRegion', label: 'LastPass region', kind: 'select',
+  options: [{ value: 'us', label: 'lastpass.com' }, { value: 'eu', label: 'lastpass.eu' }] }
 const jsonField: FieldDef = { name: 'config', label: 'Configuration JSON', kind: 'textarea', maxLength: maxConfig }
 const bitwardenDefaults = { tokenEnv: 'BWS_ACCESS_TOKEN', serverUrl: 'https://vault.bitwarden.com' }
 const bitwardenFields: FieldDef[] = [
@@ -49,8 +56,16 @@ const bitwardenFields: FieldDef[] = [
 
 function initialConfiguration(provider: Provider): FormValues {
   if (provider.type === onePassword || provider.type === vault) return {}
-  if (provider.type === lastPass) {
-    return { [lastPassUsernameField.name]: storedUsername(provider.configuration), sealedConfiguration: provider.configuration }
+  if (provider.type === lastPassRefresh) {
+    try {
+      const config = JSON.parse(provider.configuration) as { username?: unknown; european?: unknown } | null
+      return {
+        lastPassUsername: typeof config?.username === 'string' ? config.username : '',
+        lastPassRegion: config?.european === true ? 'eu' : 'us',
+      }
+    } catch {
+      return { lastPassUsername: '', lastPassRegion: 'us' }
+    }
   }
   if (provider.type !== bitwarden) return { config: provider.configuration }
 
@@ -97,13 +112,10 @@ function providerConfiguration(type: string, values: FormValues, errors: Record<
     if (!sealed) errors.vaultToken = 'Enter a Vault token.'
     return sealed
   }
-  if (type === lastPass) {
+  if (type === lastPassRefresh) {
     const username = text(values, lastPassUsernameField.name)
-    if (!username) errors.lastPassUsername = 'Enter a LastPass username.'
-    if (text(values, lastPassPasswordField.name)) return '{}'
-    const sealed = text(values, 'sealedConfiguration')
-    if (!sealed || storedUsername(sealed) !== username) errors.lastPassMasterPassword = 'Enter the master password for this LastPass username.'
-    return sealed
+    if (!/^[^@\s]+@[^@\s]+$/.test(username)) errors.lastPassUsername = 'Enter your LastPass account email address.'
+    return JSON.stringify({ username, european: text(values, 'lastPassRegion') === 'eu' })
   }
   return configuration(values, errors)
 }
@@ -128,34 +140,10 @@ async function sealVault(prepared: Prepared, values: FormValues, signal: AbortSi
   }
 }
 
-async function sealLastPass(prepared: Prepared, values: FormValues, signal: AbortSignal) {
-  const masterPassword = text(values, lastPassPasswordField.name)
-  if (!masterPassword) return { prepared, draft: values }
-  const username = text(values, lastPassUsernameField.name)
-  const { config } = await api.post('/api/v1/providers/lastpass/seal', { body: { username, masterPassword }, signal })
-  return {
-    prepared: { ...prepared, parameters: { ...prepared.parameters, config } },
-    draft: { ...values, lastPassMasterPassword: '', sealedConfiguration: config },
-  }
-}
-
-function storedUsername(configuration: string): string {
-  try {
-    const parsed: unknown = JSON.parse(configuration)
-    if (parsed && typeof parsed === 'object' && typeof (parsed as { username?: unknown }).username === 'string') {
-      return (parsed as { username: string }).username
-    }
-  } catch {
-    // A malformed stored configuration is shown as it is; the backend validation reports it.
-  }
-  return ''
-}
-
 async function prepareForValidation(prepared: Prepared, values: FormValues, signal: AbortSignal) {
   const type = text(values, 'type')
   if (type === onePassword) return sealOnePassword(prepared, values, signal)
   if (type === vault) return sealVault(prepared, values, signal)
-  if (type === lastPass) return sealLastPass(prepared, values, signal)
   return { prepared, draft: values }
 }
 
@@ -186,16 +174,18 @@ export function addProvider(types: ProviderType[]): OperationDef {
     fields: [
       { name: 'name', label: 'Provider name', kind: 'text', required: true, maxLength: 64 },
       { name: 'type', label: 'Provider type', kind: 'select', required: true,
-        options: types.map(({ type }) => ({ value: type, label: type === bitwarden ? 'Bitwarden Secrets Manager' : type === vault ? 'HashiCorp Vault' : type })) },
+        options: types.map(({ type }) => ({ value: type, label: type === bitwarden ? 'Bitwarden Secrets Manager' : type === vault ? 'HashiCorp Vault'
+          : type === lastPassRefresh ? 'LastPass' : type })) },
       { ...tokenField, visible: (values) => text(values, 'type') === onePassword },
       { ...vaultTokenField, visible: (values) => text(values, 'type') === vault },
       ...bitwardenFields.map((field) => ({ ...field, visible: (values: FormValues) => text(values, 'type') === bitwarden })),
-      { ...lastPassUsernameField, visible: (values) => text(values, 'type') === lastPass },
-      { ...lastPassPasswordField, visible: (values) => text(values, 'type') === lastPass },
-      { ...jsonField, visible: (values) => ![onePassword, bitwarden, lastPass, vault].includes(text(values, 'type')) },
+      { ...lastPassUsernameField, visible: (values) => text(values, 'type') === lastPassRefresh },
+      { ...lastPassRegionField, visible: (values) => text(values, 'type') === lastPassRefresh },
+      { ...jsonField, visible: (values) => ![onePassword, bitwarden, lastPassRefresh, vault].includes(text(values, 'type')) },
       ...durationFields,
     ],
-    initial: { type: types[0]?.type ?? '', config: '{}', ...bitwardenDefaults, ...durationValues(0) },
+    initial: { type: types[0]?.type ?? '', config: '{}', lastPassRegion: 'us', ...bitwardenDefaults,
+      ...durationValues(types[0]?.type === lastPassRefresh ? 3600 : 0) },
     prepare(values) {
       const errors: Record<string, string> = {}
       const name = text(values, 'name')
@@ -204,6 +194,7 @@ export function addProvider(types: ProviderType[]): OperationDef {
       if (!types.some((item) => item.type === type)) errors.type = 'Choose a provider type.'
       const config = providerConfiguration(type, values, errors)
       const seconds = maxStale(values, errors)
+      if (type === lastPassRefresh && seconds === '0') errors.hours = 'Set how long LastPass values may be used after a refresh.'
       if (Object.keys(errors).length) return { errors }
 
       return { operation: 'provider-add', parameters: { name, type, config, 'max-stale-seconds': seconds }, summary: `Add provider ${name}.`, done: `Added provider ${name}.` }
@@ -218,12 +209,12 @@ export function changeProviderConfig(provider: Provider): OperationDef {
     key: 'provider-config',
     title: 'Change configuration',
     confirmLabel: 'Save configuration',
-    warning: [onePassword, lastPass, vault].includes(provider.type) ? undefined : credentialNotice,
+    warning: [onePassword, lastPassRefresh, vault].includes(provider.type) ? undefined : credentialNotice,
     about: [['Provider', provider.name]],
     fields: provider.type === bitwarden ? bitwardenFields
       : provider.type === onePassword ? [tokenField]
         : provider.type === vault ? [vaultTokenField]
-          : provider.type === lastPass ? [lastPassUsernameField, lastPassPasswordField] : [jsonField],
+          : provider.type === lastPassRefresh ? [lastPassUsernameField, lastPassRegionField] : [jsonField],
     initial: initialConfiguration(provider),
     prepare(values) {
       const errors: Record<string, string> = {}
@@ -232,9 +223,7 @@ export function changeProviderConfig(provider: Provider): OperationDef {
 
       return { operation: 'provider-config', parameters: { id: provider.id, revision: String(provider.revision), config }, summary: `Change configuration for ${provider.name}.`, done: 'Configuration saved.' }
     },
-    prepareForValidation: provider.type === onePassword ? sealOnePassword
-      : provider.type === vault ? sealVault
-        : provider.type === lastPass ? sealLastPass : undefined,
+    prepareForValidation: provider.type === onePassword ? sealOnePassword : provider.type === vault ? sealVault : undefined,
     validate: ({ parameters }, signal) => api.post('/api/v1/providers/validate', { body: { type: provider.type, config: String(parameters.config) }, signal }),
   }
 }
@@ -245,11 +234,14 @@ export function changeMaxStale(provider: Provider): OperationDef {
     title: 'Change maximum staleness',
     confirmLabel: 'Save cache policy',
     about: [['Provider', provider.name]],
-    fields: durationFields,
+    fields: provider.type === lastPassRefresh
+      ? durationFields.map(field => field.name === 'hours' ? { ...field, hint: 'Cached values can be used for this long after a manual refresh.' } : field)
+      : durationFields,
     initial: durationValues(provider.maxStaleSeconds),
     prepare(values) {
       const errors: Record<string, string> = {}
       const seconds = maxStale(values, errors)
+      if (provider.type === lastPassRefresh && seconds === '0') errors.hours = 'Set how long LastPass values may be used after a refresh.'
       if (Object.keys(errors).length) return { errors }
 
       return { operation: 'provider-max-stale', parameters: { id: provider.id, revision: String(provider.revision), 'max-stale-seconds': seconds }, summary: `Change how long cached values from ${provider.name} may be served.`, done: 'Cache policy saved.' }
@@ -268,12 +260,18 @@ export function removeProvider(provider: Provider): OperationDef {
 }
 
 export function addMount(provider: Provider): OperationDef {
+  const interactive = provider.type === lastPassRefresh
   return {
     key: 'mount-add',
     title: 'Add mount',
     confirmLabel: 'Add mount',
     about: [['Provider', provider.name]],
-    fields: [
+    fields: interactive ? [
+      { name: 'path', label: 'Logical path', kind: 'text', required: true, maxLength: 200 },
+      { name: 'itemId', label: 'LastPass item ID', kind: 'text', required: true, maxLength: 32 },
+      { name: 'itemField', label: 'LastPass field', kind: 'select',
+        options: Object.entries(lastPassFields).map(([value, label]) => ({ value, label })) },
+    ] : [
       { name: 'kind', label: 'Mount kind', kind: 'select', options: [{ value: 'tree', label: 'Tree' }, { value: 'single', label: 'Single secret' }] },
       { name: 'path', label: 'Logical path', kind: 'text', required: true, maxLength: 200 },
       { name: 'base', label: 'Provider path', kind: 'text', maxLength: 300, hint: provider.type === bitwarden
@@ -282,12 +280,16 @@ export function addMount(provider: Provider): OperationDef {
           ? 'Use a document path for its fields, end a folder path with /, or leave it blank for the KV mount root. For a single secret, use document/field.'
           : 'For a tree mount, leave blank to use the provider root.' },
     ],
-    initial: { kind: 'tree' },
+    initial: interactive ? { kind: 'single', itemField: 'F_70617373776F7264' } : { kind: 'tree' },
     prepare(values) {
       const errors: Record<string, string> = {}
-      const kind = text(values, 'kind')
+      const kind = interactive ? 'single' : text(values, 'kind')
       const path = text(values, 'path')
-      const base = text(values, 'base')
+      const id = text(values, 'itemId')
+      const field = text(values, 'itemField')
+      const base = interactive ? `${id}/${field}` : text(values, 'base')
+      if (interactive && !/^[1-9][0-9]{0,31}$/.test(id)) errors.itemId = 'Enter the numeric LastPass item ID.'
+      if (interactive && !Object.hasOwn(lastPassFields, field)) errors.itemField = 'Choose a LastPass field.'
       if (kind !== 'tree' && kind !== 'single') errors.kind = 'Choose a mount kind.'
       if (!path || path.length > 200) errors.path = 'Enter a logical path of 1 to 200 characters.'
       if (kind === 'single' && !base) errors.base = 'Enter the provider path to the secret.'

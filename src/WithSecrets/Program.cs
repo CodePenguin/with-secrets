@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.IO.Pipes;
 using System.Text;
 using WithSecrets.Bitwarden;
 using WithSecrets.LastPass;
@@ -79,6 +80,11 @@ internal static class Program
             TerminalPrompt.Final("with-secrets: " + isolationProblem);
 
             return RunCommand.Usage;
+        }
+
+        if (args is ["--lastpass-refresh-helper", string channel])
+        {
+            return await RunLastPassRefreshHelper(channel);
         }
 
         CliCommand? command = CliArgs.Parse(args, out string error);
@@ -229,6 +235,44 @@ internal static class Program
     }
 
     /// <summary>The host service in the foreground, until Ctrl+C. Windows service installation and start at logon come later.</summary>
+    private static async Task<int> RunLastPassRefreshHelper(string channel)
+    {
+        if (channel.Length != 32 || !channel.All(Uri.IsHexDigit)
+            || Console.IsInputRedirected || Console.IsOutputRedirected)
+        {
+            Console.Error.WriteLine("Open the WithSecrets LastPass refresh from the browser in an interactive terminal.");
+            return RunCommand.Usage;
+        }
+
+        HostConfigLoad config = HostConfigFile.InFolder(StorePath()).Load();
+        if (config.Problem is not null || config.Config?.Authority is not { } authority)
+        {
+            Console.Error.WriteLine("This WithSecrets installation has no usable authority pin for the LastPass refresh.");
+            return RunCommand.StoreError;
+        }
+
+        using CancellationTokenSource cancel = new();
+        void OnCancel(object? sender, ConsoleCancelEventArgs args)
+        {
+            args.Cancel = true;
+            cancel.Cancel();
+        }
+        Console.CancelKeyPress += OnCancel;
+        try
+        {
+            using NamedPipeClientStream pipe = new(".", LastPassRefreshLauncher.PipePrefix + channel, PipeDirection.InOut,
+                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            await pipe.ConnectAsync(5000, cancel.Token);
+            return await LastPassRefreshTerminal.RunAsync(pipe, authority.Fingerprint, cancel.Token);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or TimeoutException or OperationCanceledException)
+        {
+            Console.Error.WriteLine("The WithSecrets LastPass helper could not connect to the refresh request.");
+            return 1;
+        }
+        finally { Console.CancelKeyPress -= OnCancel; }
+    }
+
     private static string StorePath() => TestIsolation.Current?.StoreFolder ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), StoreFolder);
 
     private static async Task<int> RunPairAsync()
@@ -340,23 +384,18 @@ internal static class Program
                 Deployment = deployment,
                 ConfigureProviders = (registry, authorityLock, review) =>
                 {
+                    LastPassProvider.RegisterInteractive(registry);
                     BitwardenProvider.Register(registry, authorityLock);
                     OnePasswordProvider.Register(registry, authorityLock, review,
                         Environment.GetEnvironmentVariable(OnePasswordProvider.ExecutableVariable) ?? "");
-                    if (Environment.GetEnvironmentVariable(LastPassProvider.AllowDiskCacheVariable) == "1")
-                    {
-                        LastPassProvider.Register(registry, authorityLock, review,
-                            Environment.GetEnvironmentVariable(LastPassProvider.ExecutableVariable) ?? "");
-                    }
                     VaultProvider.Register(registry, authorityLock, review,
                         Environment.GetEnvironmentVariable(VaultProvider.AddressVariable) ?? "",
                         Environment.GetEnvironmentVariable(VaultProvider.MountVariable) ?? "secret",
                         Environment.GetEnvironmentVariable(VaultProvider.NamespaceVariable));
                 },
+                LaunchInteractiveRefresh = LastPassRefreshLauncher.StartAsync,
                 SealOnePasswordConfiguration = token => state.TryManifest(out Manifest? manifest, out _) && manifest?.Review is { } reviewKey
                     ? OnePasswordProvider.SealConfiguration(token, reviewKey.PublicKey) : null,
-                SealLastPassConfiguration = (username, masterPassword) => state.TryManifest(out Manifest? manifest, out _) && manifest?.Review is { } reviewKey
-                    ? LastPassProvider.SealConfiguration(username, masterPassword, reviewKey.PublicKey) : null,
                 SealVaultConfiguration = token => state.TryManifest(out Manifest? manifest, out _) && manifest?.Review is { } reviewKey
                     ? VaultProvider.SealConfiguration(token, reviewKey.PublicKey) : null,
                 MachineEndpoint = machineEndpoint,

@@ -21,7 +21,10 @@ export function OperationProvider({ children }: { children: ReactNode }) {
   return (
     <OperationContext.Provider value={(def) => setActive({ def, id: Date.now() })}>
       {children}
-      {active ? <OperationDialog key={active.id} def={active.def} resume={active.resume} onClose={() => setActive(null)} /> : null}
+      {active ? <OperationDialog key={active.id} def={active.def} resume={active.resume} onClose={() => {
+        active.def?.onClose?.()
+        setActive(null)
+      }} /> : null}
     </OperationContext.Provider>
   )
 }

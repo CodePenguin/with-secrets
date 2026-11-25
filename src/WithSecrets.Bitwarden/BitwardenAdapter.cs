@@ -238,7 +238,7 @@ public sealed class BitwardenAdapter(string executablePath, Func<string, Uri, st
         }
     }
 
-    /// <summary>A secret the provider says is gone: its cached value and the grants that name it end (the same report 1Password and LastPass make).</summary>
+    /// <summary>A secret the provider says is gone: its cached value and the grants that name it end.</summary>
     private void ReportRemoved(Connection connection, IReadOnlyList<ProviderSecretRequest> requests, ProviderSecretResult[] results)
     {
         string[] removed = [.. results.Where(result => result?.ErrorKind == ProviderErrorKind.SecretNotFound)

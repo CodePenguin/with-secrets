@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import { entry, mount, provider, session, signedIn, status, violations } from '../../test/fakeApi'
 import { renderApp } from '../../test/render'
+import { fromBase64Url, toBase64Url } from '../../lib/passkey'
 
 const instance = provider()
 const mounted = mount()
@@ -78,41 +79,60 @@ describe('Providers page', () => {
     })
   })
 
-  it.each(['add', 'replace'] as const)('seals the LastPass master password before the %s authorization', async (mode) => {
+  it('shows the terminal verification details and asks for a passkey only after values are staged', async () => {
     const api = providerApi()
-    const seal = 'POST /api/v1/providers/lastpass/seal'
-    const config = '{"username":"user@example.test","encryptedConfiguration":"encrypted:fixture"}'
-    const masterPassword = 'lp_test_password'
-    const existing = { ...instance, type: 'lastpass', configuration: config, actions: ['config'] }
-    api.on('GET /api/v1/providers', { body: [existing] })
-    api.on('GET /api/v1/providers/types', { body: [{ type: 'test', adapterVersion: '1.0' }, { type: 'lastpass', adapterVersion: '1.0' }] })
-    api.on(seal, { body: { config } })
-    api.on(validate, { body: { ok: true, issues: [{ message: 'Check vault access.', severity: 'warning' }] } })
     const user = userEvent.setup()
-    renderApp(mode === 'add' ? '/providers' : `/providers/${instance.id}`)
-    await user.click(await screen.findByRole('button', { name: mode === 'add' ? /^Add provider$/ : `Change configuration ${instance.name}` }))
+    const id = 'a29b54c6-ed2e-42c1-be2b-e535142807e3'
+    const refresh = { id, state: 'waiting', requestedBy: 'Laptop', providerName: instance.name,
+      account: 'Vault@example.test', region: 'lastpass.com', expires: '2026-11-25T19:10:00Z',
+      mappings: [{ providerPath: '100/F_70617373776F7264', localName: 'APP_PASSWORD' }] }
+    const launch = `POST /api/v1/providers/${instance.id}/value-refreshes`
+    const get = `GET /api/v1/provider-value-refreshes/${id}`
+    api.on('GET /api/v1/providers', { body: [{ ...instance, type: 'lastpass-refresh', actions: ['refresh-values'] }] })
+    api.on(launch, async ({ body }) => {
+      const browserKey = await crypto.subtle.importKey('spki', fromBase64Url(String(body?.browserKey)),
+        { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['encrypt'])
+      const encrypted = await crypto.subtle.encrypt('RSA-OAEP', browserKey, new TextEncoder().encode('A7BW'))
+      return { status: 201, body: { refresh, encryptedCode: toBase64Url(new Uint8Array(encrypted)) } }
+    })
+    api.on(get, { body: refresh })
+    renderApp(`/providers/${instance.id}`)
+    await user.click(await screen.findByRole('button', { name: `Refresh values for ${instance.name}` }))
+    const dialog = within(screen.getByRole('dialog'))
+    expect(await dialog.findByText('A7BW', {}, { timeout: 3000 })).toBeVisible()
+    expect(dialog.getByText('Vault@example.test')).toBeVisible()
+    expect(dialog.getByText('Item 100 / password →', { exact: false })).toBeVisible()
+    expect(dialog.getByText('APP_PASSWORD')).toBeVisible()
+    expect(dialog.queryByRole('textbox')).not.toBeInTheDocument()
+    expect(dialog.queryByRole('button', { name: 'Review and approve' })).not.toBeInTheDocument()
+    expect(api.count(authorize)).toBe(0)
+    api.on(get, { body: { ...refresh, state: 'ready' } })
+    await user.click(await dialog.findByRole('button', { name: 'Review and approve' }, { timeout: 3000 }))
+    await waitFor(() => expect(api.count(authorize)).toBe(1))
+    expect(api.calls.find((call) => call.method + ' ' + call.path === authorize)?.body).toEqual({
+      operation: 'provider-refresh-values', parameters: { id },
+    })
+    expect(api.calls.find((call) => call.method + ' ' + call.path === launch)?.body).toEqual({ browserKey: expect.any(String) })
+  })
+
+  it('configures LastPass with an email, region and cache lifetime', async () => {
+    const api = providerApi()
+    const config = '{"username":"Vault@example.test","european":true}'
+    api.on('GET /api/v1/providers/types', { body: [{ type: 'lastpass-refresh', adapterVersion: '1' }] })
+    api.on(validate, { body: { ok: true, issues: [] } })
+    const user = userEvent.setup()
+    renderApp('/providers')
+    await user.click(await screen.findByRole('button', { name: /^Add provider$/ }))
     const form = within(screen.getByRole('dialog'))
-    if (mode === 'add') {
-      await user.type(form.getByLabelText(/Provider name/), 'Team vault')
-      await user.selectOptions(form.getByLabelText(/Provider type/), 'lastpass')
-      await user.type(form.getByLabelText(/LastPass username/), 'user@example.test')
-    }
-    expect(form.queryByLabelText(/Configuration JSON/)).not.toBeInTheDocument()
-    const input = form.getByLabelText(/master password/)
-    expect(input).toHaveAttribute('type', 'password')
-    expect(input).toHaveValue('')
-    await user.type(input, masterPassword)
-    await user.click(form.getByRole('button', { name: 'Continue' }))
-    expect(await form.findByText('Check vault access.')).toBeVisible()
-    expect(input).toHaveValue('')
-    await user.click(form.getByRole('checkbox', { name: 'Continue with these warnings' }))
+    await user.type(form.getByLabelText(/Provider name/), 'Team vault')
+    await user.type(form.getByLabelText(/LastPass account email/), 'Vault@example.test')
+    await user.selectOptions(form.getByLabelText(/LastPass region/), 'eu')
+    expect(form.queryByLabelText(/master password/)).not.toBeInTheDocument()
     await user.click(form.getByRole('button', { name: 'Continue' }))
     await waitFor(() => expect(api.count(authorize)).toBe(1))
-    expect(api.count(seal)).toBe(1)
-    expect(api.calls.filter((call) => JSON.stringify(call.body)?.includes(masterPassword)).map((call) => call.method + ' ' + call.path)).toEqual([seal])
     expect(api.calls.find((call) => call.method + ' ' + call.path === authorize)?.body).toMatchObject({
-      operation: mode === 'add' ? 'provider-add' : 'provider-config',
-      parameters: { config, 'confirm-warnings': 'yes' },
+      operation: 'provider-add',
+      parameters: { config, type: 'lastpass-refresh', 'max-stale-seconds': '3600' },
     })
   })
 

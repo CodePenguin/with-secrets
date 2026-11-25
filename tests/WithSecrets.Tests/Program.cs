@@ -114,11 +114,6 @@ internal static class Program
 
     private static int Main(string[] args)
     {
-        // The LastPass adapter starts this executable as its fake lpass, with the password on stdin.
-        if (Environment.GetEnvironmentVariable("WS_LPASS_FAKE") == "1")
-        {
-            return LastPassTests.FakeLpass(args);
-        }
 
         if (args is [DotenvxRun.CaptureArgument, var pipe, .. var names])
         {
@@ -329,7 +324,7 @@ internal static class Program
 
         if (Wants("LastPass"))
         {
-            LastPassTests.Run(Check).GetAwaiter().GetResult();
+            LastPassRefreshTests.Run(Check).GetAwaiter().GetResult();
         }
 
         if (Wants("Bitwarden"))

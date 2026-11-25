@@ -20,7 +20,7 @@ public sealed record InstanceStatus(
 /// </summary>
 public sealed class ProviderRegistry(TimeProvider? clock = null)
 {
-    private sealed record ProviderType(string AdapterVersion, Func<IProviderAdapter> Factory, Func<IAdapterConfiguration> NewConfiguration);
+    private sealed record ProviderType(string AdapterVersion, Func<IProviderAdapter> Factory, Func<IAdapterConfiguration> NewConfiguration, bool Interactive);
 
     private sealed class Instance(Guid id, string providerType, IProviderAdapter adapter, ILogger logger, DateTimeOffset now) : IAdapterStatusReporter
     {
@@ -168,15 +168,21 @@ public sealed class ProviderRegistry(TimeProvider? clock = null)
     /// <summary>Raised for each accepted <see cref="InvalidateProviderDataEvent" />, with the reporting instance's id. Not raised after shutdown began.</summary>
     public event Action<Guid, InvalidateProviderDataEvent>? InvalidationRequested;
 
-    public void RegisterType(string providerType, string adapterVersion, Func<IProviderAdapter> factory, Func<IAdapterConfiguration> newConfiguration)
+    public void RegisterType(string providerType, string adapterVersion, Func<IProviderAdapter> factory, Func<IAdapterConfiguration> newConfiguration,
+        bool interactive = false)
     {
         lock (_gate)
         {
-            if (!_types.TryAdd(providerType, new ProviderType(adapterVersion, factory, newConfiguration)))
+            if (!_types.TryAdd(providerType, new ProviderType(adapterVersion, factory, newConfiguration, interactive)))
             {
                 throw new InvalidOperationException($"Provider type '{providerType}' is already registered.");
             }
         }
+    }
+
+    internal bool IsInteractiveType(string type)
+    {
+        lock (_gate) return _types.TryGetValue(type, out ProviderType? registration) && registration.Interactive;
     }
 
     /// <summary>

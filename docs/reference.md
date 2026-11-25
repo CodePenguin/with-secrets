@@ -82,9 +82,11 @@ For **Bitwarden Secrets Manager**, install `bws` on the authority service's PATH
 
 In the administration app, open **Providers** → **Add provider**, choose **Bitwarden Secrets Manager**, and enter the token variable name and server URL. Continue to validate the connection and approve the change with an admin passkey. Add a tree mount using the lowercase project UUID as the provider path. For a single-secret mount, use the project UUID followed by `/S_` and the lowercase secret UUID without hyphens. WithSecrets uses a temporary Bitwarden profile that disables persistent CLI authentication state.
 
-For **LastPass**, install `lpass` on the Linux or macOS authority and set `WITH_SECRETS_LASTPASS_EXECUTABLE` in the service environment to its absolute path. Set `WITH_SECRETS_LASTPASS_ALLOW_DISK_CACHE=1` to opt into the encrypted vault copy the CLI writes under its private temporary directory, even when WithSecrets uses live-only retrieval. Restart the service after changing its environment. In **Providers** → **Add provider**, select **lastpass** and enter the account username and master password. The app seals the password to the authority's review key before requesting the approval tap. The authority and its review key must be open to use the provider. The CLI runs unattended, so sign-ins that require interactive verification and vault items that require a master-password reprompt are unsupported.
+For **LastPass**, add a provider with the account email, region, and how long refreshed values may be used. Add a single mount for each field using its numeric LastPass item ID. On that provider's page, choose **Refresh values** from an interactive desktop on the authority machine. Compare the four-character code, requester, full account email, and mounted fields in the browser and the WithSecrets terminal. Enter the master password in the terminal and return to the browser to approve saving the encrypted values with your WithSecrets passkey.
 
-Find the numeric vault item ID with `lpass ls --format=%ai` in an authenticated CLI session. Enter that ID as the provider path for a tree mount. For a single-secret mount, append the field path.
+The terminal refresh supports personal login fields. Shared folders, protected items and sign-ins that require additional LastPass verification are unsupported. WithSecrets streams the vault without writing it to disk, keeps only the approved fields in its encrypted cache, and asks for another refresh after the configured lifetime. The desktop launcher uses a Windows console, Terminal on macOS, or GNOME Terminal, Konsole, or xterm on Linux.
+
+When configuring a LastPass mount through the API, use the numeric item ID followed by the field path suffix.
 
 | Field | Path suffix |
 | --- | --- |

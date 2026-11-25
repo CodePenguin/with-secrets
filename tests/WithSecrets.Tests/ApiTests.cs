@@ -64,6 +64,7 @@ internal static class ApiTests
         {
             await OpenApiDocument(check, root);
             await ProviderRoutes(check, root);
+            await InteractiveProviderRefreshTests.Run(check, root);
         }
         finally
         {
@@ -81,11 +82,9 @@ internal static class ApiTests
             ListHandler = (_, _) => Task.FromResult(new ListSecretsResult([new ProviderSecretInfo("TOKEN", "ext-token", "Token metadata")], null, true)),
         }, () => new FakeConfiguration());
         const string token = "ops_write_only_canary";
-        const string masterPassword = "lastpass-write-only-canary";
         var (publicKey, privateKey) = JweCipher.Instance.NewKeyPair();
         using AdminApp app = new(root, providers: registry,
             sealOnePasswordConfiguration: supplied => OnePassword.OnePasswordProvider.SealConfiguration(supplied, publicKey),
-            sealLastPassConfiguration: (username, password) => LastPass.LastPassProvider.SealConfiguration(username, password, publicKey),
             sealVaultConfiguration: supplied => Vault.VaultProvider.SealConfiguration(supplied, publicKey));
         ProviderAuthority providers = app.Service.Providers!;
         ProviderInstance instance = providers.Store.AddInstance("vault-one", "test", """{"label":"test"}""", TimeSpan.FromHours(1));
@@ -142,30 +141,8 @@ internal static class ApiTests
             "providers API: Vault sealing returns ciphertext and leaves stored instances untouched");
 
         const string lastPassSealPath = "/api/v1/providers/lastpass/seal";
-        string lastPassBody = JsonSerializer.Serialize(new { username = "user@example.test", masterPassword });
-        (int lastPassStatus, string lastPassSealed) = await browser.PostAsync(lastPassSealPath, lastPassBody);
-        check(lastPassStatus == 200 && Conform("SealedProviderConfiguration", lastPassSealed) is null
-            && !lastPassSealed.Contains(masterPassword, StringComparison.Ordinal) && providers.Store.Instances().Count == 1,
-            "providers API: LastPass sealing returns ciphertext and leaves stored instances untouched");
-        if (lastPassStatus == 200)
-        {
-            using JsonDocument answer = JsonDocument.Parse(lastPassSealed);
-            using JsonDocument configuration = JsonDocument.Parse(answer.RootElement.GetProperty("config").GetString()!);
-            check(configuration.RootElement.GetProperty("username").GetString() == "user@example.test",
-                "providers API: the sealed LastPass configuration keeps the account name");
-            string ciphertext = configuration.RootElement.GetProperty("encryptedConfiguration").GetString()!;
-            using JsonDocument opened = JsonDocument.Parse(JweCipher.Instance.Decrypt(privateKey, ciphertext));
-            check(opened.RootElement.GetProperty("masterPassword").GetString() == masterPassword,
-                "providers API: the returned configuration seals the submitted master password to the key");
-            check(ProviderAdmin.ConfigurationScreen(configuration.RootElement.GetRawText()) is null,
-                "providers API: the sealed LastPass configuration passes the credential screen");
-        }
-
-        (int invalidPassword, string passwordProblem) = await browser.PostAsync(lastPassSealPath,
-            JsonSerializer.Serialize(new { username = "user@example.test", masterPassword = "bad\npassword" }));
-        check(invalidPassword == 400 && !passwordProblem.Contains("bad", StringComparison.Ordinal),
-            "providers API: a refused master password is not echoed");
-
+        check((await browser.PostAsync(lastPassSealPath, "{}")).Status == 404 && doc["paths"]![lastPassSealPath] is null,
+            "providers API: LastPass has no credential submission route");
 
         string validateBody = JsonSerializer.Serialize(new { type = "test", config = """{"label":"test"}""" });
         (int validated, string issues) = await browser.PostAsync("/api/v1/providers/validate", validateBody);

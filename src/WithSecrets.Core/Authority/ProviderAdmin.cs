@@ -12,7 +12,8 @@ namespace WithSecrets;
 /// constant, a stored non-secret value or an adapter's own validation message; never configuration text or provider response text taken from an exception.
 /// </summary>
 internal sealed class ProviderAdmin(ProviderAuthority providers, AdminAudit audit, Func<string, string?>? sealOnePasswordConfiguration = null,
-    Func<string, string, string?>? sealLastPassConfiguration = null, Func<string, string?>? sealVaultConfiguration = null)
+    Func<string, string?>? sealVaultConfiguration = null,
+    bool interactiveRefreshEnabled = false)
 {
     /// <summary>The longest configuration text accepted (it is signed into the page text, so it is bounded).</summary>
     internal const int MaxConfigurationLength = 2000;
@@ -27,9 +28,6 @@ internal sealed class ProviderAdmin(ProviderAuthority providers, AdminAudit audi
     public string? SealOnePasswordConfiguration(string token) => sealOnePasswordConfiguration?.Invoke(token);
 
     public string? SealVaultConfiguration(string token) => sealVaultConfiguration?.Invoke(token);
-
-    public string? SealLastPassConfiguration(string username, string masterPassword) => sealLastPassConfiguration?.Invoke(username, masterPassword);
-
 
     public IReadOnlyList<ProviderTypeDto> Types() => [.. providers.Registry.Types().Select(item => new ProviderTypeDto(item.Type, item.AdapterVersion))];
 
@@ -160,6 +158,8 @@ internal sealed class ProviderAdmin(ProviderAuthority providers, AdminAudit audi
     internal ProviderStore Store => providers.Store;
 
     internal bool HasType(string type) => providers.Registry.Types().Any(item => item.Type == type);
+
+    internal bool IsInteractiveType(string type) => providers.Registry.IsInteractiveType(type);
 
     /// <summary>The most one post-commit namespace refresh of a mount takes (an adapter whose listing ignores its token included); after it the change's outcome says the namespace was not listed. For tests: shortened.</summary>
     internal TimeSpan RefreshDeadline { get; set; } = ProviderPolicy.Deadline;
@@ -347,9 +347,12 @@ internal sealed class ProviderAdmin(ProviderAuthority providers, AdminAudit audi
         }
     }
 
-    private static IReadOnlyList<string> ProviderActions(ProviderInstance instance, IReadOnlyList<Mount> mounts)
+    private IReadOnlyList<string> ProviderActions(ProviderInstance instance, IReadOnlyList<Mount> mounts)
     {
-        return mounts.Any(mount => mount.InstanceId == instance.Id) ? ["config", "max-stale", "add-mount"] : ["config", "max-stale", "remove", "add-mount"];
+        if (!mounts.Any(mount => mount.InstanceId == instance.Id)) return ["config", "max-stale", "remove", "add-mount"];
+        return interactiveRefreshEnabled && instance.MaxStale > TimeSpan.Zero && providers.InteractiveAdapter(instance.Id) is not null
+            ? ["config", "max-stale", "add-mount", "refresh-values"]
+            : ["config", "max-stale", "add-mount"];
     }
 
     private static ValidationDto Issues(IReadOnlyList<ProviderValidationIssue> issues)

@@ -32,9 +32,10 @@ public sealed class ProviderAuthority : IDisposable
         Cache = new ProviderCache(Store, keys);
         Invalidation = new ProviderInvalidation(Store, audit);
         ProviderRetriever retriever = new(registry.Adapter, clock, (wait, cancel) => Task.Delay(wait, clock, cancel));
-        Source = new ProviderSecretSource(native, Store, retriever, Cache, Invalidation, clock, AuditSink(audit));
+        Source = new ProviderSecretSource(native, Store, retriever, Cache, Invalidation, clock, AuditSink(audit), registry.IsInteractiveType);
         Reconciler = new NamespaceReconciler(Store, registry.Adapter, _logger);
-        Refresher = new ProviderRefresher(Store, retriever, Cache, () => native.Current().Manifest?.Store, Invalidation, clock, _logger);
+        Refresher = new ProviderRefresher(Store, retriever, Cache, () => native.Current().Manifest?.Store, Invalidation, clock, _logger,
+            interactive: registry.IsInteractiveType);
         ReconcileLoop = new ProviderReconciliation(Store, Reconciler, () => Cache.IsLocked, InstanceReady, clock, _logger);
     }
 
@@ -54,6 +55,13 @@ public sealed class ProviderAuthority : IDisposable
     }
 
     public ProviderRegistry Registry { get; }
+
+    internal IInteractiveProviderAdapter? InteractiveAdapter(Guid id)
+    {
+        try { return Registry.Adapter(id) as IInteractiveProviderAdapter; }
+        catch (KeyNotFoundException) { return null; }
+        catch (InvalidOperationException) { return null; }
+    }
 
     public ProviderStore Store { get; }
 

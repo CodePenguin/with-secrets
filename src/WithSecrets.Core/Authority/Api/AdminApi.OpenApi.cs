@@ -80,7 +80,7 @@ internal sealed partial class AdminApi
                 ("id", S.Str(format: "uuid")), ("name", S.Str()), ("type", S.Str()), ("configuration", S.Str()),
                 ("maxStaleSeconds", S.Int(0, 86400)), ("revision", S.Int(min: 1)), ("mounts", S.Int(min: 0)),
                 ("status", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("ProviderStatus"), new JsonObject { ["type"] = "null" }) }),
-                ("actions", S.Arr(S.Str(values: ["config", "max-stale", "remove", "add-mount"]))),
+                ("actions", S.Arr(S.Str(values: ["config", "max-stale", "remove", "add-mount", "refresh-values"]))),
             ]),
             ["ProviderList"] = S.Arr(S.Ref("Provider")),
             ["Mount"] = S.Obj(
@@ -104,6 +104,13 @@ internal sealed partial class AdminApi
             ["SealedProviderConfiguration"] = S.Obj([("config", ParameterSchema("config"))]),
             ["ProviderValidation"] = S.Obj([("ok", S.Bool()), ("issues", S.Arr(S.Ref("ProviderValidationIssue")))]),
             ["MountRefresh"] = S.Obj([("complete", S.Bool()), ("added", S.Int(min: 0)), ("removed", S.Int(min: 0)), ("changed", S.Int(min: 0))]),
+            ["ProviderValueRefresh"] = S.Obj(
+            [
+                ("id", S.Str(format: "uuid")), ("state", S.Str(values: ["waiting", "ready", "stopped"])),
+                ("requestedBy", S.Str()), ("providerName", S.Str()), ("account", S.Str()), ("region", S.Str()), ("expires", S.Time()),
+                ("mappings", S.Arr(S.Obj([("providerPath", S.Str()), ("localName", S.Str())]))),
+            ]),
+            ["ProviderValueRefreshLaunched"] = S.Obj([("refresh", S.Ref("ProviderValueRefresh")), ("encryptedCode", S.Str())]),
             ["Login"] = S.Obj([("state", S.Str(values: ["waiting", "ready", "failed"])), ("problem", S.Str(nullable: true))]),
             ["Session"] = S.Obj(
             [

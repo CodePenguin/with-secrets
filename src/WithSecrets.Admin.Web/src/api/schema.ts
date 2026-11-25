@@ -746,23 +746,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/providers/lastpass/seal": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Seal a write-only LastPass master password for provider configuration. */
-        post: operations["sealLastPassConfiguration"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/providers/validate": {
         parameters: {
             query?: never;
@@ -792,6 +775,41 @@ export interface paths {
         /** Refresh the namespace entries of a mount from its provider. */
         post: operations["refreshMount"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/providers/{id}/value-refreshes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Open the local terminal and begin an interactive provider refresh. */
+        post: operations["startProviderValueRefresh"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/provider-value-refreshes/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read the matching code and staging status for this session's refresh. */
+        get: operations["getProviderValueRefresh"];
+        put?: never;
+        post?: never;
+        /** End this session's refresh and discard its staged ciphertext. */
+        delete: operations["cancelProviderValueRefresh"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1477,7 +1495,7 @@ export interface components {
             revision: number;
             mounts: number;
             status: components["schemas"]["ProviderStatus"] | null;
-            actions: ("config" | "max-stale" | "remove" | "add-mount")[];
+            actions: ("config" | "max-stale" | "remove" | "add-mount" | "refresh-values")[];
         };
         ProviderList: components["schemas"]["Provider"][];
         Mount: {
@@ -1523,6 +1541,26 @@ export interface components {
             added: number;
             removed: number;
             changed: number;
+        };
+        ProviderValueRefresh: {
+            /** Format: uuid */
+            id: string;
+            /** @enum {string} */
+            state: "waiting" | "ready" | "stopped";
+            requestedBy: string;
+            providerName: string;
+            account: string;
+            region: string;
+            /** Format: date-time */
+            expires: string;
+            mappings: {
+                providerPath: string;
+                localName: string;
+            }[];
+        };
+        ProviderValueRefreshLaunched: {
+            refresh: components["schemas"]["ProviderValueRefresh"];
+            encryptedCode: string;
         };
         Login: {
             /** @enum {string} */
@@ -1835,7 +1873,7 @@ export interface components {
             /** @description Carry this in the `authorization` member of the one mutation it was made for. */
             id: string;
             /** @enum {string} */
-            operation: "unlock" | "review-unlock" | "lock" | "policy-manual" | "policy-unattended" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-remove" | "mount-add" | "mount-remove";
+            operation: "unlock" | "review-unlock" | "lock" | "policy-manual" | "policy-unattended" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
             /** @enum {string} */
             state: "pending" | "verified" | "refused" | "consumed" | "expired";
             detail: string | null;
@@ -1863,7 +1901,7 @@ export interface components {
         InlineAuthorization: {
             id: string;
             /** @enum {string} */
-            operation: "unlock" | "review-unlock" | "lock" | "policy-manual" | "policy-unattended" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-remove" | "mount-add" | "mount-remove";
+            operation: "unlock" | "review-unlock" | "lock" | "policy-manual" | "policy-unattended" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
             /** @enum {string} */
             state: "pending";
             detail: string | null;
@@ -1898,7 +1936,7 @@ export interface components {
              * @description The operation to authorize.
              * @enum {string}
              */
-            operation: "unlock" | "review-unlock" | "lock" | "policy-manual" | "policy-unattended" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-remove" | "mount-add" | "mount-remove";
+            operation: "unlock" | "review-unlock" | "lock" | "policy-manual" | "policy-unattended" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
             parameters?: {
                 config?: string;
             } & {
@@ -6445,141 +6483,6 @@ export interface operations {
             };
         };
     };
-    sealLastPassConfiguration: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": {
-                    username: string;
-                    masterPassword: string;
-                };
-            };
-        };
-        responses: {
-            /** @description Success. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SealedProviderConfiguration"];
-                };
-            };
-            /** @description The request is not valid (invalid-request, invalid-json). */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description No browser session (session-required). */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description No such resource (not-found). */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description The operation does not apply, or the change failed (operation-refused, operation-failed). */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description The body is too large (payload-too-large). */
-            413: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description The body is not application/json (unsupported-media-type). */
-            415: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description The Host is not a loopback name (host-not-allowed). */
-            421: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description The authority is locked (authority-locked). */
-            423: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too many requests (too-many-requests). */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description The request failed (internal-error). Nothing the response does not say was changed. */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Provider administration is unavailable on this service (internal-error). */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
     validateProvider: {
         parameters: {
             query?: never;
@@ -6754,6 +6657,330 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MountRefresh"];
+                };
+            };
+            /** @description The request is not valid (invalid-request, invalid-json). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No browser session (session-required). */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such resource (not-found). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The operation does not apply, or the change failed (operation-refused, operation-failed). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The Host is not a loopback name (host-not-allowed). */
+            421: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The authority is locked (authority-locked). */
+            423: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests (too-many-requests). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request failed (internal-error). Nothing the response does not say was changed. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Provider administration is unavailable on this service (internal-error). */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    startProviderValueRefresh: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    browserKey: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Success. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderValueRefreshLaunched"];
+                };
+            };
+            /** @description The request is not valid (invalid-request, invalid-json). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No browser session (session-required). */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such resource (not-found). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The operation does not apply, or the change failed (operation-refused, operation-failed). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is too large (payload-too-large). */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is not application/json (unsupported-media-type). */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The Host is not a loopback name (host-not-allowed). */
+            421: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The authority is locked (authority-locked). */
+            423: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests (too-many-requests). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request failed (internal-error). Nothing the response does not say was changed. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Provider administration is unavailable on this service (internal-error). */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    getProviderValueRefresh: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Success. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderValueRefresh"];
+                };
+            };
+            /** @description The request is not valid (invalid-request, invalid-json). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No browser session (session-required). */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such resource (not-found). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The Host is not a loopback name (host-not-allowed). */
+            421: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request failed (internal-error). Nothing the response does not say was changed. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    cancelProviderValueRefresh: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Success. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Done"];
                 };
             };
             /** @description The request is not valid (invalid-request, invalid-json). */

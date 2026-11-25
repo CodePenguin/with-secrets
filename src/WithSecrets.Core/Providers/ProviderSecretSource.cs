@@ -55,7 +55,8 @@ public sealed class ProviderSecretSource(
     ProviderCache cache,
     ProviderInvalidation invalidation,
     TimeProvider clock,
-    Action<IReadOnlyList<ProviderAudit>> audit) : ISecretSource
+    Action<IReadOnlyList<ProviderAudit>> audit,
+    Func<string, bool>? interactive = null) : ISecretSource
 {
     private sealed record Selected(string Name, ProviderInstance Instance, NamespaceEntry Entry);
 
@@ -268,6 +269,7 @@ public sealed class ProviderSecretSource(
 
             DateTimeOffset started = clock.GetUtcNow();
             bool cacheEnabled = instance.MaxStale > TimeSpan.Zero;
+            bool interactiveOnly = interactive?.Invoke(instance.ProviderType) == true;
 
             Dictionary<string, Obtained> byExternal = new(StringComparer.Ordinal);
             Dictionary<string, CachedSecret?> before = new(StringComparer.Ordinal);
@@ -275,9 +277,16 @@ public sealed class ProviderSecretSource(
             foreach (IGrouping<string, Selected> same in group.GroupBy(item => item.Entry.ExternalId, StringComparer.Ordinal))
             {
                 CachedSecret? row = cacheEnabled ? cache.TryGet(instance.Id, same.Key, storeKey) : null;
-                if (row is not null && Age(started, row) is { } age && ProviderPolicy.IsFreshEnough(age, instance.MaxStale))
+                if (row is not null && Age(started, row) is { } age && (interactiveOnly
+                    ? ProviderPolicy.WithinStaleWindow(age, instance.MaxStale) : ProviderPolicy.IsFreshEnough(age, instance.MaxStale)))
                 {
                     byExternal[same.Key] = new Obtained(RetrievalOutcomeKind.Cached, Open(row), null);
+                    continue;
+                }
+
+                if (interactiveOnly)
+                {
+                    byExternal[same.Key] = new Obtained(RetrievalOutcomeKind.Failed, null, ProviderErrorKind.InteractionRequired);
                     continue;
                 }
 

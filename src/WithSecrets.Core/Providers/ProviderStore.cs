@@ -415,7 +415,8 @@ public sealed class ProviderStore(AuthorityStore store)
     /// write transaction (invalidations bump it inside theirs, so the two cannot interleave): when it moved, nothing is written (Invalidated). A row is never
     /// replaced by one with an OLDER last_verified (a retrieval that started earlier but commits later): that row is kept and the result is Superseded.
     /// </summary>
-    internal CacheWrite WriteCache(Guid instanceId, IReadOnlyList<(string ExternalId, CacheRow Row)> rows, long? expectedGeneration)
+    internal CacheWrite WriteCache(Guid instanceId, IReadOnlyList<(string ExternalId, CacheRow Row)> rows, long? expectedGeneration,
+        string? interactiveStoreKey = null, Action<SqliteConnection, SqliteTransaction>? appendAudit = null)
     {
         return store.WriteTransaction((connection, transaction) =>
         {
@@ -426,6 +427,16 @@ public sealed class ProviderStore(AuthorityStore store)
                 || maxStaleSeconds <= 0)
             {
                 return CacheWrite.Invalidated;
+            }
+
+            if (interactiveStoreKey is not null)
+            {
+                if (new StateDatabase(store.Database).CurrentManifest(connection, transaction)?.Store != interactiveStoreKey)
+                    return CacheWrite.Invalidated;
+                if (rows.Any(item => WithSecretsDatabase.Scalar(connection, transaction,
+                    "SELECT last_verified FROM provider_cache WHERE instance_id = $instance AND external_id = $id",
+                    ("$instance", Id(instanceId)), ("$id", item.ExternalId)) is long existing && existing >= item.Row.LastVerified))
+                    return CacheWrite.Superseded;
             }
 
             CacheWrite result = CacheWrite.Written;
@@ -443,6 +454,7 @@ public sealed class ProviderStore(AuthorityStore store)
                 }
             }
 
+            appendAudit?.Invoke(connection, transaction);
             store.Fault?.Invoke("provider-cache-before-commit");
 
             return result;

@@ -45,6 +45,8 @@ export type OperationDef = {
   autoPrepare?: boolean
   /** The name of the final button: what the tap does, in two or three words. */
   confirmLabel?: string
+  /** Discard any state held for this specific operation when its dialog closes. */
+  onClose?: () => void
   /** Validates the form and gives the exact operation, or the errors by field name. */
   prepare: (values: FormValues) => { errors: Record<string, string> } | Prepared
   prepareForValidation?: (prepared: Prepared, values: FormValues, signal: AbortSignal) => Promise<{ prepared: Prepared; draft: FormValues }>

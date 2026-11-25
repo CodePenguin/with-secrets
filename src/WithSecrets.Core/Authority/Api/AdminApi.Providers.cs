@@ -1,3 +1,5 @@
+using System.Buffers.Text;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -23,13 +25,16 @@ internal sealed partial class AdminApi
             ApiAccess.Authorize, 200, "SealedProviderConfiguration", S.Obj([("serviceAccountToken", S.Str(min: 1, max: 2000))]), [], null, SealOnePasswordConfigurationAsync),
         new("POST", Prefix + "/providers/vault/seal", "sealVaultConfiguration", "Seal a write-only HashiCorp Vault token for provider configuration.", "providers",
             ApiAccess.Authorize, 200, "SealedProviderConfiguration", S.Obj([("token", S.Str(min: 1, max: 2000))]), [], null, SealVaultConfigurationAsync),
-        new("POST", Prefix + "/providers/lastpass/seal", "sealLastPassConfiguration", "Seal a write-only LastPass master password for provider configuration.", "providers",
-            ApiAccess.Authorize, 200, "SealedProviderConfiguration", S.Obj([("username", S.Str(min: 1, max: 256)), ("masterPassword", S.Str(min: 1, max: 8192))]), [], null, SealLastPassConfigurationAsync,
-            BodyLimit: MaxBody + 6 * (8192 + 256)),
         new("POST", Prefix + "/providers/validate", "validateProvider", "Validate a proposed provider configuration or mount path.", "providers", ApiAccess.Authorize, 200,
             "ProviderValidation", ProviderValidationBody(), [], null, ValidateProviderAsync, BodyLimit: ConfigurationBodyLimit),
         new("POST", Prefix + "/mounts/{id}/refresh", "refreshMount", "Refresh the namespace entries of a mount from its provider.", "providers", ApiAccess.Authorize, 200,
             "MountRefresh", null, [], null, RefreshMountAsync),
+        new("POST", Prefix + "/providers/{id}/value-refreshes", "startProviderValueRefresh", "Open the local terminal and begin an interactive provider refresh.", "providers",
+            ApiAccess.Authorize, 201, "ProviderValueRefreshLaunched", S.Obj([("browserKey", S.Str(min: 300, max: 512))]), [], null, StartProviderValueRefreshAsync),
+        new("GET", Prefix + "/provider-value-refreshes/{id}", "getProviderValueRefresh", "Read the matching code and staging status for this session's refresh.", "providers",
+            ApiAccess.Read, 200, "ProviderValueRefresh", null, [], null, GetProviderValueRefreshAsync),
+        new("DELETE", Prefix + "/provider-value-refreshes/{id}", "cancelProviderValueRefresh", "End this session's refresh and discard its staged ciphertext.", "providers",
+            ApiAccess.Authorize, 200, "Done", null, [], null, CancelProviderValueRefreshAsync),
         Mutation("POST", "/providers", "provider-add", "addProvider", "Add a provider instance.", "providers", "name", "type", "config", "max-stale-seconds", "confirm-warnings"),
         Mutation("PUT", "/providers/{id}/config", "provider-config", "changeProviderConfig", "Change a provider instance configuration.", "providers", "revision", "config", "confirm-warnings"),
         Mutation("PUT", "/providers/{id}/max-stale", "provider-max-stale", "changeProviderMaxStale", "Change the provider instance cache policy.", "providers", "revision", "max-stale-seconds"),
@@ -113,38 +118,6 @@ internal sealed partial class AdminApi
             $"The {providerName} configuration could not be sealed. Check the token and authority setup."));
     }
 
-    private Task<ApiResult> SealLastPassConfigurationAsync(ApiCall call)
-    {
-        if (ProviderRequestProblem(call.Session) is { } refusal)
-        {
-            return Task.FromResult(refusal);
-        }
-
-        try
-        {
-            string username = call.Body!.Value.GetProperty("username").GetString()!;
-            string masterPassword = call.Body.Value.GetProperty("masterPassword").GetString()!;
-            string? config = admin.Providers!.SealLastPassConfiguration(username, masterPassword);
-            if (config is { Length: > ProviderAdmin.MaxConfigurationLength })
-            {
-                return Task.FromResult(ProviderProblem(400, "configuration-not-sealed",
-                    "The sealed LastPass configuration exceeds the provider configuration size limit."));
-            }
-            if (config is not null && ProviderAdmin.ConfigurationScreen(config) is null)
-            {
-                return Task.FromResult(new ApiResult(200, new { config }));
-            }
-        }
-        catch (Exception error) when (error is not OutOfMemoryException)
-        {
-            // The request contains the master password. Never include provider exception details.
-        }
-
-        return Task.FromResult(ProviderProblem(400, "configuration-not-sealed",
-            "The LastPass configuration could not be sealed. Check the account details and authority setup."));
-    }
-
-
     private async Task<ApiResult> ValidateProviderAsync(ApiCall call)
     {
         if (ProviderRequestProblem(call.Session) is { } refusal)
@@ -205,6 +178,52 @@ internal sealed partial class AdminApi
     }
 
     private static ApiResult ProvidersUnavailable() => ProviderProblem(503, "internal-error", "providers cannot be changed from this service");
+
+    private async Task<ApiResult> StartProviderValueRefreshAsync(ApiCall call)
+    {
+        if (ProviderRequestProblem(call.Session) is { } refusal) return refusal;
+        if (admin.InteractiveRefreshes is not { } refreshes) return ProvidersUnavailable();
+        if (!Guid.TryParseExact(call.Path["id"], "D", out Guid instance) || admin.Providers!.Store.Instance(instance) is null)
+            return ProviderProblem(404, "not-found", "no provider instance has that id");
+
+        using RSA browserKey = RSA.Create();
+        try
+        {
+            byte[] der = Base64Url.DecodeFromChars(call.Body!.Value.GetProperty("browserKey").GetString()!);
+            browserKey.ImportSubjectPublicKeyInfo(der, out int read);
+            if (read != der.Length || browserKey.KeySize != 2048 || !der.AsSpan().SequenceEqual(browserKey.ExportSubjectPublicKeyInfo()))
+                return ProviderProblem(400, "invalid-request", "the browser refresh key must be an RSA 2048 public key");
+        }
+        catch (Exception error) when (error is FormatException or CryptographicException or ArgumentException)
+        {
+            return ProviderProblem(400, "invalid-request", "the browser refresh key is invalid");
+        }
+
+        try
+        {
+            return new ApiResult(201, await refreshes.StartAsync(instance, call.Session!, browserKey, call.Context.RequestAborted));
+        }
+        catch (ProviderConfigurationException problem)
+        {
+            return ProviderProblem(409, "operation-refused", problem.Message);
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            return ProviderProblem(409, "operation-refused", "The WithSecrets terminal could not open a verified refresh on this desktop.");
+        }
+    }
+
+    private Task<ApiResult> GetProviderValueRefreshAsync(ApiCall call)
+        => Task.FromResult(Guid.TryParseExact(call.Path["id"], "D", out Guid id) && call.Session is { } owner
+            && admin.InteractiveRefreshes?.View(id, owner) is { } view
+            ? new ApiResult(200, view)
+            : ProviderProblem(404, "not-found", "this refresh is unavailable or expired"));
+
+    private Task<ApiResult> CancelProviderValueRefreshAsync(ApiCall call)
+        => Task.FromResult(Guid.TryParseExact(call.Path["id"], "D", out Guid id) && call.Session is { } owner
+            && admin.InteractiveRefreshes?.Cancel(id, owner) == true
+            ? new ApiResult(200, new { ok = true })
+            : ProviderProblem(404, "not-found", "this refresh is unavailable or expired"));
 
     private static ApiResult ProviderProblem(int status, string code, string detail) => new(status, new ApiProblem(status, code, detail));
 }
