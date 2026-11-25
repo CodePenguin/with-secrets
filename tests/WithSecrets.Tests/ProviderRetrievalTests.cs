@@ -358,6 +358,20 @@ internal static class ProviderRetrievalTests
         outcomes = await waiting.RetrieveAsync(Instance, [a], CancellationToken.None);
         check(IsFailure(outcomes, a.RequestId, ProviderErrorKind.Unavailable), "retrieval: deadline during backoff is Unavailable");
 
+        // A caller who cancels after part of a batch succeeded gets the cancellation, never partial outcomes.
+        Rig partial = new();
+        a = Req("p/a");
+        ProviderSecretRequest second = Req("p/b");
+        partial.Adapter.Handler = (_, _, _) => Results(Ok(a.RequestId, "alpha"), Err(second.RequestId, ProviderErrorKind.RateLimited));
+        using CancellationTokenSource midway = new();
+        ProviderRetriever interrupted = new(_ => partial.Adapter, TimeProvider.System, (_, token) =>
+        {
+            midway.Cancel();
+
+            return Task.FromCanceled(midway.Token);
+        });
+        check(await Rethrows(() => interrupted.RetrieveAsync(Instance, [a, second], midway.Token)), "retrieval: cancelling after a partial success rethrows the cancellation");
+
         // The outcome owns its bytes.
         rig = new Rig();
         a = Req("p/a");

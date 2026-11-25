@@ -19,9 +19,29 @@ public sealed class ProviderRetriever(Func<Guid, IProviderAdapter> adapters, Tim
     public async Task<IReadOnlyDictionary<Guid, RetrievalOutcome>> RetrieveAsync(Guid instanceId, IReadOnlyList<ProviderSecretRequest> requests, CancellationToken cancel)
     {
         Dictionary<Guid, RetrievalOutcome> outcomes = [];
+        try
+        {
+            await FillAsync(outcomes, instanceId, requests, cancel).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Nobody receives the outcomes of a call that throws, so the values already retrieved are wiped.
+            foreach (RetrievalSuccess success in outcomes.Values.OfType<RetrievalSuccess>())
+            {
+                CryptographicOperations.ZeroMemory(success.Value);
+            }
+
+            throw;
+        }
+
+        return outcomes;
+    }
+
+    private async Task FillAsync(Dictionary<Guid, RetrievalOutcome> outcomes, Guid instanceId, IReadOnlyList<ProviderSecretRequest> requests, CancellationToken cancel)
+    {
         if (requests.Count == 0)
         {
-            return outcomes;
+            return;
         }
 
         using CancellationTokenSource deadline = new(ProviderPolicy.Deadline, clock);
@@ -68,7 +88,7 @@ public sealed class ProviderRetriever(Func<Guid, IProviderAdapter> adapters, Tim
                 {
                     FailAll(outstanding, outcomes, ProviderErrorKind.Unavailable, null);
 
-                    return outcomes;
+                    return;
                 }
 
                 // A provider-side timeout: a retryable Unavailable.
@@ -85,7 +105,7 @@ public sealed class ProviderRetriever(Func<Guid, IProviderAdapter> adapters, Tim
                 cancel.ThrowIfCancellationRequested();
                 FailAll(outstanding, outcomes, ProviderErrorKind.Unknown, null);
 
-                return outcomes;
+                return;
             }
 
             if (outstanding.Count == 0)
@@ -117,11 +137,9 @@ public sealed class ProviderRetriever(Func<Guid, IProviderAdapter> adapters, Tim
                 cancel.ThrowIfCancellationRequested();
                 FailAll(outstanding, outcomes, ProviderErrorKind.Unavailable, null);
 
-                return outcomes;
+                return;
             }
         }
-
-        return outcomes;
     }
 
     // Records the item results; returns the requests that failed with a retryable kind (their failure stays recorded as the last outcome).
