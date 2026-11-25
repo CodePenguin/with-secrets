@@ -115,14 +115,14 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, TextWrit
     private async Task<int> RunPlan(string program, IReadOnlyList<string> typedArguments, string reason, string workingDirectory, EnvPlan plan, IReadOnlyList<string> available, LaunchContext context, bool approveOnly = false)
     {
         IReadOnlyList<EncryptedValue> encrypted = plan.Encrypted ?? [];
-        if (plan.Mappings.Count == 0 && encrypted.Count == 0)
+        bool requiresDotenvx = encrypted.Count > 0 || context.Request?.DotenvxInputDigest is not null
+            || DotenvxRun.HasPolicy(workingDirectory) || plan.HasDotenvxDeclarations;
+        if (plan.Mappings.Count == 0 && !requiresDotenvx)
         {
             return await Fail(Usage, "Name the secrets with --secrets NAME[,NAME...]. There is no option for all secrets.");
         }
 
-        // The Dotenvx key secrets of the encrypted values that survived composition are requested like any secret: they are listed on
-        // the page, covered by the approval, and read from the store only after it. A key nobody needs is never requested.
-        IReadOnlyList<string> names = [.. plan.Mappings.Select(mapping => mapping.Secret).Concat(encrypted.Select(value => value.KeySecret)).Distinct(StringComparer.Ordinal)];
+        IReadOnlyList<string> names = [.. plan.Mappings.Select(mapping => mapping.Secret).Distinct(StringComparer.Ordinal)];
         string[] invalid = [.. names.Where(name => !SecretNames.IsValid(name))];
         if (invalid.Length > 0)
         {
@@ -136,14 +136,39 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, TextWrit
             return await Fail(Usage, $"A secret cannot be given to {ApprovalSummary.Clean(protectedVariable)}, because it changes which code runs. Nothing was run.");
         }
 
-        string[] missingKeys = [.. encrypted.Select(value => value.KeySecret).Distinct(StringComparer.Ordinal).Where(name => !available.Contains(name, StringComparer.Ordinal))];
-        if (missingKeys.Length > 0)
+        string? dotenvx = null;
+        string? dotenvxInputs = context.Request?.DotenvxInputDigest;
+        if (requiresDotenvx && context.Request is null)
         {
-            return await Fail(Usage, $"Missing secret: {string.Join(", ", missingKeys)}. It holds the Dotenvx private key for {string.Join(", ", encrypted.Where(value => missingKeys.Contains(value.KeySecret)).Select(value => value.Variable))}. Ask the user to add it.");
+            if (plan.Files.Count == 0)
+            {
+                return await Fail(Usage, "The dotenvx project policy requires a selected .env file.");
+            }
+
+            string executable = Environment.GetEnvironmentVariable(DotenvxRun.ExecutableVariable) ?? "";
+            if (!Path.IsPathFullyQualified(executable) || !File.Exists(executable))
+            {
+                return await Fail(Usage, $"Set {DotenvxRun.ExecutableVariable} to a trusted absolute dotenvx path to resolve {encrypted.FirstOrDefault()?.Variable ?? "the project environment"}.");
+            }
+
+            dotenvx = executable;
+            try
+            {
+                dotenvxInputs = DotenvxRun.InputDigest(workingDirectory, plan.Files, plan.FileHashes);
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or DotenvxResolutionException)
+            {
+                return await Fail(Usage, "Cannot read the project inputs for dotenvx. Nothing was run.");
+            }
+        }
+
+        if (requiresDotenvx && context.Request is not null && context.Request.DotenvxInputDigest is null)
+        {
+            return await Fail(Usage, "The requesting client must bind the dotenvx project inputs before approval.");
         }
 
         string[] missing = [.. names.Where(name => !available.Contains(name, StringComparer.Ordinal))];
-        if (missing.Length > 0 || names.Count == 0)
+        if (missing.Length > 0)
         {
             string have = available.Count == 0 ? "(none)" : string.Join(", ", available);
 
@@ -255,7 +280,12 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, TextWrit
         // A remote authority approves and decrypts: the authority's grants stand in for a local decision.
         bool remote = context.Authorization is { IsRemote: true };
         Dictionary<string, string> sources = names.ToDictionary(name => name, store.LabelFor, StringComparer.Ordinal);
-        ApprovalRequest request = new(program, resolved, arguments, workingDirectory, reason, names, null, typedArguments, links, Sources: sources, Unlock: store.NeedsUnlock, Script: script, ProgramFile: programFile, Mappings: plan.Mappings, EnvFiles: plan.Files, EnvNames: [.. plan.Ordinary.Keys.Order(StringComparer.Ordinal)], EnvValues: plan.Ordinary, InheritedEnvironment: context.Environment, Decrypts: [.. encrypted.Select(value => value.ToItem())]);
+        var dynamicNames = context.Request?.DotenvxDynamicNames ?? (context.Request is null && dotenvxInputs is not null ? plan.DynamicNames : null);
+        if (dynamicNames is { Count: 0 })
+        {
+            dynamicNames = null;
+        }
+        ApprovalRequest request = new(program, resolved, arguments, workingDirectory, reason, names, null, typedArguments, links, Sources: sources, Unlock: store.NeedsUnlock, Script: script, ProgramFile: programFile, Mappings: plan.Mappings, EnvFiles: plan.Files, EnvNames: [.. plan.Ordinary.Keys.Order(StringComparer.Ordinal)], EnvValues: plan.Ordinary, InheritedEnvironment: context.Environment, Decrypts: [.. encrypted.Select(value => value.ToItem())], DotenvxInputDigest: dotenvxInputs, DotenvxDynamicNames: dynamicNames);
         Fingerprint fingerprint = RequestFingerprint.Compute(request);
 
         // What the page shows must be the file the fingerprint covers; a file that changed in between is not approved unseen.
@@ -304,7 +334,7 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, TextWrit
         if (request.Decrypts is { Count: > 0 } decrypts)
         {
             // Names and a short fingerprint of each ciphertext (the hash of a ciphertext is not a secret); never a value, a ciphertext or a key.
-            auditMetadata["decrypts"] = string.Join(",", decrypts.Select(item => item.Variable + "=" + item.KeySecret + ":" + item.Short));
+            auditMetadata["decrypts"] = string.Join(",", decrypts.Select(item => item.Variable + ":" + item.Short));
         }
 
         if (fingerprint.Files.Count > 0)
@@ -541,13 +571,36 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, TextWrit
                 return await Cancelled();
             }
 
-            // Only the approved names are decrypted. The bytes are zeroed when the program ends; the strings the redactor and the
-            // child's environment need cannot be wiped (see SecretValues). The store key itself is opened inside, from what the
-            // passkey released, and zeroed there.
+            // Resolve project ciphertext in a separate process before reading locally stored values.
+            Dictionary<string, string> injected;
+            try
+            {
+                injected = !requiresDotenvx ? new(StringComparer.Ordinal)
+                    : context.DotenvxResolver is { } resolve ? await resolve()
+                    : await DotenvxRun.ResolveAsync(dotenvx!, workingDirectory, plan.Files,
+                        [.. encrypted.Select(value => value.Variable), .. dynamicNames ?? []], context.Cancel, dotenvxInputs);
+                if (context.Request is null && (dynamicNames ?? []).Any(name => !injected.ContainsKey(name))
+                    || encrypted.Any(item => !injected.TryGetValue(item.Variable, out string? value) || value == item.Ciphertext || !UsablePlaintext(value)))
+                {
+                    throw new DotenvxResolutionException();
+                }
+            }
+            catch (OperationCanceledException) when (context.Cancel.IsCancellationRequested)
+            {
+                Record(AuditEventTypes.Launch, "cancelled", "dotenvx-cancelled", runGrant);
+                return await Cancelled();
+            }
+            catch (DotenvxResolutionException error)
+            {
+                Record(AuditEventTypes.Launch, "failed", "dotenvx-failed", runGrant);
+                return await Fail(Usage, error.ApprovalRequired ? DotenvxRun.ApprovalError : "Cannot resolve the approved project environment with dotenvx. Nothing was run.");
+            }
+
+            // The local store opens only the approved names and wipes its unwrapped key inside the call.
             SecretValues secrets;
             try
             {
-                secrets = delivered ?? store.GetValues(names, unlock);
+                secrets = delivered ?? (names.Count == 0 ? new SecretValues(new Dictionary<string, byte[]>()) : store.GetValues(names, unlock));
             }
             catch (Exception error)
             {
@@ -569,7 +622,10 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, TextWrit
             using (secrets)
             {
                 // The variable the program sees is the left side of the pair; the redactor gets every value.
-                Dictionary<string, string> injected = request.Mappings!.ToDictionary(mapping => mapping.Variable, mapping => secrets.Text(mapping.Secret), StringComparer.Ordinal);
+                foreach (SecretMapping mapping in request.Mappings!)
+                {
+                    injected[mapping.Variable] = secrets.Text(mapping.Secret);
+                }
 
                 // Final filter, whatever the earlier checks said: nothing the page could not show goes to a variable that changes which code runs, where
                 // traffic goes or who a commit is by. Nothing is run and nothing is decrypted.
@@ -580,29 +636,10 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, TextWrit
                     return await Fail(Usage, $"A secret value cannot be given to {ApprovalSummary.Clean(protectedName)}, because it changes which code runs. Nothing was run.");
                 }
 
-                // Encrypted .env values: decrypted here, in memory, with the key secret that was approved, by the Dotenvx library. The key is never added
-                // to the child's environment; it is added to what the output redactor masks. A failure names the variable only, never the value or the ciphertext.
-                List<string> redactAlso = [];
-                foreach (EncryptedValue value in encrypted)
-                {
-                    string key = secrets.Text(value.KeySecret);
-                    redactAlso.Add(key);
-                    string? plain = DecryptValue(value, key);
-                    if (plain is null || !UsablePlaintext(plain))
-                    {
-                        // One message and one audit reason for every kind of failure: nothing here tells the cause apart (no oracle), and no value is named.
-                        Record(AuditEventTypes.Launch, "failed", "env-decrypt-failed", runGrant);
-
-                        return await Fail(Usage, $"Cannot use the encrypted .env value of {value.Variable}. Nothing was run.");
-                    }
-
-                    injected[value.Variable] = plain;
-                }
-
                 // Prepare the child and its environment, then commit through the gate: the process starts only if the launch was not
                 // cancelled and the local authorization did not change since it began. The loser of that race starts nothing and
                 // its prepared environment is thrown away. Once started, nothing here touches the child.
-                PreparedChild prepared = ChildRunner.Prepare(new ChildSpec(runProgram, runArguments, workingDirectory, injected, plan.Ordinary, context.Environment, redactAlso));
+                PreparedChild prepared = ChildRunner.Prepare(new ChildSpec(runProgram, runArguments, workingDirectory, injected, plan.Ordinary, context.Environment));
                 System.Diagnostics.Process? process = null;
                 string? startFailure = null;
                 string? copyProblem = null;
@@ -702,19 +739,6 @@ public sealed class RunCommand(ISecretSource store, IApprover approver, TextWrit
             {
                 _keys.Discard();
             }
-        }
-    }
-
-    /// <summary>The plain text of an encrypted .env value, or null when it does not decrypt. Never throws; the cause is not reported, because it could carry the value.</summary>
-    private static string? DecryptValue(EncryptedValue value, string privateKey)
-    {
-        try
-        {
-            return DotenvxCipher.Instance.Decrypt(privateKey, value.Ciphertext);
-        }
-        catch (Exception error) when (error is not OutOfMemoryException)
-        {
-            return null;
         }
     }
 
@@ -1036,6 +1060,8 @@ public sealed class LaunchContext
 
     /// <summary>Told the link of the approval page when the authority shows it (remote mode); the service sends it to the client as an approval event.</summary>
     public Action<string>? OnApprovalLink { get; init; }
+
+    internal Func<Task<Dictionary<string, string>>>? DotenvxResolver { get; init; }
 
     /// <summary>
     /// The host's signed audit trail. A secret-bearing run must commit its authorization event here before anything is decrypted, and does not run when it cannot.

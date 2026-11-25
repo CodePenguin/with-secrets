@@ -34,7 +34,7 @@ public static class VaultProvider
             throw new ProviderAdapterException(ProviderErrorKind.InvalidConfiguration, "Enter a valid Vault token.");
         }
 
-        string ciphertext = DotenvxCipher.Instance.Encrypt(JsonSerializer.Serialize(new { token }), reviewPublicKey);
+        string ciphertext = JweCipher.Instance.Encrypt(JsonSerializer.Serialize(new { token }), reviewPublicKey);
         return JsonSerializer.Serialize(new { encryptedConfiguration = ciphertext });
     }
 }

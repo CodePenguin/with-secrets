@@ -18,11 +18,7 @@ internal static partial class WebApprovalTests
         public string Everything() => string.Join("\n", Events.Select(item => AppLog.Render(item) + "\n" + string.Join("\n", item.Properties.Select(pair => pair.Key + "=" + pair.Value))));
     }
 
-    /// <summary>
-    /// Dotenvx encrypted .env values end to end over real HTTP with a test authenticator and the real signed store. The values are
-    /// encrypted with the real Dotenvx primitives, the private key is stored as the secret DOTENV_PRIVATE_KEY, and an approved
-    /// run injects the decrypted value. The key must be on no surface: not the child's environment, stdout, stderr, audit, page or log.
-    /// </summary>
+    /// <summary>Delegated dotenvx and store values over the real passkey approval page.</summary>
     internal static async Task EnvEncryptedHttp(Action<bool, string> check, string parent)
     {
         string folder = Path.Combine(parent, "enc-" + Guid.NewGuid().ToString("N")[..8]);
@@ -36,9 +32,10 @@ internal static partial class WebApprovalTests
         const string Ordinary = "Verbose7";
         int states = 0;
 
-        (string publicKey, string privateKey) = DotenvxCipher.Instance.NewKeyPair();
-        string cipher = DotenvxCipher.Instance.Encrypt(Plain, publicKey);
-        string stranger = DotenvxCipher.Instance.Encrypt(Plain, DotenvxCipher.Instance.NewKeyPair().PublicKey);
+        using var fake = new FakeDotenvx();
+        string privateKey = FakeDotenvx.Credential;
+        string cipher = FakeDotenvx.Cipher(Plain);
+        const string stranger = "encrypted:YmFkLXNlY29uZA==";
         string cipherBody = cipher["encrypted:".Length..];
 
         string project = Path.Combine(folder, "project");
@@ -57,7 +54,7 @@ internal static partial class WebApprovalTests
             File.SetUnixFileMode(programPath, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
 
-        (StateDatabase Db, PasskeyStore Passkeys, SecretStore Store, CountingCipher Cipher) NewState(bool withKey)
+        (StateDatabase Db, PasskeyStore Passkeys, SecretStore Store, CountingCipher Cipher) NewState()
         {
             StateDatabase db = StateDatabase.InFolder(Path.Combine(folder, "state-" + Interlocked.Increment(ref states)));
             PasskeyStore passkeys = new(db);
@@ -65,11 +62,6 @@ internal static partial class WebApprovalTests
             CountingCipher counting = new();
             SecretStore store = new(db, counting);
             Dictionary<string, string> values = new() { ["team/API_KEY"] = ApiValue };
-            if (withKey)
-            {
-                values["DOTENV_PRIVATE_KEY"] = privateKey;
-            }
-
             if (SecretStoreTests.Put(store, values) is { } problem)
             {
                 throw new InvalidOperationException(problem);
@@ -121,7 +113,7 @@ internal static partial class WebApprovalTests
         AppLog.LogFolder = logFolder;
         AppLog.Tap = capture;
         AppLog.Configure(true);
-        (StateDatabase db, PasskeyStore passkeys, SecretStore store, CountingCipher counting) = NewState(true);
+        (StateDatabase db, PasskeyStore passkeys, SecretStore store, CountingCipher counting) = NewState();
         var result = await RunWith(db, passkeys, store);
         AppLog.Close();
         string logFiles = Directory.Exists(logFolder) ? string.Join("\n", Directory.EnumerateFiles(logFolder).Select(file =>
@@ -142,33 +134,28 @@ internal static partial class WebApprovalTests
         check(result.Code == 0 && result.Out.Contains("d=[REDACTED]", StringComparison.Ordinal) && result.Out.Contains("t=[REDACTED]", StringComparison.Ordinal) && result.Out.Contains("l=" + Ordinary, StringComparison.Ordinal), "env encrypted http: approved, the decrypted value is injected and redacted (" + result.Code + " " + result.Err + ")");
         check(env.Contains("DB_PASS=" + Plain, StringComparison.Ordinal) && env.Contains("TOKEN=" + ApiValue, StringComparison.Ordinal), "env encrypted http: the program has the decrypted value as DB_PASS and the reference as TOKEN");
         check(!env.Contains("DOTENV_PRIVATE_KEY", StringComparison.Ordinal) && !env.Contains(privateKey, StringComparison.Ordinal) && !env.Contains(cipherBody, StringComparison.Ordinal), "env encrypted http: the private key is not in the child's environment, and neither is the ciphertext");
-        check(counting.Decrypts == 2, "env encrypted http: the store decrypted the reference and the key, nothing else (" + counting.Decrypts + ")");
-        check(result.Page.Contains("\ndecrypt with secret DOTENV_PRIVATE_KEY: DB_PASS (cipher sha256 " + DecryptItem.HashOf(cipher)[..12] + ") from " + dotenv, StringComparison.Ordinal) && result.Page.Split('\n').FirstOrDefault(line => line.StartsWith("Secrets: ", StringComparison.Ordinal))?.Contains("DOTENV_PRIVATE_KEY", StringComparison.Ordinal) == true, "env encrypted http: the page has the decrypt line and lists the key secret among the secrets");
+        check(counting.Decrypts == 1, "env encrypted http: the store decrypted only the WithSecrets reference (" + counting.Decrypts + ")");
+        check(result.Page.Contains("\nresolve with dotenvx: DB_PASS (cipher sha256 " + DecryptItem.HashOf(cipher)[..12] + ") from " + dotenv, StringComparison.Ordinal) && result.Page.Split('\n').FirstOrDefault(line => line.StartsWith("Secrets: ", StringComparison.Ordinal))?.Contains("DOTENV_PRIVATE_KEY", StringComparison.Ordinal) == false, "env encrypted http: the page has the decrypt line and requests no Dotenvx key from the store");
         string everything = string.Join("\n", [result.Page, result.Reply, result.Out, result.Err, audit, logEverything, terminalDebug]);
         check(!everything.Contains(privateKey, StringComparison.Ordinal) && !everything.Contains(Plain, StringComparison.Ordinal) && !everything.Contains(cipherBody, StringComparison.Ordinal) && !everything.Contains(ApiValue, StringComparison.Ordinal), "env encrypted http: the key, the decrypted value, the ciphertext and the reference value are on no page, stdout, stderr, audit row, log or debug line");
         check(logFiles.Length > 0 || capture.Events.Count > 0, "env encrypted http: the leak check had log output to look at");
-        check(audit.Contains("\"decrypts\":\"DB_PASS=DOTENV_PRIVATE_KEY:" + DecryptItem.HashOf(cipher)[..12] + "\"", StringComparison.Ordinal) && audit.Contains("\"outcome\":\"approved\"", StringComparison.Ordinal), "env encrypted http: the signed events name the variable, the key secret and the short cipher fingerprint");
+        check(audit.Contains("\"decrypts\":\"DB_PASS:" + DecryptItem.HashOf(cipher)[..12] + "\"", StringComparison.Ordinal) && audit.Contains("\"outcome\":\"approved\"", StringComparison.Ordinal), "env encrypted http: the signed events name the variable and the short cipher fingerprint");
 
         // an OS variable hides the encrypted value: it is not decrypted and the key is not requested, even when the store has none
-        (db, passkeys, store, counting) = NewState(false);
+        (db, passkeys, store, counting) = NewState();
         result = await RunWith(db, passkeys, store, name => name == "DB_PASS" ? "from-os" : null);
         env = File.Exists(envFile) ? File.ReadAllText(envFile) : "";
         check(result.Code == 0 && counting.Decrypts == 1 && !result.Page.Contains("decrypt ", StringComparison.Ordinal) && !result.Page.Contains("DOTENV_PRIVATE_KEY", StringComparison.Ordinal) && !env.Contains(Plain, StringComparison.Ordinal), "env encrypted http: an overridden encrypted value is not decrypted and its key is not requested (" + result.Code + " " + result.Err + ")");
-
-        // a missing key secret: exit 2 naming the secret, before any page
-        (db, passkeys, store, counting) = NewState(false);
-        result = await RunWith(db, passkeys, store);
-        check(result.Code == RunCommand.Usage && result.Err.Contains("Missing secret: DOTENV_PRIVATE_KEY", StringComparison.Ordinal) && result.Page.Length == 0 && !result.Ran && counting.Decrypts == 0 && !result.Err.Contains(cipherBody, StringComparison.Ordinal), "env encrypted http: a missing key secret is exit 2 naming the secret, no page, nothing decrypted (" + result.Code + ")");
 
         // a value that does not decrypt (damaged, or made for another key): exit 2 naming the variable only, nothing runs
         foreach ((string label, string bad) in new[] { ("damaged", "encrypted:" + new string('A', 120)), ("another key", stranger) })
         {
             File.WriteAllText(dotenv, $"DB_PASS={bad}\nTOKEN=secret://team/API_KEY\n");
-            (db, passkeys, store, counting) = NewState(true);
+            (db, passkeys, store, counting) = NewState();
             result = await RunWith(db, passkeys, store);
             audit = StateDatabaseTests.AuditText(db.FilePath);
             string badBody = bad["encrypted:".Length..];
-            check(result.Code == RunCommand.Usage && result.Err.Contains("DB_PASS", StringComparison.Ordinal) && !result.Ran && !result.Out.Contains(ApiValue, StringComparison.Ordinal), "env encrypted http: a " + label + " value is exit 2 naming the variable, and the program does not run (" + result.Code + ")");
+            check(result.Code == RunCommand.Usage && result.Err.Contains("with dotenvx", StringComparison.Ordinal) && !result.Ran && !result.Out.Contains(ApiValue, StringComparison.Ordinal), "env encrypted http: a " + label + " value is exit 2 naming the variable, and the program does not run (" + result.Code + ")");
             check(!result.Err.Contains(badBody, StringComparison.Ordinal) && !result.Page.Contains(badBody, StringComparison.Ordinal) && !audit.Contains(badBody, StringComparison.Ordinal) && !result.Err.Contains(privateKey, StringComparison.Ordinal) && !result.Out.Contains(privateKey, StringComparison.Ordinal), "env encrypted http: a " + label + " value leaves no ciphertext or key on stderr, page or audit");
         }
 

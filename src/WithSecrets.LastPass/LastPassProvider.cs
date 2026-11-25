@@ -39,7 +39,7 @@ public static class LastPassProvider
             throw new ProviderAdapterException(ProviderErrorKind.InvalidConfiguration, "Enter a valid LastPass master password.");
         }
 
-        string ciphertext = DotenvxCipher.Instance.Encrypt(JsonSerializer.Serialize(new { masterPassword }), reviewPublicKey);
+        string ciphertext = JweCipher.Instance.Encrypt(JsonSerializer.Serialize(new { masterPassword }), reviewPublicKey);
         return JsonSerializer.Serialize(new { username, encryptedConfiguration = ciphertext });
     }
 }

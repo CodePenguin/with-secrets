@@ -18,7 +18,6 @@ public sealed class LastPassAdapter(
     public const string ProviderType = "lastpass";
     public const string AdapterVersion = "1.0";
 
-    private const string CiphertextPrefix = "encrypted:";
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private static readonly string[] ValueFields = ["password", "username", "url", "note"];
     private readonly object _gate = new();
@@ -539,8 +538,7 @@ public sealed class LastPassAdapter(
     }
 
     internal static bool IsEncryptedConfiguration(string value)
-        => value.StartsWith(CiphertextPrefix, StringComparison.Ordinal) && value.Length > CiphertextPrefix.Length
-            && value.AsSpan(CiphertextPrefix.Length).IndexOfAnyExcept("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=") < 0;
+        => JweCipher.IsCiphertext(value);
 
     private static Task<Dictionary<string, string>> ShowAsync(LastPassCli cli, string account, string password, CancellationToken cancellationToken)
         => cli.ReadJsonAsync(ShowArguments(account), password, root => ReadAccount(root, account), cancellationToken);

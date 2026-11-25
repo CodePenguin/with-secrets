@@ -522,14 +522,14 @@ internal static class ConfigTests
                 {
                     master = first is not null && released is not null ? KeyVault.OpenMaster(first, released) : null;
                     check(keys[0].Slot is not null && master is { Length: 32 }, "first-run setup: the first key has a key slot that its PRF output opens");
-                    check(first is { Version: 1, Secrets.Count: 0 } && first.Store.Length == 66 && KeyVault.IsVault(first.Vault), "first-run setup: the first manifest has the store public key and the vault (and no secrets)");
+                    check(first is { Version: 1, Secrets.Count: 0 } && JweCipher.IsPublicKey(first.Store) && KeyVault.IsVault(first.Vault), "first-run setup: the first manifest has the store public key and the vault (and no secrets)");
                     privateKey = first is not null && master is not null ? KeyVault.UnwrapVault(first.Vault, master, first.Store) : null;
                     string privateHex = privateKey is null ? "" : Encoding.UTF8.GetString(privateKey);
-                    check(privateHex.Length == 64 && DotenvxCipher.Instance.Derive(privateHex) == first!.Store, "first-run setup: the vault holds the private key of the stored public key, and the passkey's PRF output opens it");
+                    check(JweCipher.Instance.Derive(privateHex) == first!.Store, "first-run setup: the vault holds the private key of the stored public key, and the passkey's PRF output opens it");
                     SqliteConnection.ClearAllPools();
                     string stateFolder = Path.GetDirectoryName(db.FilePath)!;
                     bool leaked = privateKey is null || WebApprovalTests.FolderHolds(stateFolder, privateKey) || WebApprovalTests.FolderHolds(stateFolder, Encoding.UTF8.GetBytes(privateHex.ToUpperInvariant()))
-                        || WebApprovalTests.FolderHolds(stateFolder, Convert.FromHexString(privateHex)) || WebApprovalTests.FolderHolds(stateFolder, Encoding.ASCII.GetBytes(Convert.ToBase64String(Convert.FromHexString(privateHex))));
+                        || WebApprovalTests.FolderHolds(stateFolder, System.Buffers.Text.Base64Url.DecodeFromChars(privateHex)) || WebApprovalTests.FolderHolds(stateFolder, Encoding.ASCII.GetBytes(Convert.ToBase64String(System.Buffers.Text.Base64Url.DecodeFromChars(privateHex))));
                     check(!leaked, "first-run setup: the store private key (hex, upper hex, raw, base64) is in no file of the store folder: not with-secrets.db, its WAL or anything else");
                     check(!WebApprovalTests.FolderHolds(stateFolder, master!), "first-run setup: the master key is in no file either");
                     check(!Directory.EnumerateFiles(stateFolder, ".env*", SearchOption.AllDirectories).Any(), "first-run setup: no .env.keys or other key file");
@@ -538,7 +538,7 @@ internal static class ConfigTests
                     if (first?.Review is { } review && master is not null)
                     {
                         reviewKey = KeyVault.UnwrapReview(review.Vault, master, review.PublicKey);
-                        check(review.PublicKey != first.Store && DotenvxCipher.Instance.Derive(Encoding.UTF8.GetString(reviewKey)) == review.PublicKey
+                        check(review.PublicKey != first.Store && JweCipher.Instance.Derive(Encoding.UTF8.GetString(reviewKey)) == review.PublicKey
                             && !WebApprovalTests.FolderHolds(stateFolder, reviewKey) && !seen.Contains(Encoding.UTF8.GetString(reviewKey), StringComparison.OrdinalIgnoreCase),
                             "first-run setup: the independently generated review key is wrapped and its private part stays out of files and output");
                     }
@@ -567,7 +567,7 @@ internal static class ConfigTests
             {
                 JsonElement sign = step.RootElement.GetProperty("sign");
                 Manifest? first = Manifest.Parse(sign.GetProperty("manifest").GetString()!, out _);
-                check(first is { Version: 1 } && first.Store.Length == 66 && KeyVault.IsVault(first.Vault) && first.Settings == ToolSettings.Defaults && first.Admins.Single().Id == TestAuthenticator.Encode(laptop.CredentialId) && sign.GetProperty("first").GetBoolean()
+                check(first is { Version: 1 } && JweCipher.IsPublicKey(first.Store) && KeyVault.IsVault(first.Vault) && first.Settings == ToolSettings.Defaults && first.Admins.Single().Id == TestAuthenticator.Encode(laptop.CredentialId) && sign.GetProperty("first").GetBoolean()
                     && !sign.TryGetProperty("allowCredentials", out _), "first-run setup: after the registration the new key is asked to sign the first manifest, with it as admin (" + run.First + ")");
             }
 

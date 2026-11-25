@@ -114,7 +114,9 @@ public sealed record ApprovalRequest(
     IReadOnlyDictionary<string, string>? InheritedEnvironment = null,
     string? Heading = null,
     IReadOnlyList<string>? ExtraLines = null,
-    IReadOnlyList<DecryptItem>? Decrypts = null);
+    IReadOnlyList<DecryptItem>? Decrypts = null,
+    string? DotenvxInputDigest = null,
+    IReadOnlyList<string>? DotenvxDynamicNames = null);
 
 /// <summary>
 /// What a person signed on an approval page: the page nonce, the exact text that was bound (see <see cref="RequestBinding" />)

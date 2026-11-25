@@ -28,7 +28,7 @@ internal static class ProviderCacheTests
             })
             { LockState = Lock };
             Cache = new ProviderCache(Store, Keys);
-            (PublicKey, PrivateKey) = DotenvxCipher.Instance.NewKeyPair();
+            (PublicKey, PrivateKey) = JweCipher.Instance.NewKeyPair();
         }
 
         public AuthorityStore Authority { get; }
@@ -145,7 +145,7 @@ internal static class ProviderCacheTests
         using SoftwareSigningKey attacker = new();
         string fingerprint = KeyIdentity.Fingerprint(attacker.PublicKey);
         rig.Exec("UPDATE authority_keys SET public_key = $k, fingerprint = $f WHERE status = 'Active'", ("$k", Convert.ToBase64String(attacker.PublicKey)), ("$f", fingerprint));
-        string planted = DotenvxCipher.Instance.Encrypt("Attacker-Chosen-Value", rig.PublicKey);
+        string planted = JweCipher.Instance.Encrypt("Attacker-Chosen-Value", rig.PublicKey);
         byte[] signature = attacker.Sign(ProviderCache.Seal(instance, "ext-1", T0, SecretStore.Hash(planted), rig.PublicKey, fingerprint));
         rig.Exec("UPDATE provider_cache SET ciphertext = $c, authority_key = $f, signature = $s", ("$c", planted), ("$f", fingerprint), ("$s", signature));
 
@@ -177,7 +177,7 @@ internal static class ProviderCacheTests
             && row.StorePublicKey == rig.PublicKey, "cache: put then get round trips (decrypts to the value, lastVerified kept)");
 
         string ciphertext = rig.Scalar("SELECT ciphertext FROM provider_cache") as string ?? "";
-        check(ciphertext.StartsWith("encrypted:", StringComparison.Ordinal) && !ciphertext.Contains(Value, StringComparison.Ordinal)
+        check(ciphertext.StartsWith(JweCipher.Prefix, StringComparison.Ordinal) && !ciphertext.Contains(Value, StringComparison.Ordinal)
             && !ciphertext.Contains(Convert.ToBase64String(Bytes(Value)), StringComparison.Ordinal), "cache: ciphertext at rest does not contain the plaintext");
         check(rig.Cache.TryGet(instance, "ext-other", rig.PublicKey) is null && rig.Cache.TryGet(Guid.NewGuid(), "ext-1", rig.PublicKey) is null, "cache: a missing row is null");
 
@@ -194,7 +194,7 @@ internal static class ProviderCacheTests
         bool threw = false;
         try
         {
-            (_, string otherPrivate) = DotenvxCipher.Instance.NewKeyPair();
+            (_, string otherPrivate) = JweCipher.Instance.NewKeyPair();
             rig.Cache.Decrypt(row!, otherPrivate);
         }
         catch (SecretStoreException failure)
@@ -213,7 +213,7 @@ internal static class ProviderCacheTests
 
         // A valid ciphertext of another value for the same store key (anyone with the public key can make one).
         string original = (string)rig.Scalar("SELECT ciphertext FROM provider_cache")!;
-        rig.Exec("UPDATE provider_cache SET ciphertext = $c", ("$c", DotenvxCipher.Instance.Encrypt("Attacker-Value-1", rig.PublicKey)));
+        rig.Exec("UPDATE provider_cache SET ciphertext = $c", ("$c", JweCipher.Instance.Encrypt("Attacker-Value-1", rig.PublicKey)));
         check(rig.Cache.TryGet(instance, "ext-1", rig.PublicKey) is null, "cache: tampered ciphertext (valid encryption of another value) -> null");
         rig.Exec("UPDATE provider_cache SET ciphertext = $c", ("$c", "garbage"));
         check(rig.Cache.TryGet(instance, "ext-1", rig.PublicKey) is null, "cache: garbled ciphertext -> null");
@@ -235,7 +235,7 @@ internal static class ProviderCacheTests
         check(rig.Cache.TryGet(other, "ext-1", rig.PublicKey) is null, "cache: a row moved to another instance -> null");
         rig.Exec("UPDATE provider_cache SET instance_id = $i", ("$i", instance.ToString("D")));
 
-        (string otherPublic, _) = DotenvxCipher.Instance.NewKeyPair();
+        (string otherPublic, _) = JweCipher.Instance.NewKeyPair();
         check(rig.Cache.TryGet(instance, "ext-1", otherPublic) is null, "cache: row for another store public key -> null");
         rig.Exec("UPDATE provider_cache SET store_public_key = $k", ("$k", otherPublic));
         check(rig.Cache.TryGet(instance, "ext-1", otherPublic) is null && rig.Cache.TryGet(instance, "ext-1", rig.PublicKey) is null, "cache: a rewritten store_public_key -> null");

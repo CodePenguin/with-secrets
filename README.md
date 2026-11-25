@@ -24,7 +24,7 @@ Deny, a wrong proof, an error or no answer before the time limit all end the run
 
 ## What you get
 
-- **Secrets the agent cannot read.** Values are typed in the admin web app, encrypted with [dotenvx](https://dotenvx.com/) crypto, and stored in a SQLite database. The key that opens them is wrapped by your passkeys and is never kept on disk.
+- **Secrets the agent cannot read.** Values are typed in the admin web app, sealed with [JSON Web Encryption](https://www.rfc-editor.org/rfc/rfc7516.html), and stored in a SQLite database. The key that opens them is wrapped by your passkeys and is never kept on disk.
 - **Approval of the exact command.** What you approve is what runs: the page shows the script's contents and hash, and the program runs a private snapshot of that file (on Linux and macOS) or holds it against changes (on Windows).
 - **A small, strict command grammar.** Interpreters are allowed in one reviewable form (`sh script.sh`, `python -c CODE`, `pwsh -NoProfile -File x.ps1`); forms that load unshown code are refused, and variables that change which code loads are removed from the child's environment.
 - **Pre-approvals.** A grant lets one exact command run again for a chosen time without another page.
@@ -76,7 +76,7 @@ STRIPE_KEY=secret://team/payments/STRIPE_PRODUCTION_KEY
 GITHUB_TOKEN=secret://GITHUB_TOKEN
 ```
 
-The program receives `STRIPE_KEY` and `GITHUB_TOKEN` as environment variables, and `LOG_LEVEL` as an ordinary value. Dotenvx `encrypted:` values work too. Details: [Project `.env` declarations](docs/reference.md#project-env-declarations).
+The program receives `STRIPE_KEY` and `GITHUB_TOKEN` as environment variables, and `LOG_LEVEL` as an ordinary value. A requesting client configured with the dotenvx executable can also resolve dotenvx `encrypted:` values. Details: [Project `.env` declarations](docs/reference.md#project-env-declarations).
 
 | Command | What it does |
 | --- | --- |
@@ -136,7 +136,7 @@ Layout: `src/WithSecrets.Core` (logic, the approval page, the host and the autho
 
 ## Credits
 
-Several of the ideas come from [Agent Secret](https://kovyrin.net/2026/06/04/agent-secret/) (Kovyrin, 2026). The encryption format is [dotenvx](https://dotenvx.com/); [dotnet-dotenvx](https://github.com/CodePenguin/dotnet-dotenvx) is the .NET port this project calls.
+Several of the ideas come from [Agent Secret](https://kovyrin.net/2026/06/04/agent-secret/) (Kovyrin, 2026). The internal store uses [JWE](https://www.rfc-editor.org/rfc/rfc7516.html). Projects can optionally resolve encrypted .env values with the [dotenvx CLI](https://dotenvx.com/).
 
 ## License
 

@@ -158,7 +158,7 @@ internal sealed partial class AdminApi
             [
                 ("variable", S.Str()),
                 ("file", S.Str()),
-                ("keySecret", S.Str()),
+                ("publicKey", S.Str()),
                 ("cipherShort", S.Str()),
             ]),
             ["ApprovalNameValue"] = S.Obj([("name", S.Str()), ("value", S.Str())]),

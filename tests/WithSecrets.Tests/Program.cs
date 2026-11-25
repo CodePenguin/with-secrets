@@ -120,6 +120,16 @@ internal static class Program
             return LastPassTests.FakeLpass(args);
         }
 
+        if (args is [DotenvxRun.CaptureArgument, var pipe, .. var names])
+        {
+            return DotenvxRun.CaptureAsync(pipe, names).GetAwaiter().GetResult();
+        }
+
+        if (args is ["run", "--strict", "--quiet", .. var dotenvx])
+        {
+            return FakeDotenvx.Run(dotenvx);
+        }
+
         if (args is ["project" or "secret", .., "--output", "json"])
         {
             return BitwardenTests.FakeBws(args);

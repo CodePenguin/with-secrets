@@ -789,7 +789,7 @@ internal static class GrantAuthorityTests
         string path = fx.Store.FilePath;
         string raw = string.Concat(new[] { path, path + "-wal", path + "-shm" }
             .Where(File.Exists).Select(file => Encoding.Latin1.GetString(File.ReadAllBytes(file))));
-        check(row.Evidence?.Ciphertext.StartsWith("encrypted:", StringComparison.Ordinal) == true
+        check(row.Evidence?.Ciphertext.StartsWith(JweCipher.Prefix, StringComparison.Ordinal) == true
             && row.ReviewKey == TestState.Current(fx.Db)!.Review!.PublicKey
             && row.SealKey == KeyIdentity.Fingerprint(keys.ActivePublicKey()!)
             && !raw.Contains(canary, StringComparison.Ordinal)

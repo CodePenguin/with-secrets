@@ -4,7 +4,6 @@ namespace WithSecrets.Vault;
 
 public sealed class VaultConfiguration : IAdapterConfiguration
 {
-    private const string CiphertextPrefix = "encrypted:";
 
     public string EncryptedConfiguration { get; private set; } = "";
 
@@ -22,9 +21,7 @@ public sealed class VaultConfiguration : IAdapterConfiguration
         EncryptedConfiguration = value.GetString()!;
     }
 
-    internal bool IsEncrypted => EncryptedConfiguration.StartsWith(CiphertextPrefix, StringComparison.Ordinal)
-        && EncryptedConfiguration.Length > CiphertextPrefix.Length
-        && EncryptedConfiguration.AsSpan(CiphertextPrefix.Length).IndexOfAnyExcept("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=") < 0;
+    internal bool IsEncrypted => JweCipher.IsCiphertext(EncryptedConfiguration);
 
     internal static bool ValidToken(string? token)
         => token is { Length: > 0 and <= 2000 }

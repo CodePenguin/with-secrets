@@ -892,7 +892,7 @@ internal static class AuditTrailTests
             check(!text.Contains(Value, StringComparison.Ordinal) && !text.Contains(Other, StringComparison.Ordinal) && !text.Contains(EnvCanary, StringComparison.Ordinal), "redaction: no secret or environment value is in the database or its journals");
 
             check(!argCanaries.Any(canary => text.Contains(canary, StringComparison.Ordinal)), "redaction: argument canaries are absent from the database and its journals");
-            check(rig.Machine.Deployment.Store.Grants().Single().Evidence?.Ciphertext.StartsWith("encrypted:", StringComparison.Ordinal) == true, "redaction: the once-only grant keeps encrypted evidence");
+            check(rig.Machine.Deployment.Store.Grants().Single().Evidence?.Ciphertext.StartsWith(JweCipher.Prefix, StringComparison.Ordinal) == true, "redaction: the once-only grant keeps encrypted evidence");
             check(!run.Stdout.Contains(Value, StringComparison.Ordinal) && !(run.Stdout + run.Stderr).Contains("EnvCanary-555", StringComparison.Ordinal), "redaction: the secret value is not in what the run printed either");
         }
 

@@ -1,9 +1,6 @@
 namespace WithSecrets.Tests;
 
-/// <summary>
-/// Pins the choice to keep our own .env parser and our DotenvxCipher wrapper over Dotenvx.Primitives.Decrypt: no command
-/// execution, no expansion, no key from the environment or from a key file, no fail-open on a wrong key. Throwaway keys only.
-/// </summary>
+/// <summary>Project declarations stay literal until delegated encrypted values are resolved.</summary>
 internal static class EnvParserPinTests
 {
     private const string Canary = "CANARY-expand-7731";
@@ -14,8 +11,6 @@ internal static class EnvParserPinTests
         string folder = Path.Combine(parent, "pin-" + Guid.NewGuid().ToString("N")[..8]);
         Directory.CreateDirectory(folder);
         ParserIsLiteral(check, folder);
-        DecryptIsLiteral(check, folder);
-        DecryptFailsClosed(check, folder);
         ParserRejects(check);
     }
 
@@ -56,118 +51,6 @@ internal static class EnvParserPinTests
     }
 
     // 2: an encrypted value whose plaintext looks like a command or an expansion comes back as that text.
-    private static void DecryptIsLiteral(Action<bool, string> check, string folder)
-    {
-        string? before = Environment.GetEnvironmentVariable(CanaryVar);
-        Environment.SetEnvironmentVariable(CanaryVar, Canary);
-        try
-        {
-            string marker = Marker(folder);
-            string slashed = marker.Replace('\\', '/');
-            string plain = "$(echo x > " + slashed + ")|${" + CanaryVar + "}|$" + CanaryVar + "|`echo y > " + slashed + "`";
-            (string publicKey, string privateKey) = DotenvxCipher.Instance.NewKeyPair();
-            string cipher = DotenvxCipher.Instance.Encrypt(plain, publicKey);
-            check(cipher.StartsWith("encrypted:", StringComparison.Ordinal), "pin decrypt: the test value is an encrypted: text");
-            string got = DotenvxCipher.Instance.Decrypt(privateKey, cipher);
-            check(got == plain && !got.Contains(Canary, StringComparison.Ordinal), "pin decrypt: the plaintext comes back literally, no expansion");
-            check(!File.Exists(marker), "pin decrypt: no command ran (the marker file does not exist)");
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(CanaryVar, before);
-        }
-    }
-
-    // 3, 4, 6: wrong key, tampered text, missing key fail closed; no key from the environment or ./.env.keys; no key or plaintext in messages.
-    private static void DecryptFailsClosed(Action<bool, string> check, string folder)
-    {
-        const string Plain = "Plain-Pin-Value-5520";
-        (string publicKey, string rightKey) = DotenvxCipher.Instance.NewKeyPair();
-        (_, string wrongKey) = DotenvxCipher.Instance.NewKeyPair();
-        string cipher = DotenvxCipher.Instance.Encrypt(Plain, publicKey);
-        string body = cipher["encrypted:".Length..];
-        string tampered = "encrypted:" + body[..^8] + (body[^8] == 'A' ? 'B' : 'A') + body[^7..];
-
-        string? beforeKey = Environment.GetEnvironmentVariable("DOTENV_PRIVATE_KEY");
-        string beforeDirectory = Environment.CurrentDirectory;
-        string work = Path.Combine(folder, "keys-work");
-        Directory.CreateDirectory(work);
-        File.WriteAllText(Path.Combine(work, ".env.keys"), "DOTENV_PRIVATE_KEY=" + rightKey + "\n");
-        File.WriteAllText(Path.Combine(work, ".env"), "DOTENV_PRIVATE_KEY=" + rightKey + "\nX=" + cipher + "\n");
-        Environment.SetEnvironmentVariable("DOTENV_PRIVATE_KEY", rightKey);
-        Environment.CurrentDirectory = work;
-        try
-        {
-            check(DotenvxCipher.Instance.Decrypt(rightKey, cipher) == Plain, "pin decrypt: the right key decrypts (control)");
-            (string Name, string Key, string Text)[] cases =
-            [
-                ("wrong key, right key in the environment and in ./.env.keys", wrongKey, cipher),
-                ("empty key, right key in the environment and in ./.env.keys", "", cipher),
-                ("garbage key", "not-a-key", cipher),
-                ("tampered ciphertext", rightKey, tampered),
-                ("damaged ciphertext", rightKey, "encrypted:" + new string('B', 100)),
-                ("empty ciphertext body", rightKey, "encrypted:"),
-            ];
-            foreach ((string name, string key, string text) in cases)
-            {
-                string? result = null;
-                Exception? failure = null;
-                try
-                {
-                    result = DotenvxCipher.Instance.Decrypt(key, text);
-                }
-                catch (Exception exception)
-                {
-                    failure = exception;
-                }
-
-                string seen = failure is null ? "" : Everything(failure);
-                check(failure is not null && result is null, "pin decrypt: " + name + " fails (" + (result is null ? "no value returned" : "a value was returned") + ")");
-                check(result != text && result != text["encrypted:".Length..], "pin decrypt: " + name + " does not return the ciphertext as the value");
-                check(failure is not null && !ContainsAny(seen, rightKey, wrongKey, Plain, Canary), "pin decrypt: " + name + ": the failure text holds no key and no plaintext");
-            }
-
-            check(DotenvxCipher.Instance.Decrypt(rightKey, cipher) == Plain, "pin decrypt: the right key still decrypts after the failures");
-        }
-        finally
-        {
-            Environment.CurrentDirectory = beforeDirectory;
-            Environment.SetEnvironmentVariable("DOTENV_PRIVATE_KEY", beforeKey);
-        }
-
-        Exception? missing = null;
-        string? missingResult = null;
-        Environment.SetEnvironmentVariable("DOTENV_PRIVATE_KEY", rightKey);
-        try
-        {
-            missingResult = DotenvxCipher.Instance.Decrypt(null!, cipher);
-        }
-        catch (Exception exception)
-        {
-            missing = exception;
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable("DOTENV_PRIVATE_KEY", beforeKey);
-        }
-
-        check(missing is not null && missingResult is null && !ContainsAny(Everything(missing), rightKey, wrongKey, Plain), "pin decrypt: a missing key fails (with the right key in the environment), naming no key");
-
-        // the plan asks the secret store for the key; it never looks at ./.env.keys or the environment
-        string project = Path.Combine(folder, "project");
-        Directory.CreateDirectory(project);
-        File.WriteAllText(Path.Combine(project, ".env"), "X=" + cipher + "\n");
-        File.WriteAllText(Path.Combine(project, ".env.keys"), "DOTENV_PRIVATE_KEY=" + rightKey + "\n");
-        EnvResult plan = EnvDeclarations.Compose(null, project, [], _ => null);
-        check(plan.Plan is { Encrypted: [{ KeySecret: "DOTENV_PRIVATE_KEY" }] } && !plan.Plan.Ordinary.ContainsKey("X"), "pin decrypt: the plan asks the secret store for the key (a .env.keys beside the .env is ignored) and is no ordinary value");
-    }
-
-    private static string Everything(Exception exception) => exception.ToString() + "\n" + exception.Message + "\n" + string.Join("\n", exception.Data.Values.Cast<object?>().Select(item => item?.ToString()));
-
-    private static bool ContainsAny(string text, params string[] needles) => needles.Any(needle => needle.Length > 0 && text.Contains(needle, StringComparison.Ordinal));
-
-    // 5: what Dotenvx accepts silently and we refuse or define. Unclosed quote, junk after a quote, NUL in a quoted value and
-    // invalid names are already pinned in EnvDeclarationTests.Parser (the "bad" table) and are not repeated here.
     private static void ParserRejects(Action<bool, string> check)
     {
         // a lone CR does not end a line; it is data (never a break that hides a second declaration)

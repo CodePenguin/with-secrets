@@ -40,8 +40,8 @@ internal sealed class RecoveryCarry(byte[] oldPrivateKey, byte[] oldReviewKey, s
         SortedDictionary<string, string> rows = new(StringComparer.Ordinal);
         foreach ((string name, string ciphertext) in oldRows.OrderBy(item => item.Key, StringComparer.Ordinal))
         {
-            string value = DotenvxCipher.Instance.Decrypt(privateKey, ciphertext);
-            rows[name] = DotenvxCipher.Instance.Encrypt(value, newPublicKey);
+            string value = JweCipher.Instance.Decrypt(privateKey, ciphertext);
+            rows[name] = JweCipher.Instance.Encrypt(value, newPublicKey);
         }
 
         return rows;
@@ -414,8 +414,8 @@ public sealed class StoreRecovery(StateDatabase db, EnrollmentTarget primaryTarg
                     return Wrong("That recovery code does not open this store.");
                 }
 
-                if (DotenvxCipher.Instance.Derive(Encoding.UTF8.GetString(key)) != manifest.Store
-                    || DotenvxCipher.Instance.Derive(Encoding.UTF8.GetString(reviewKey)) != manifest.Review!.PublicKey)
+                if (JweCipher.Instance.Derive(Encoding.UTF8.GetString(key)) != manifest.Store
+                    || JweCipher.Instance.Derive(Encoding.UTF8.GetString(reviewKey)) != manifest.Review!.PublicKey)
                 {
                     return Wrong("That recovery code does not open this store.");
                 }

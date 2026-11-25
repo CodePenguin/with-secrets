@@ -25,8 +25,8 @@ public sealed record ServiceTrust(string? PinnedFingerprint, string? Problem = n
 /// <summary>
 /// The client side of a run: reads the .env files once, sends the immutable plan to the host service as a
 /// <see cref="LaunchRequest" />, prints what the service streams back (the approval link, the redacted output) and ends with the
-/// exit code the service reports. It never opens the secret store, never decrypts and never starts the program: the final
-/// decision to launch is the service's.
+/// exit code the service reports. It can resolve dotenvx project values after approval. The service owns access to the
+/// WithSecrets store and starts the requested program.
 /// </summary>
 public static class LaunchClient
 {
@@ -53,10 +53,10 @@ public static class LaunchClient
     /// </summary>
     public static async Task<int> RunAsync(RunArgs args, string workingDirectory, LocalEndpoint endpoint, int? pagePort, TextWriter stdout, TextWriter stderr, ServiceTrust trust, IReadOnlyDictionary<string, string>? environment = null, HttpMessageHandler? handler = null, CancellationToken cancel = default, bool approve = false)
     {
-        environment ??= CurrentEnvironment();
+        environment = (environment ?? CurrentEnvironment()).Where(pair => !DotenvxRun.IsCredential(pair.Key)).ToDictionary();
         Func<string, string?> lookup = name => environment.FirstOrDefault(item => string.Equals(item.Key, name, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) is { Key: not null } found ? found.Value : null;
 
-        // The .env files are read once, here. The plan goes to the service and nowhere else reads the files.
+        // The service gets the plan. The requesting client keeps the dotenvx project files local.
         EnvResult composed = EnvDeclarations.Compose(args.EnvFiles, workingDirectory, args.Secrets, lookup);
         if (composed.Plan is not { } plan)
         {
@@ -69,13 +69,37 @@ public static class LaunchClient
         }
 
         IReadOnlyList<EncryptedValue> encrypted = plan.Encrypted ?? [];
-        if (plan.Mappings.Count == 0 && encrypted.Count == 0)
+        string? dotenvxExecutable = null;
+        string? dotenvxDigest = null;
+        if (plan.HasDotenvxDeclarations || DotenvxRun.HasPolicy(workingDirectory))
+        {
+            if (plan.Files.Count == 0)
+            {
+                return await Fail(stderr, RunCommand.Usage, "The dotenvx project policy requires a selected .env file.");
+            }
+
+            dotenvxExecutable = Environment.GetEnvironmentVariable(DotenvxRun.ExecutableVariable) ?? "";
+            if (!Path.IsPathFullyQualified(dotenvxExecutable) || !File.Exists(dotenvxExecutable))
+            {
+                return await Fail(stderr, RunCommand.Usage, $"Set {DotenvxRun.ExecutableVariable} in the requesting user's environment to a trusted absolute dotenvx path.");
+            }
+
+            try
+            {
+                dotenvxDigest = DotenvxRun.InputDigest(workingDirectory, plan.Files, plan.FileHashes);
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or DotenvxResolutionException)
+            {
+                return await Fail(stderr, RunCommand.Usage, "Cannot read the project inputs for dotenvx. Nothing was run.");
+            }
+        }
+
+        if (plan.Mappings.Count == 0 && dotenvxDigest is null)
         {
             return await Fail(stderr, RunCommand.Usage, "Name the secrets with --secrets NAME[,NAME...]. There is no option for all secrets.");
         }
 
-        // The key secrets of the encrypted values are requested like any secret (listed, approved, read only after the approval).
-        IReadOnlyList<string> names = [.. plan.Mappings.Select(mapping => mapping.Secret).Concat(encrypted.Select(value => value.KeySecret)).Distinct(StringComparer.Ordinal)];
+        IReadOnlyList<string> names = [.. plan.Mappings.Select(mapping => mapping.Secret).Distinct(StringComparer.Ordinal)];
         string[] invalid = [.. names.Where(name => !SecretNames.IsValid(name))];
         if (invalid.Length > 0)
         {
@@ -99,7 +123,8 @@ public static class LaunchClient
             [.. plan.Ordinary.Keys.Order(StringComparer.Ordinal)],
             plan.Ordinary,
             environment,
-            [.. encrypted.Select(value => new LaunchEncrypted(value.Variable, value.File, value.KeySecret, value.Ciphertext))]);
+            [.. encrypted.Select(value => new LaunchEncrypted(value.Variable, value.File, value.PublicKey, value.Ciphertext))],
+            dotenvxDigest, dotenvxDigest is not null && plan.DynamicNames is { Count: > 0 } ? plan.DynamicNames : null);
 
         using HttpClient client = handler is null
             ? new HttpClient(endpoint.CreateHandler())
@@ -156,6 +181,7 @@ public static class LaunchClient
             }
 
             using StreamReader reader = new(await response.Content.ReadAsStreamAsync(cancel), new UTF8Encoding(false));
+            bool sentDotenvx = false;
             try
             {
                 while (await reader.ReadLineAsync(cancel) is { } line)
@@ -175,6 +201,19 @@ public static class LaunchClient
                             await target.WriteAsync(launchEvent.Text);
                             await target.FlushAsync();
                             break;
+                        case LaunchEvent.DotenvxKind:
+                            if (sentDotenvx || approve || dotenvxExecutable is null || dotenvxDigest is null)
+                            {
+                                return await Fail(stderr, RunCommand.StoreError, "the host service sent an unexpected dotenvx request");
+                            }
+
+                            sentDotenvx = true;
+                            if (!await SendDotenvxAsync(client, endpoint, request, dotenvxExecutable, launchEvent.Challenge!, stderr, cancel))
+                            {
+                                return await Fail(stderr, RunCommand.StoreError, "the host service refused the dotenvx response");
+                            }
+
+                            break;
                         default:
                             return launchEvent.ExitCode!.Value;
                     }
@@ -187,6 +226,48 @@ public static class LaunchClient
         }
 
         return await Fail(stderr, RunCommand.StoreError, "the host service closed the connection before the program finished");
+    }
+
+    private static async Task<bool> SendDotenvxAsync(HttpClient client, LocalEndpoint endpoint, LaunchRequest request,
+        string executable, string challenge, TextWriter stderr, CancellationToken cancel)
+    {
+        Dictionary<string, string>? values = null;
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+        TimeSpan remaining = request.Expires - DateTimeOffset.UtcNow;
+        if (remaining > TimeSpan.Zero)
+        {
+            timeout.CancelAfter(remaining);
+            try
+            {
+                values = await DotenvxRun.ResolveAsync(executable, request.WorkingDirectory, request.EnvFiles,
+                    [.. DotenvxRun.OutputNames(request)], timeout.Token, request.DotenvxInputDigest);
+            }
+            catch (DotenvxResolutionException error) when (error.ApprovalRequired)
+            {
+                await stderr.WriteLineAsync("with-secrets: " + DotenvxRun.ApprovalError);
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or DotenvxResolutionException
+                || error is OperationCanceledException && !cancel.IsCancellationRequested)
+            {
+                values = null;
+            }
+        }
+
+        byte[] body = JsonSerializer.SerializeToUtf8Bytes(values);
+        try
+        {
+            using var message = new HttpRequestMessage(HttpMethod.Post, new Uri(endpoint.BaseUri, "v1/launch/" + request.RequestId + "/dotenvx"))
+            {
+                Content = new ByteArrayContent(body),
+            };
+            message.Headers.Add("X-Dotenvx-Challenge", challenge);
+            using HttpResponseMessage response = await client.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancel);
+            return response.StatusCode == HttpStatusCode.NoContent;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(body);
+        }
     }
 
     /// <summary>

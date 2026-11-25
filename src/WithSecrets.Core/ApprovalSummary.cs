@@ -160,6 +160,11 @@ public static class ApprovalSummary
             text.Append((char)10).Append(Clean(extra));
         }
 
+        if (DotenvxLine(request) is { } line)
+        {
+            text.Append('\n').Append(line);
+        }
+
         if (request.RequestId is { Length: > 0 } id)
         {
             text.Append('\n').Append(RequestIdPrefix).Append(Clean(id));
@@ -167,6 +172,11 @@ public static class ApprovalSummary
 
         return text.ToString();
     }
+
+    internal static string? DotenvxLine(ApprovalRequest request) => request.DotenvxInputDigest is { } digest
+        ? "The requesting client's dotenvx resolves project values after approval. Project input SHA-256 " + Clean(digest) + "."
+            + (request.DotenvxDynamicNames is { Count: > 0 } dynamicNames ? " Values evaluated at launch: " + string.Join(", ", dynamicNames.Select(Clean)) + "." : "")
+        : null;
 
     /// <summary>
     /// A warning (never a block) when a credential is written into the command line, the inline code or a script: what kind and where, never the credential, and the
@@ -312,7 +322,7 @@ public static class ApprovalSummary
 
         foreach (DecryptItem item in decrypts)
         {
-            text.Append('\n').Append("decrypt with secret ").Append(Clean(item.KeySecret)).Append(": ").Append(Clean(item.Variable)).Append(" (cipher sha256 ").Append(Clean(item.Short)).Append(") from ").Append(Clean(item.File));
+            text.Append('\n').Append("resolve with dotenvx: ").Append(Clean(item.Variable)).Append(" (cipher sha256 ").Append(Clean(item.Short)).Append(") from ").Append(Clean(item.File));
         }
 
         text.Append('\n').Append("Encrypted values are not shown. Anyone who has the public key in a .env file can write one, so a value is not proof that you made it: compare each cipher fingerprint with the committed file.");

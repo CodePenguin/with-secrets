@@ -771,7 +771,7 @@ internal static class ProviderDeliveryTests
             "delivery: audit outcomes Fresh, Cached, Stale, Failed carry path and instance");
         check(rig.Audits[0].ErrorKind is null && rig.Audits[1].ErrorKind is null && rig.Audits[3].ErrorKind == ProviderErrorKind.RateLimited, "delivery: audit error kinds");
         string text = string.Join("\n", rig.Audits.Select(audit => audit.ToString()));
-        check(!text.Contains(Alpha, StringComparison.Ordinal) && !text.Contains("encrypted:", StringComparison.Ordinal) && !text.Contains("ext-a", StringComparison.Ordinal) && !text.Contains("{}", StringComparison.Ordinal),
+        check(!text.Contains(Alpha, StringComparison.Ordinal) && !text.Contains(JweCipher.Prefix, StringComparison.Ordinal) && !text.Contains("ext-a", StringComparison.Ordinal) && !text.Contains("{}", StringComparison.Ordinal),
             "delivery: audit records carry no value, ciphertext or configuration");
         check(typeof(ProviderAudit).GetProperties().All(property => property.PropertyType != typeof(byte[])), "delivery: ProviderAudit has no byte[] member");
     }
@@ -844,13 +844,13 @@ internal static class ProviderDeliveryTests
 
         // A planted ciphertext (valid for the store public key) is never served: a miss, refetched.
         string storeKey = TestState.Current(rig.Db)!.Store;
-        rig.Exec("UPDATE provider_cache SET ciphertext = $c", ("$c", DotenvxCipher.Instance.Encrypt("Planted-Value-9", storeKey)));
+        rig.Exec("UPDATE provider_cache SET ciphertext = $c", ("$c", JweCipher.Instance.Encrypt("Planted-Value-9", storeKey)));
         Dictionary<string, string>? got = rig.TryGet(out string error, "team/ALPHA");
         check(got?["team/ALPHA"] == Alpha && rig.Invocations == 2, "delivery: a tampered row is a miss and is refetched (" + error + ")");
 
         // During an outage a tampered row is not served stale either.
         rig.Clock.Advance(TimeSpan.FromMinutes(50));
-        rig.Exec("UPDATE provider_cache SET ciphertext = $c", ("$c", DotenvxCipher.Instance.Encrypt("Planted-Value-9", storeKey)));
+        rig.Exec("UPDATE provider_cache SET ciphertext = $c", ("$c", JweCipher.Instance.Encrypt("Planted-Value-9", storeKey)));
         rig.Adapter.Fails("kv/ALPHA", ProviderErrorKind.Unavailable);
         got = rig.TryGet(out error, "team/ALPHA");
         check(got is null && !error.Contains("Planted", StringComparison.Ordinal), "delivery: a tampered row is never served stale (" + error + ")");

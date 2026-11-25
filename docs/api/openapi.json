@@ -12741,7 +12741,7 @@
           "file": {
             "type": "string"
           },
-          "keySecret": {
+          "publicKey": {
             "type": "string"
           },
           "cipherShort": {
@@ -12752,7 +12752,7 @@
         "required": [
           "variable",
           "file",
-          "keySecret",
+          "publicKey",
           "cipherShort"
         ]
       },

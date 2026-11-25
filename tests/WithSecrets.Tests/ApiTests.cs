@@ -82,7 +82,7 @@ internal static class ApiTests
         }, () => new FakeConfiguration());
         const string token = "ops_write_only_canary";
         const string masterPassword = "lastpass-write-only-canary";
-        var (publicKey, privateKey) = DotenvxCipher.Instance.NewKeyPair();
+        var (publicKey, privateKey) = JweCipher.Instance.NewKeyPair();
         using AdminApp app = new(root, providers: registry,
             sealOnePasswordConfiguration: supplied => OnePassword.OnePasswordProvider.SealConfiguration(supplied, publicKey),
             sealLastPassConfiguration: (username, password) => LastPass.LastPassProvider.SealConfiguration(username, password, publicKey),
@@ -127,7 +127,7 @@ internal static class ApiTests
             using JsonDocument answer = JsonDocument.Parse(sealedBody);
             using JsonDocument configuration = JsonDocument.Parse(answer.RootElement.GetProperty("config").GetString()!);
             string ciphertext = configuration.RootElement.GetProperty("encryptedConfiguration").GetString()!;
-            using JsonDocument opened = JsonDocument.Parse(DotenvxCipher.Instance.Decrypt(privateKey, ciphertext));
+            using JsonDocument opened = JsonDocument.Parse(JweCipher.Instance.Decrypt(privateKey, ciphertext));
             check(opened.RootElement.GetProperty("serviceAccountToken").GetString() == token,
                 "providers API: the returned configuration seals the submitted token to the key");
         }
@@ -154,7 +154,7 @@ internal static class ApiTests
             check(configuration.RootElement.GetProperty("username").GetString() == "user@example.test",
                 "providers API: the sealed LastPass configuration keeps the account name");
             string ciphertext = configuration.RootElement.GetProperty("encryptedConfiguration").GetString()!;
-            using JsonDocument opened = JsonDocument.Parse(DotenvxCipher.Instance.Decrypt(privateKey, ciphertext));
+            using JsonDocument opened = JsonDocument.Parse(JweCipher.Instance.Decrypt(privateKey, ciphertext));
             check(opened.RootElement.GetProperty("masterPassword").GetString() == masterPassword,
                 "providers API: the returned configuration seals the submitted master password to the key");
             check(ProviderAdmin.ConfigurationScreen(configuration.RootElement.GetRawText()) is null,

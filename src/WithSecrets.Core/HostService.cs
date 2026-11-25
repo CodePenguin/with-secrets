@@ -1,7 +1,9 @@
 using System.Buffers;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -165,6 +167,7 @@ public sealed class HostService : IDisposable
     private readonly WebApplication _app;
     private readonly AdminWebAssets _web;
     private readonly Dictionary<string, CancellationTokenSource> _active = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DotenvxHandoff> _dotenvxHandoffs = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTimeOffset> _seen = new(StringComparer.Ordinal);
     private readonly Lock _lock = new();
     private int _disposed;
@@ -745,6 +748,12 @@ public sealed class HostService : IDisposable
             return;
         }
 
+        if (path.StartsWith("/v1/launch/", StringComparison.Ordinal) && path.EndsWith("/dotenvx", StringComparison.Ordinal))
+        {
+            await ReceiveDotenvx(context, path["/v1/launch/".Length..^"/dotenvx".Length]);
+            return;
+        }
+
         if (path.StartsWith("/v1/launch/", StringComparison.Ordinal) && path.EndsWith("/cancel", StringComparison.Ordinal))
         {
             if (!HttpMethods.IsPost(request.Method))
@@ -1202,6 +1211,7 @@ public sealed class HostService : IDisposable
                 AfterPrepare = _options.AfterPrepare,
                 AfterCommit = _options.AfterCommit,
                 OnApprovalLink = link => events.Send(LaunchEvent.Approval(link)),
+                DotenvxResolver = () => RequestDotenvx(launch, events, cancel.Token),
             };
 
             (LaunchOutcome outcome, int exitCode) = await Task.Run(() => Run(launch, launchContext, pagePort, events, approve));
@@ -1215,6 +1225,111 @@ public sealed class HostService : IDisposable
                 _active.Remove(launch.RequestId);
             }
         }
+    }
+
+    private async Task<Dictionary<string, string>> RequestDotenvx(LaunchRequest launch, EventStream events, CancellationToken cancel)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancel);
+        TimeSpan remaining = launch.Expires - DateTimeOffset.UtcNow;
+        if (remaining <= TimeSpan.Zero)
+        {
+            throw new DotenvxResolutionException();
+        }
+
+        timeout.CancelAfter(remaining);
+        var handoff = new DotenvxHandoff(Convert.ToHexString(RandomNumberGenerator.GetBytes(32)), timeout.Token);
+        lock (_lock)
+        {
+            _dotenvxHandoffs.Add(launch.RequestId, handoff);
+        }
+
+        try
+        {
+            events.Send(LaunchEvent.Dotenvx(handoff.Challenge));
+            var values = await handoff.Response.Task.WaitAsync(timeout.Token);
+            var expected = DotenvxRun.OutputNames(launch);
+            if (values is null || values.Count != expected.Count || values.Any(item => !expected.Contains(item.Key) || item.Value.Length > EnvDeclarations.MaxValue || item.Value.Contains('\0'))
+                || launch.Encrypted.Any(item => !values.TryGetValue(item.Variable, out string? value) || value == item.Ciphertext || !RunCommand.UsablePlaintext(value)))
+            {
+                throw new DotenvxResolutionException();
+            }
+
+            foreach ((string name, string value) in launch.EnvVariables)
+            {
+                if (values.TryGetValue(name, out string? resolved) && resolved == value)
+                {
+                    values.Remove(name);
+                }
+            }
+
+            return values;
+        }
+        catch (OperationCanceledException) when (!cancel.IsCancellationRequested)
+        {
+            throw new DotenvxResolutionException();
+        }
+        finally
+        {
+            lock (_lock)
+            {
+                _dotenvxHandoffs.Remove(launch.RequestId);
+            }
+        }
+    }
+
+    private async Task ReceiveDotenvx(HttpContext context, string id)
+    {
+        if (!HttpMethods.IsPost(context.Request.Method))
+        {
+            await Refuse(context.Response, 405, "use POST");
+            return;
+        }
+
+        DotenvxHandoff? handoff;
+        lock (_lock)
+        {
+            _dotenvxHandoffs.TryGetValue(id, out handoff);
+        }
+
+        if (handoff is null || handoff.Cancel.IsCancellationRequested || context.Request.Headers["X-Dotenvx-Challenge"] is not { Count: 1 } challenge
+            || !string.Equals(challenge[0], handoff.Challenge, StringComparison.Ordinal))
+        {
+            await Refuse(context.Response, 404, "no such dotenvx handoff");
+            return;
+        }
+
+        byte[]? body = null;
+        Dictionary<string, string>? values;
+        try
+        {
+            body = await ReadBody(context.Request.Body, context.RequestAborted);
+            values = DotenvxRun.ReadValues(body, names: null);
+        }
+        catch (Exception error) when (error is JsonException or DotenvxResolutionException or BodyTooLargeException or IOException)
+        {
+            await Refuse(context.Response, 400, "invalid dotenvx handoff");
+            return;
+        }
+        finally
+        {
+            if (body is not null)
+            {
+                CryptographicOperations.ZeroMemory(body);
+            }
+        }
+
+        if (handoff.Cancel.IsCancellationRequested || !handoff.Response.TrySetResult(values))
+        {
+            await Refuse(context.Response, 409, "the dotenvx handoff was used");
+            return;
+        }
+
+        context.Response.StatusCode = 204;
+    }
+
+    private sealed record DotenvxHandoff(string Challenge, CancellationToken Cancel)
+    {
+        public TaskCompletionSource<Dictionary<string, string>?> Response { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
     private async Task<(LaunchOutcome Outcome, int ExitCode)> Run(LaunchRequest launch, LaunchContext context, int? pagePort, EventStream events, bool approve)

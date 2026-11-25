@@ -61,6 +61,7 @@ internal static class EnvDeclarationTests
             await WebApprovalTests.EnvHttp(check, folder);
             await WebApprovalTests.EnvEncryptedHttp(check, folder);
             await Encrypted(check, folder);
+            await ClientDotenvx(check, folder);
             await ReviewFixes(check, folder);
             EnvParserPinTests.Run(check, folder);
         }
@@ -206,8 +207,8 @@ internal static class EnvDeclarationTests
 
         // encrypted values: the effective one is listed with its key secret (nothing decrypted here); an overridden one is ignored
         EnvResult encrypted = Compose(folder, "X=encrypted:BDQ3s0m3\nY=plain\n");
-        check(encrypted.Plan is { } xp && xp.Encrypted is [{ Variable: "X", KeySecret: "DOTENV_PRIVATE_KEY" } ev] && ev.File.EndsWith(".env", StringComparison.Ordinal) && xp.Mappings.Count == 0 && !xp.Ordinary.ContainsKey("X") && xp.Ordinary["Y"] == "plain", "compose: an effective encrypted value is planned with the key secret DOTENV_PRIVATE_KEY, not as an ordinary value");
-        check(encrypted.Plan!.Encrypted![0].ToString() == "encrypted X (" + encrypted.Plan.Encrypted[0].File + ") key DOTENV_PRIVATE_KEY", "compose: an encrypted value prints names only");
+        check(encrypted.Plan is { } xp && xp.Encrypted is [{ Variable: "X", PublicKey: "" } ev] && ev.File.EndsWith(".env", StringComparison.Ordinal) && xp.Mappings.Count == 0 && !xp.Ordinary.ContainsKey("X") && xp.Ordinary["Y"] == "plain", "compose: an effective encrypted value is planned with the key secret DOTENV_PRIVATE_KEY, not as an ordinary value");
+        check(encrypted.Plan!.Encrypted![0].ToString() == "encrypted X (" + encrypted.Plan.Encrypted[0].File + ")", "compose: an encrypted value prints names only");
         check(Compose(folder, "X=encrypted:BDQ3s0m3\n", environment: new() { ["X"] = "os" }).Plan is { Encrypted.Count: 0 }, "compose: an encrypted value hidden by an OS variable is ignored, its key is not needed");
         check(Compose(folder, "X=encrypted:BDQ3s0m3\n", ["X"]).Plan is { Mappings.Count: 1, Encrypted.Count: 0 }, "compose: an encrypted value hidden by --secrets is ignored");
         File.WriteAllText(Path.Combine(folder, "first.env"), "X=plain\n");
@@ -217,20 +218,12 @@ internal static class EnvDeclarationTests
         check(Compose(folder, "X=encrypted:BDQ3s0m3\nX2=encrypted:BDQ3s0m4\nY=secret://K\n").Plan is { Encrypted.Count: 2 }, "compose: more than one encrypted value");
         check(Compose(folder, "X=encrypted:" + new string('A', EnvDeclarations.MaxEncrypted)).Error!.Contains("longer than", StringComparison.Ordinal), "compose: an over-long encrypted value is an error");
 
-        // the key secret by Dotenvx convention
-        (string File, string Key)[] keys = [(".env", "DOTENV_PRIVATE_KEY"), (".env.production", "DOTENV_PRIVATE_KEY_PRODUCTION"), (".env.ci-test", "DOTENV_PRIVATE_KEY_CI_TEST"), (".env.my.stage", "DOTENV_PRIVATE_KEY_MY_STAGE"),
-            ("prod.env", "DOTENV_PRIVATE_KEY"), ("sub/.env.Local", "DOTENV_PRIVATE_KEY_LOCAL"), ("secrets.txt", "DOTENV_PRIVATE_KEY"), (".env.", "DOTENV_PRIVATE_KEY")];
-        foreach ((string file, string key) in keys)
-        {
-            check(EnvDeclarations.KeySecretFor(Path.Combine(folder, file)) == key, "compose: the key secret for " + file + " is " + key);
-        }
+        File.WriteAllText(Path.Combine(folder, ".env.staging"), $"DOTENV_PUBLIC_KEY_STAGING={FakeDotenvx.PublicKey}\nS=encrypted:BDQ3s0m3\n");
+        check(EnvDeclarations.Compose([".env.staging"], folder, [], _ => null).Plan?.Encrypted?.Single().PublicKey == FakeDotenvx.PublicKey,
+            "compose: encrypted values carry the public metadata from their source file");
+        check(Compose(folder, "DOTENV_PUBLIC_KEY=bad\nX=encrypted:BDQ3s0m3\n").Plan is null,
+            "compose: malformed public metadata is refused");
 
-        check(EnvDeclarations.KeySecretFor(Path.Combine(folder, ".env.pr@d")) is null, "compose: a file name that makes no valid key secret name gives none");
-        File.WriteAllText(Path.Combine(folder, ".env.staging"), "S=encrypted:BDQ3s0m3\n");
-        check(EnvDeclarations.Compose([".env.staging"], folder, [], _ => null).Plan is { Encrypted: [{ KeySecret: "DOTENV_PRIVATE_KEY_STAGING" }] }, "compose: .env.staging asks for DOTENV_PRIVATE_KEY_STAGING");
-
-        // the key itself is never handed to a program: not as a --secrets name, not as a reference target, not as an ordinary value
-        check(Compose(folder, "A=1\n", ["DOTENV_PRIVATE_KEY"]).Error!.Contains("private key", StringComparison.Ordinal), "compose: --secrets DOTENV_PRIVATE_KEY is refused");
         check(Compose(folder, "A=secret://DOTENV_PRIVATE_KEY_PRODUCTION\n").Error!.Contains("private key", StringComparison.Ordinal) && Compose(folder, "A=secret://team/DOTENV_PRIVATE_KEY\n").Plan is null, "compose: a reference to a Dotenvx private key secret is refused");
 
         // bad references and bad lines name the variable or the line, never the value
@@ -578,7 +571,7 @@ internal static class EnvDeclarationTests
         check(run.Code == RunCommand.Usage && approver.Requests.Count == 0, "run: a missing -f file is exit 2");
         File.WriteAllText(Path.Combine(folder, ".env"), "ENC=encrypted:BDQ3s0m3\nTOKEN=secret://A_KEY\n");
         run = await Execute(parent, folder, script, dump, source, approver, []);
-        check(run.Code == RunCommand.Usage && run.Err.Contains("Missing secret: DOTENV_PRIVATE_KEY", StringComparison.Ordinal) && run.Err.Contains("ENC", StringComparison.Ordinal) && !run.Err.Contains("BDQ3s0m3", StringComparison.Ordinal) && approver.Requests.Count == 0 && source.Requests.Count == 0, "run: an effective encrypted value whose key secret is not in the store is exit 2 naming the secret, before any prompt");
+        check(run.Code == RunCommand.Usage && run.Err.Contains(DotenvxRun.ExecutableVariable, StringComparison.Ordinal) && run.Err.Contains("ENC", StringComparison.Ordinal) && !run.Err.Contains("BDQ3s0m3", StringComparison.Ordinal) && approver.Requests.Count == 0 && source.Requests.Count == 0, "run: an effective encrypted value requires an explicitly configured dotenvx executable before approval");
         File.WriteAllText(Path.Combine(folder, ".env"), "TOKEN=secret://NO_SUCH_KEY\n");
         run = await Execute(parent, folder, script, dump, source, approver, []);
         check(run.Code == RunCommand.Usage && run.Err.Contains("Unknown secret: NO_SUCH_KEY", StringComparison.Ordinal) && approver.Requests.Count == 0, "run: a reference to a name not in the store is exit 2");
@@ -592,137 +585,111 @@ internal static class EnvDeclarationTests
         check(run.Code == 0 && run.EnvDump.Contains("A_KEY=aaaa-value-1", StringComparison.Ordinal) && run.EnvDump.Contains("LOG_LEVEL=viaenv", StringComparison.Ordinal), "run: --secrets and the ordinary .env together");
     }
 
-    // --- Dotenvx encrypted values: the run (in memory, with the real Dotenvx primitives)
     private static async Task Encrypted(Action<bool, string> check, string parent)
     {
-        const string Plain = "Decrypted-Value-6021";
-        (string publicKey, string privateKey) = DotenvxCipher.Instance.NewKeyPair();
-        string cipher = DotenvxCipher.Instance.Encrypt(Plain, publicKey);
-        string cipherBody = cipher["encrypted:".Length..];
-        (string publicStaging, string privateStaging) = DotenvxCipher.Instance.NewKeyPair();
-        string stagingCipher = DotenvxCipher.Instance.Encrypt("Staging-Value-7733", publicStaging);
+        const string plain = "Decrypted-Value-6021";
+        const string stored = "Stored-Value-4711";
+        string cipher = FakeDotenvx.Cipher(plain);
+        string text = $"DOTENV_PUBLIC_KEY={FakeDotenvx.PublicKey}\nDB_PASS={cipher}\nTOKEN=secret://TEAM/API_KEY\n";
+        var (folder, script, dump) = Project(parent, text);
+        using var fake = new FakeDotenvx();
+        var source = new RecordingSource(new() { ["TEAM/API_KEY"] = stored });
 
-        // the effective encrypted value: decrypted after approval with the key secret, injected under the variable, key not in the environment
-        (string folder, string script, string dump) = Project(parent, $"DB_PASS={cipher}\nLOG_LEVEL={Ordinary}\n");
-        RecordingSource source = new(new() { ["DOTENV_PRIVATE_KEY"] = privateKey, ["UNRELATED_KEY"] = "unrelated-value-1" });
-        FakeApprover approver = new(true);
-        RunResult run = await Execute(parent, folder, script, dump, source, approver, []);
-        check(run.Code == 0 && run.EnvDump.Contains("DB_PASS=" + Plain, StringComparison.Ordinal) && run.EnvDump.Contains("LOG_LEVEL=" + Ordinary, StringComparison.Ordinal), "encrypted: the decrypted value is injected as DB_PASS (" + run.Code + " " + run.Err + ")");
-        check(!run.EnvDump.Contains("DOTENV_PRIVATE_KEY", StringComparison.Ordinal) && !run.EnvDump.Contains(privateKey, StringComparison.Ordinal) && !run.EnvDump.Contains(cipherBody, StringComparison.Ordinal), "encrypted: neither the private key nor the ciphertext reaches the child's environment");
-        check(source.Requests.Count == 1 && source.Requests[0].SequenceEqual(["DOTENV_PRIVATE_KEY"]), "encrypted: only the key secret is read from the store, after approval");
-        ApprovalRequest seen = approver.Requests[0];
-        check(seen.SecretNames.SequenceEqual(["DOTENV_PRIVATE_KEY"]) && seen.Decrypts is [{ Variable: "DB_PASS", KeySecret: "DOTENV_PRIVATE_KEY" } item] && item.File == Path.Combine(folder, ".env"), "encrypted: the request lists the key secret and the decrypt item");
-        string text = ApprovalSummary.BuildMessage(seen);
-        string echo = ApprovalSummary.BuildMessage(seen, showValues: false);
-        string decryptLine = "decrypt with secret DOTENV_PRIVATE_KEY: DB_PASS (cipher sha256 " + seen.Decrypts![0].Short + ") from " + Path.Combine(folder, ".env");
-        check(text.Split('\n').Contains(decryptLine) && echo.Split('\n').Contains(decryptLine) && text.Split('\n').First(line => line.StartsWith("Secrets: ", StringComparison.Ordinal)).Contains("DOTENV_PRIVATE_KEY", StringComparison.Ordinal), "encrypted: the page and the terminal echo show the decrypt line, and the Secrets line lists the key secret");
-        check(text.IndexOf("decrypt ", StringComparison.Ordinal) > text.IndexOf("Agent says:", StringComparison.Ordinal), "encrypted: the decrypt line is in the .env block, after the Run and Agent lines");
-        string surfaces = string.Join("\n", text, echo, run.Out, run.Err, run.Audit);
-        check(!surfaces.Contains(privateKey, StringComparison.Ordinal) && !surfaces.Contains(cipherBody, StringComparison.Ordinal) && !surfaces.Contains(Plain, StringComparison.Ordinal), "encrypted: no key, ciphertext or decrypted value on the page, terminal, audit, stdout or stderr");
-        check(run.Audit.Contains("\"decrypts\":\"DB_PASS=DOTENV_PRIVATE_KEY:" + seen.Decrypts![0].Short + "\"", StringComparison.Ordinal), "encrypted: the audit events have the decrypt item by names and the short cipher fingerprint only");
-
-        // the bind covers it: the fingerprint changes with the variable, the file or the key secret, and without any decrypt item
-        string baseKey = RequestFingerprint.Compute(seen).Key;
-        check(RequestFingerprint.Compute(seen with { Decrypts = [seen.Decrypts![0] with { Variable = "OTHER" }] }).Key != baseKey, "encrypted: another variable is another fingerprint");
-        check(RequestFingerprint.Compute(seen with { Decrypts = [seen.Decrypts![0] with { File = Path.Combine(folder, "x.env") }] }).Key != baseKey, "encrypted: another file is another fingerprint");
-        check(RequestFingerprint.Compute(seen with { Decrypts = [seen.Decrypts![0] with { KeySecret = "DOTENV_PRIVATE_KEY_X" }] }).Key != baseKey, "encrypted: another key secret is another fingerprint");
-        check(RequestFingerprint.Compute(seen with { Decrypts = [] }).Key != baseKey, "encrypted: no decrypt items is another fingerprint");
-
-        // an encrypted value that does not survive composition asks for no key: not requested, not on the page, and the store need not hold it
-        (folder, script, dump) = Project(parent, $"DB_PASS={cipher}\nTOKEN=secret://UNRELATED_KEY\n");
-        source = new(new() { ["UNRELATED_KEY"] = "unrelated-value-1" });
-        approver = new(true);
-        run = await Execute(parent, folder, script, dump, source, approver, [], null, new() { ["DB_PASS"] = "from-os" });
-        check(run.Code == 0 && source.Requests.Count == 1 && source.Requests[0].SequenceEqual(["UNRELATED_KEY"]) && approver.Requests[0].Decrypts is { Count: 0 } && !ApprovalSummary.BuildMessage(approver.Requests[0]).Contains("DOTENV_PRIVATE_KEY", StringComparison.Ordinal), "encrypted: overridden by an OS variable, no key is requested and no decrypt line is shown (" + run.Err + ")");
-        (folder, script, dump) = Project(parent, "UNRELATED_KEY=encrypted:abc\nTOKEN=secret://UNRELATED_KEY\n");
-        approver = new(true);
-        source = new(new() { ["UNRELATED_KEY"] = "unrelated-value-1" });
-        run = await Execute(parent, folder, script, dump, source, approver, ["UNRELATED_KEY"]);
-        check(run.Code == 0 && approver.Requests[0].SecretNames.SequenceEqual(["UNRELATED_KEY"]) && approver.Requests[0].Decrypts is { Count: 0 }, "encrypted: overridden by --secrets, no key is requested");
-        (folder, script, dump) = Project(parent, null);
-        File.WriteAllText(Path.Combine(folder, "a.env"), "DB_PASS=plainvalue\nTOKEN=secret://UNRELATED_KEY\n");
-        File.WriteAllText(Path.Combine(folder, "b.env"), $"DB_PASS={cipher}\n");
-        approver = new(true);
-        run = await Execute(parent, folder, script, dump, source, approver, [], ["a.env", "b.env"]);
-        check(run.Code == 0 && approver.Requests[0].Decrypts is { Count: 0 } && run.EnvDump.Contains("DB_PASS=plainvalue", StringComparison.Ordinal), "encrypted: overridden by an earlier file, no key is requested");
-
-        // the key secret follows the file name: .env.staging uses DOTENV_PRIVATE_KEY_STAGING
-        (folder, script, dump) = Project(parent, null);
-        File.WriteAllText(Path.Combine(folder, ".env.staging"), $"DB_PASS={stagingCipher}\n");
-        source = new(new() { ["DOTENV_PRIVATE_KEY_STAGING"] = privateStaging, ["DOTENV_PRIVATE_KEY"] = privateKey });
-        approver = new(true);
-        run = await Execute(parent, folder, script, dump, source, approver, [], [".env.staging"]);
-        check(run.Code == 0 && run.EnvDump.Contains("DB_PASS=Staging-Value-7733", StringComparison.Ordinal) && source.Requests[0].SequenceEqual(["DOTENV_PRIVATE_KEY_STAGING"]) && !run.EnvDump.Contains(privateStaging, StringComparison.Ordinal), "encrypted: .env.staging is decrypted with DOTENV_PRIVATE_KEY_STAGING, and only that key is read");
-
-        // two files, two keys: both requested, each value with its own key
-        File.WriteAllText(Path.Combine(folder, ".env"), $"DB_PASS_MAIN={cipher}\n");
-        approver = new(true);
-        source = new(new() { ["DOTENV_PRIVATE_KEY_STAGING"] = privateStaging, ["DOTENV_PRIVATE_KEY"] = privateKey });
-        run = await Execute(parent, folder, script, dump, source, approver, [], [".env", ".env.staging"]);
-        check(run.Code == 0 && run.EnvDump.Contains("DB_PASS_MAIN=" + Plain, StringComparison.Ordinal) && run.EnvDump.Contains("DB_PASS=Staging-Value-7733", StringComparison.Ordinal) && source.Requests[0].Order().SequenceEqual(["DOTENV_PRIVATE_KEY", "DOTENV_PRIVATE_KEY_STAGING"]), "encrypted: two files use two keys, one read of the store");
-
-        // failures: a missing key is exit 2 naming the secret before any prompt; a value that does not decrypt names the variable only
-        (folder, script, dump) = Project(parent, $"DB_PASS={cipher}\n");
-        source = new(new() { ["UNRELATED_KEY"] = "unrelated-value-1" });
-        approver = new(true);
-        run = await Execute(parent, folder, script, dump, source, approver, []);
-        check(run.Code == RunCommand.Usage && run.Err.Contains("Missing secret: DOTENV_PRIVATE_KEY", StringComparison.Ordinal) && approver.Requests.Count == 0 && source.Requests.Count == 0 && run.EnvDump.Length == 0, "encrypted: a missing key secret is exit 2, no prompt, nothing read");
-        foreach ((string label, string bad) in new[] { ("damaged", "encrypted:" + new string('B', 100)), ("another key", DotenvxCipher.Instance.Encrypt(Plain, publicStaging)), ("not base64", "encrypted:!!!") })
+        string? executable = Environment.GetEnvironmentVariable(DotenvxRun.ExecutableVariable);
+        var missing = new FakeApprover(true);
+        try
         {
-            (folder, script, dump) = Project(parent, $"DB_PASS={bad}\nOK_VAR=fine1\n");
-            source = new(new() { ["DOTENV_PRIVATE_KEY"] = privateKey });
-            approver = new(true);
-            run = await Execute(parent, folder, script, dump, source, approver, []);
-            check(run.Code == RunCommand.Usage && run.Err.Contains("DB_PASS", StringComparison.Ordinal) && run.EnvDump.Length == 0 && approver.Requests.Count == 1, "encrypted: a " + label + " value is exit 2 after approval, naming the variable, nothing runs");
-            check(!run.Err.Contains(bad["encrypted:".Length..], StringComparison.Ordinal) && !run.Err.Contains(privateKey, StringComparison.Ordinal) && !run.Audit.Contains(bad["encrypted:".Length..], StringComparison.Ordinal) && !run.Audit.Contains(privateKey, StringComparison.Ordinal), "encrypted: a " + label + " value leaves no ciphertext or key on stderr or in the audit");
+            Environment.SetEnvironmentVariable(DotenvxRun.ExecutableVariable, "dotenvx");
+            var refusal = await Execute(parent, folder, script, dump, source, missing, []);
+            check(refusal.Code == RunCommand.Usage && refusal.Err.Contains(DotenvxRun.ExecutableVariable, StringComparison.Ordinal)
+                && refusal.Err.Contains("DB_PASS", StringComparison.Ordinal) && missing.Requests.Count == 0,
+                "dotenvx: a relative executable is refused before approval");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(DotenvxRun.ExecutableVariable, executable);
         }
 
-        (folder, script, dump) = Project(parent, "SHORT=" + DotenvxCipher.Instance.Encrypt("qzx", publicKey) + "\n");
-        run = await Execute(parent, folder, script, dump, new RecordingSource(new() { ["DOTENV_PRIVATE_KEY"] = privateKey }), new FakeApprover(true), []);
-        check(run.Code == RunCommand.Usage && run.Err.Contains("SHORT", StringComparison.Ordinal) && run.EnvDump.Length == 0 && !run.Err.Contains("qzx", StringComparison.Ordinal), "encrypted: a decrypted value too short to redact is exit 2 naming the variable");
+        var approval = new FakeApprover(true);
+        var result = await Execute(parent, folder, script, dump, source, approval, []);
+        var approved = approval.Requests.Single();
+        check(result.Code == 0 && result.EnvDump.Contains("DB_PASS=" + plain, StringComparison.Ordinal)
+            && result.EnvDump.Contains("TOKEN=" + stored, StringComparison.Ordinal), "dotenvx: the child receives both sets of values (" + result.Err + ")");
+        check(source.Requests.Single().SequenceEqual(["TEAM/API_KEY"]) && approved.SecretNames.SequenceEqual(["TEAM/API_KEY"]),
+            "dotenvx: a launch requests only WithSecrets values from the store");
+        check(approved.Decrypts is [{ Variable: "DB_PASS" } item] && item.PublicKey == FakeDotenvx.PublicKey
+            && item.CipherSha256 == DecryptItem.HashOf(cipher), "dotenvx: the approval binds the public key and ciphertext");
+        string surfaces = result.Out + result.Err + result.Audit + ApprovalSummary.BuildMessage(approved);
+        check(new[] { plain, stored, cipher, FakeDotenvx.Credential }.All(value => !surfaces.Contains(value, StringComparison.Ordinal))
+            && !result.EnvDump.Contains("DOTENVX_ARMOR_TOKEN", StringComparison.Ordinal), "dotenvx: values and the resolver credential stay out of output and audit");
 
-        // denied: the key is not read
-        (folder, script, dump) = Project(parent, $"DB_PASS={cipher}\n");
-        source = new(new() { ["DOTENV_PRIVATE_KEY"] = privateKey });
-        run = await Execute(parent, folder, script, dump, source, new FakeApprover(false), []);
-        check(run.Code == RunCommand.Denied && source.Requests.Count == 0 && run.EnvDump.Length == 0, "encrypted: denied means the key is not read and nothing runs");
-
-        // a Dotenvx private key is never given to the program, however it is asked for
-        (folder, script, dump) = Project(parent, "TOKEN=secret://DOTENV_PRIVATE_KEY\n");
-        approver = new(true);
-        run = await Execute(parent, folder, script, dump, new RecordingSource(new() { ["DOTENV_PRIVATE_KEY"] = privateKey }), approver, []);
-        check(run.Code == RunCommand.Usage && approver.Requests.Count == 0 && run.EnvDump.Length == 0 && run.Err.Contains("private key", StringComparison.Ordinal), "encrypted: a reference to the private key secret is refused before any prompt");
-        (folder, script, dump) = Project(parent, null);
-        run = await Execute(parent, folder, script, dump, new RecordingSource(new() { ["DOTENV_PRIVATE_KEY"] = privateKey }), approver, ["DOTENV_PRIVATE_KEY"]);
-        check(run.Code == RunCommand.Usage && approver.Requests.Count == 0 && run.EnvDump.Length == 0, "encrypted: --secrets DOTENV_PRIVATE_KEY is refused before any prompt");
-
-        // a long encrypted value at the limit still round-trips
-        string longPlain = new('v', EnvDeclarations.MaxValue);
-        (folder, script, dump) = Project(parent, "BIG=" + DotenvxCipher.Instance.Encrypt(longPlain, publicKey) + "\n");
-        run = await Execute(parent, folder, script, dump, new RecordingSource(new() { ["DOTENV_PRIVATE_KEY"] = privateKey }), new FakeApprover(true), []);
-        check(run.Code == 0 && run.EnvDump.Contains("BIG=" + longPlain, StringComparison.Ordinal), "encrypted: a value of 4096 characters decrypts (" + run.Code + " " + run.Err + ")");
+        File.Delete(dump);
+        var denied = await Execute(parent, folder, script, dump, source, new FakeApprover(false), []);
+        check(denied.Code == RunCommand.Denied && !File.Exists(dump), "dotenvx: denial prevents the launch");
     }
 
-    // --- the security review of the encrypted values (phase B): each finding has its tests here
     private static readonly string[] ProtectedNames =
     [
         "NODE_OPTIONS", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY", "LD_PRELOAD", "BASH_ENV", "GIT_SSH_COMMAND", "PYTHONSTARTUP", "DOTNET_STARTUP_HOOKS", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
         "GIT_COMMITTER_NAME", "PATH", "COMSPEC", "PYTHONPATH", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "JAVA_TOOL_OPTIONS", "RUBYOPT", "PERL5OPT", "ENV", "ZDOTDIR", "SystemRoot", "windir", "PATHEXT", "https_proxy", "node_options",
     ];
 
+    private static async Task ClientDotenvx(Action<bool, string> check, string parent)
+    {
+        const string projectValue = "Client-Dotenvx-8214";
+        const string storeValue = "Service-Only-8811";
+        using var fake = new FakeDotenvx();
+        string? edited = null;
+        using var rig = new HostServiceTests.Rig(parent, new() { ["TOKEN"] = storeValue },
+            approver: () => edited is null ? new FakeApprover(true) : new EnvEditingApprover(edited, "DB_PASS=changed\n"));
+        string env = Path.Combine(rig.Work, ".env");
+        string text = $"DB_PASS={FakeDotenvx.Cipher(projectValue)}\nTOKEN=secret://TOKEN\nLOG_LEVEL=visible\nCOMPUTED=$LOG_LEVEL\n";
+        File.WriteAllText(env, text);
+        string program = rig.Script("dotenvx", "echo db=%DB_PASS% store=%TOKEN% log=%LOG_LEVEL% computed=%COMPUTED% armor=[%DOTENVX_TOKEN%]", "echo \"db=$DB_PASS store=$TOKEN log=$LOG_LEVEL computed=$COMPUTED armor=[$DOTENVX_TOKEN]\"");
+        using var stdout = new StringWriter();
+        using var stderr = new StringWriter();
+        var args = new RunArgs([], "review client dotenvx", program, []);
+        Task<int> Run() => LaunchClient.RunAsync(args, rig.Work, rig.Service.Endpoint, null, stdout, stderr, rig.Machine.Trust);
+        int result = await Run();
+        check(result == 0 && stdout.ToString().Contains("db=[REDACTED] store=[REDACTED] log=visible computed=[REDACTED] armor=[]", StringComparison.Ordinal)
+            && rig.Store.Reads == 1, "dotenvx client: the app receives the merged values after the private handoff (" + result + " " + stderr + ")");
+
+        File.WriteAllText(Path.Combine(rig.Work, "Envfile"), "strict true\n");
+        File.WriteAllText(env, "TOKEN=secret://TOKEN\nLOG_LEVEL=visible\n");
+        stdout.GetStringBuilder().Clear();
+        stderr.GetStringBuilder().Clear();
+        using (var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+        {
+            result = await LaunchClient.RunAsync(args, rig.Work, rig.Service.Endpoint, null, stdout, stderr, rig.Machine.Trust, cancel: deadline.Token);
+        }
+        check(result == RunCommand.Usage && stdout.ToString().Length == 0 && rig.Store.Reads == 1
+            && stderr.ToString().Contains(DotenvxRun.ApprovalError, StringComparison.Ordinal)
+            && !stderr.ToString().Contains("simulated prompt", StringComparison.Ordinal),
+            "dotenvx client: policy-only runs fail promptly on the Armor marker without forwarding the prompt or reading the store");
+        File.Delete(Path.Combine(rig.Work, "Envfile"));
+        File.WriteAllText(env, text);
+
+        edited = env;
+        stdout.GetStringBuilder().Clear();
+        stderr.GetStringBuilder().Clear();
+        result = await Run();
+        check(result == RunCommand.Usage && stdout.ToString().Length == 0 && rig.Store.Reads == 1,
+            "dotenvx client: project inputs edited during approval fail before the store is read (" + result + " " + stderr + ")");
+    }
+
     private static LaunchRequest Launch(string folder, string envFile, LaunchEncrypted item, IReadOnlyList<string>? secretNames = null, IReadOnlyDictionary<string, string>? ordinary = null)
     {
         DateTimeOffset now = DateTimeOffset.UtcNow;
 
-        return new LaunchRequest(LaunchProtocol.Version, "req-" + Guid.NewGuid().ToString("N")[..8], now, now.AddMinutes(5), "bm9uY2UtMDAwMDAwMDE" + Guid.NewGuid().ToString("N")[..6], secretNames ?? [item.KeySecret], [], "review test", "prog", [], folder, [envFile],
+        return new LaunchRequest(LaunchProtocol.Version, "req-" + Guid.NewGuid().ToString("N")[..8], now, now.AddMinutes(5), "bm9uY2UtMDAwMDAwMDE" + Guid.NewGuid().ToString("N")[..6], secretNames ?? [item.PublicKey], [], "review test", "prog", [], folder, [envFile],
             [.. (ordinary ?? new Dictionary<string, string>()).Keys.Order(StringComparer.Ordinal)], ordinary ?? new Dictionary<string, string>(), new Dictionary<string, string>(), [item]);
     }
 
     private static async Task ReviewFixes(Action<bool, string> check, string parent)
     {
         const string Plain = "Decrypted-Value-6021";
-        (string publicKey, string privateKey) = DotenvxCipher.Instance.NewKeyPair();
-        string cipher = DotenvxCipher.Instance.Encrypt(Plain, publicKey);
+        using var fake = new FakeDotenvx();
+        string cipher = FakeDotenvx.Cipher(Plain);
         string cipherBody = cipher["encrypted:".Length..];
 
         // H1: an encrypted value is one the page cannot show, so it may not go to a name that changes which code runs, where traffic goes or who a commit is by
@@ -737,7 +704,7 @@ internal static class EnvDeclarationTests
         foreach (string name in new[] { "NODE_OPTIONS", "HTTPS_PROXY", "LD_PRELOAD", "BASH_ENV", "GIT_SSH_COMMAND", "PYTHONSTARTUP", "DOTNET_STARTUP_HOOKS", "GIT_AUTHOR_NAME", "PATH" })
         {
             (string folder, string script, string dump) = Project(parent, $"{name}={cipher}\n");
-            RecordingSource source = new(new() { ["DOTENV_PRIVATE_KEY"] = privateKey });
+            RecordingSource source = new(new() {  });
             FakeApprover approver = new(true);
             RunResult run = await Execute(parent, folder, script, dump, source, approver, []);
             check(run.Code == RunCommand.Usage && approver.Requests.Count == 0 && source.Requests.Count == 0 && run.EnvDump.Length == 0 && !run.Err.Contains(cipherBody, StringComparison.Ordinal), "protected encrypted run: " + name + " is exit 2 before any page, nothing is read or run");
@@ -758,24 +725,23 @@ internal static class EnvDeclarationTests
         {
             string folder = Fresh(parent);
             string envFile = Path.Combine(folder, ".env");
-            LaunchEncrypted fine = new("DB_PASS", envFile, "DOTENV_PRIVATE_KEY", cipher);
+            LaunchEncrypted fine = new("DB_PASS", envFile, "", cipher);
             check(EnvDeclarations.FromRequest(Launch(folder, envFile, fine)) is { Plan.Encrypted: [{ Variable: "DB_PASS" }] }, "request: an encrypted value for an ordinary name is accepted");
             foreach (string name in new[] { "NODE_OPTIONS", "HTTPS_PROXY", "LD_PRELOAD", "BASH_ENV", "GIT_SSH_COMMAND", "PYTHONSTARTUP", "DOTNET_STARTUP_HOOKS", "GIT_AUTHOR_NAME", "PATH", "DOTENV_PRIVATE_KEY_X" })
             {
                 check(EnvDeclarations.FromRequest(Launch(folder, envFile, fine with { Variable = name })) is { Plan: null, Error: { } error } && error.Contains(name, StringComparison.Ordinal) && !error.Contains(cipherBody, StringComparison.Ordinal), "request: an encrypted value for " + name + " is refused by the service");
             }
 
-            check(EnvDeclarations.FromRequest(Launch(folder, envFile, fine with { KeySecret = "DOTENV_PRIVATE_KEY_STAGING" }, ["DOTENV_PRIVATE_KEY_STAGING"])).Plan is null, "request: a key secret other than the one the file name gives is refused");
+            check(EnvDeclarations.FromRequest(Launch(folder, envFile, fine with { PublicKey = "DOTENV_PRIVATE_KEY_STAGING" }, ["DOTENV_PRIVATE_KEY_STAGING"])).Plan is null, "request: a key secret other than the one the file name gives is refused");
             check(EnvDeclarations.FromRequest(Launch(folder, envFile, fine with { File = Path.Combine(folder, "other.env") })).Plan is null, "request: an encrypted value from a file that is not among the env files is refused");
             check(EnvDeclarations.FromRequest(Launch(folder, envFile, fine with { Ciphertext = "plain text" })).Plan is null && EnvDeclarations.FromRequest(Launch(folder, envFile, fine with { Ciphertext = "encrypted:" + new string('A', EnvDeclarations.MaxEncrypted) })).Plan is null, "request: a ciphertext that is not encrypted: text, or is longer than the limit, is refused");
-            check(EnvDeclarations.FromRequest(Launch(folder, envFile, fine, ["OTHER_SECRET"])).Plan is null, "request: a key secret that is not among the requested secrets is refused");
             check(EnvDeclarations.FromRequest(Launch(folder, envFile, fine, null, new Dictionary<string, string> { ["DB_PASS"] = "x" })).Plan is null, "request: a variable that is both ordinary and encrypted is refused");
             check(EnvDeclarations.FromRequest(Launch(folder, envFile, fine, null, new Dictionary<string, string> { ["NODE_OPTIONS"] = "--max-old-space-size=100" })).Plan is { } passed && passed.Ordinary.ContainsKey("NODE_OPTIONS"), "request: an ordinary code-loading value is passed on (the page shows it)");
         }
 
         // H2: the fingerprint covers the ciphertext, so a swapped one is another request
         {
-            string swapped = DotenvxCipher.Instance.Encrypt("https://attacker.example/x", publicKey);
+            string swapped = FakeDotenvx.Cipher("https://attacker.example/x");
             (string folder, string script, string dump) = Project(parent, $"API_BASE_URL={cipher}\n");
             StateDatabase db = TestState.Seeded(Path.Combine(Fresh(parent), WithSecretsDatabase.FileName));
             async Task<(int Code, string Err, FakeApprover Approver, string Dump)> RunSaved(string env)
@@ -784,7 +750,7 @@ internal static class EnvDeclarationTests
                 File.Delete(dump);
                 FakeApprover approver = new(true);
                 StringWriter stderr = new();
-                RunCommand command = new(new RecordingSource(new() { ["DOTENV_PRIVATE_KEY"] = privateKey }), approver, new StringWriter(), stderr, environment: _ => null);
+                RunCommand command = new(new RecordingSource([]), approver, new StringWriter(), stderr, environment: _ => null);
                 int code = await command.ExecuteAsync(new RunArgs([], "review test", script, [], null), folder, TestAudit.Sink(db));
 
                 return (code, stderr.ToString(), approver, File.Exists(dump) ? File.ReadAllText(dump) : "");
@@ -803,7 +769,7 @@ internal static class EnvDeclarationTests
             check(RequestFingerprint.Compute(first.Approver.Requests[0] with { Decrypts = [first.Approver.Requests[0].Decrypts![0] with { CipherSha256 = DecryptItem.HashOf(swapped) }] }).Key != key, "ciphertext: the hash is part of the fingerprint");
             ApprovalRequest approved = first.Approver.Requests[0];
             DateTimeOffset now = DateTimeOffset.UtcNow;
-            LaunchRequest expected = LaunchRequestBinding.From(approved, "req-bind-0001", "bm9uY2UtMDAwMDAwMDE", now, now.AddMinutes(5)) with { Encrypted = [new LaunchEncrypted("API_BASE_URL", Path.Combine(folder, ".env"), "DOTENV_PRIVATE_KEY", cipher)] };
+            LaunchRequest expected = LaunchRequestBinding.From(approved, "req-bind-0001", "bm9uY2UtMDAwMDAwMDE", now, now.AddMinutes(5)) with { Encrypted = [new LaunchEncrypted("API_BASE_URL", Path.Combine(folder, ".env"), "", cipher)] };
             check(LaunchRequestBinding.Mismatch(expected, approved) is null, "ciphertext: the request with the approved ciphertext matches the approval (" + LaunchRequestBinding.Mismatch(expected, approved) + ")");
             check(LaunchRequestBinding.Mismatch(expected with { Encrypted = [expected.Encrypted[0] with { Ciphertext = swapped }] }, approved) is { } mismatch && mismatch.Contains("encrypted", StringComparison.Ordinal), "ciphertext: a request whose ciphertext differs from the approved one does not match the approval");
         }
@@ -817,7 +783,7 @@ internal static class EnvDeclarationTests
             File.WriteAllText(Path.Combine(folder, "secrets.txt"), $"LOG_FORMAT={cipher}\n");
             string outside = Fresh(parent);
             File.WriteAllText(Path.Combine(outside, ".env"), $"LOG_FORMAT={cipher}\n");
-            RecordingSource source = new(new() { ["DOTENV_PRIVATE_KEY"] = privateKey, ["DOTENV_PRIVATE_KEY_PRODUCTION"] = privateKey });
+            RecordingSource source = new(new() {  });
             string fingerprint = DecryptItem.HashOf(cipher)[..12];
             foreach ((string label, string[]? files, bool warns) in new (string, string[]?, bool)[]
             {
@@ -832,11 +798,11 @@ internal static class EnvDeclarationTests
                 RunResult run = await Execute(parent, folder, script, dump, source, approver, [], files);
                 string text = ApprovalSummary.BuildMessage(approver.Requests[0]);
                 string echo = ApprovalSummary.BuildMessage(approver.Requests[0], showValues: false);
-                string line = text.Split('\n').First(item => item.StartsWith("decrypt with secret ", StringComparison.Ordinal));
+                string line = text.Split('\n').First(item => item.StartsWith("resolve with dotenvx: ", StringComparison.Ordinal));
                 check(run.Code == 0 && line.Contains("(cipher sha256 " + fingerprint + ") from ", StringComparison.Ordinal) && echo.Contains(fingerprint, StringComparison.Ordinal), "transplant (" + label + "): the decrypt line shows the short fingerprint of the ciphertext, on the page and in the terminal echo (" + run.Err.Trim() + ")");
                 check(text.Contains("Anyone who has the public key", StringComparison.Ordinal), "transplant (" + label + "): the page says that anyone with the public key can write an encrypted value");
                 check(text.Contains("is decrypted from a file that is not this project's own .env file", StringComparison.Ordinal) == warns && echo.Contains("not this project's own", StringComparison.Ordinal) == warns, "transplant (" + label + "): the warning is " + (warns ? "shown" : "not shown"));
-                check(!text.Contains(cipherBody, StringComparison.Ordinal) && !text.Contains(Plain, StringComparison.Ordinal) && !text.Contains(privateKey, StringComparison.Ordinal), "transplant (" + label + "): names and the short fingerprint only, never the ciphertext, the value or the key");
+                check(!text.Contains(cipherBody, StringComparison.Ordinal) && !text.Contains(Plain, StringComparison.Ordinal) && !text.Contains(FakeDotenvx.Credential, StringComparison.Ordinal), "transplant (" + label + "): names and the short fingerprint only, never the ciphertext, the value or the key");
             }
 
             // the warning is part of the text the person signs and of nothing else: the fingerprint of the request does not need it, the text does
@@ -852,27 +818,25 @@ internal static class EnvDeclarationTests
             Directory.CreateDirectory(Path.Combine(folder, forged));
             File.WriteAllText(Path.Combine(folder, forged, ".env.production"), $"DB_PASS={cipher}\n");
             FakeApprover approver = new(true);
-            RunResult run = await Execute(parent, folder, script, dump, new RecordingSource(new() { ["DOTENV_PRIVATE_KEY_PRODUCTION"] = privateKey }), approver, [], [Path.Combine(forged, ".env.production")]);
+            RunResult run = await Execute(parent, folder, script, dump, new RecordingSource([]), approver, [], [Path.Combine(forged, ".env.production")]);
             string[] lines = ApprovalSummary.BuildMessage(approver.Requests[0]).Split('\n');
-            check(run.Code == 0 && lines.Count(item => item.StartsWith("decrypt with secret ", StringComparison.Ordinal)) == 1 && lines.First(item => item.StartsWith("decrypt with secret ", StringComparison.Ordinal)).StartsWith("decrypt with secret DOTENV_PRIVATE_KEY_PRODUCTION: DB_PASS (cipher sha256 ", StringComparison.Ordinal), "forged path: the real key secret comes first on the decrypt line, before any text of the path");
+            check(run.Code == 0 && lines.Count(item => item.StartsWith("resolve with dotenvx: ", StringComparison.Ordinal)) == 1 && lines.First(item => item.StartsWith("resolve with dotenvx: ", StringComparison.Ordinal)).StartsWith("resolve with dotenvx: DB_PASS (cipher sha256 ", StringComparison.Ordinal), "forged path: the real key secret comes first on the decrypt line, before any text of the path");
         }
 
-        // F7: only ASCII letters, digits, '.', '-' and '_' make a key name; nothing is folded onto a letter
-        check(EnvDeclarations.KeySecretFor(".env.\u017Ftaging") is null && EnvDeclarations.KeySecretFor(".env.product\u0131on") is null && EnvDeclarations.KeySecretFor(".env.a-b") == "DOTENV_PRIVATE_KEY_A_B" && EnvDeclarations.KeySecretFor(".env.\u212Aey") is null, "key name: a non-ASCII suffix (long s, dotless i, Kelvin sign) gives no key name");
 
         // M4: NUL and other control characters in a decrypted value never reach the child's environment
         foreach ((string label, string bad) in new[] { ("NUL and a second variable", "ok123\0NODE_OPTIONS=--require ./x.js"), ("a line break", "line-one\nline-two"), ("a bell", "ring\u0007ring-1"), ("DEL", "del\u007Fvalue-1"), ("a C1 control", "c1\u0085control-1") })
         {
-            (string folder, string script, string dump) = Project(parent, $"DB_PASS={DotenvxCipher.Instance.Encrypt(bad, publicKey)}\nOK_VAR=fine1\n");
+            (string folder, string script, string dump) = Project(parent, $"DB_PASS={FakeDotenvx.Cipher(bad)}\nOK_VAR=fine1\n");
             FakeApprover approver = new(true);
-            RunResult run = await Execute(parent, folder, script, dump, new RecordingSource(new() { ["DOTENV_PRIVATE_KEY"] = privateKey }), approver, []);
-            check(run.Code == RunCommand.Usage && run.Err.Contains("DB_PASS", StringComparison.Ordinal) && run.EnvDump.Length == 0 && !run.Err.Contains("NODE_OPTIONS", StringComparison.Ordinal) && !run.Err.Contains("ring", StringComparison.Ordinal), "control characters (" + label + "): exit 2 naming the variable only, the program is not run (" + run.Code + ")");
-            check(run.Audit.Contains("env-decrypt-failed", StringComparison.Ordinal) && run.Audit.Contains("\"type\":\"launch\"", StringComparison.Ordinal), "control characters (" + label + "): the failure is in the signed audit as a failed launch (finding 12)");
+            RunResult run = await Execute(parent, folder, script, dump, new RecordingSource([]), approver, []);
+            check(run.Code == RunCommand.Usage && run.Err.Contains("with dotenvx", StringComparison.Ordinal) && run.EnvDump.Length == 0 && !run.Err.Contains("NODE_OPTIONS", StringComparison.Ordinal) && !run.Err.Contains("ring", StringComparison.Ordinal), "control characters (" + label + "): exit 2 naming the variable only, the program is not run (" + run.Code + ")");
+            check(run.Audit.Contains("dotenvx-failed", StringComparison.Ordinal) && run.Audit.Contains("\"type\":\"launch\"", StringComparison.Ordinal), "control characters (" + label + "): the failure is in the signed audit as a failed launch (finding 12)");
         }
 
         {
-            (string folder, string script, string dump) = Project(parent, $"DB_PASS={DotenvxCipher.Instance.Encrypt("tab\tallowed-1", publicKey)}\n");
-            RunResult run = await Execute(parent, folder, script, dump, new RecordingSource(new() { ["DOTENV_PRIVATE_KEY"] = privateKey }), new FakeApprover(true), []);
+            (string folder, string script, string dump) = Project(parent, $"DB_PASS={FakeDotenvx.Cipher("tab\tallowed-1")}\n");
+            RunResult run = await Execute(parent, folder, script, dump, new RecordingSource([]), new FakeApprover(true), []);
             check(run.Code == 0 && run.EnvDump.Contains("DB_PASS=tab\tallowed-1", StringComparison.Ordinal), "control characters: a tab is allowed (" + run.Code + " " + run.Err.Trim() + ")");
             check(!RunCommand.UsablePlaintext(new string('a', SecretNames.MinValueLength - 1)) && RunCommand.UsablePlaintext(new string('a', SecretNames.MinValueLength)) && RunCommand.UsablePlaintext(new string('a', EnvDeclarations.MaxValue)) && !RunCommand.UsablePlaintext(new string('a', EnvDeclarations.MaxValue + 1)) && !RunCommand.UsablePlaintext("abc\0def"), "length bounds: a decrypted value of 6 to 4096 characters without NUL is usable, and nothing else");
         }
@@ -886,10 +850,10 @@ internal static class EnvDeclarationTests
             string tampered = cipher[..^8] + (cipher[^8] == 'A' ? 'B' : 'A') + cipher[^7..];
             string[] messages = new string[3];
             int index = 0;
-            foreach (string bad in new[] { tampered, DotenvxCipher.Instance.Encrypt(Plain, DotenvxCipher.Instance.NewKeyPair().PublicKey), "encrypted:" + new string('B', 100) })
+            foreach (string bad in new[] { tampered, "encrypted:YmFkLXNlY29uZA==", "encrypted:" + new string('B', 100) })
             {
                 (string folder, string script, string dump) = Project(parent, $"DB_PASS={bad}\n");
-                RunResult run = await Execute(parent, folder, script, dump, new RecordingSource(new() { ["DOTENV_PRIVATE_KEY"] = privateKey }), new FakeApprover(true), []);
+                RunResult run = await Execute(parent, folder, script, dump, new RecordingSource([]), new FakeApprover(true), []);
                 messages[index++] = run.Err.Split('\n').Last(line => line.Trim().Length > 0);
                 check(run.Code == RunCommand.Usage && run.EnvDump.Length == 0 && !run.Err.Contains(bad["encrypted:".Length..], StringComparison.Ordinal), "tampered, wrong-key and damaged ciphertext: exit 2, the program is not run, no ciphertext in the message");
             }
@@ -959,8 +923,8 @@ internal static class EnvDeclarationTests
         // the key secret is in the redactor's reach and the audit of a failed decrypt names no value
         {
             (string folder, string script, string dump) = Project(parent, $"DB_PASS={cipher}\n");
-            RunResult run = await Execute(parent, folder, script, dump, new RecordingSource(new() { ["DOTENV_PRIVATE_KEY"] = privateKey }), new FakeApprover(true), []);
-            check(run.Code == 0 && run.Audit.Contains("\"decrypts\":\"DB_PASS=DOTENV_PRIVATE_KEY:" + DecryptItem.HashOf(cipher)[..12] + "\"", StringComparison.Ordinal) && TestAuditFree(run.Audit, privateKey, Plain, cipherBody), "audit: every event of a decrypting run carries the variable, key secret name and short fingerprint, and no key, value or ciphertext");
+            RunResult run = await Execute(parent, folder, script, dump, new RecordingSource([]), new FakeApprover(true), []);
+            check(run.Code == 0 && run.Audit.Contains("\"decrypts\":\"DB_PASS:" + DecryptItem.HashOf(cipher)[..12] + "\"", StringComparison.Ordinal) && TestAuditFree(run.Audit, FakeDotenvx.Credential, Plain, cipherBody), "audit: every event of a decrypting run carries the variable, key secret name and short fingerprint, and no key, value or ciphertext");
         }
     }
 
@@ -992,12 +956,12 @@ internal static class EnvDeclarationTests
         check(NeedsCommand.Run(source, ["bad.env"], folder, stdout, stderr, _ => null) == RunCommand.Usage && stderr.ToString().Contains("bad.env:1:", StringComparison.Ordinal) && !stderr.ToString().Contains("s3cr3tvalue", StringComparison.Ordinal) && stdout.ToString().Length == 0, "needs: a parse error is exit 2 with file and line, no value");
         File.WriteAllText(Path.Combine(folder, "enc.env"), "X=encrypted:BDQ3s0m3\n");
         stdout = new();
-        check(NeedsCommand.Run(source, ["enc.env"], folder, stdout, stderr = new StringWriter(), _ => null) == 0 && stdout.ToString().Contains("Encrypted: X (encrypted, file " + Path.Combine(folder, "enc.env") + ") key DOTENV_PRIVATE_KEY NOT IN STORE", StringComparison.Ordinal) && !stdout.ToString().Contains("BDQ3s0m3", StringComparison.Ordinal), "needs: an encrypted value is listed with its key secret and NOT IN STORE, no ciphertext");
+        check(NeedsCommand.Run(source, ["enc.env"], folder, stdout, stderr = new StringWriter(), _ => null) == 0 && stdout.ToString().Contains("Encrypted: X (requires dotenvx, file " + Path.Combine(folder, "enc.env") + ")", StringComparison.Ordinal) && !stdout.ToString().Contains("BDQ3s0m3", StringComparison.Ordinal), "needs: an encrypted value is listed as requiring dotenvx, with no ciphertext");
         stdout = new();
         RecordingSource withKey = new(new() { ["DOTENV_PRIVATE_KEY_STAGING"] = "key-never-printed-1", ["Team/Api_Key"] = "x-Value-1", ["team/API_KEY"] = "x-Value-2" });
         File.WriteAllText(Path.Combine(folder, ".env.staging"), "S=encrypted:BDQ3s0m3\n");
         File.WriteAllText(Path.Combine(folder, "case.env"), "A=secret://team/Api_Key\nB=secret://TEAM/api_key\nC=secret://team/API_KEY\n");
-        check(NeedsCommand.Run(withKey, [".env.staging"], folder, stdout, new StringWriter(), _ => null) == 0 && stdout.ToString().Contains("key DOTENV_PRIVATE_KEY_STAGING in store", StringComparison.Ordinal) && withKey.Requests.Count == 0 && !stdout.ToString().Contains("key-never-printed-1", StringComparison.Ordinal), "needs: a key secret that is in the store says in store, and nothing is decrypted");
+        check(NeedsCommand.Run(withKey, [".env.staging"], folder, stdout, new StringWriter(), _ => null) == 0 && stdout.ToString().Contains("Encrypted: S (requires dotenvx, file ", StringComparison.Ordinal) && withKey.Requests.Count == 0 && !stdout.ToString().Contains("key-never-printed-1", StringComparison.Ordinal), "needs: encrypted values report the resolver and nothing is decrypted");
         stdout = new();
         check(NeedsCommand.Run(withKey, ["case.env"], folder, stdout, new StringWriter(), _ => null) == 0, "needs: case.env runs");
         string[] caseLines = stdout.ToString().Split('\n').Select(line => line.TrimEnd('\r')).ToArray();

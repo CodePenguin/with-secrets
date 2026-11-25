@@ -24,7 +24,7 @@ public sealed record ManifestKey(string Id, string Name, string PublicKey, int A
 /// this member order, no white space, keys sorted by id (ordinal), secrets sorted by name (ordinal), numbers as plain invariant
 /// integers, strings written as <see cref="ToolSettings.Canonical" /> writes them (only <c>"</c> and <c>\</c> escaped, U+007F
 /// and up as <c>\uXXXX</c>), <c>created</c> in the round-trip ("O") format and SETTINGS the canonical settings JSON. Sign counts
-/// are not in it. <see cref="Store" /> is the store's public key (Dotenvx, 66 lower-case hex digits) or empty before the first
+/// are not in it. <see cref="Store" /> is the store's public key (P-256 SubjectPublicKeyInfo encoded as base64url) or empty before the first
 /// secret, and <see cref="Vault" /> is then the store's private key wrapped under the master key (empty exactly when the store key is); the
 /// slot of a key is its entry of the master key (see <see cref="KeyVault" />), and every key has one; each HASH is <see cref="SecretStore.Hash" />
 /// of that secret's stored ciphertext (64 lower-case hex digits). Anyone
@@ -189,7 +189,7 @@ public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, Too
             }
         }
 
-        if (Store.Length > 0 && !IsHex(Store, 66))
+        if (Store.Length > 0 && !JweCipher.IsPublicKey(Store))
         {
             return "the store key is not valid";
         }
@@ -211,7 +211,7 @@ public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, Too
             {
                 return "a review key without a store key";
             }
-            if (!IsHex(review.PublicKey, 66) || !KeyVault.IsVault(review.Vault))
+            if (!JweCipher.IsPublicKey(review.PublicKey) || !KeyVault.IsVault(review.Vault))
             {
                 return "the review key is not valid";
             }

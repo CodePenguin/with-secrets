@@ -71,7 +71,7 @@ internal static class RecoveryTests
     {
         try
         {
-            DotenvxCipher.Instance.Decrypt(privateKey, row);
+            JweCipher.Instance.Decrypt(privateKey, row);
 
             return false;
         }
@@ -446,7 +446,7 @@ internal static class RecoveryTests
                 byte[] key = KeyVault.UnwrapVault(manifest.Vault, master, manifest.Store);
                 using Unlock released = TestVault.Unlock(db, laptop)!;
                 byte[] viaPasskey = KeyVault.OpenMaster(manifest, released);
-                check(DotenvxCipher.Instance.Derive(Encoding.UTF8.GetString(key)) == manifest.Store && master.AsSpan().SequenceEqual(viaPasskey), "first config recovery: the code opens the same master key as the passkey, and the vault holds the store key");
+                check(JweCipher.Instance.Derive(Encoding.UTF8.GetString(key)) == manifest.Store && master.AsSpan().SequenceEqual(viaPasskey), "first config recovery: the code opens the same master key as the passkey, and the vault holds the store key");
 
                 string[] forms = CodeForms(recovery);
                 string[] said = [.. flow.Lines, result.Detail, page, create, again, Audit(db)];
@@ -613,16 +613,16 @@ internal static class RecoveryTests
             AuditRow? recovered = rows.FirstOrDefault(row => row.Event == "recovered");
             check(recovered is not null && recovered.Detail.Contains("3 secrets", StringComparison.Ordinal) && recovered.Detail.Contains("with-secrets.db.recovered-20261103120000", StringComparison.Ordinal), "recover: a `recovered` audit row names the secret count and the old file (" + recovered?.Detail + ")");
             check(after is not null && Fails(() => KeyVault.OpenRecovery(after, RecoveryCodeBytes(w.Code))), "recover: the old recovery code no longer opens the new store");
-            check(after is not null && RecoveryCode.TryParse(newCode, out byte[] fresher) && KeyVault.UnwrapVault(after.Vault, KeyVault.OpenRecovery(after, fresher), after.Store).Length == 64, "recover: the new recovery code (final page) opens the new store");
+            check(after is not null && RecoveryCode.TryParse(newCode, out byte[] fresher) && JweCipher.Instance.Derive(Encoding.UTF8.GetString(KeyVault.UnwrapVault(after.Vault, KeyVault.OpenRecovery(after, fresher), after.Store))) == after.Store, "recover: the new recovery code (final page) opens the new store");
             check(CodePattern.IsMatch(newCode) && newCode != w.Code, "recover: a new recovery code was shown on the last page");
 
             string[] said = [.. flow.Lines, result.Detail, pageOne, codeBody, page, create, Audit(w.Db)];
             string[] secrets = [.. Values.Values];
             check(!Holds(said, secrets), "recover: no secret value is in any output or audit entry");
-            check(!Holds(said, [oldKey, oldMaster, Convert.ToBase64String(Convert.FromHexString(oldKey)), Convert.ToBase64String(Convert.FromHexString(oldMaster))]), "recover: the old store key and the old master key are in no output or audit entry");
+            check(!Holds(said, [oldKey, oldMaster, Convert.ToBase64String(Base64Url.DecodeFromChars(oldKey)), Convert.ToBase64String(Convert.FromHexString(oldMaster))]), "recover: the old store key and the old master key are in no output or audit entry");
             check(!Holds([.. said, flow.AllLines()], CodeForms(w.Code)) && !Holds(said, CodeForms(newCode).Where(form => !sign.Contains(form, StringComparison.Ordinal)).ToArray()), "recover: neither recovery code is in any terminal line, result text or earlier page");
             check(!pageOne.Contains(w.Code, StringComparison.Ordinal) && !codeBody.Contains(w.Code, StringComparison.Ordinal), "recover: page 1 and its answer never hold the code typed");
-            string[] folderForms = [oldKey, oldMaster, Convert.ToBase64String(Convert.FromHexString(oldKey)), Convert.ToBase64String(Convert.FromHexString(oldMaster))];
+            string[] folderForms = [oldKey, oldMaster, Convert.ToBase64String(Base64Url.DecodeFromChars(oldKey)), Convert.ToBase64String(Convert.FromHexString(oldMaster))];
             check(folderForms.All(form => !WebApprovalTests.FolderHolds(w.Folder, Encoding.UTF8.GetBytes(form))) && !WebApprovalTests.FolderHolds(w.Folder, Convert.FromHexString(oldMaster)) && !WebApprovalTests.FolderHolds(w.Folder, Encoding.UTF8.GetBytes(oldKey)),
                 "recover: the old store key and master key (text, hex, base64, raw) are in no file of the folder, the renamed old file included");
             check(!FolderHoldsCode(w.Folder, w.Code) && !FolderHoldsCode(w.Folder, newCode), "recover: neither recovery code is in any file of the folder");
@@ -887,7 +887,7 @@ internal static class RecoveryTests
             PasskeyMethod method = new(new PasskeyStore(w.Db), Local);
             check(method.Enrolled().Select(entry => entry.Name).SequenceEqual(["laptop"]), "rotate: the enrolled list has only the kept key (" + string.Join(", ", method.Enrolled().Select(entry => entry.Name)) + ")");
             check(after is not null && Fails(() => KeyVault.OpenRecovery(after, RecoveryCodeBytes(w.Code))), "rotate: the old recovery code fails");
-            check(newCode is not null && CodePattern.IsMatch(newCode) && after is not null && RecoveryCode.TryParse(newCode, out byte[] fresher) && DotenvxCipher.Instance.Derive(Encoding.UTF8.GetString(KeyVault.UnwrapVault(after.Vault, KeyVault.OpenRecovery(after, fresher), after.Store))) == after.Store,
+            check(newCode is not null && CodePattern.IsMatch(newCode) && after is not null && RecoveryCode.TryParse(newCode, out byte[] fresher) && JweCipher.Instance.Derive(Encoding.UTF8.GetString(KeyVault.UnwrapVault(after.Vault, KeyVault.OpenRecovery(after, fresher), after.Store))) == after.Store,
                 "rotate: the new recovery code (final reply) opens the new store (" + (newCode ?? "none") + ")");
             // The service can upload the rotation event while this test is reading it.
             IReadOnlyList<AuditRow> rows = [.. service.Audit.Outbox.Pending(1000)
@@ -913,7 +913,7 @@ internal static class RecoveryTests
 
             string[] said = [.. flow.Lines, result.Detail, pageOne, pageTwo, body1, Audit(w.Db)];
             check(!Holds(said, [.. Values.Values]) && !Holds([body2], [.. Values.Values]), "rotate: no secret value is in any output");
-            string[] keyForms = [oldKey, oldMaster, oldPrf, Convert.ToBase64String(Convert.FromHexString(oldKey)), Convert.ToBase64String(Convert.FromHexString(oldMaster)), Base64Url.EncodeToString(oldUnlock.Output)];
+            string[] keyForms = [oldKey, oldMaster, oldPrf, Convert.ToBase64String(Base64Url.DecodeFromChars(oldKey)), Convert.ToBase64String(Convert.FromHexString(oldMaster)), Base64Url.EncodeToString(oldUnlock.Output)];
             check(!Holds([.. said, body2], keyForms), "rotate: the old store key, master key and PRF output are in no output");
             check(keyForms.All(form => !WebApprovalTests.FolderHolds(w.Folder, Encoding.UTF8.GetBytes(form))) && !WebApprovalTests.FolderHolds(w.Folder, Convert.FromHexString(oldMaster)) && !WebApprovalTests.FolderHolds(w.Folder, oldUnlock.Output), "rotate: the old keys and the PRF output are in no file");
             check(!Holds(said, CodeForms(w.Code)) && (newCode is null || !Holds(said, CodeForms(newCode))) && (newCode is null || !FolderHoldsCode(w.Folder, newCode)) && !FolderHoldsCode(w.Folder, w.Code), "rotate: neither recovery code is in any terminal line, earlier page, audit entry or file");

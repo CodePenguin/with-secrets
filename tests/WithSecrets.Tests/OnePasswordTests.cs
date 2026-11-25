@@ -91,12 +91,12 @@ internal static class OnePasswordTests
         using var unlockSession = new CancellationTokenSource();
         CancellationToken authorityLockToken = unlockSession.Token;
         IProviderAdapter adapter = new OnePasswordAdapter(executablePath, () => authorityLockToken,
-            (reference, _) => ValueTask.FromResult<string?>(reference switch { "encrypted:ZmFrZQ==" => Plaintext(FakeToken), "encrypted:c2xvdw==" => Plaintext(SlowToken), _ => null }));
+            (reference, _) => ValueTask.FromResult<string?>(reference switch { "jwe:v1:ZmFrZQ.a2V5.aXY.Y2lwaGVy.dGFn" => Plaintext(FakeToken), "jwe:v1:c2xvdw.a2V5.aXY.Y2lwaGVy.dGFn" => Plaintext(SlowToken), _ => null }));
         try
         {
             Environment.SetEnvironmentVariable("OP_CONNECT_HOST", "unused");
             Environment.SetEnvironmentVariable("OP_SESSION_test", "unused");
-            OnePasswordConfiguration config = Configuration("encrypted:ZmFrZQ==");
+            OnePasswordConfiguration config = Configuration("jwe:v1:ZmFrZQ.a2V5.aXY.Y2lwaGVy.dGFn");
             var reporter = new Reporter();
             await adapter.InitializeAsync(config, new(Guid.NewGuid(), OnePasswordAdapter.ProviderType, OnePasswordAdapter.AdapterVersion, NullLogger.Instance, reporter), default);
             check(reporter.Events.ToArray() is [LifecycleChangedEvent { State: AdapterLifecycleState.Ready }, HealthChangedEvent { State: AdapterHealthState.Initializing }, ..],
@@ -210,7 +210,7 @@ internal static class OnePasswordTests
                 "1Password accepts calls in a new unlock session");
 
 
-            Task slowUpdate = adapter.UpdateConfigurationAsync(Configuration("encrypted:c2xvdw=="), default);
+            Task slowUpdate = adapter.UpdateConfigurationAsync(Configuration("jwe:v1:c2xvdw.a2V5.aXY.Y2lwaGVy.dGFn"), default);
             check(slowUpdate.IsCompletedSuccessfully && reporter.Events.OfType<HealthChangedEvent>().LastOrDefault() is HealthChangedEvent { State: AdapterHealthState.Initializing },
                 "1Password starts a replacement probe without waiting for connectivity");
             await slowUpdate;

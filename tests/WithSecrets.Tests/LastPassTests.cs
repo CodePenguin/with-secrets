@@ -10,9 +10,9 @@ internal static class LastPassTests
 {
     internal const string FakePassword = "fake-lpass-password";
     internal const string SlowPassword = "fake-lpass-slow-password";
-    private const string EncryptedFake = "encrypted:ZmFrZQ==";
-    private const string EncryptedSlow = "encrypted:c2xvdw==";
-    private const string EncryptedWrong = "encrypted:d3Jvbmc=";
+    private const string EncryptedFake = "jwe:v1:ZmFrZQ.a2V5.aXY.Y2lwaGVy.dGFn";
+    private const string EncryptedSlow = "jwe:v1:c2xvdw.a2V5.aXY.Y2lwaGVy.dGFn";
+    private const string EncryptedWrong = "jwe:v1:d3Jvbmc.a2V5.aXY.Y2lwaGVy.dGFn";
     private const string FakeUsername = "user@example.test";
     private const string Leaf = "F_70617373776F7264";
     private const string NoteLeaf = "F_6E6F7465";
@@ -187,7 +187,7 @@ internal static class LastPassTests
                 return Task.CompletedTask;
             }, check);
 
-            using JsonDocument executableOverride = JsonDocument.Parse("""{"username":"user@example.test","encryptedConfiguration":"encrypted:ZmFrZQ==","executablePath":"untrusted"}""");
+            using JsonDocument executableOverride = JsonDocument.Parse("""{"username":"user@example.test","encryptedConfiguration":"jwe:v1:ZmFrZQ.a2V5.aXY.Y2lwaGVy.dGFn","executablePath":"untrusted"}""");
             await Fails(ProviderErrorKind.InvalidConfiguration, () =>
             {
                 new LastPassConfiguration().Load(executableOverride);

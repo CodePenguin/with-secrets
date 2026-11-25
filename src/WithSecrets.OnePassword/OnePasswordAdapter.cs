@@ -494,11 +494,9 @@ public sealed class OnePasswordAdapter(
             ProviderErrorKind.InvalidConfiguration, "The encrypted 1Password configuration could not be opened or did not contain a valid service-account token."));
     }
 
-    private const string CiphertextPrefix = "encrypted:";
 
     private static bool IsEncryptedConfiguration(string value)
-        => value.StartsWith(CiphertextPrefix, StringComparison.Ordinal) && value.Length > CiphertextPrefix.Length
-            && value.AsSpan(CiphertextPrefix.Length).IndexOfAnyExcept("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=") < 0;
+        => JweCipher.IsCiphertext(value);
 
     internal static bool IsServiceAccountToken(string? token)
         => token is { Length: > 0 and <= 8192 }

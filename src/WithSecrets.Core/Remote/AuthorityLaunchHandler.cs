@@ -296,7 +296,9 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
 
         return new ApprovalRequest(request.Program, context.ResolvedProgram, context.Arguments, request.WorkingDirectory, request.Reason, request.SecretNames, null, request.Arguments, context.Links, context.FingerprintKey, sources, _secrets.NeedsUnlock, context.Script, context.ProgramFile,
             [.. request.Mappings.Select(mapping => new SecretMapping(mapping.Variable, mapping.Secret))], request.EnvFiles, request.EnvNames, request.EnvVariables, request.InheritedEnvironment,
-            Decrypts: [.. request.Encrypted.Select(item => new DecryptItem(item.Variable, item.File, item.KeySecret, DecryptItem.HashOf(item.Ciphertext)))],
+            Decrypts: [.. request.Encrypted.Select(item => new DecryptItem(item.Variable, item.File, item.PublicKey, DecryptItem.HashOf(item.Ciphertext)))],
+            DotenvxInputDigest: request.DotenvxInputDigest,
+            DotenvxDynamicNames: request.DotenvxDynamicNames,
             ExtraLines: [$"This request comes from another machine: {ApprovalSummary.Clean(name)} (host name {ApprovalSummary.Clean(message.Decide.HostName)}, key fingerprint {KeyIdentity.Display(machine.Fingerprint)}). The program runs there; the secrets are decrypted here and sent to it over the encrypted machine connection."]);
     }
 
@@ -535,7 +537,7 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
         try
         {
             Interlocked.Increment(ref _decryptions);
-            values = _secrets.GetValues(request.SecretNames, unlock);
+            values = request.SecretNames.Count == 0 ? new SecretValues(new Dictionary<string, byte[]>()) : _secrets.GetValues(request.SecretNames, unlock);
         }
         catch (Exception error) when (error is not OutOfMemoryException and not AuthorityLockedException)
         {

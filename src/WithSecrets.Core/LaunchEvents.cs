@@ -6,14 +6,17 @@ namespace WithSecrets;
 
 /// <summary>
 /// One line of the answer to a launch: newline-delimited JSON, one object per line. The only members are the ones named here
-/// (event, link, stream, text, outcome, exitCode); a value of a secret has no place in any of them. <c>text</c> is output that
+/// (event, link, stream, text, outcome, exitCode, challenge); the stream carries no secret values. <c>text</c> is output that
 /// the service already redacted, or a message of the service.
 /// </summary>
-public sealed record LaunchEvent(string Kind, string? Link = null, string? Stream = null, string? Text = null, LaunchOutcome? Outcome = null, int? ExitCode = null)
+public sealed record LaunchEvent(string Kind, string? Link = null, string? Stream = null, string? Text = null, LaunchOutcome? Outcome = null, int? ExitCode = null, string? Challenge = null)
 {
     public const string ApprovalKind = "approval";
     public const string OutputKind = "output";
     public const string ResultKind = "result";
+    internal const string DotenvxKind = "dotenvx";
+
+    internal static string Dotenvx(string challenge) => JsonSerializer.Serialize(new { @event = DotenvxKind, challenge });
 
     /// <summary>The approval page link, public: the person opens it.</summary>
     public static string Approval(string link)
@@ -69,6 +72,7 @@ public sealed record LaunchEvent(string Kind, string? Link = null, string? Strea
                 ApprovalKind => ["event", "link"],
                 OutputKind => ["event", "stream", "text"],
                 ResultKind => ["event", "outcome", "exitCode"],
+                DotenvxKind => ["event", "challenge"],
                 _ => [],
             };
             if (known.Length == 0)
@@ -93,6 +97,9 @@ public sealed record LaunchEvent(string Kind, string? Link = null, string? Strea
                     break;
                 case OutputKind when reader.Text("stream", out string? stream) && reader.Text("text", out string? text) && stream is "stdout" or "stderr":
                     launchEvent = new LaunchEvent(name, Stream: stream, Text: text);
+                    break;
+                case DotenvxKind when reader.Text("challenge", out string? challenge) && LaunchProtocol.NoncePattern().IsMatch(challenge!):
+                    launchEvent = new LaunchEvent(name, Challenge: challenge);
                     break;
                 case ResultKind when reader.Text("outcome", out string? outcomeName) && reader.Int("exitCode", out int code) && Enum.TryParse(outcomeName, true, out LaunchOutcome outcome) && Enum.IsDefined(outcome) && outcomeName == outcomeName!.ToLowerInvariant():
                     launchEvent = new LaunchEvent(name, Outcome: outcome, ExitCode: code);

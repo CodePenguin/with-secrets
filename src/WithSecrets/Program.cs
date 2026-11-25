@@ -10,7 +10,7 @@ namespace WithSecrets;
 internal static class Program
 {
     // Everything lives in the user profile: %USERPROFILE%\.with-secrets\with-secrets.db (passkeys, settings, approvals and the
-    // secrets as Dotenvx ciphertext). The store key is never stored: it is wrapped under keys that only the passkeys (WebAuthn PRF) can produce.
+    // secrets as JWE ciphertext). The store key is wrapped under keys that only the passkeys (WebAuthn PRF) can produce.
     private const string StoreFolder = ".with-secrets";
 
     /// <summary>The reason the command line's endpoint could not be made (a plain I/O error from the endpoint: a path and a rule), found in the chain of the start failure. Null when it is something else.</summary>
@@ -62,6 +62,11 @@ internal static class Program
 
     private static async Task<int> Execute(string[] args)
     {
+        if (args is [DotenvxRun.CaptureArgument, var pipe, .. var names])
+        {
+            return await DotenvxRun.CaptureAsync(pipe, names);
+        }
+
         // The release check on the published program (see SelfCheck): a throwaway service, software keys, no user state.
         if (args is ["--self-check"])
         {
@@ -94,7 +99,7 @@ internal static class Program
         // Diagnostics: warnings go to the log file always; --debug (or WITH_SECRETS_DEBUG=1) adds the Debug events, to the terminal too.
         AppLog.Configure(AppLog.DebugRequested(command.Debug));
 
-        // A run is a client of the host service: it opens no store and no with-secrets.db, decrypts nothing and starts nothing itself.
+        // The host service owns the WithSecrets store and the final application launch.
         if (command is CliCommand.Run run)
         {
             return await RunThroughService(run, run.Args, approve: false);

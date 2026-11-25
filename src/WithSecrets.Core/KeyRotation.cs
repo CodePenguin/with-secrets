@@ -168,7 +168,7 @@ public sealed class KeyRotation(StateDatabase db, SecretStore store, EnrollmentT
                 return Denied("the key's PRF output does not open the store key; nothing was changed");
             }
 
-            (string publicKey, string privateText) = DotenvxCipher.Instance.NewKeyPair();
+            (string publicKey, string privateText) = JweCipher.Instance.NewKeyPair();
             newKey = Encoding.UTF8.GetBytes(privateText);
             privateText = "";
 
@@ -177,8 +177,8 @@ public sealed class KeyRotation(StateDatabase db, SecretStore store, EnrollmentT
             Dictionary<string, string> rows = new(StringComparer.Ordinal);
             foreach ((string name, string ciphertext) in oldRows.OrderBy(item => item.Key, StringComparer.Ordinal))
             {
-                string value = DotenvxCipher.Instance.Decrypt(oldPrivate, ciphertext);
-                rows[name] = DotenvxCipher.Instance.Encrypt(value, publicKey);
+                string value = JweCipher.Instance.Decrypt(oldPrivate, ciphertext);
+                rows[name] = JweCipher.Instance.Encrypt(value, publicKey);
             }
 
             newMaster = KeyVault.NewMasterKey();

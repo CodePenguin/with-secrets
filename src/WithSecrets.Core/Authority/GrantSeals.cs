@@ -9,7 +9,7 @@ public sealed class GrantSealException(string message) : Exception(message);
 public sealed class GrantSealer(AuthorityStore store, AuthorityKeyRing keys, IApprovalVerifier verifier, ISecretCipher? cipher = null)
 {
     private readonly StateDatabase _state = new(store.Database);
-    private readonly ISecretCipher _cipher = cipher ?? DotenvxCipher.Instance;
+    private readonly ISecretCipher _cipher = cipher ?? JweCipher.Instance;
 
     internal void Write(AuthorityStore.GrantTx tx, GrantRecord row, PlainEvidence plain)
     {
@@ -130,7 +130,7 @@ public static class GrantSeals
 
     internal static void Rekey(AuthorityStore.GrantTx tx, string oldReviewPrivate, string newReviewPublic, ISigningKey key)
     {
-        DotenvxCipher cipher = DotenvxCipher.Instance;
+        JweCipher cipher = JweCipher.Instance;
         string oldReviewPublic = cipher.Derive(oldReviewPrivate);
         foreach (GrantRecord row in tx.Sealed())
         {

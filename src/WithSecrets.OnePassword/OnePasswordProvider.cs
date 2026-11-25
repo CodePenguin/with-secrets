@@ -33,7 +33,7 @@ public static class OnePasswordProvider
             throw new ProviderAdapterException(ProviderErrorKind.InvalidConfiguration, "Enter a valid 1Password service-account token.");
         }
 
-        string ciphertext = DotenvxCipher.Instance.Encrypt(JsonSerializer.Serialize(new { serviceAccountToken = token }), reviewPublicKey);
+        string ciphertext = JweCipher.Instance.Encrypt(JsonSerializer.Serialize(new { serviceAccountToken = token }), reviewPublicKey);
         return JsonSerializer.Serialize(new { encryptedConfiguration = ciphertext });
     }
 }

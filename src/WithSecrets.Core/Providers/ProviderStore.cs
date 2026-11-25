@@ -96,8 +96,8 @@ public sealed class ProviderStore(AuthorityStore store)
             {
                 JsonObject configuration = JsonNode.Parse(instance.Configuration)!.AsObject();
                 string ciphertext = configuration["encryptedConfiguration"]!.GetValue<string>();
-                string plaintext = DotenvxCipher.Instance.Decrypt(oldReviewPrivate, ciphertext);
-                configuration["encryptedConfiguration"] = DotenvxCipher.Instance.Encrypt(plaintext, newReviewPublic);
+                string plaintext = JweCipher.Instance.Decrypt(oldReviewPrivate, ciphertext);
+                configuration["encryptedConfiguration"] = JweCipher.Instance.Encrypt(plaintext, newReviewPublic);
                 replacement = configuration.ToJsonString();
             }
             catch (Exception error) when (error is not OutOfMemoryException)

@@ -12,15 +12,15 @@ internal sealed class CountingCipher : ISecretCipher
 
     public int Decrypts => _decrypts;
 
-    public (string PublicKey, string PrivateKey) NewKeyPair() => DotenvxCipher.Instance.NewKeyPair();
+    public (string PublicKey, string PrivateKey) NewKeyPair() => JweCipher.Instance.NewKeyPair();
 
-    public string Encrypt(string value, string publicKey) => DotenvxCipher.Instance.Encrypt(value, publicKey);
+    public string Encrypt(string value, string publicKey) => JweCipher.Instance.Encrypt(value, publicKey);
 
     public string Decrypt(string privateKey, string ciphertext)
     {
         Interlocked.Increment(ref _decrypts);
 
-        return DotenvxCipher.Instance.Decrypt(privateKey, ciphertext);
+        return JweCipher.Instance.Decrypt(privateKey, ciphertext);
     }
 }
 
@@ -83,7 +83,7 @@ internal static class SecretStoreTests
             return (manifest.Store, null, null);
         }
 
-        (string publicKey, string privateKey) = DotenvxCipher.Instance.NewKeyPair();
+        (string publicKey, string privateKey) = JweCipher.Instance.NewKeyPair();
 
         return (publicKey, TestVault.Vault(store.Database, privateKey, publicKey), KeyVault.NewReviewKey(TestVault.Master(store.Database)));
     }
@@ -164,11 +164,11 @@ internal static class SecretStoreTests
         check(first.Canonical().Contains(",\"store\":\"\",\"vault\":\"\",\"secrets\":{},\"settings\":", StringComparison.Ordinal), "store manifest: the text has store, vault and secrets before the settings (" + first.Canonical() + ")");
         check(first.SettingsPrefix().EndsWith(",\"store\":\"\",\"vault\":\"\",\"secrets\":{},\"settings\":", StringComparison.Ordinal), "store manifest: the settings prefix ends with store and secrets");
 
-        (string publicKey, _) = DotenvxCipher.Instance.NewKeyPair();
+        (string publicKey, _) = JweCipher.Instance.NewKeyPair();
         string hashB = new('b', 64);
         string hashA = new('a', 64);
         byte[] master = KeyVault.NewMasterKey();
-        string vault = KeyVault.WrapVault(Encoding.UTF8.GetBytes(DotenvxCipher.Instance.NewKeyPair().PrivateKey), master, publicKey);
+        string vault = KeyVault.WrapVault(Encoding.UTF8.GetBytes(JweCipher.Instance.NewKeyPair().PrivateKey), master, publicKey);
         ReviewKey review = KeyVault.NewReviewKey(master);
         Manifest withSecrets = first.WithSecrets(publicKey, new Dictionary<string, string> { ["B_NAME"] = hashB, ["A_NAME"] = hashA }, vault, review);
         string text = withSecrets.Canonical();
@@ -205,9 +205,9 @@ internal static class SecretStoreTests
         check(store.Label == "global" && store.ListNames().Count == 0, "store: an empty store lists nothing");
         check(Put(store, new Dictionary<string, string> { ["A_NAME"] = ValueA, ["B_NAME"] = ValueB, ["C_NAME"] = ValueC }) is null, "store: three secrets are stored");
         Manifest manifest = TestState.Current(db)!;
-        check(manifest.Store.Length == 66 && manifest.Vault.Length > 0, "store: the first write made one key pair; the manifest has its public key and the vault");
+        check(JweCipher.IsPublicKey(manifest.Store) && manifest.Vault.Length > 0, "store: the first write made one key pair; the manifest has its public key and the vault");
         check(manifest.Version == 2 && manifest.Secrets.Keys.SequenceEqual(["A_NAME", "B_NAME", "C_NAME"]) && manifest.Secrets.All(item => item.Value == SecretStore.Hash(Row(db, item.Key))), "store: the manifest has the hash of every row");
-        check(Row(db, "A_NAME").StartsWith("encrypted:", StringComparison.Ordinal) && !File.ReadAllText(db.FilePath).Contains(ValueA, StringComparison.Ordinal), "store: a row is a Dotenvx ciphertext; no value is in with-secrets.db");
+        check(Row(db, "A_NAME").StartsWith(JweCipher.Prefix, StringComparison.Ordinal) && !File.ReadAllText(db.FilePath).Contains(ValueA, StringComparison.Ordinal), "store: a row is a JWE ciphertext; no value is in with-secrets.db");
         check(store.ListNames().SequenceEqual(["A_NAME", "B_NAME", "C_NAME"]) && cipher.Decrypts == 0, "store: --list reads names and decrypts nothing (no private key opened)");
 
         using (SecretValues values = Read(store, ["B_NAME"]))
@@ -259,13 +259,13 @@ internal static class SecretStoreTests
     {
         (string Name, Action<StateDatabase, string> Edit, bool StateFails)[] edits =
         [
-            ("a row replaced by another valid ciphertext made with the public key", (db, publicKey) => Sql(db, "UPDATE secrets SET ciphertext = $c WHERE name = 'A_NAME'", ("$c", DotenvxCipher.Instance.Encrypt("Attacker-Value-1", publicKey))), false),
+            ("a row replaced by another valid ciphertext made with the public key", (db, publicKey) => Sql(db, "UPDATE secrets SET ciphertext = $c WHERE name = 'A_NAME'", ("$c", JweCipher.Instance.Encrypt("Attacker-Value-1", publicKey))), false),
             ("a row swapped with another row", (db, _) => Sql(db, "UPDATE secrets SET ciphertext = (SELECT ciphertext FROM secrets WHERE name = 'B_NAME') WHERE name = 'A_NAME'"), false),
-            ("a row added without a hash", (db, publicKey) => Sql(db, "INSERT INTO secrets (name, ciphertext) VALUES ('EXTRA_NAME', $c)", ("$c", DotenvxCipher.Instance.Encrypt("Extra-Value-1", publicKey))), false),
+            ("a row added without a hash", (db, publicKey) => Sql(db, "INSERT INTO secrets (name, ciphertext) VALUES ('EXTRA_NAME', $c)", ("$c", JweCipher.Instance.Encrypt("Extra-Value-1", publicKey))), false),
             ("a row deleted (its hash stays)", (db, _) => Sql(db, "DELETE FROM secrets WHERE name = 'B_NAME'"), false),
             ("a hash removed from the manifest text", (db, _) => Sql(db, "UPDATE manifest SET text = replace(text, substr(text, instr(text, ',\"B_NAME\":'), 76), '')"), true),
             ("a hash changed in the manifest text", (db, _) => Sql(db, "UPDATE manifest SET text = replace(text, '\"A_NAME\":\"', '\"A_NAME\":\"0')"), true),
-            ("the store key changed in the manifest text", (db, publicKey) => Sql(db, "UPDATE manifest SET text = replace(text, $p, $q)", ("$p", publicKey), ("$q", DotenvxCipher.Instance.NewKeyPair().PublicKey)), true),
+            ("the store key changed in the manifest text", (db, publicKey) => Sql(db, "UPDATE manifest SET text = replace(text, $p, $q)", ("$p", publicKey), ("$q", JweCipher.Instance.NewKeyPair().PublicKey)), true),
         ];
         int index = 0;
         foreach ((string name, Action<StateDatabase, string> edit, bool stateFails) in edits)
@@ -319,14 +319,14 @@ internal static class SecretStoreTests
         check(approver.Requests.Single().Sources is { } sources && sources["A_NAME"] == "global" && ApprovalSummary.BuildMessage(approver.Requests[0]).Contains("Secrets: A_NAME (global)", StringComparison.Ordinal), "store run: the approval text names each secret's source");
         string audit = StateDatabaseTests.AuditText(db.FilePath);
         check(audit.Contains("\"outcome\":\"test-put\"", StringComparison.Ordinal) && audit.Contains("\"type\":\"execution\"", StringComparison.Ordinal), "store run: the signed audit has the store write and the run");
-        string[] canaries = [ValueA, ValueB, ValueC, "encrypted:", Convert.ToHexString(TestVault.RecoveryCode(db))];
+        string[] canaries = [ValueA, ValueB, ValueC, JweCipher.Prefix, Convert.ToHexString(TestVault.RecoveryCode(db))];
         check(canaries.All(canary => !audit.Contains(canary, StringComparison.Ordinal)), "audit canary: no secret value, ciphertext or recovery code appears in the admin or run events");
         check(TestAudit.MetadataClean(db, canaries, out HashSet<string> scanned) && AuditEventTypes.All.All(scanned.Contains), "audit canary: the metadata of every event type (" + string.Join(",", scanned) + ") holds no value, ciphertext or code");
         AuditEvent authorized = TestAudit.Events(db, all: true).First(item => item.Type == AuditEventTypes.Authorization && item.Outcome == "approved");
         check(authorized.Meta.TryGetValue("secrets", out string? named) && named == "A_NAME" && authorized.Meta.ContainsKey("files"), "run metadata: the approval event names the secrets and the file fingerprints (" + string.Join(",", authorized.Meta.Keys) + ")");
 
         // A swapped row: the run stops before it asks, with exit 4.
-        Sql(db, "UPDATE secrets SET ciphertext = $c WHERE name = 'A_NAME'", ("$c", DotenvxCipher.Instance.Encrypt("Attacker-Value-1", TestState.Current(db)!.Store)));
+        Sql(db, "UPDATE secrets SET ciphertext = $c WHERE name = 'A_NAME'", ("$c", JweCipher.Instance.Encrypt("Attacker-Value-1", TestState.Current(db)!.Store)));
         FakeApprover never = new(true, unlock: () => AdminUnlock(db));
         stderr = new StringWriter();
         code = await new RunCommand(new SecretStore(new StateDatabase(db.FilePath), cipher), never, new StringWriter(), stderr).ExecuteAsync(args, folder);
@@ -352,7 +352,7 @@ internal static class SecretStoreTests
         public ApprovalDecision Request(ApprovalRequest request)
         {
             Unlock? unlock = AdminUnlock(db);
-            string ciphertext = DotenvxCipher.Instance.Encrypt("Attacker-Value-1", publicKey);
+            string ciphertext = JweCipher.Instance.Encrypt("Attacker-Value-1", publicKey);
             Sql(db, addRow ? "INSERT INTO secrets (name, ciphertext) VALUES ('EXTRA_NAME', $c)" : "UPDATE secrets SET ciphertext = $c WHERE name = 'A_NAME'", ("$c", ciphertext));
 
             return ApprovalDecision.Allow("approved", 0, null, unlock);

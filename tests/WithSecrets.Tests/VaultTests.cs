@@ -13,7 +13,7 @@ internal static class VaultTests
     public static async Task Run(Action<bool, string> check)
     {
         const string token = "hvs.vault-token-canary";
-        var (publicKey, privateKey) = DotenvxCipher.Instance.NewKeyPair();
+        var (publicKey, privateKey) = JweCipher.Instance.NewKeyPair();
         string sealedConfiguration = VaultProvider.SealConfiguration(token, publicKey);
         using JsonDocument document = JsonDocument.Parse(sealedConfiguration);
         VaultConfiguration configuration = new();
@@ -62,7 +62,7 @@ internal static class VaultTests
             };
         }));
         IProviderAdapter adapter = new VaultAdapter("https://vault.example.test", "team/kv", "teams/demo", () => authority.Token,
-            (ciphertext, _) => ValueTask.FromResult<string?>(DotenvxCipher.Instance.Decrypt(privateKey, ciphertext)), http);
+            (ciphertext, _) => ValueTask.FromResult<string?>(JweCipher.Instance.Decrypt(privateKey, ciphertext)), http);
         StatusReporter status = new();
         await adapter.InitializeAsync(configuration,
             new(Guid.NewGuid(), VaultAdapter.ProviderType, VaultAdapter.AdapterVersion, NullLogger.Instance, status), default);

@@ -58,6 +58,7 @@ public static class CliArgs
 
         To run a program: with-secrets [--secrets NAME[,NAME...]] --reason "why" [-f .env] -- PROGRAM [ARGS...]
         Set WITH_SECRETS_ONEPASSWORD_EXECUTABLE to the trusted absolute path to op on the authority host.
+        Set WITH_SECRETS_DOTENVX_EXECUTABLE in the requesting user's environment to the absolute path of a trusted dotenvx binary.
 
 
         A run goes through the host service, which must be running (with-secrets service, in a terminal of its own). The run reaches it over
@@ -96,7 +97,7 @@ public static class CliArgs
         references, --reason is always required. The first file wins per name; an existing environment variable beats an
         ordinary .env value, but a secret:// reference beats it. The approval page shows every "VARIABLE <- secret NAME" and
         the .env paths, and the files are read once. Code-loading variables (NODE_OPTIONS...) are dropped from .env values
-        and a reference to one, or to PATH, is refused. Dotenvx encrypted values and ${} expansion are not supported yet.
+        and a reference to one, or to PATH, is refused. In dotenvx projects, dotenvx resolves approved encrypted and expanded values.
         --needs [-f PATH]... prints what the current project would ask for (names only) and whether each secret is in the store.
 
         Machines. Every host service has a machine identity (an ECDSA P-256 key that Windows keeps and nobody can read out; its

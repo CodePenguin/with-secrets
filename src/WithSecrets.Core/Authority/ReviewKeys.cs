@@ -7,7 +7,7 @@ namespace WithSecrets;
 public sealed class ReviewKeys(ISecretCipher? cipher = null) : IDisposable
 {
     private readonly Lock _gate = new();
-    private readonly ISecretCipher _cipher = cipher ?? DotenvxCipher.Instance;
+    private readonly ISecretCipher _cipher = cipher ?? JweCipher.Instance;
     private byte[]? _privateKey;
     private IDisposable? _pages;
     private string? _publicKey;
@@ -40,7 +40,7 @@ public sealed class ReviewKeys(ISecretCipher? cipher = null) : IDisposable
             {
                 master = KeyVault.OpenMaster(manifest, unlock);
                 unwrapped = KeyVault.UnwrapReview(review.Vault, master, review.PublicKey);
-                if (DotenvxCipher.Instance.Derive(Encoding.UTF8.GetString(unwrapped)) != review.PublicKey)
+                if (JweCipher.Instance.Derive(Encoding.UTF8.GetString(unwrapped)) != review.PublicKey)
                 {
                     return false;
                 }

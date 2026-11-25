@@ -206,7 +206,7 @@ internal static class ProviderEndToEndTests
         return new Ran(raw, File.Exists(valueFile) ? File.ReadAllText(valueFile).Trim() : null);
     }
 
-    private static bool Clean(string text) => !text.Contains(Github, StringComparison.Ordinal) && !text.Contains(Older, StringComparison.Ordinal) && !text.Contains(NativeValue, StringComparison.Ordinal) && !text.Contains("encrypted:", StringComparison.Ordinal);
+    private static bool Clean(string text) => !text.Contains(Github, StringComparison.Ordinal) && !text.Contains(Older, StringComparison.Ordinal) && !text.Contains(NativeValue, StringComparison.Ordinal) && !text.Contains(JweCipher.Prefix, StringComparison.Ordinal);
 
     public static async Task Run(Action<bool, string> check)
     {

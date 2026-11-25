@@ -161,12 +161,12 @@ internal static partial class WebApprovalTests
                 TestState.Add(db, laptop.Record("localhost", "laptop"), withStore: true);
                 SecretStore store = new(db);
                 Manifest before = TestState.Current(db)!;
-                check(before.Store.Length == 66 && KeyVault.IsVault(before.Vault), "prf first set: the state from the first setup already has the store key and the vault");
+                check(JweCipher.IsPublicKey(before.Store) && KeyVault.IsVault(before.Vault), "prf first set: the state from the first setup already has the store key and the vault");
                 (byte[] master, string privateHex) = Open(db, laptop);
                 EntryRun run = SetRun(passkeys, store, ["A_NAME"], laptop, Values(("A_NAME", PrfA)));
                 Manifest? after = TestState.Current(db);
                 check(run.Result is { Code: 0 } && run.Entry is not null && after is { Version: 2 } && after.Store == before.Store && after.Vault == before.Vault && after.Secrets.ContainsKey("A_NAME"), "prf first set: one page, no PRF, no approval page; the manifest keeps the store key and vault and adds the hash of the first secret (" + run.Result?.Detail + ")");
-                check(privateHex.Length == 64 && DotenvxCipher.Instance.Derive(privateHex) == after!.Store, "prf first set: the vault holds the private key of the stored public key, and the passkey's PRF output opens it");
+                check(JweCipher.Instance.Derive(privateHex) == after!.Store, "prf first set: the vault holds the private key of the stored public key, and the passkey's PRF output opens it");
                 byte[] privateAscii = Encoding.ASCII.GetBytes(privateHex);
                 SqliteConnection.ClearAllPools();
                 check(!FolderHolds(Path.GetDirectoryName(db.FilePath)!, privateAscii) && !FolderHolds(Path.GetDirectoryName(db.FilePath)!, Encoding.UTF8.GetBytes(privateHex.ToUpperInvariant())), "prf first set: the private key (hex) is in no file of the store folder: not in with-secrets.db, its WAL or anything else");
@@ -293,7 +293,7 @@ internal static partial class WebApprovalTests
                 check(decision is { Approved: true } && passkeys.All().Count == 2 && TestState.Current(db)!.Version == version + 1, "prf enroll: a passkey with PRF is enrolled (" + decision?.Detail + "; " + string.Join(" | ", lines) + ")");
                 (byte[] masterLaptop, _) = Open(db, laptop);
                 (byte[] masterPhone, string hexPhone) = Open(db, phone);
-                check(masterLaptop.AsSpan().SequenceEqual(masterPhone) && DotenvxCipher.Instance.Derive(hexPhone) == TestState.Current(db)!.Store, "prf enroll: the new key's slot opens the same master key and the vault");
+                check(masterLaptop.AsSpan().SequenceEqual(masterPhone) && JweCipher.Instance.Derive(hexPhone) == TestState.Current(db)!.Store, "prf enroll: the new key's slot opens the same master key and the vault");
                 check(TestState.Current(db)!.Keys.Select(key => key.Slot!.Salt).Distinct().Count() == 1, "prf enroll: every key's slot has the same salt (the store's)");
                 var result = await RunWith(db, passkeys, store, (url, origin, rp) => TestState.Approve(client, url, origin, rp, phone));
                 check(result.Code == 0 && cipher.Decrypts == 1, "prf enroll: the new key approves a run and it decrypts (" + result.Code + " " + result.Err + ")");

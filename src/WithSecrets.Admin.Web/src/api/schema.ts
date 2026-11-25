@@ -1598,7 +1598,7 @@ export interface components {
         ApprovalDecrypt: {
             variable: string;
             file: string;
-            keySecret: string;
+            publicKey: string;
             cipherShort: string;
         };
         ApprovalNameValue: {

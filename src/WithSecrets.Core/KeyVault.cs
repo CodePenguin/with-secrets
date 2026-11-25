@@ -32,7 +32,7 @@ public sealed class Unlock(string credentialId, byte[] output) : IDisposable
 
 /// <summary>
 /// The crypto of the key slots, in two layers. Each PRF-capable passkey has a slot that wraps a stable master key MK; one vault
-/// wraps the secret store's private key K (the Dotenvx key, as UTF-8 hex text) under MK.
+/// wraps the secret store's private key K (PKCS#8 encoded as base64url text) under MK.
 /// <list type="bullet">
 /// <item>Slot: <c>KEK = HKDF-SHA256(ikm: PRF output, salt: slot salt, info: "with-secrets/v1 slot")</c>, then AES-256-GCM of MK under
 /// KEK with a random 12-byte nonce and the associated data <c>credential id || slot salt</c>. Stored as base64url of
@@ -124,7 +124,7 @@ internal static class KeyVault
     /// <summary>Creates a review key and retains only its public key and its master-key-wrapped private bytes.</summary>
     public static ReviewKey NewReviewKey(byte[] masterKey)
     {
-        (string publicKey, string privateText) = DotenvxCipher.Instance.NewKeyPair();
+        (string publicKey, string privateText) = JweCipher.Instance.NewKeyPair();
         byte[] privateKey = Encoding.UTF8.GetBytes(privateText);
         try
         {

@@ -3065,7 +3065,7 @@ internal static partial class WebApprovalTests
             {
                 (PasskeyStore passkeys, SecretStore store) = Fresh(new Dictionary<string, string> { ["A_NEW"] = ValueA });
                 StateDatabase db = store.Database;
-                db.Write((connection, transaction) => WithSecretsDatabase.Execute(connection, transaction, "UPDATE secrets SET ciphertext = $c WHERE name = 'A_NEW'", ("$c", DotenvxCipher.Instance.Encrypt("Attacker-Value-1", TestState.Current(db)!.Store))));
+                db.Write((connection, transaction) => WithSecretsDatabase.Execute(connection, transaction, "UPDATE secrets SET ciphertext = $c WHERE name = 'A_NEW'", ("$c", JweCipher.Instance.Encrypt("Attacker-Value-1", TestState.Current(db)!.Store))));
                 EntryRun set = SetRun(passkeys, store, ["B_OLD"], laptop, Values(("B_OLD", ValueB)));
                 EntryRun removed = RemoveRun(passkeys, store, ["A_NEW"], laptop, true);
                 check(set.Result is { Code: RunCommand.StoreError } && set.Entry is null && removed.Result is { Code: RunCommand.StoreError } && removed.Removal is null && set.Result.Detail.Contains("failed verification", StringComparison.Ordinal), "secrets: a store that fails verification refuses a set and a removal (" + set.Result?.Detail + ")");

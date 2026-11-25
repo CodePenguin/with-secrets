@@ -288,7 +288,7 @@ internal static class TestState
         if (withStore && current is null)
         {
             // Like a first setup: the store public key and its vault are in the first manifest.
-            (string publicKey, string privateKey) = DotenvxCipher.Instance.NewKeyPair();
+            (string publicKey, string privateKey) = JweCipher.Instance.NewKeyPair();
             first = first with { Store = publicKey, Vault = TestVault.Vault(db, privateKey, publicKey), Review = KeyVault.NewReviewKey(TestVault.Master(db)) };
         }
 
@@ -357,7 +357,7 @@ internal static class TestVault
         byte[] key = KeyVault.UnwrapReview(review.Vault, Master(db), review.PublicKey);
         try
         {
-            return DotenvxCipher.Instance.Decrypt(Encoding.UTF8.GetString(key), row.Evidence!.Ciphertext);
+            return JweCipher.Instance.Decrypt(Encoding.UTF8.GetString(key), row.Evidence!.Ciphertext);
         }
         finally
         {

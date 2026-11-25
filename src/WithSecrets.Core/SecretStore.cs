@@ -1,7 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
 
-using Dotenvx.Primitives;
 
 using Microsoft.Data.Sqlite;
 
@@ -36,7 +35,7 @@ public interface ISecretSource
 
 /// <summary>
 /// Decrypted secret values as UTF-8 bytes, zeroed by <see cref="Dispose" />. The bytes are the one copy the tool can wipe.
-/// Copies it cannot wipe: the string Dotenvx's decrypt returns (dropped at once), every string made by <see cref="Text" /> (the
+/// Copies it cannot wipe: the string the JWE handler returns (dropped at once), every string made by <see cref="Text" /> (the
 /// redactor and the child's environment need strings), and the child's environment block itself. .NET strings are immutable
 /// and may be moved by the garbage collector, so they stay in memory until it reuses that memory.
 /// </summary>
@@ -92,38 +91,23 @@ public sealed class SecretValues : IDisposable
     }
 }
 
-/// <summary>The crypto of stored values: Dotenvx's ECIES (secp256k1) "encrypted:" format.</summary>
+/// <summary>The crypto of stored values: Authenticated public-key encryption.</summary>
 public interface ISecretCipher
 {
-    /// <summary>A new key pair, hex: the public key (66 digits) and the private key (64 digits).</summary>
+    /// <summary>A new key pair, encoded for storage.</summary>
     (string PublicKey, string PrivateKey) NewKeyPair();
 
-    /// <summary>The "encrypted:..." ciphertext of <paramref name="value" /> for <paramref name="publicKey" />.</summary>
+    /// <summary>The sealed ciphertext of <paramref name="value" /> for <paramref name="publicKey" />.</summary>
     string Encrypt(string value, string publicKey);
 
     string Decrypt(string privateKey, string ciphertext);
-}
-
-/// <summary>Dotenvx's primitives, the crypto library of the store (not its file format).</summary>
-public sealed class DotenvxCipher : ISecretCipher
-{
-    public static readonly DotenvxCipher Instance = new();
-
-    public (string PublicKey, string PrivateKey) NewKeyPair() => Primitives.Keypair(null!);
-
-    public string Encrypt(string value, string publicKey) => Primitives.Encrypt(value, publicKey, true);
-
-    public string Decrypt(string privateKey, string ciphertext) => Primitives.Decrypt(privateKey, ciphertext, true);
-
-    /// <summary>The public key of a private key.</summary>
-    public string Derive(string privateKey) => Primitives.Derive(privateKey);
 }
 
 /// <summary>The secret store cannot be used: it failed verification, a name is missing, or a value cannot be decrypted. Names only, never values.</summary>
 public sealed class SecretStoreException(string message, Exception? inner = null) : Exception(message, inner);
 
 /// <summary>
-/// The global secret store: table <c>secrets(name, ciphertext)</c> in with-secrets.db, one Dotenvx ciphertext per secret. The signed
+/// The global secret store: table <c>secrets(name, ciphertext)</c> in with-secrets.db, one JWE ciphertext per secret. The signed
 /// manifest holds the store's public key and <see cref="Hash" /> of every ciphertext, because anyone with the public key can
 /// write a valid ciphertext: a row is used only when it matches its signed hash, and a row without a hash, or a hash without a
 /// row, is a store that failed verification. Every read checks every row's hash (no decrypt); <see cref="GetValues" /> then
@@ -136,7 +120,7 @@ public sealed class SecretStore(StateDatabase db, ISecretCipher? cipher = null) 
 {
     public const string GlobalLabel = "global";
 
-    private readonly ISecretCipher _cipher = cipher ?? DotenvxCipher.Instance;
+    private readonly ISecretCipher _cipher = cipher ?? JweCipher.Instance;
 
     public string Label => GlobalLabel;
 

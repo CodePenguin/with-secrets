@@ -12,7 +12,7 @@ public sealed record ApprovalMachineView(string Fingerprint, string? FriendlyNam
 public sealed record ApprovalScriptProjection(string? Path, string Sha256, long Length, string? Text, bool Guessed, bool Binary);
 
 /// <summary>One decrypted-env metadata row: names and cipher fingerprint only.</summary>
-public sealed record ApprovalDecryptProjection(string Variable, string File, string KeySecret, string CipherShort);
+public sealed record ApprovalDecryptProjection(string Variable, string File, string PublicKey, string CipherShort);
 public sealed record ApprovalNameValue(string Name, string Value);
 public sealed record ApprovalCodeWarning(string Name, string Why, string Value);
 
@@ -228,9 +228,9 @@ public sealed class ApprovalQueue : IDisposable
             pairs,
             shownEnv,
             warnings,
-            [.. (shown.Decrypts ?? []).Select(item => new ApprovalDecryptProjection(ApprovalSummary.Clean(item.Variable), ApprovalSummary.Clean(item.File), ApprovalSummary.Clean(item.KeySecret), ApprovalSummary.Clean(item.Short)))],
+            [.. (shown.Decrypts ?? []).Select(item => new ApprovalDecryptProjection(ApprovalSummary.Clean(item.Variable), ApprovalSummary.Clean(item.File), ApprovalSummary.Clean(item.PublicKey), ApprovalSummary.Clean(item.Short)))],
             shown.InheritedEnvironment is { } inherited ? EnvironmentBinding.Line(inherited) : null,
-            [.. (shown.ExtraLines ?? []).Select(ApprovalSummary.Clean)],
+            [.. (shown.ExtraLines ?? []).Select(ApprovalSummary.Clean), .. new[] { ApprovalSummary.DotenvxLine(shown) }.OfType<string>()],
             canonical,
             shown.Unlock,
             grant ? ApprovalSummary.Clean(shown.Heading!) : null,

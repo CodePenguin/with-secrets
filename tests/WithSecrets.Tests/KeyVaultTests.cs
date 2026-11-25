@@ -46,7 +46,7 @@ internal static class KeyVaultTests
         check(parsed is not null && error is null && parsed.Keys.Single().Slot == slot && parsed.Vault == "" && parsed.Canonical() == text, "slot manifest: round trip keeps the slot (" + error + ")");
         check(first.Problem() is null, "slot manifest: a key with a slot is valid (" + first.Problem() + ")");
 
-        (string publicKey, string privateKey) = DotenvxCipher.Instance.NewKeyPair();
+        (string publicKey, string privateKey) = JweCipher.Instance.NewKeyPair();
         string vault = KeyVault.WrapVault(Encoding.UTF8.GetBytes(privateKey), mk, publicKey);
         ReviewKey review = KeyVault.NewReviewKey(mk);
         Manifest withStore = first.WithSecrets(publicKey, new Dictionary<string, string> { ["A_NAME"] = new string('a', 64) }, vault, review);
@@ -56,7 +56,7 @@ internal static class KeyVaultTests
         byte[] reviewPrivate = KeyVault.UnwrapReview(review.Vault, mk, review.PublicKey);
         try
         {
-            check(DotenvxCipher.Instance.Derive(Encoding.UTF8.GetString(reviewPrivate)) == review.PublicKey && review.PublicKey != publicKey
+            check(JweCipher.Instance.Derive(Encoding.UTF8.GetString(reviewPrivate)) == review.PublicKey && review.PublicKey != publicKey
                 && Fails(() => KeyVault.UnwrapReview(review.Vault, mk, publicKey)) && Fails(() => KeyVault.UnwrapVault(review.Vault, mk, review.PublicKey))
                 && Fails(() => KeyVault.UnwrapReview(vault, mk, publicKey)), "review key: the wrap is bound to its public key and its own context");
         }
@@ -183,7 +183,7 @@ internal static class KeyVaultTests
     private static void Vaults(Action<bool, string> check)
     {
         byte[] mk = KeyVault.NewMasterKey();
-        (string publicKey, string privateKey) = DotenvxCipher.Instance.NewKeyPair();
+        (string publicKey, string privateKey) = JweCipher.Instance.NewKeyPair();
         byte[] key = Encoding.UTF8.GetBytes(privateKey);
         string vault = KeyVault.WrapVault(key, mk, publicKey);
 
@@ -191,7 +191,7 @@ internal static class KeyVaultTests
         check(KeyVault.UnwrapVault(vault, mk, publicKey).AsSpan().SequenceEqual(key), "key vault: vault round trip returns the private key bytes");
         check(!vault.Contains(privateKey, StringComparison.Ordinal) && !Convert.ToHexStringLower(Base64Url.DecodeFromChars(vault)).Contains(privateKey, StringComparison.Ordinal), "key vault: the private key is not in the vault in the clear");
         check(Fails(() => KeyVault.UnwrapVault(vault, KeyVault.NewMasterKey(), publicKey)), "key vault: a vault does not open with another master key");
-        check(Fails(() => KeyVault.UnwrapVault(vault, mk, DotenvxCipher.Instance.NewKeyPair().PublicKey)), "key vault: a vault does not open for another store public key (it is associated data)");
+        check(Fails(() => KeyVault.UnwrapVault(vault, mk, JweCipher.Instance.NewKeyPair().PublicKey)), "key vault: a vault does not open for another store public key (it is associated data)");
         foreach (int index in new[] { 0, 12, 12 + 63, 12 + 64 })
         {
             check(Fails(() => KeyVault.UnwrapVault(Flip(vault, index), mk, publicKey)), $"key vault: a tampered vault (byte {index}) does not open");

@@ -59,7 +59,7 @@ public static class RequestFingerprint
             text.Append('\u0002');
             foreach (DecryptItem item in (request.Decrypts ?? []).OrderBy(item => item.Variable, StringComparer.Ordinal))
             {
-                text.Append(item.Variable).Append('\0').Append(Normalize(item.File)).Append('\0').Append(item.KeySecret).Append('\0').Append(item.CipherSha256).Append('\0');
+                text.Append(item.Variable).Append('\0').Append(Normalize(item.File)).Append('\0').Append(item.PublicKey).Append('\0').Append(item.CipherSha256).Append('\0');
             }
 
             text.Append('\u0002');
@@ -75,6 +75,15 @@ public static class RequestFingerprint
             }
 
             text.Append('\u0001');
+        }
+
+        if (request.DotenvxInputDigest is { } dotenvxDigest)
+        {
+            text.Append((char)4).Append(dotenvxDigest).Append((char)4);
+            foreach (string name in request.DotenvxDynamicNames ?? [])
+            {
+                text.Append(name).Append('\0');
+            }
         }
 
         // The environment the program inherits (a request over the API) is part of what was approved. Absent: the key is unchanged.

@@ -629,7 +629,7 @@ internal static class PasskeyRegistration
                 byte[]? recoveryCode = null;
                 try
                 {
-                    (string publicKey, string privateText) = DotenvxCipher.Instance.NewKeyPair();
+                    (string publicKey, string privateText) = JweCipher.Instance.NewKeyPair();
                     privateKey = Encoding.UTF8.GetBytes(privateText);
 
                     // The recovery code (shown once, on the last page, never to the terminal) with its slot of the master key. The slot

@@ -16,7 +16,7 @@ public sealed class ProviderCache(ProviderStore store, AuthorityKeyRing keys, IS
 {
     private const string SealContext = "with-secrets provider cache v1";
 
-    private readonly ISecretCipher _cipher = cipher ?? DotenvxCipher.Instance;
+    private readonly ISecretCipher _cipher = cipher ?? JweCipher.Instance;
 
     /// <summary>
     /// Encrypts each value (strict UTF-8, else <see cref="ArgumentException" /> before anything is signed) of one instance to <paramref name="storePublicKey" />, seals

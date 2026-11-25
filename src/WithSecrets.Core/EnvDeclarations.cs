@@ -23,28 +23,31 @@ public sealed record EnvPlan(
     IReadOnlyDictionary<string, string> Ordinary,
     IReadOnlyList<string> Notes,
     IReadOnlyList<string>? Links = null,
-    IReadOnlyList<EncryptedValue>? Encrypted = null);
+    IReadOnlyList<EncryptedValue>? Encrypted = null,
+    IReadOnlyList<string>? FileHashes = null,
+    bool HasDotenvxDeclarations = false,
+    IReadOnlyList<string>? DynamicNames = null);
 
 /// <summary>
-/// A Dotenvx <c>encrypted:</c> value that is the final declaration of <see cref="Variable" />, with the store secret that holds its
-/// private key. The ciphertext stays in the plan (read once) and is never printed: <see cref="ToString" /> has names only.
+/// A Dotenvx <c>encrypted:</c> value that is the final declaration of <see cref="Variable" />, with the public key for its
+/// decryption. The ciphertext stays in the plan (read once) and is never printed: <see cref="ToString" /> has names only.
 /// </summary>
-public sealed record EncryptedValue(string Variable, string File, string KeySecret, string Ciphertext)
+public sealed record EncryptedValue(string Variable, string File, string PublicKey, string Ciphertext)
 {
-    public override string ToString() => "encrypted " + Variable + " (" + File + ") key " + KeySecret;
+    public override string ToString() => "encrypted " + Variable + " (" + File + ")";
 
     /// <summary>The upper-case hex SHA-256 of the ciphertext text (UTF-8). A hash of a ciphertext is not a secret; it ties an approval to exactly this ciphertext.</summary>
     public string Sha256 => DecryptItem.HashOf(Ciphertext);
 
     /// <summary>What the page, the fingerprint and the audit row get: no ciphertext.</summary>
-    public DecryptItem ToItem() => new(Variable, File, KeySecret, Sha256);
+    public DecryptItem ToItem() => new(Variable, File, PublicKey, Sha256);
 }
 
 /// <summary>
 /// What the approval page, the fingerprint and the audit row know of an encrypted value: names, the file, and the SHA-256 of the
 /// ciphertext (<see cref="CipherSha256" />, full upper-case hex), never the ciphertext itself.
 /// </summary>
-public sealed record DecryptItem(string Variable, string File, string KeySecret, string CipherSha256)
+public sealed record DecryptItem(string Variable, string File, string PublicKey, string CipherSha256)
 {
     /// <summary>The characters of <see cref="CipherSha256" /> the page and the audit row show: enough to compare with the committed file, short enough to read.</summary>
     public const int ShortLength = 12;
@@ -93,7 +96,7 @@ public static partial class EnvDeclarations
     /// <summary>True when a secret reference may not be given to this variable.</summary>
     public static bool IsProtectedVariable(string name)
     {
-        return IsSink(name) || ChildRunner.IsCodeLoading(name, true) || name.StartsWith("DOTENV_PRIVATE_KEY", StringComparison.OrdinalIgnoreCase)
+        return IsSink(name) || ChildRunner.IsCodeLoading(name, true) || DotenvxRun.IsCredential(name)
             || ProtectedVariables.Any(item => string.Equals(item, name, StringComparison.OrdinalIgnoreCase));
     }
 
@@ -106,7 +109,7 @@ public static partial class EnvDeclarations
     }
 
     /// <summary>One declaration read from a file: the name, the value and its line.</summary>
-    public sealed record Entry(string Name, string Value, int Line);
+    public sealed record Entry(string Name, string Value, int Line, bool Expands = false);
 
     /// <summary>
     /// The declarations of one file, in order (a name repeated in a file: the last line wins), or an error. Dotenvx style:
@@ -160,7 +163,8 @@ public static partial class EnvDeclarations
                 order.Add(name);
             }
 
-            byName[name] = new Entry(name, value, number);
+            bool expands = !line.AsSpan(equals + 1).TrimStart().StartsWith("'") && DotenvxRun.Expansion().IsMatch(value);
+            byName[name] = new Entry(name, value, number, expands);
             if (order.Count > MaxEntriesPerFile)
             {
                 // Stop here: a file of a million tiny lines must not be built up in memory before a limit is looked at.
@@ -300,6 +304,9 @@ public static partial class EnvDeclarations
 
         List<string> links = [];
         List<string> used = [];
+        List<string> fileHashes = [];
+        bool hasDotenvx = false;
+        Dictionary<string, string[]> publicKeys = new(names);
         Dictionary<string, (Entry Entry, string File)> final = new(names);
         List<string> finalOrder = [];
         foreach (string path in paths)
@@ -343,6 +350,7 @@ public static partial class EnvDeclarations
                 }
 
                 text = new UTF8Encoding(false, true).GetString(buffer, 0, length).TrimStart((char)0xFEFF);
+                fileHashes.Add(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(buffer.AsSpan(0, length))));
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException or DecoderFallbackException)
             {
@@ -361,6 +369,8 @@ public static partial class EnvDeclarations
                 return Failure(parseError!);
             }
 
+            publicKeys[path] = [.. entries.Where(entry => IsPublicKeyName(entry.Name)).Select(entry => entry.Value)];
+            hasDotenvx |= entries.Any(entry => !DotenvxRun.IsCredential(entry.Name) && entry.Value.StartsWith(EncryptedPrefix, StringComparison.Ordinal));
             foreach (Entry entry in entries)
             {
                 if (final.TryAdd(entry.Name, (entry, path)))
@@ -382,7 +392,7 @@ public static partial class EnvDeclarations
 
             if (SecretNames.IsPrivateKeyName(secret))
             {
-                return Failure("--secrets cannot name " + ApprovalSummary.Clean(secret) + ": a Dotenvx private key is used only to decrypt .env values and is never given to a program");
+                return Failure("--secrets cannot name " + ApprovalSummary.Clean(secret) + ": a Dotenvx private key is never given to a program");
             }
 
             if (byVariable.TryAdd(secret, new SecretMapping(secret, secret)))
@@ -418,7 +428,7 @@ public static partial class EnvDeclarations
 
                 if (SecretNames.IsPrivateKeyName(store))
                 {
-                    return Failure("variable " + name + " (" + where + "): " + ApprovalSummary.Clean(store) + " is a Dotenvx private key: it is used only to decrypt .env values and is never given to a program");
+                    return Failure("variable " + name + " (" + where + "): " + ApprovalSummary.Clean(store) + " is a Dotenvx private key and is never given to a program");
                 }
 
                 if (byVariable.TryGetValue(name, out SecretMapping? existing))
@@ -440,7 +450,7 @@ public static partial class EnvDeclarations
 
             // An encrypted value is one the page cannot show, so it may not go where a reference may not go. This is decided by the name alone,
             // before any override: PATH and the like must not be safe only because the operating system happens to have them.
-            if (entry.Value.StartsWith(EncryptedPrefix, StringComparison.Ordinal) && IsProtectedVariable(name) && !name.StartsWith("DOTENV_PRIVATE_KEY", StringComparison.OrdinalIgnoreCase))
+            if (entry.Value.StartsWith(EncryptedPrefix, StringComparison.Ordinal) && IsProtectedVariable(name) && !DotenvxRun.IsCredential(name))
             {
                 return Failure("variable " + name + " (" + where + "): an encrypted value cannot be given to this variable, because it changes which code runs");
             }
@@ -452,27 +462,28 @@ public static partial class EnvDeclarations
             }
 
             // The program never gets a Dotenvx private key, whatever the .env says.
-            if (name.StartsWith("DOTENV_PRIVATE_KEY", StringComparison.OrdinalIgnoreCase))
+            if (DotenvxRun.IsCredential(name))
             {
-                notes.Add("the .env variable " + name + " was left out of the program's environment (a Dotenvx private key is never given to a program)");
+                notes.Add("the .env variable " + name + " was left out of the program's environment (Dotenvx credentials are excluded from the child environment)");
 
                 continue;
             }
 
             if (entry.Value.StartsWith(EncryptedPrefix, StringComparison.Ordinal))
             {
-                string? keySecret = KeySecretFor(file);
-                if (keySecret is null)
+                string[] keys = publicKeys[file];
+                string publicKey = keys.FirstOrDefault() ?? "";
+                if (keys.Length > 1 || !DotenvxRun.ValidPublicKey(publicKey))
                 {
-                    return Failure("variable " + name + " (" + where + "): the Dotenvx key name for this file is not a valid secret name");
+                    return Failure("variable " + name + " (" + where + "): expected at most one valid Dotenvx public key declaration");
                 }
 
-                if (entry.Value.Length > MaxEncrypted)
+                if (entry.Value.Length > MaxEncrypted || !DotenvxRun.Ciphertext().IsMatch(entry.Value))
                 {
-                    return Failure("variable " + name + " (" + where + "): the encrypted value is longer than " + MaxEncrypted + " characters");
+                    return Failure("variable " + name + " (" + where + "): the encrypted value must use encrypted: base64 and be no longer than " + MaxEncrypted + " characters");
                 }
 
-                encrypted.Add(new EncryptedValue(name, file, keySecret, entry.Value));
+                encrypted.Add(new EncryptedValue(name, file, publicKey, entry.Value));
 
                 continue;
             }
@@ -495,34 +506,13 @@ public static partial class EnvDeclarations
             return Failure("at most " + MaxPairs + " secrets at a time (" + mappings.Count + " asked for)");
         }
 
-        return new EnvResult(new EnvPlan(used, mappings, ordinary, notes, links, encrypted), null);
+        string[] dynamicNames = [.. ordinary.Keys.Where(name => final[name].Entry.Expands && !IsProtectedVariable(name)).Order(StringComparer.Ordinal)];
+        return new EnvResult(new EnvPlan(used, mappings, ordinary, notes, links, encrypted, fileHashes, hasDotenvx, dynamicNames), null);
     }
 
-    /// <summary>
-    /// The store secret that holds the Dotenvx private key for values read from <paramref name="file" />, by Dotenvx convention:
-    /// <c>DOTENV_PRIVATE_KEY</c> for <c>.env</c>, <c>DOTENV_PRIVATE_KEY_SUFFIX</c> for <c>.env.suffix</c> (suffix in upper case, '-'
-    /// and '.' become '_'); any other file name uses <c>DOTENV_PRIVATE_KEY</c>. The suffix must be ASCII letters, digits, '.', '-', '_'
-    /// (checked before upper-casing, so no other character is folded onto a letter); otherwise, or when the result is not a valid
-    /// secret name, null.
-    /// </summary>
-    public static string? KeySecretFor(string file)
-    {
-        const string Base = "DOTENV_PRIVATE_KEY";
-        string name = Path.GetFileName(file);
-        string key = Base;
-        if (name.StartsWith(".env.", StringComparison.OrdinalIgnoreCase) && name.Length > 5)
-        {
-            string suffix = name[5..];
-            if (suffix.Any(c => !(c is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '-' or '.' or '_')))
-            {
-                return null;
-            }
+    private static bool IsPublicKeyName(string name)
+        => name == "DOTENV_PUBLIC_KEY" || name.StartsWith("DOTENV_PUBLIC_KEY_", StringComparison.Ordinal);
 
-            key = Base + "_" + new string([.. suffix.Select(c => c is '-' or '.' ? '_' : c is >= 'a' and <= 'z' ? (char)(c - 32) : c)]);
-        }
-
-        return SecretNames.IsValid(key) ? key : null;
-    }
 
     /// <summary>
     /// The plan of a launch request that came over the API, checked again with the rules that built it (the sender is not trusted
@@ -593,7 +583,7 @@ public static partial class EnvDeclarations
             }
 
             // A code-loading name is passed when it is an ordinary value: the page shows every ordinary value in full. Only a private key never goes on.
-            if (name.StartsWith("DOTENV_PRIVATE_KEY", StringComparison.OrdinalIgnoreCase))
+            if (DotenvxRun.IsCredential(name))
             {
                 return Failure("variable " + name + " is a Dotenvx private key name and cannot be passed");
             }
@@ -615,7 +605,7 @@ public static partial class EnvDeclarations
         }
 
         // Encrypted values: the sender is not trusted to have applied the rules either. The page cannot show what they decrypt to, so the name
-        // rule is the one of a secret reference (nothing that changes which code runs), the key secret is the one the file name gives, and
+        // rule is the one of a secret reference (nothing that changes which code runs), the public key is constrained to literal Dotenvx metadata, and
         // the file is one of the listed .env files.
         List<EncryptedValue> encrypted = [];
         foreach (LaunchEncrypted item in request.Encrypted)
@@ -635,19 +625,14 @@ public static partial class EnvDeclarations
                 return Failure("variable " + item.Variable + ": the encrypted value names a file that is not one of the env files");
             }
 
-            if (KeySecretFor(item.File) is not { } keySecret || keySecret != item.KeySecret)
+            if (!DotenvxRun.ValidPublicKey(item.PublicKey))
             {
-                return Failure("variable " + item.Variable + ": the key secret is not the one the file name gives");
+                return Failure("variable " + item.Variable + ": invalid Dotenvx public key");
             }
 
-            if (!item.Ciphertext.StartsWith(EncryptedPrefix, StringComparison.Ordinal) || item.Ciphertext.Length > MaxEncrypted || item.Ciphertext.Contains(' ', StringComparison.Ordinal))
+            if (item.Ciphertext.Length > MaxEncrypted || !DotenvxRun.Ciphertext().IsMatch(item.Ciphertext) || item.Ciphertext.Contains('\0', StringComparison.Ordinal))
             {
                 return Failure("variable " + item.Variable + ": the encrypted value is not an encrypted: text of at most " + MaxEncrypted + " characters");
-            }
-
-            if (!request.SecretNames.Contains(item.KeySecret, StringComparer.Ordinal))
-            {
-                return Failure("variable " + item.Variable + ": the key secret " + ApprovalSummary.Clean(item.KeySecret) + " is not among the requested secrets");
             }
 
             if (!variables.Add(item.Variable))
@@ -655,7 +640,7 @@ public static partial class EnvDeclarations
                 return Failure("variable " + item.Variable + " is given twice");
             }
 
-            encrypted.Add(new EncryptedValue(item.Variable, item.File, item.KeySecret, item.Ciphertext));
+            encrypted.Add(new EncryptedValue(item.Variable, item.File, item.PublicKey, item.Ciphertext));
         }
 
         List<string> links = [];
@@ -754,7 +739,7 @@ public static class NeedsCommand
 
         foreach (EncryptedValue value in plan.Encrypted ?? [])
         {
-            stdout.WriteLine("Encrypted: " + value.Variable + " (encrypted, file " + ApprovalSummary.Clean(value.File) + ") key " + value.KeySecret + " " + (inStore.Contains(value.KeySecret, StringComparer.Ordinal) ? "in store" : "NOT IN STORE") + CaseNote(value.KeySecret, inStore));
+            stdout.WriteLine("Encrypted: " + value.Variable + " (requires dotenvx, file " + ApprovalSummary.Clean(value.File) + ")");
         }
 
         return 0;

@@ -163,7 +163,7 @@ public static class ChildRunner
         }
 
         // The child never gets the dotenvx private key, even if the agent's own environment holds one.
-        foreach (string name in start.Environment.Keys.Where(key => key.StartsWith("DOTENV_PRIVATE_KEY", StringComparison.OrdinalIgnoreCase)).ToList())
+        foreach (string name in start.Environment.Keys.Where(DotenvxRun.IsCredential).ToList())
         {
             start.Environment.Remove(name);
         }
@@ -179,7 +179,7 @@ public static class ChildRunner
         // on. Only a Dotenvx private key never goes to the program. Not redacted, not secret.
         foreach ((string name, string value) in spec.Ordinary ?? new Dictionary<string, string>())
         {
-            if (!name.StartsWith("DOTENV_PRIVATE_KEY", StringComparison.OrdinalIgnoreCase))
+            if (!DotenvxRun.IsCredential(name))
             {
                 start.Environment[name] = value;
             }

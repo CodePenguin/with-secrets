@@ -15,16 +15,15 @@ internal static class LaunchContractTests
 
     private const string GoldenCanonical = "{\"protocolVersion\":1,\"requestId\":\"req-0001\",\"created\":\"2026-11-01T12:00:00.0000000Z\",\"expires\":\"2026-11-01T12:05:00.0000000Z\",\"clientNonce\":\"bm9uY2UtMDAwMDAwMDE\",\"secretNames\":[\"API_KEY\",\"team/DB_PASS\"],\"mappings\":[{\"variable\":\"API_KEY\",\"secret\":\"API_KEY\"},{\"variable\":\"DB\",\"secret\":\"team/DB_PASS\"}],\"reason\":\"deploy \\\"v2\\\"\\u000a\",\"program\":\"dotnet\",\"arguments\":[\"test\",\"--filter\",\"\\u00e9\"],\"workingDirectory\":\"C:\\\\work\\\\app\",\"envFiles\":[\".env\"],\"envNames\":[\"MODE\"],\"envVariables\":{\"MODE\":\"ci\"},\"inheritedEnvironment\":{\"LANG\":\"en\",\"PATH\":\"C:\\\\bin\"},\"encrypted\":[]}";
 
-    // The same request with a key secret and one Dotenvx encrypted value.
-    private const string GoldenEncryptedCanonical = "{\"protocolVersion\":1,\"requestId\":\"req-0001\",\"created\":\"2026-11-01T12:00:00.0000000Z\",\"expires\":\"2026-11-01T12:05:00.0000000Z\",\"clientNonce\":\"bm9uY2UtMDAwMDAwMDE\",\"secretNames\":[\"API_KEY\",\"team/DB_PASS\",\"DOTENV_PRIVATE_KEY\"],\"mappings\":[{\"variable\":\"API_KEY\",\"secret\":\"API_KEY\"},{\"variable\":\"DB\",\"secret\":\"team/DB_PASS\"}],\"reason\":\"deploy \\\"v2\\\"\\u000a\",\"program\":\"dotnet\",\"arguments\":[\"test\",\"--filter\",\"\\u00e9\"],\"workingDirectory\":\"C:\\\\work\\\\app\",\"envFiles\":[\".env\"],\"envNames\":[\"MODE\"],\"envVariables\":{\"MODE\":\"ci\"},\"inheritedEnvironment\":{\"LANG\":\"en\",\"PATH\":\"C:\\\\bin\"},\"encrypted\":[{\"variable\":\"TOKEN\",\"file\":\"C:\\\\work\\\\app\\\\.env\",\"keySecret\":\"DOTENV_PRIVATE_KEY\",\"ciphertext\":\"encrypted:QUJDRA==\"}]}";
+    // The same request with one delegated Dotenvx value.
+    private const string GoldenEncryptedCanonical = "{\"protocolVersion\":1,\"requestId\":\"req-0001\",\"created\":\"2026-11-01T12:00:00.0000000Z\",\"expires\":\"2026-11-01T12:05:00.0000000Z\",\"clientNonce\":\"bm9uY2UtMDAwMDAwMDE\",\"secretNames\":[\"API_KEY\",\"team/DB_PASS\"],\"mappings\":[{\"variable\":\"API_KEY\",\"secret\":\"API_KEY\"},{\"variable\":\"DB\",\"secret\":\"team/DB_PASS\"}],\"reason\":\"deploy \\\"v2\\\"\\u000a\",\"program\":\"dotnet\",\"arguments\":[\"test\",\"--filter\",\"\\u00e9\"],\"workingDirectory\":\"C:\\\\work\\\\app\",\"envFiles\":[\".env\"],\"envNames\":[\"MODE\"],\"envVariables\":{\"MODE\":\"ci\"},\"inheritedEnvironment\":{\"LANG\":\"en\",\"PATH\":\"C:\\\\bin\"},\"encrypted\":[{\"variable\":\"TOKEN\",\"file\":\"C:\\\\work\\\\app\\\\.env\",\"publicKey\":\"\",\"ciphertext\":\"encrypted:QUJDRA==\"}]}";
 
     // Computed independently (Python hashlib) over the exact bytes of GoldenEncryptedCanonical.
-    private const string GoldenEncryptedDigest = "12DBD33A70EE7E0440FE8F16A5C19BC013D1714A792C2F6B78051C8E879FB740";
+    private const string GoldenEncryptedDigest = "1BC0BF34D61B907AEF19FCCA44D2574B981EFD225131255FBC2BA2AAD82A9125";
 
     private static LaunchRequest EncryptedSample() => Sample() with
     {
-        SecretNames = ["API_KEY", "team/DB_PASS", "DOTENV_PRIVATE_KEY"],
-        Encrypted = [new LaunchEncrypted("TOKEN", "C:\\work\\app\\.env", "DOTENV_PRIVATE_KEY", "encrypted:QUJDRA==")],
+        Encrypted = [new LaunchEncrypted("TOKEN", "C:\\work\\app\\.env", "", "encrypted:QUJDRA==")],
     };
 
     // Computed independently (Python hashlib) over the exact bytes of GoldenCanonical.
@@ -76,8 +75,13 @@ internal static class LaunchContractTests
         check(withEncrypted.Canonical() == GoldenEncryptedCanonical && withEncrypted.Digest() == GoldenEncryptedDigest, "launch contract: a request with an encrypted value matches its golden vector (" + withEncrypted.Canonical() + ")");
         check(LaunchRequest.TryParse(GoldenEncryptedCanonical, out LaunchRequest? backEncrypted, out string? encryptedError) && backEncrypted!.Encrypted.Single() == withEncrypted.Encrypted.Single() && backEncrypted.Digest() == GoldenEncryptedDigest, "launch contract: the encrypted member parses back (" + encryptedError + ")");
         check(withEncrypted.Digest() != (withEncrypted with { Encrypted = [withEncrypted.Encrypted[0] with { Ciphertext = "encrypted:QUJDRQ==" }] }).Digest(), "request digest: changing one ciphertext changes the digest");
+        string inputDigest = new('A', 64);
+        string bound = GoldenEncryptedCanonical[..^1] + ",\"dotenvxInputDigest\":\"" + inputDigest + "\"}";
+        check((withEncrypted with { DotenvxInputDigest = inputDigest }).Canonical() == bound
+            && LaunchRequest.TryParse(bound, out LaunchRequest? boundRequest, out _) && boundRequest!.DotenvxInputDigest == inputDigest,
+            "launch contract: the project input digest has a canonical position and round trips");
         check(!LaunchRequest.TryParse(GoldenEncryptedCanonical.Replace(",\"ciphertext\":\"encrypted:QUJDRA==\"", "", StringComparison.Ordinal), out _, out string? missingCipher) && missingCipher!.Contains("ciphertext", StringComparison.Ordinal), "launch contract: an encrypted item without its ciphertext does not parse");
-        check(!LaunchRequest.TryParse(GoldenEncryptedCanonical.Replace("\"keySecret\"", "\"keySecret\":\"X\",\"extra\"", StringComparison.Ordinal), out _, out _), "launch contract: an encrypted item with an unknown member does not parse");
+        check(!LaunchRequest.TryParse(GoldenEncryptedCanonical.Replace("\"publicKey\"", "\"publicKey\":\"X\",\"extra\"", StringComparison.Ordinal), out _, out _), "launch contract: an encrypted item with an unknown member does not parse");
 
         LaunchRequest unsorted = Sample() with { EnvVariables = new Dictionary<string, string> { ["ZED"] = "1", ["ALPHA"] = "2" } };
         check(unsorted.Canonical().Contains("\"envVariables\":{\"ALPHA\":\"2\",\"ZED\":\"1\"}", StringComparison.Ordinal), "launch contract: environment variables are written sorted by name (ordinal)");
@@ -105,8 +109,8 @@ internal static class LaunchContractTests
     {
         ConstructorInfo constructor = typeof(LaunchRequest).GetConstructors().Single();
         ParameterInfo[] parameters = constructor.GetParameters();
-        LaunchRequest baseline = Sample();
-        check(parameters.Length == 16, "launch contract: the request has 16 fields (a new field needs a golden vector and a binding decision): " + parameters.Length);
+        LaunchRequest baseline = EncryptedSample() with { DotenvxInputDigest = new string('A', 64), DotenvxDynamicNames = ["MODE"] };
+        check(parameters.Length == 18, "launch contract: the request has 18 fields (a new field needs a golden vector and a binding decision): " + parameters.Length);
         foreach (ParameterInfo parameter in parameters)
         {
             PropertyInfo property = typeof(LaunchRequest).GetProperty(parameter.Name!)!;
@@ -131,7 +135,7 @@ internal static class LaunchContractTests
         DateTimeOffset time => time.AddSeconds(1),
         IReadOnlyList<string> list => (IReadOnlyList<string>)[.. list, "x"],
         IReadOnlyList<LaunchMapping> list => (IReadOnlyList<LaunchMapping>)[.. list, new LaunchMapping("X", "X")],
-        IReadOnlyList<LaunchEncrypted> list => (IReadOnlyList<LaunchEncrypted>)[.. list, new LaunchEncrypted("X", "f", "DOTENV_PRIVATE_KEY", "encrypted:QQ==")],
+        IReadOnlyList<LaunchEncrypted> list => (IReadOnlyList<LaunchEncrypted>)[.. list, new LaunchEncrypted("X", "f", "", "encrypted:QQ==")],
         IReadOnlyDictionary<string, string> map => new Dictionary<string, string>(map) { ["X"] = "x" },
         _ => throw new InvalidOperationException("no mutation for " + type),
     };
@@ -157,9 +161,8 @@ internal static class LaunchContractTests
         check((Sample() with { ClientNonce = "short" }).Validate(now) is not null, "launch validation: a short client nonce is refused");
         check((Sample() with { SecretNames = [] }).Validate(now) is not null, "launch validation: no secret names is refused");
         check((Sample() with { SecretNames = ["1lower_case", "API_KEY"] }).Validate(now) is not null, "launch validation: an invalid secret name is refused");
-        check(EncryptedSample().Validate(now) is null, "launch validation: a request with an encrypted value and its key secret is valid (" + EncryptedSample().Validate(now) + ")");
-        check((EncryptedSample() with { SecretNames = ["API_KEY", "team/DB_PASS"] }).Validate(now) is { } unlisted && unlisted.Contains("key secret", StringComparison.Ordinal), "launch validation: an encrypted value whose key secret is not listed is refused");
-        check((Sample() with { Mappings = [], Encrypted = EncryptedSample().Encrypted, SecretNames = ["DOTENV_PRIVATE_KEY"] }).Validate(now) is null, "launch validation: a request with only encrypted values (no pairs) is valid");
+        check(EncryptedSample().Validate(now) is null, "launch validation: a request with a delegated encrypted value is valid (" + EncryptedSample().Validate(now) + ")");
+        check((Sample() with { Mappings = [], Encrypted = EncryptedSample().Encrypted, SecretNames = [] }).Validate(now) is null, "launch validation: a request with only encrypted values (no pairs) is valid");
         check((Sample() with { Mappings = [], Encrypted = [] }).Validate(now) is not null, "launch validation: no pairs and no encrypted values is refused");
         check((Sample() with { Mappings = [new LaunchMapping("DB", "NOT_LISTED")] }).Validate(now) is not null, "launch validation: a mapping to a secret that was not named is refused");
         check((Sample() with { Mappings = [] }).Validate(now) is not null, "launch validation: no mappings is refused");

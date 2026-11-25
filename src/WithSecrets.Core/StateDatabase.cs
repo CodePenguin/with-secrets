@@ -18,7 +18,7 @@ public sealed class StateDatabaseException(string message, Exception? inner = nu
 /// each other (up to the busy timeout) and no update is lost. A missing database is empty. A database that exists but cannot be
 /// used (not a database, damaged, locked beyond the timeout, another schema version) is an error, never an empty store. A
 /// database of another schema version is never moved forward: the message says to delete it and start over. It holds no
-/// secret value in plain text: each secret is a row of Dotenvx ciphertext (see <see cref="SecretStore" />). The tool reads no
+/// secret value in plain text: each secret is a row of JWE ciphertext (see <see cref="SecretStore" />). The tool reads no
 /// other file in the store folder.
 /// </summary>
 public sealed class StateDatabase
