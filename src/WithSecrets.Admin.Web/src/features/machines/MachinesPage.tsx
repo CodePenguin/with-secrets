@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useInvitations, useMachines } from '../../api/queries'
+import { useInvitations, useMachines, useSession } from '../../api/queries'
 import type { Invitation, Machine } from '../../api/types'
 import { Badge, Empty, Facts, PageHeader } from '../../components/Card'
 import { Flow } from '../../components/Icon'
@@ -44,7 +44,7 @@ function invitationTone(status: Invitation['status']): 'ok' | 'warn' | 'bad' | '
 type Start = (def: OperationDef) => void
 
 /** One machine: its facts once, and what can be done to it. A machine that has just paired (Pending) is shown by the "paired" section above the list, not twice. */
-function MachineItem({ machine, start, level }: { machine: Machine; start: Start; level: 'h2' | 'h3' }) {
+function MachineItem({ machine, start, level, canChange }: { machine: Machine; start: Start; level: 'h2' | 'h3'; canChange: boolean }) {
   const name = machine.friendlyName ?? machine.hostName
   const Heading = level
   const [copied, setCopied] = useState<'no' | 'yes' | 'failed'>('no')
@@ -99,7 +99,7 @@ function MachineItem({ machine, start, level }: { machine: Machine; start: Start
           ['Updated', <Time key="u" value={machine.updated} />],
         ]}
       />
-      {machine.actions.length > 0 ? (
+      {canChange && machine.actions.length > 0 ? (
         <div className={list.actions}>
           {machine.actions.map((action) => (
             <Button key={action} variant={action === 'approve' ? 'primary' : action === 'disable' || action === 'untrust' ? 'danger' : 'secondary'} onClick={() => start(builders[action](machine))}>
@@ -124,6 +124,8 @@ export function MachinesPage() {
   const machines = useMachines(true, pollMs)
   const invitations = useInvitations(true, pollMs)
   const start = useStartOperation()
+  const session = useSession()
+  const canChange = session.data?.capabilities.includes('admin.decide') === true
   const announce = useAnnounce()
   const waiting = machines.data?.filter((machine) => machine.status === 'pending') ?? []
   const others = machines.data?.filter((machine) => machine.status !== 'pending') ?? []
@@ -135,19 +137,17 @@ export function MachinesPage() {
     const now = new Set(waiting.map((machine) => machine.fingerprint))
     if (known.current) {
       const fresh = waiting.filter((machine) => !known.current?.has(machine.fingerprint))
-      if (fresh.length > 0) announce(`A machine paired: ${fresh.map((machine) => machine.hostName).join(', ')}. Check its fingerprint and host name, then approve it.`)
+      if (fresh.length > 0) announce(`A machine paired: ${fresh.map((machine) => machine.hostName).join(', ')}.` + (canChange ? ' Check its fingerprint and host name, then approve it.' : ''))
     }
     known.current = now
-  }, [machines.data]) // eslint-disable-line react-hooks/exhaustive-deps -- compared against the machines already seen
+  }, [machines.data, canChange]) // eslint-disable-line react-hooks/exhaustive-deps -- compared against the machines already seen
 
   return (
     <>
       <PageHeader title="Machines">
-        <Button variant="primary" onClick={() => start(createPairingInvitation())}>
-          Add a machine
-        </Button>
+        {canChange ? <Button variant="primary" onClick={() => start(createPairingInvitation())}>Add a machine</Button> : null}
       </PageHeader>
-      <Flow label="How a machine is added" steps={[{ icon: 'plus', text: 'Add a machine' }, { icon: 'link', text: 'It pairs with the invitation' }, { icon: 'check', text: 'You approve it' }]} />
+      {canChange ? <Flow label="How a machine is added" steps={[{ icon: 'plus', text: 'Add a machine' }, { icon: 'link', text: 'It pairs with the invitation' }, { icon: 'check', text: 'You approve it' }]} /> : null}
       {machines.isPending ? <Loading what="machines" /> : null}
       {machines.isError ? (
         <>
@@ -166,7 +166,7 @@ export function MachinesPage() {
           <h2 id="paired-heading">{waiting.length === 1 ? 'A machine paired and is waiting for you' : `${waiting.length} machines paired and are waiting for you`}</h2>
           <ul className={list.list} aria-label="Machines waiting for approval">
             {waiting.map((machine) => (
-              <MachineItem key={machine.fingerprint} machine={machine} start={start} level="h3" />
+              <MachineItem key={machine.fingerprint} machine={machine} start={start} canChange={canChange} level="h3" />
             ))}
           </ul>
         </section>
@@ -176,7 +176,7 @@ export function MachinesPage() {
       {others.length > 0 ? (
         <ul className={list.list} aria-label="Machines">
           {others.map((machine) => (
-            <MachineItem key={machine.fingerprint} machine={machine} start={start} level="h2" />
+            <MachineItem key={machine.fingerprint} machine={machine} start={start} canChange={canChange} level="h2" />
           ))}
         </ul>
       ) : null}
@@ -214,7 +214,7 @@ export function MachinesPage() {
                     ...(invitation.machine ? ([['Machine', <span key="m" className={styles.mono}>{invitation.machine}</span>]] as const) : []),
                   ]}
                 />
-                {invitation.canRevoke ? (
+                {canChange && invitation.canRevoke ? (
                   <div className={list.actions}>
                     <Button variant="danger" onClick={() => start(revokePairingInvitation(invitation))}>
                       Revoke

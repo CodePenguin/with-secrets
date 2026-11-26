@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { useApprovals, useGrants, useMachines, useStatus } from '../../api/queries'
+import { useApprovals, useGrants, useMachines, useSession, useStatus } from '../../api/queries'
 import { Card, Facts, PageHeader } from '../../components/Card'
 import { Button } from '../../components/Button'
 import { Icon } from '../../components/Icon'
@@ -11,6 +11,8 @@ import { useStartOperation } from '../authorization/OperationProvider'
 export function OverviewPage() {
   usePageTitle('Overview')
   const status = useStatus()
+  const session = useSession()
+  const canChange = session.data?.capabilities.includes('admin.decide') === true
   const machines = useMachines(true)
   const grants = useGrants(true)
   const approvals = useApprovals(true)
@@ -28,18 +30,19 @@ export function OverviewPage() {
   return (
     <>
       <PageHeader title="Overview">
-        {s.locked ? (
+        {canChange && !s.remote && s.locked ? (
           <Button variant="primary" onClick={() => start(unlock())}>
             <Icon name="unlock" /> Unlock the authority
           </Button>
-        ) : (
+        ) : null}
+        {canChange && !s.remote && !s.locked ? (
           <Button variant="danger" onClick={() => start(lock())}>
             <Icon name="lock" /> Lock the authority
           </Button>
-        )}
+        ) : null}
       </PageHeader>
 
-      {s.locked ? (
+      {!s.remote && s.locked ? (
         <Notice kind="warning" title="The authority is locked">
           Secret requests are refused until it is unlocked.
         </Notice>
@@ -53,7 +56,6 @@ export function OverviewPage() {
       <Card title="Authority">
         <Facts
           items={[
-            ['Unlock mode', s.unlockMode],
             ['Version', s.version],
           ]}
         />

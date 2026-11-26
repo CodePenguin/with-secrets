@@ -9,7 +9,7 @@ using Microsoft.Data.Sqlite;
 namespace WithSecrets.Tests;
 
 /// <summary>
-/// Phase 4b: the authority's startup lock, unlock and lock on the admin web app (each a fresh, operation-bound passkey tap), the unattended-unlock opt-in, the one authorizer
+/// Phase 4b: the authority's startup lock, unlock and lock on the admin web app (each a fresh, operation-bound passkey tap), a locked restart, the one authorizer
 /// for sensitive administrator operations, that grant use is not administrative, and that the key purposes stay separate. The ceremonies run over real pages with a software
 /// passkey, as the admin command tests do.
 /// </summary>
@@ -24,7 +24,7 @@ internal static class AuthorityLockTests
             await Startup(check, root);
             await Ceremonies(check, root);
             await Review(check, root);
-            await Unattended(check, root);
+            await RestartStaysLocked(check, root);
             await Origins(check, root);
             Store(check, root);
             Authorizer(check, root);
@@ -61,6 +61,13 @@ internal static class AuthorityLockTests
 
             return inner.Ask(prompt);
         }
+
+        public ApprovalDecision AskWithKeyRelease(ApprovalPrompt prompt, CancellationToken cancel)
+        {
+            count();
+
+            return inner.AskWithKeyRelease(prompt, cancel);
+        }
     }
 
     private sealed class Asks
@@ -76,38 +83,6 @@ internal static class AuthorityLockTests
 
             return new CountingAsker(new TargetAdminAsker(target, target), () => Interlocked.Increment(ref Count));
         };
-    }
-
-    /// <summary>Reversible protection for tests that can be made to fail in each way the platform can.</summary>
-    private sealed class FakeProtection : IUnlockProtection
-    {
-        public bool Broken { get; set; }
-
-        public bool Wrong { get; set; }
-
-        public string? Gone { get; set; }
-
-        public string Name => "test protection";
-
-        public string? Unavailable => Gone;
-
-        public byte[] Seal(byte[] material) => [0x46, .. material.Select(item => (byte)(item ^ 0x5A))];
-
-        public byte[]? Open(byte[] sealedBlob)
-        {
-            if (Broken)
-            {
-                return null;
-            }
-
-            byte[] opened = [.. sealedBlob.Skip(1).Select(item => (byte)(item ^ 0x5A))];
-            if (Wrong)
-            {
-                opened[0] ^= 1;
-            }
-
-            return opened;
-        }
     }
 
     private static int Attempts(AuthorityStore store, string operation, string outcome) =>
@@ -138,7 +113,7 @@ internal static class AuthorityLockTests
         s_admin = laptop;
         TestAuthenticator phone = TestAuthenticator.ES256();
         DateTimeOffset created = new(2026, 11, 1, 10, 0, 0, TimeSpan.Zero);
-        TestState.Add(db, laptop.Record("localhost", "laptop") with { Created = created });
+        TestState.Add(db, laptop.Record("localhost", "laptop") with { Created = created }, withStore: true);
         TestState.Add(db, phone.Record("localhost", "phone") with { Created = created });
 
         return (laptop, phone);
@@ -146,80 +121,226 @@ internal static class AuthorityLockTests
 
     // ---- the startup lock ----
 
+    /// <summary>The PRF output a tap sends in <paramref name="mode" /> (see <see cref="InlineTap" />).</summary>
+    private static byte[] PrfFor(PrfMode mode, TestAuthenticator who, TestAuthenticator? other, byte[]? otherSalt, byte[] salt)
+    {
+        if (mode == PrfMode.OtherOwnSalt)
+        {
+            return other!.Prf(otherSalt!)!;
+        }
+
+        byte[] output = (mode == PrfMode.OtherCredential ? other! : who).Prf(salt)!;
+
+        return mode == PrfMode.ShortOutput ? output[..16] : output;
+    }
+
+    /// <summary>
+    /// One inline tap on the admin app (as its page does): the authorization, the assertion by <paramref name="who" /> and, unless <paramref name="prf" /> is <see cref="PrfMode.Missing" />, the PRF
+    /// output sealed to the authorization's key (<see cref="PrfMode.Garbled" />: the sealed box altered; <see cref="PrfMode.OtherCredential" />: a well-sealed output of another passkey; <see cref="PrfMode.OtherOwnSalt" />: another passkey's output for the salt of its own slot in the manifest;
+    /// <see cref="PrfMode.WrongBind" />: sealed for another page; <see cref="PrfMode.ShortOutput" />: an output of the wrong size). Then the mutation.
+    /// </summary>
+    internal static async Task<(int Proof, int Mutation, string State)> InlineTap(AdminBrowser browser, string op, string route, TestAuthenticator who, PrfMode prf, TestAuthenticator? other = null, byte[]? otherSalt = null)
+    {
+        await browser.LoadAsync();
+        (int prepared, string json) = await browser.PostAsync("/api/v1/authorizations/inline", AdminBrowser.AuthorizationBody(op));
+        if (prepared != 201)
+        {
+            return (0, prepared, json);
+        }
+
+        using JsonDocument created = JsonDocument.Parse(json);
+        JsonElement item = created.RootElement;
+        using JsonDocument options = JsonDocument.Parse(item.GetProperty("proof").GetProperty("payload").GetString()!);
+        JsonElement payload = options.RootElement;
+        byte[] bind = Base64Url.DecodeFromChars(payload.GetProperty("bind").GetString()!);
+        string proof = who.Assert(bind, browser.Origin, payload.GetProperty("rpId").GetString()!, TestState.NextCount());
+        string body = JsonSerializer.Serialize(new { proof });
+        if (prf != PrfMode.Missing)
+        {
+            byte[] output = PrfFor(prf, who, other, otherSalt, Base64Url.DecodeFromChars(payload.GetProperty("salt").GetString()!));
+            try
+            {
+                (string epk, string iv, string ct) = PrfBrowser.Seal(item.GetProperty("prfKey").GetString()!, prf == PrfMode.WrongBind ? SHA256.HashData(bind) : bind, output);
+                if (prf == PrfMode.Garbled)
+                {
+                    byte[] bytes = Base64Url.DecodeFromChars(ct);
+                    bytes[0] ^= 1;
+                    ct = Base64Url.EncodeToString(bytes);
+                }
+
+                body = JsonSerializer.Serialize(new { proof, prf = new { epk, iv, ct } });
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(output);
+            }
+        }
+
+        string id = item.GetProperty("id").GetString()!;
+        (int accepted, _) = await browser.PostAsync("/api/v1/authorizations/" + id + "/proof", body);
+        if (accepted != 200)
+        {
+            return (accepted, 0, "");
+        }
+
+        (int result, _) = await browser.PostAsync(route, JsonSerializer.Serialize(new { authorization = id }));
+        (_, string state, _) = await browser.GetAsync("/api/v1/authorizations/" + id);
+        return (accepted, result, state);
+    }
+
+    private static async Task<bool> StatusOpen(AdminApp app)
+    {
+        using JsonDocument status = JsonDocument.Parse(await app.Http.GetStringAsync(app.Browser().Base + "/api/v1/status"));
+        return status.RootElement.GetProperty("reviewOpen").GetBoolean();
+    }
+
+    private static bool Closed(UnlockedKeys keys) => !keys.IsOpen && keys.OpenedBy is null && keys.HeldForTests == (null, null);
+
+    /// <summary>Follows the rotation pages a started store key rotation links to: tap 1 (with the PRF output) and tap 2 (the signature), both by <paramref name="who" />.</summary>
+    private static (int First, int Second) RotationPages(HttpClient http, string link, TestAuthenticator who)
+    {
+        Uri uri = new(link);
+        (int first, string reply) = TestState.Approve(http, "http://127.0.0.1:" + uri.Port + uri.AbsolutePath, "http://localhost:" + uri.Port, "localhost", who);
+        (string Url, string Origin)? next = RecoveryTests.NextLink(reply);
+
+        return (first, next is { } two ? TestState.Approve(http, two.Url, two.Origin, "localhost", who).Status : 0);
+    }
+
+    // ---- the unlocked keys ----
+
     private static async Task Review(Action<bool, string> check, string root)
     {
-        using AdminApp app = new(root, unlocked: false, protection: true);
-        ReviewKeys review = app.Service.Review!;
-        async Task<bool> StatusOpen()
+        using AdminApp app = new(root, unlocked: false);
+        UnlockedKeys keys = app.Service.Keys!;
+        string laptopId = TestAuthenticator.Encode(app.Laptop.CredentialId);
+
+        check(Closed(keys) && !await StatusOpen(app), "unlock keys: a new service starts locked with no key open");
+        // A second admin key: its own PRF output opens its own slot, so it is the output a store that tried every slot would accept for the laptop's assertion.
+        using TestAuthenticator desk = TestAuthenticator.ES256();
+        TestState.Add(app.State, desk.Record("localhost", "desk") with { Created = new DateTimeOffset(2026, 11, 1, 11, 0, 0, TimeSpan.Zero) }, admin: true);
+        string deskId = TestAuthenticator.Encode(desk.CredentialId);
+        byte[] deskSalt = Base64Url.DecodeFromChars(TestState.Current(app.State)!.Keys.First(key => key.Id == deskId).Slot!.Salt);
+        foreach ((PrfMode mode, string what, TestAuthenticator other) in new[]
         {
-            using JsonDocument status = JsonDocument.Parse(await app.Http.GetStringAsync(app.Browser().Base + "/api/v1/status"));
-            return status.RootElement.GetProperty("reviewOpen").GetBoolean();
+            (PrfMode.Missing, "no PRF output", app.Phone), (PrfMode.Garbled, "a garbled PRF output", app.Phone), (PrfMode.OtherCredential, "another passkey's PRF output", app.Phone),
+            (PrfMode.WrongBind, "a PRF output sealed for another page", app.Phone), (PrfMode.ShortOutput, "a PRF output of the wrong size", app.Phone),
+            (PrfMode.OtherOwnSalt, "another admin's valid PRF output for its own slot", desk),
+        })
+        {
+            (int proof, int mutation, string state) = await InlineTap(app.Browser(), AdminService.OpUnlock, "/api/v1/unlock", app.Laptop, mode, other, deskSalt);
+            check(proof == 200 && mutation == 409 && app.Service.Lock.IsLocked && Closed(keys) && !await StatusOpen(app)
+                && state.Contains("the passkey did not release the secret store key (use an admin passkey with PRF); the authority stays locked", StringComparison.Ordinal),
+                "unlock keys: an admin tap with " + what + " is refused, the authority stays locked and holds nothing (" + proof + " " + mutation + ")");
         }
 
-        async Task<(int Proof, int Mutation, string State)> Tap(AdminBrowser browser, string op, TestAuthenticator who, bool withPrf)
-        {
-            await browser.LoadAsync();
-            (int prepared, string json) = await browser.PostAsync("/api/v1/authorizations/inline", AdminBrowser.AuthorizationBody(op));
-            if (prepared != 201)
-            {
-                return (0, prepared, json);
-            }
+        check((await InlineTap(app.Browser(), AdminService.OpUnlock, "/api/v1/unlock", app.Phone, PrfMode.Normal)).Proof == 409 && app.Service.Lock.IsLocked && Closed(keys),
+            "unlock keys: a passkey that is not an admin cannot unlock, even with its PRF output");
+        check(Attempts(app.Store, "unlock-authority", "failed: the passkey did not release the secret store key") == 6, "unlock keys: each refused unlock is audited as failed");
 
-            using JsonDocument created = JsonDocument.Parse(json);
-            JsonElement item = created.RootElement;
-            using JsonDocument options = JsonDocument.Parse(item.GetProperty("proof").GetProperty("payload").GetString()!);
-            JsonElement payload = options.RootElement;
-            byte[] bind = Base64Url.DecodeFromChars(payload.GetProperty("bind").GetString()!);
-            string proof = who.Assert(bind, browser.Origin, payload.GetProperty("rpId").GetString()!, TestState.NextCount());
-            string body = JsonSerializer.Serialize(new { proof });
-            if (withPrf)
-            {
-                byte[] output = who.Prf(Base64Url.DecodeFromChars(payload.GetProperty("salt").GetString()!))!;
-                try
-                {
-                    (string epk, string iv, string ct) = PrfBrowser.Seal(item.GetProperty("prfKey").GetString()!, bind, output);
-                    body = JsonSerializer.Serialize(new { proof, prf = new { epk, iv, ct } });
-                }
-                finally
-                {
-                    CryptographicOperations.ZeroMemory(output);
-                }
-            }
-
-            string id = item.GetProperty("id").GetString()!;
-            (int accepted, _) = await browser.PostAsync("/api/v1/authorizations/" + id + "/proof", body);
-            if (accepted != 200)
-            {
-                return (accepted, 0, "");
-            }
-
-            string route = op == AdminService.OpUnlock ? "/api/v1/unlock" : "/api/v1/review/unlock";
-            (int result, _) = await browser.PostAsync(route, JsonSerializer.Serialize(new { authorization = id }));
-            (_, string state, _) = await browser.GetAsync("/api/v1/authorizations/" + id);
-            return (accepted, result, state);
-        }
-
-        check(!review.IsOpen && !await StatusOpen(), "review: a new service starts with the review key closed");
-        check((await Tap(app.Browser(), AdminService.OpUnlock, app.Laptop, true)).Mutation == 200
-            && !app.Service.Lock.IsLocked && review.IsOpen && await StatusOpen(), "review: an inline admin unlock with PRF opens the review key");
-
-        app.Service.Lock.Lock("test");
-        check(!review.IsOpen && !await StatusOpen(), "review: locking wipes the review key");
-        (int proof, int mutation, string state) = await Tap(app.Browser(), AdminService.OpUnlock, app.Laptop, false);
-        check(proof == 200 && mutation == 200 && !app.Service.Lock.IsLocked && !review.IsOpen
-            && state.Contains("Review text stays locked", StringComparison.Ordinal), "review: an unlock without key release still unlocks the authority and reports that review stays closed");
+        check((await InlineTap(app.Browser(), AdminService.OpUnlock, "/api/v1/unlock", app.Laptop, PrfMode.Normal)).Mutation == 200
+            && !app.Service.Lock.IsLocked && keys.IsOpen && keys.OpenedBy?.Id == laptopId && await StatusOpen(app), "unlock keys: an admin tap with its PRF output unlocks and opens the keys and review");
+        (byte[]? store, byte[]? review) = keys.HeldForTests;
+        check(store is { Length: > 0 } && review is { Length: > 0 }, "unlock keys: the store key and the review key are both held");
 
         AdminBrowser session = await app.SignedIn();
-        check((await Tap(session, AdminService.OpReviewUnlock, app.Phone, true)).Proof == 409 && !review.IsOpen, "review: an ordinary passkey does not open review");
-        check((await Tap(session, AdminService.OpReviewUnlock, app.Laptop, false)).Mutation == 409 && !review.IsOpen, "review: opening review requires key release");
-        Tapped allow = await session.OpAsync(AdminService.OpPolicyUnattended, app.Laptop);
-        check(allow.MutationStatus == 200, "review: an administrator can enable unattended unlock for the restart");
+        (int reviewRoute, _) = await session.PostAsync("/api/v1/review/unlock", "{\"authorization\":\"AAAAAAAAAAAA\"}");
+        check(reviewRoute == 404, "unlock keys: there is no separate review unlock (" + reviewRoute + ")");
+
+        check((await InlineTap(session, AdminService.OpLock, "/api/v1/lock", app.Laptop, PrfMode.Missing)).Proof == 200 && await HostServiceTests.WaitFor(() => app.Service.Lock.IsLocked), "unlock keys: an admin tap locks");
+        check(Closed(keys) && store?.All(item => item == 0) == true && review?.All(item => item == 0) == true && !await StatusOpen(app), "unlock keys: the lock zeroes and drops both keys");
+
+        check((await InlineTap(app.Browser(), AdminService.OpUnlock, "/api/v1/unlock", app.Laptop, PrfMode.Normal)).Mutation == 200 && keys.IsOpen, "unlock keys: the authority unlocks again after a lock");
         app.Start(unlocked: false);
-        check(app.Service.Lock.How == UnlockMethod.Unattended && app.Service.Review?.IsOpen == false && !await StatusOpen(), "review: unattended startup leaves the review key closed");
-        session = await app.SignedIn();
-        check((await Tap(session, AdminService.OpReviewUnlock, app.Laptop, true)).Mutation == 200
-            && app.Service.Review?.IsOpen == true && Attempts(app.Store, AdminService.OpReviewUnlock, "applied") == 1,
-            "review: an explicit admin tap after unattended startup opens review and is audited");
+        check(app.Service.Lock.IsLocked && Closed(app.Service.Keys!) && !await StatusOpen(app), "unlock keys: a restart leaves the authority locked and no key open");
+
+        await RotationLocks(check, root);
+        await RemovingTheUnlockingKeyLocks(check, root);
+        LockDuringUnlock(check, root);
+    }
+
+    private static async Task RotationLocks(Action<bool, string> check, string root)
+    {
+        using AdminApp app = new(root, unlocked: false);
+        UnlockedKeys keys = app.Service.Keys!;
+        check((await InlineTap(app.Browser(), AdminService.OpUnlock, "/api/v1/unlock", app.Laptop, PrfMode.Normal)).Mutation == 200 && keys.IsOpen, "rotation lock: unlocked with the keys open");
+        (byte[]? store, byte[]? review) = keys.HeldForTests;
+        Manifest before = TestState.Current(app.State)!;
+        AdminBrowser session = await app.SignedIn();
+        Tapped rotate = await session.OpAsync("store-key-rotate", app.Laptop);
+        string? link = RecoveryTests.Member(rotate.MutationBody, "link");
+        (int first, int second) = link is null ? (0, 0) : RotationPages(app.Http, link, app.Laptop);
+        check(rotate.MutationStatus == 202 && first == 200 && second == 200 && await HostServiceTests.WaitFor(() => app.Service.Lock.IsLocked)
+            && TestState.Current(app.State)!.Store != before.Store, "rotation lock: a committed store key rotation locks the authority (" + rotate.MutationStatus + " " + first + " " + second + ")");
+        check(Closed(keys) && store?.All(item => item == 0) == true && review?.All(item => item == 0) == true && !await StatusOpen(app), "rotation lock: the old keys are zeroed and nothing is open");
+        check(await HostServiceTests.WaitFor(() => Attempts(app.Store, "rotate-store-key", "applied") == 1), "rotation lock: the rotation is audited as applied");
+        Manifest after = TestState.Current(app.State)!;
+        check((await InlineTap(app.Browser(), AdminService.OpUnlock, "/api/v1/unlock", app.Laptop, PrfMode.Normal)).Mutation == 200 && keys.IsOpen
+            && keys.UseStoreKey(after, key => JweCipher.Instance.Derive(key)) == after.Store, "rotation lock: the kept admin passkey unlocks again and opens the new store key");
+    }
+
+    private static async Task RemovingTheUnlockingKeyLocks(Action<bool, string> check, string root)
+    {
+        using AdminApp app = new(root, unlocked: false);
+        using TestAuthenticator desk = TestAuthenticator.ES256();
+        TestState.Add(app.State, desk.Record("localhost", "desk") with { Created = new DateTimeOffset(2026, 11, 1, 10, 0, 0, TimeSpan.Zero) }, admin: true);
+        UnlockedKeys keys = app.Service.Keys!;
+        check((await InlineTap(app.Browser(), AdminService.OpUnlock, "/api/v1/unlock", desk, PrfMode.Normal)).Mutation == 200 && keys.OpenedBy?.Id == TestAuthenticator.Encode(desk.CredentialId),
+            "removal lock: a second admin passkey unlocks and is named as the one that opened the keys");
+        AdminBrowser session = await app.SignedIn();
+
+        async Task<bool> Remove(string name)
+        {
+            Tapped remove = await session.OpAsync("passkey-unenroll", app.Laptop, true, null, true, ("name", name));
+            string? link = RecoveryTests.Member(remove.MutationBody, "link");
+            if (remove.MutationStatus != 202 || link is null)
+            {
+                return false;
+            }
+
+            Uri uri = new(link);
+            return TestState.Approve(app.Http, "http://127.0.0.1:" + uri.Port + uri.AbsolutePath, "http://localhost:" + uri.Port, "localhost", app.Laptop).Status == 200
+                && await HostServiceTests.WaitFor(() => !TestState.Current(app.State)!.Keys.Any(key => key.Name == name));
+        }
+
+        check(await Remove("phone") && !app.Service.Lock.IsLocked && keys.IsOpen, "removal lock: removing another passkey leaves the authority unlocked");
+        (byte[]? store, _) = keys.HeldForTests;
+        check(await Remove("desk") && await HostServiceTests.WaitFor(() => app.Service.Lock.IsLocked) && Closed(keys) && store?.All(item => item == 0) == true,
+            "removal lock: removing the admin passkey that unlocked locks the authority and zeroes the keys");
+    }
+
+    private static void LockDuringUnlock(Action<bool, string> check, string root)
+    {
+        using AdminApp app = new(root, unlocked: false);
+        UnlockedKeys keys = app.Service.Keys!;
+        Manifest manifest = TestState.Current(app.State)!;
+        using Unlock unlock = TestVault.Unlock(app.State, app.Laptop)!;
+        AuthorityLock authority = app.Service.Lock;
+        Task? locking = null;
+        bool waited = false;
+        UnlockOutcome outcome = authority.UnlockWith(UnlockMethod.Manual, () =>
+        {
+            locking = Task.Run(() => authority.Lock("test: a lock while the keys open"));
+            bool opened = keys.TryOpen(manifest, unlock);
+            waited = !locking.Wait(200);
+
+            return opened;
+        });
+        locking!.Wait(TimeSpan.FromSeconds(10));
+        check(outcome == UnlockOutcome.Unlocked && waited && authority.IsLocked && Closed(keys), "lock during unlock: a lock that comes while the keys open waits, and it ends locked with nothing held");
+
+        using ManualResetEventSlim discarding = new();
+        using ManualResetEventSlim release = new();
+        authority.OnLock(_ =>
+        {
+            discarding.Set();
+            release.Wait(TimeSpan.FromSeconds(10));
+        });
+        Task slowLock = Task.Run(() => authority.Lock("test: a slow discard"));
+        discarding.Wait(TimeSpan.FromSeconds(10));
+        UnlockOutcome during = authority.UnlockWith(UnlockMethod.Manual, () => keys.TryOpen(manifest, unlock));
+        release.Set();
+        slowLock.Wait(TimeSpan.FromSeconds(10));
+        check(during == UnlockOutcome.Locking && authority.IsLocked && Closed(keys), "lock during unlock: while a lock is still discarding, an unlock opens nothing");
     }
 
     private static async Task Startup(Action<bool, string> check, string root)
@@ -227,7 +348,7 @@ internal static class AuthorityLockTests
         using HostServiceTests.Rig rig = new(root, startLocked: true);
         HostService service = rig.Service;
         string status = await rig.Http.GetStringAsync(rig.Url("/v1/status"));
-        check(service.Lock.IsLocked && status == "{\"protocolVersion\":1,\"running\":true,\"locked\":true,\"adminPort\":" + service.Port + "}", "lock: a service starts LOCKED and /v1/status says running and locked, nothing else (" + status + ")");
+        check(service.Lock.IsLocked && status == "{\"protocolVersion\":1,\"running\":true,\"locked\":true,\"remote\":false,\"adminPort\":" + service.Port + "}", "lock: a service starts LOCKED and /v1/status says running and locked, nothing else (" + status + ")");
 
         HostServiceTests.Raw refused = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, rig.Script("never", "echo never", "echo never")));
         check(refused.Status == HttpStatusCode.Locked && refused.Body.Contains("/admin", StringComparison.Ordinal) && refused.Body.Contains("locked", StringComparison.Ordinal) && rig.Store.Reads == 0 && rig.Approvers.IsEmpty, "lock: a run while locked is refused (423) with one line naming the admin page; nothing is asked or decrypted (" + refused.Body + ")");
@@ -347,16 +468,15 @@ internal static class AuthorityLockTests
         check(!auditText.Contains("authenticatorData", StringComparison.Ordinal) && !auditText.Contains("signature", StringComparison.Ordinal) && !auditText.Contains(unlock.ProofBody[..Math.Min(20, unlock.ProofBody.Length)], StringComparison.Ordinal), "unlock: the audit holds no proof");
 
         // Unlock creates no grant and widens none.
-        check(store.Grants().Count == 0 && live.Authorization.SyncedGrants.Count == 0 && !live.Authorization.Keys.IsHeld, "unlock: it creates no grant and holds no key");
+        check(store.Grants().Count == 0 && live.Authorization.SyncedGrants.Count == 0, "unlock: it creates no grant");
 
-        // Hold something to discard: a store key for a grant, the vouching state and a synchronized grant.
-        live.Authorization.Keys.Hold(new Unlock("test-credential", [.. Enumerable.Range(1, 32).Select(item => (byte)item)]), new HeldKeyBinding("g1", "s1", 1, null));
-        byte[]? held = live.Authorization.Keys.HeldBytes;
-        check(live.Authorization.Vouched && held is not null && held.Any(b => b != 0), "lock: before locking the host is vouched for and holds a key");
+        // What a lock discards: the keys the unlock opened, the vouching state and the synchronized grants.
+        (byte[]? heldStore, byte[]? heldReview) = live.Keys!.HeldForTests;
+        check(live.Authorization.Vouched && live.Keys.IsOpen && heldStore is { Length: > 0 } && heldStore.Any(b => b != 0) && heldReview is { Length: > 0 } && heldReview.Any(b => b != 0), "lock: before locking the host is vouched for and the unlock's store key and review key are open");
 
         Tapped lockTap = await TapOn(live, http, AdminService.OpLock, laptop);
         check(lockTap.ApproveStatus == 200 && await HostServiceTests.WaitFor(() => live.Lock.IsLocked), "lock: the admin key's fresh tap locks at once");
-        check(!live.Authorization.Keys.IsHeld && held!.All(b => b == 0) && !live.Authorization.Vouched && live.Authorization.SyncedGrants.Count == 0 && !live.Ready, "lock: the held key is zeroed and dropped, the vouching state and grants are discarded, the host is not ready");
+        check(!live.Keys.IsOpen && heldStore is { Length: > 0 } && heldStore.All(b => b == 0) && heldReview is { Length: > 0 } && heldReview.All(b => b == 0) && !live.Authorization.Vouched && live.Authorization.SyncedGrants.Count == 0 && !live.Ready, "lock: the keys are zeroed and closed, the vouching state and grants are discarded, the host is not ready");
         (int replayStatus, _) = TestState.Post(http, unlock.PageUrl + "/proof", unlock.ProofBody);
         await Task.Delay(300);
         check(live.Lock.IsLocked && replayStatus != 200, "replay: sending the unlock proof again to its page unlocks nothing");
@@ -390,135 +510,32 @@ internal static class AuthorityLockTests
         return await browser.OpAsync(op, signer, userVerified, change);
     }
 
-    // ---- unattended unlock ----
+    // ---- a restart is locked ----
 
-    private static async Task Unattended(Action<bool, string> check, string root)
+    private static async Task RestartStaysLocked(Action<bool, string> check, string root)
     {
-        FakeProtection protection = new();
         Asks asks = new();
         using HostServiceTests.Rig rig = new(root, startLocked: true);
         rig.Service.Dispose();
-        (TestAuthenticator laptop, TestAuthenticator phone) = Keys(rig.State);
-        HostService Start(IUnlockProtection use) => HostService.Start(new HostServiceOptions { CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), State = rig.State, Store = rig.Store, Deployment = rig.Machine.Restart(), Port = 0, UnlockProtection = use, AdminAskerFactory = asks.Factory(rig.State, TimeSpan.FromSeconds(3)) });
+        (TestAuthenticator laptop, _) = Keys(rig.State);
+        HostService Start() => HostService.Start(new HostServiceOptions { CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), State = rig.State, Store = rig.Store, Deployment = rig.Machine.Restart(), Port = 0, AdminAskerFactory = asks.Factory(rig.State, TimeSpan.FromSeconds(3)) });
         using HttpClient http = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(60) };
 
-        HostService first = Start(protection);
-        AuthorityStore store = rig.Machine.Deployment.Store;
-        check(store.GetUnlockPolicy() == UnlockPolicy.Manual && first.Lock.IsLocked && first.StartupUnlockNote is null, "policy: the default is manual and a start is locked");
-
-        // While locked only the unlock is possible: the policy cannot be asked for (no session can exist either).
-        AdminBrowser lockedBrowser = BrowserOf(first, http);
-        Tapped whileLocked = await lockedBrowser.OpAsync(AdminService.OpPolicyUnattended, laptop);
-        check(whileLocked.Link is null && whileLocked.PostStatus is 401 or 423 && store.GetUnlockPolicy() == UnlockPolicy.Manual, "policy: while the authority is locked nothing but the unlock can be asked for (" + whileLocked.PostStatus + ")");
-
-        // Unlocking (manual) is not authority to change the policy: the policy tap is its own.
+        HostService first = Start();
         Tapped unlock = await TapOn(first, http, AdminService.OpUnlock, laptop);
-        await HostServiceTests.WaitFor(() => !first.Lock.IsLocked);
-
-        // The change needs a fresh tap of an admin key for exactly this policy.
-        Tapped outsider = await TapOn(first, http, AdminService.OpPolicyUnattended, phone);
-        check(outsider.ApproveStatus == 403 && store.GetUnlockPolicy() == UnlockPolicy.Manual && store.UnattendedMaterial() is null, "policy: a non-admin key cannot allow unattended unlock (" + outsider.PostStatus + " " + outsider.ApproveStatus + " " + outsider.MutationStatus + " " + outsider.Error + " " + outsider.MutationBody + ")");
-        Tapped noUv = await TapOn(first, http, AdminService.OpPolicyUnattended, laptop, userVerified: false);
-        check(noUv.ApproveStatus == 403 && store.GetUnlockPolicy() == UnlockPolicy.Manual, "policy: an assertion without user verification does not change it (" + noUv.PostStatus + " " + noUv.ApproveStatus + " " + noUv.MutationStatus + " " + noUv.Error + " " + noUv.MutationBody + ")");
-        Tapped otherOperation = await TapOn(first, http, AdminService.OpPolicyUnattended, laptop, change: challenge => SHA256.HashData(challenge));
-        check(otherOperation.ApproveStatus is 403 or 400 && store.GetUnlockPolicy() == UnlockPolicy.Manual, "policy: a signature for other parameters does not change it (" + otherOperation.PostStatus + " " + otherOperation.ApproveStatus + " " + otherOperation.MutationStatus + " " + otherOperation.Error + " " + otherOperation.MutationBody + ")");
-
-        await Login(first, http);
-        int asked = asks.Count;
-        Tapped silent = await TapOn(first, http, AdminService.OpPolicyUnattended, null);
-        await Task.Delay(300);
-        check(unlock.ApproveStatus == 200 && silent.Link is not null && asks.Count == asked + 1 && store.GetUnlockPolicy() == UnlockPolicy.Manual, "policy: an unlocked authority still needs a fresh tap to change the policy (" + unlock.ApproveStatus + "; silent=" + silent.PostStatus + "/" + silent.Link + "; asks=" + asks.Count + "/" + asked + "; policy=" + store.GetUnlockPolicy() + ")");
-
-        Tapped allow = await TapOn(first, http, AdminService.OpPolicyUnattended, laptop);
-        check(allow.ApproveStatus == 200 && await HostServiceTests.WaitFor(() => store.GetUnlockPolicy() == UnlockPolicy.Unattended) && store.UnattendedMaterial() is { Sealed.Length: > 0 }, "policy: the admin key's tap allows unattended unlock (" + allow.PostStatus + " " + allow.ApproveStatus + " mutation=" + allow.MutationStatus + " " + allow.MutationBody + "; policy=" + store.GetUnlockPolicy() + ")");
-        check(store.Audit(1000).Any(entry => entry.Event == "unlock-policy-changed" && entry.Detail.Contains("manual to unattended", StringComparison.Ordinal) && entry.Actor.Contains("laptop", StringComparison.Ordinal)), "policy: the change is in the audit history with the key that tapped (" + string.Join(" | ", store.Audit(1000).Where(entry => entry.Event.Contains("unlock", StringComparison.Ordinal) || entry.Event == "admin-operation").Select(entry => entry.Event + ":" + entry.Detail + ":" + entry.Actor)) + ")");
-        string rootStatus = await http.GetStringAsync("http://127.0.0.1:" + first.Port + "/api/v1/status");
-        string rootSettings = (await (await Login(first, http)).GetAsync("/api/v1/settings")).Html;
-        check(rootStatus.Contains("\"unlockMode\":\"unattended\"", StringComparison.Ordinal) && rootSettings.Contains("weaker", StringComparison.Ordinal) && rootSettings.Contains("Unattended", StringComparison.Ordinal), "policy: the API shows the weaker mode (status=" + rootStatus + "; settings contains weaker=" + rootSettings.Contains("weaker", StringComparison.Ordinal) + ")");
-        check(ServiceStartup.LockLines(true, UnlockPolicy.Unattended, null, first.Admin.PageUrl).Any(line => line.Contains("weaker", StringComparison.Ordinal)) && ServiceStartup.LockLines(true, UnlockPolicy.Manual, null, first.Admin.PageUrl).Any(line => line.Contains("Manual", StringComparison.Ordinal) && line.Contains("unlock mode", StringComparison.Ordinal)), "policy: the service startup lines report the unlock mode, the weaker one by name");
-
-        // A restart unlocks itself; nothing else changes.
+        check(unlock.ApproveStatus == 200 && await HostServiceTests.WaitFor(() => !first.Lock.IsLocked), "restart: the admin key's tap unlocks before the restart");
         first.Dispose();
-        int grantsBefore = store.Grants().Count;
-        using HostService second = Start(protection);
-        check(!second.Lock.IsLocked && second.Lock.How == UnlockMethod.Unattended && second.StartupUnlockNote is { } note && note.Contains("unattended", StringComparison.Ordinal) && await HostServiceTests.WaitFor(() => second.Ready), "unattended: a restart under the policy unlocks and checks in (locked=" + second.Lock.IsLocked + "; how=" + second.Lock.How + "; note=" + second.StartupUnlockNote + "; ready=" + second.Ready + ")");
-        check(store.Grants().Count == grantsBefore && second.Authorization.SyncedGrants.Count == 0 && !second.Authorization.Keys.IsHeld, "unattended: unlocking creates no grant, widens none and holds no key");
-        using HttpClient commandLine = new(second.Endpoint.CreateHandler());
-        string status = await commandLine.GetStringAsync(new Uri(second.Endpoint.BaseUri, "v1/status"));
-        check(status == "{\"protocolVersion\":1,\"running\":true,\"locked\":false,\"adminPort\":" + second.Port + "}", "unattended: status reports unlocked and nothing else");
 
-        // It never replaces a passkey: a sensitive operation still taps, with the service unlocked unattended.
-        await Login(second, http);
-        int beforeLock = asks.Count;
-        Tapped lockNeedsTap = await TapOn(second, http, AdminService.OpLock, null);
-        await Task.Delay(400);
-        check(lockNeedsTap.Link is not null && asks.Count == beforeLock + 1 && !second.Lock.IsLocked, "unattended: an unattended unlock does not authorize a sensitive operation; the tap is still asked for");
-        Tapped lockedByTap = await TapOn(second, http, AdminService.OpLock, phone);
-        check(lockedByTap.ApproveStatus == 403 && !second.Lock.IsLocked, "unattended: and a non-admin key does not authorize it either");
+        using HostService second = Start();
+        check(second.Lock.IsLocked && second.Lock.How is null && !second.Ready && !second.Keys!.IsOpen, "restart: the service starts locked again, holding no key");
+        StringWriter errText = new();
+        int exit = await LaunchClient.RunAsync(CliArgs.ParseRun(["--secrets", "TOKEN", "--reason", "restart", "--", "anything"], out _)!, rig.Work, second.Endpoint, null, new StringWriter(), errText, rig.Machine.Trust);
+        check(exit == LaunchClient.AuthorityLocked && LaunchClient.AuthorityLocked == 8 && rig.Store.Reads == 0, "restart: a run is refused with exit 8 until an administrator taps (" + exit + ": " + errText + ")");
 
-        // Anything in doubt leaves it locked.
-        second.Dispose();
-        // L1: the unattended policy is signed by the authority key. A plain write to with-secrets.db (unsigned, or signed by nothing) cannot make a service unlock itself.
-        string signature = (string)Scalar(store.FilePath, "SELECT value FROM authority_settings WHERE name = 'unlock_signature'")!;
-        foreach ((string label, string sql) in new[] { ("no signature", "DELETE FROM authority_settings WHERE name = 'unlock_signature'"), ("a signature of other bytes", "UPDATE authority_settings SET value = 'AAAA' WHERE name = 'unlock_signature'") })
-        {
-            ExecuteSql(store.FilePath, sql);
-            using HostService planted = Start(protection);
-            check(planted.Lock.IsLocked && planted.StartupUnlockNote is { } plantedNote && plantedNote.Contains("stays locked", StringComparison.Ordinal), "unattended: a policy with " + label + " leaves the service locked (" + planted.StartupUnlockNote + ")");
-        }
-
-        ExecuteSql(store.FilePath, "DELETE FROM authority_settings WHERE name = 'unlock_signature'");
-        ExecuteSql(store.FilePath, "INSERT INTO authority_settings (name, value) VALUES ('unlock_signature', '" + signature + "')");
-        using (HostService restored = Start(protection))
-        {
-            check(!restored.Lock.IsLocked, "unattended: the genuine signed policy still unlocks (the control for the two refusals)");
-        }
-
-        foreach ((string label, Action<FakeProtection> twist) in new (string, Action<FakeProtection>)[] { ("the platform will not open the material", p => p.Broken = true), ("the material is not the recorded one", p => p.Wrong = true), ("the platform has no mechanism", p => p.Gone = "unattended unlock has no platform-protection adapter on this operating system") })
-        {
-            FakeProtection twisted = new();
-            twist(twisted);
-            using HostService stays = Start(twisted);
-            check(stays.Lock.IsLocked && stays.StartupUnlockNote is { } why && why.Contains("stays locked", StringComparison.Ordinal), "unattended: " + label + " -> the authority stays locked and says why");
-        }
-
-        // A platform with no adapter is refused when the administrator asks for the option.
-        {
-            FakeProtection none = new() { Gone = "unattended unlock has no platform-protection adapter on this operating system" };
-            using HostServiceTests.Rig other = new(root, startLocked: true);
-            other.Service.Dispose();
-            (TestAuthenticator otherLaptop, _) = Keys(other.State);
-            Asks otherAsks = new();
-            using HostService refusing = HostService.Start(new HostServiceOptions { CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), State = other.State, Store = other.Store, Deployment = other.Machine.Restart(), Port = 0, UnlockProtection = none, AdminAskerFactory = otherAsks.Factory(other.State, TimeSpan.FromSeconds(5)) });
-            refusing.Lock.Unlock(UnlockMethod.Seam);
-            await Login(refusing, http);
-            int askedBefore = otherAsks.Count;
-            Tapped refused = await TapOn(refusing, http, AdminService.OpPolicyUnattended, otherLaptop);
-            check(refused.Link is null && refused.Error is not null && refused.Error.Contains("no platform-protection adapter", StringComparison.Ordinal) && otherAsks.Count == askedBefore && other.Machine.Deployment.Store.GetUnlockPolicy() == UnlockPolicy.Manual, "unattended: a platform without an adapter refuses the option with a clear message and asks nothing");
-        }
-
-        s_admin = laptop;
-        // Back to manual: the material is deleted and a restart is locked.
-        using HostService manualAgain = Start(protection);
-        manualAgain.Lock.Unlock(UnlockMethod.Seam);
-        Tapped toManual = await TapOn(manualAgain, http, AdminService.OpPolicyManual, laptop);
-        check(toManual.ApproveStatus == 200 && await HostServiceTests.WaitFor(() => store.GetUnlockPolicy() == UnlockPolicy.Manual) && store.UnattendedMaterial() is null, "policy: the admin key's tap makes unlock manual again and the material is deleted");
-        manualAgain.Dispose();
-        using HostService afterManual = Start(protection);
-        check(afterManual.Lock.IsLocked, "policy: after going back to manual a restart is locked");
-
-        // The real platform mechanism (Windows DPAPI) round-trips and refuses another blob.
-        if (OperatingSystem.IsWindows())
-        {
-            IUnlockProtection real = UnlockProtections.ForThisPlatform();
-            byte[] material = RandomNumberGenerator.GetBytes(32);
-            byte[] sealedBlob = real.Seal(material);
-            check(real.Unavailable is null && !sealedBlob.AsSpan().SequenceEqual(material) && real.Open(sealedBlob)!.AsSpan().SequenceEqual(material) && real.Open([1, 2, 3]) is null, "dpapi: the platform mechanism seals and opens the material and refuses a blob it did not make");
-        }
-        else
-        {
-            check(UnlockProtections.ForThisPlatform().Unavailable is not null, "no adapter: this platform has no unlock protection and says so");
-        }
+        AdminBrowser browser = BrowserOf(second, http);
+        await browser.LoadAsync();
+        (int policyStatus, _) = await browser.SendAsync(HttpMethod.Put, "/api/v1/settings/unlock-policy", "{\"authorization\":\"AAAAAAAAAAAA\",\"policy\":\"unattended\"}");
+        check(policyStatus == 404 && second.Lock.IsLocked, "restart: there is no route that could let a start unlock itself (" + policyStatus + ")");
     }
 
     // ---- the admin app's origin rules ----
@@ -564,7 +581,7 @@ internal static class AuthorityLockTests
 
         string status = await http.GetStringAsync(baseUrl + "/api/v1/status");
         using HttpResponseMessage head = await http.GetAsync(baseUrl + "/api/v1/status");
-        check(status.Contains("\"locked\":true", StringComparison.Ordinal) && status.Contains("\"unlockMode\":\"manual\"", StringComparison.Ordinal) && head.Headers.Contains("X-Frame-Options") && head.Headers.Contains("Content-Security-Policy"), "api: the public status shows running/locked and the unlock mode, and the answer cannot be framed or run as script");
+        check(status.Contains("\"locked\":true", StringComparison.Ordinal) && head.Headers.Contains("X-Frame-Options") && head.Headers.Contains("Content-Security-Policy"), "api: the public status shows running/locked, and the answer cannot be framed or run as script");
         using HttpResponseMessage auditResponse = await http.GetAsync(baseUrl + "/api/v1/audit/changes");
         string audit = await auditResponse.Content.ReadAsStringAsync();
         check(auditResponse.StatusCode == HttpStatusCode.Unauthorized && !audit.Contains("admin-operation", StringComparison.Ordinal), "api: the audit history is served to a signed-in session only (401 without one, M2)");
@@ -576,32 +593,15 @@ internal static class AuthorityLockTests
     {
         using TestMachine machine = new(Path.Combine(root, "store"), trusted: false);
         AuthorityStore store = machine.Deployment.Store;
-        string Canon(UnlockPolicy policy) => AdminAuthorizer.Canonical(AuthorityStore.PolicyOperation(policy).Parameters);
         VerifiedAdmin For(string op, string parameters) => VerifiedAdmin.ForTests(op, parameters);
 
-        check(Throws<UnauthorizedAccessException>(() => store.SetUnlockPolicy(UnlockPolicy.Unattended, [1], "AA", For("unlock-authority", Canon(UnlockPolicy.Unattended)))), "setting guard: a tap for another operation cannot change the unlock policy");
-        check(Throws<UnauthorizedAccessException>(() => store.SetUnlockPolicy(UnlockPolicy.Unattended, [1], "AA", For("set-unlock-policy", Canon(UnlockPolicy.Manual)))), "setting guard: a tap for other parameters cannot change it");
-        check(store.GetUnlockPolicy() == UnlockPolicy.Manual, "setting guard: nothing changed");
-        VerifiedAdmin ok = For("set-unlock-policy", Canon(UnlockPolicy.Unattended));
-        store.SetUnlockPolicy(UnlockPolicy.Unattended, [1, 2], "AA", ok);
-        check(store.GetUnlockPolicy() == UnlockPolicy.Unattended, "setting guard: the matching tap changes it");
-        check(Throws<UnauthorizedAccessException>(() => store.SetUnlockPolicy(UnlockPolicy.Unattended, [1], "AA", ok)), "setting guard: a tap is single use");
-        check(Throws<ArgumentException>(() => store.SetUnlockPolicy(UnlockPolicy.Unattended, null, null, For("set-unlock-policy", Canon(UnlockPolicy.Unattended)))), "setting guard: unattended needs its material");
         (string retentionOp, IReadOnlyList<(string Name, string Value)> retentionParams) = AuthorityStore.RetentionOperation(7);
         check(Throws<UnauthorizedAccessException>(() => store.SetAuditRetentionDays(7, For(retentionOp, "days=8"))) && store.AuditRetentionDays() == AuthorityStore.DefaultAuditRetentionDays, "setting guard: the audit retention (a security setting) needs a tap for exactly that many days");
-        store.SetAuditRetentionDays(7, For(retentionOp, AdminAuthorizer.Canonical(retentionParams)));
+        check(Throws<UnauthorizedAccessException>(() => store.SetAuditRetentionDays(7, For("unlock-authority", AdminAuthorizer.Canonical(retentionParams)))), "setting guard: a tap for another operation cannot change it");
+        VerifiedAdmin ok = For(retentionOp, AdminAuthorizer.Canonical(retentionParams));
+        store.SetAuditRetentionDays(7, ok);
         check(store.AuditRetentionDays() == 7, "setting guard: the matching tap sets the retention");
-
-        // A setting that cannot be read is the safe default.
-        using (SqliteConnection connection = new($"Data Source={store.FilePath};Pooling=False"))
-        {
-            connection.Open();
-            using SqliteCommand command = connection.CreateCommand();
-            command.CommandText = "UPDATE authority_settings SET value = 'bogus' WHERE name = 'unlock_policy'";
-            command.ExecuteNonQuery();
-        }
-
-        check(store.GetUnlockPolicy() == UnlockPolicy.Manual && store.UnattendedMaterial() is null, "setting guard: a damaged policy value counts as manual, with no material");
+        check(Throws<UnauthorizedAccessException>(() => store.SetAuditRetentionDays(7, ok)), "setting guard: a tap is single use");
     }
 
     // ---- the authorizer in isolation ----
@@ -672,9 +672,9 @@ internal static class AuthorityLockTests
     private static async Task GrantUseIsNotAdministrative(Action<bool, string> check, string root)
     {
         using TestAuthenticator svcKey = TestAuthenticator.ES256();
-        GrantAuthorityTests.Chooser tapper = new(60, unlock: true, signer: svcKey);
+        GrantAuthorityTests.Chooser tapper = new(60, signer: svcKey);
         Asks asks = new();
-        HostServiceTests.Rig rig = new(root, approver: () => tapper, needsUnlock: true, enrolled: svcKey, adminAskers: null);
+        HostServiceTests.Rig rig = new(root, approver: () => tapper, enrolled: svcKey, adminAskers: null);
         try
         {
             string program = GrantAuthorityTests.Show(rig);
@@ -685,21 +685,23 @@ internal static class AuthorityLockTests
             HostAuthorization host = rig.Service.Authorization;
             int taps = tapper.Requests.Count;
             HostServiceTests.Raw second = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program));
-            check(first.Result is { Outcome: LaunchOutcome.Exited } && second.Result is { Outcome: LaunchOutcome.Exited } && tapper.Requests.Count == taps && host.Keys.IsHeld && asks.Count == 0, "grant use: a valid grant needs no new approval, no passkey tap and no administrator ceremony per use");
+            check(first.Result is { Outcome: LaunchOutcome.Exited } && second.Result is { Outcome: LaunchOutcome.Exited } && tapper.Requests.Count == taps && tapper.Requests.Count == 1 && asks.Count == 0, "grant use: a valid grant needs no new approval, no passkey tap and no administrator ceremony per use");
 
-            // Locking refuses the use and discards what the host held for it.
-            byte[] held = host.Keys.HeldBytes!;
+            // Locking refuses the use and discards what the host held for it: the keys the unlock opened, the vouching and the synchronized grants.
+            check(SecretStoreTests.OpenKeys(rig.Service, rig.State), "grant use: the admin's unlock opened the keys");
+            (byte[]? openStore, byte[]? openReview) = rig.Service.Keys!.HeldForTests;
             rig.Service.Lock.Lock("test");
             HostServiceTests.Raw locked = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, program));
-            check(locked.Status == HttpStatusCode.Locked && !host.Keys.IsHeld && held.All(b => b == 0) && host.SyncedGrants.Count == 0, "grant use: a locked service refuses the use of a grant and has discarded its key and synchronized grants");
+            check(locked.Status == HttpStatusCode.Locked && host.SyncedGrants.Count == 0 && !host.Vouched && !rig.Service.Keys.IsOpen && openStore is { Length: > 0 } && openStore.All(b => b == 0) && openReview is { Length: > 0 } && openReview.All(b => b == 0),
+                "grant use: a locked service refuses the use of a grant; it has zeroed and closed the keys and discarded the vouching and the synchronized grants");
 
-            // Unlocking restores nothing and widens nothing: the grant is as it was and the key must be tapped for again.
+            // Unlocking restores nothing and widens nothing: the grant is as it was.
             rig.Service.Lock.Unlock(UnlockMethod.Seam);
             await HostServiceTests.WaitFor(() => rig.Service.Ready || true);
             rig.Service.Authorization.ReconcileAsync().GetAwaiter().GetResult();
             await rig.Service.Authorization.PumpAsync();
             GrantRecord after = rig.Machine.Deployment.Store.Grants()[0];
-            check(after.Id == grant.Id && after.Revision == grant.Revision && after.Expires == grant.Expires && after.ScopeKey == grant.ScopeKey && rig.Machine.Deployment.Store.Grants().Count == 1 && !host.Keys.IsHeld, "grant use: unlocking creates no grant, extends none, and holds no key");
+            check(after.Id == grant.Id && after.Revision == grant.Revision && after.Expires == grant.Expires && after.ScopeKey == grant.ScopeKey && rig.Machine.Deployment.Store.Grants().Count == 1, "grant use: unlocking creates no grant and extends none");
         }
         finally
         {
@@ -749,24 +751,29 @@ internal static class AuthorityLockTests
         check(!KeyIdentity.Verify(machinePublic, WireText.Bytes(WireText.IdentityDomain, Convert.ToBase64String(challenge)), authoritySignature), "key separation: an authority-key signature is not valid under the machine key");
         check(!KeyIdentity.Verify(machinePublic, WireText.Bytes(WireText.IdentityDomain, Convert.ToBase64String(challenge)), authoritySignature) && !machine.Deployment.Keys.CurrentRecord().PublicKey.AsSpan().SequenceEqual(machinePublic), "key separation: the pinned authority key is not the machine key");
 
-        // The secret-data key material (the held PRF output) is neither: it is not a signing key and not derived from either, and no file of the authority holds it.
-        byte[] prf = [.. Enumerable.Range(1, 32).Select(item => (byte)(item * 7))];
-        using HostServiceTests.Rig rig = new(root, startLocked: false);
-        rig.Service.Authorization.Keys.Hold(new Unlock("test-credential", prf), new HeldKeyBinding("g", "s", 1, null));
+        // The secret-data key material (the store key and review key the unlock opened) is neither: it is not a signing key and not derived from either, and no file of the authority holds it.
+        using TestAuthenticator admin = TestAuthenticator.ES256();
+        using HostServiceTests.Rig rig = new(root, startLocked: false, enrolled: admin);
+        using (Unlock release = TestVault.Unlock(rig.State, admin)!)
+        {
+            rig.Service.Keys!.TryOpen(TestState.Current(rig.State)!, release);
+        }
+
+        (byte[]? openStore, byte[]? openReview) = rig.Service.Keys.HeldForTests;
+        byte[][] material = [[.. openStore ?? []], [.. openReview ?? []]];
         rig.Service.Lock.Lock("test");
         // Stop the background audit worker before reading the durable files directly.
         rig.Service.Dispose();
-        string prfText = Convert.ToHexString(prf);
         bool leaked = Directory.EnumerateFiles(rig.Machine.Folder).Where(file => !file.EndsWith("-shm", StringComparison.Ordinal)).Any(file =>
         {
             using FileStream stream = new(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             using StreamReader reader = new(stream, Encoding.Latin1);
             string content = reader.ReadToEnd();
 
-            return content.Contains(prfText, StringComparison.OrdinalIgnoreCase) || content.Contains(Convert.ToBase64String(prf), StringComparison.Ordinal) || content.Contains(Encoding.Latin1.GetString(prf), StringComparison.Ordinal);
+            return material.Any(key => content.Contains(Encoding.Latin1.GetString(key), StringComparison.OrdinalIgnoreCase) || content.Contains(Convert.ToHexString(key), StringComparison.OrdinalIgnoreCase) || content.Contains(Convert.ToBase64String(key), StringComparison.Ordinal));
         });
-        check(!leaked, "key separation: the held secret-data key material is in no file of the authority or the host (database, outbox, host.json)");
-        check(!prf.AsSpan().SequenceEqual(machinePublic.AsSpan(0, Math.Min(32, machinePublic.Length))), "key separation: the secret-data key material is not a signing key");
+        check(material.All(key => key.Length > 0) && !leaked, "key separation: the unlocked store key and review key are in no file of the authority or the host (database, outbox, host.json)");
+        check(material.All(key => !key.AsSpan().SequenceEqual(machinePublic) && !key.AsSpan().SequenceEqual(authorityPublic)), "key separation: the secret-data key material is not a signing key");
     }
 
     private static bool AuthorityDeploymentNames() => LocalDeployment.AuthorityKeyNameOf(1) != LocalDeployment.AuthorityKeyNameOf(2) && LocalDeployment.AuthorityKeyNameOf(1) == KeyNames.Authority && !LocalDeployment.AuthorityKeyNameOf(2).StartsWith(KeyNames.Machine, StringComparison.Ordinal);
@@ -787,15 +794,6 @@ internal static class AuthorityLockTests
         AuthorityKeyRecord recovered = AdminActions.RecoverAuthority(machine.Deployment.Keys, machine.Deployment.HostConfig, machine.Fingerprint, "test admin");
         check(recovered.Fingerprint != transition.NewFingerprint && machine.Deployment.HostConfig.Load().Config?.Authority?.Fingerprint == recovered.Fingerprint, "recovery: recovery makes a new key with no transition and pins it for this machine only by that explicit action");
 
-        // A lost unattended-unlock blob falls back to manual unlock (the passkey path), never to open.
-        FakeProtection protection = new();
-        VerifiedAdmin admin = VerifiedAdmin.ForTests("set-unlock-policy", AdminAuthorizer.Canonical(AuthorityStore.PolicyOperation(UnlockPolicy.Unattended).Parameters));
-        byte[] material = RandomNumberGenerator.GetBytes(32);
-        machine.Deployment.Store.SetUnlockPolicy(UnlockPolicy.Unattended, protection.Seal(material), Convert.ToHexString(SHA256.HashData(material)), admin, machine.Deployment.Keys.Current());
-        protection.Broken = true;
-        AuthorityLock fresh = new();
-        string? note = UnattendedUnlock.TryUnlock(machine.Deployment.Store, machine.Deployment.Keys, fresh, protection);
-        check(fresh.IsLocked && note is not null && note.Contains("stays locked", StringComparison.Ordinal), "recovery: lost unattended material leaves the authority locked for a manual passkey unlock");
         await Task.CompletedTask;
     }
 }

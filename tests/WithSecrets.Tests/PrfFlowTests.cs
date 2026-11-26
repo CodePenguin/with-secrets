@@ -9,8 +9,8 @@ namespace WithSecrets.Tests;
 
 /// <summary>
 /// Flows over real HTTP with PRF key slots (the Dotenvx private key never rests on the machine): the first <c>--set</c> after the first setup, a run
-/// approved by the first key and by an enrolled second key, every wrong PRF payload, an enrollment of a key without PRF, and
-/// a scan of everything the tool writes or says for the private key, the master key and the PRF output.
+/// approved by the first key and by an enrolled second key once the admin unlocked (the run page asks for no PRF and refuses one it did not ask for),
+/// an enrollment of a key without PRF, and a scan of everything the tool writes or says for the private key, the master key and the PRF output.
 /// </summary>
 internal static class PrfFlowTests
 {
@@ -104,7 +104,7 @@ internal static partial class WebApprovalTests
                 return (db, passkeys, store, cipher);
             }
 
-            // Runs the command; the approval page is answered by the callback (base URL, origin, rpId) and its reply is kept.
+            // Runs the command once the admin unlocked (the store key is open); the approval page is answered by the callback (base URL, origin, rpId) and its reply is kept.
             async Task<(int Code, string Out, string Err, List<string> Seen, bool Ran, int Links)> RunWith(StateDatabase db, PasskeyStore passkeys, SecretStore store, Func<string, string, string, (int Status, string Body)> approve)
             {
                 File.Delete(envFile);
@@ -120,7 +120,7 @@ internal static partial class WebApprovalTests
                     errors.WriteLine(line);
                     link.TrySetResult(line);
                 }, TimeSpan.Zero);
-                RunCommand command = new(store, approver, TextWriter.Synchronized(stdout), errors);
+                RunCommand command = new(SecretStoreTests.Unlocked(store), approver, TextWriter.Synchronized(stdout), errors);
                 Task<int> running = Task.Run(() => command.ExecuteAsync(args, scripts));
                 List<string> seen = [];
                 Task first = await Task.WhenAny(link.Task, running, Task.Delay(TimeSpan.FromSeconds(20)));
@@ -199,10 +199,10 @@ internal static partial class WebApprovalTests
                 }
             }
 
-            // (3) A run approved by the first key: only the requested row is decrypted, the child has only that value, the key is in no
-            // environment variable, and the PRF output and the private key are in no body, message or audit entry.
+            // (3) A run approved by the first key: only the requested row is decrypted, the child has only that value, the key is in no environment variable, the page asks for no PRF output, and the PRF output and the private key are in no body, message or audit entry.
             {
-                (StateDatabase db, PasskeyStore passkeys, SecretStore store, CountingCipher cipher) = NewState(phone);
+                (StateDatabase db, PasskeyStore passkeys, SecretStore store, CountingCipher cipher) = NewState();
+                TestState.Add(db, phone.Record("localhost", "extra"), admin: true);
                 (byte[] master, string privateHex) = Open(db, laptop);
                 string saltOfLaptop = TestState.Current(db)!.Keys.First(key => key.Id == TestAuthenticator.Encode(laptop.CredentialId)).Slot!.Salt;
                 byte[] prfOut = laptop.Prf(Base64Url.DecodeFromChars(saltOfLaptop))!;
@@ -215,8 +215,10 @@ internal static partial class WebApprovalTests
                 check(!Shows([.. result.Seen, result.Out, result.Err, audit], prfOut, master) && !new List<string>([.. result.Seen, result.Out, result.Err, audit]).Any(text => text.Contains(privateHex, StringComparison.OrdinalIgnoreCase)), "prf run: the PRF output, the master key and the private key are in no page, reply, stdout, stderr or audit entry");
                 check(!new List<string>([.. result.Seen, result.Out, result.Err, audit]).Any(text => text.Contains(PrfA, StringComparison.Ordinal) || text.Contains(PrfB, StringComparison.Ordinal)), "prf run: no value is in any page, reply, stdout, stderr or audit entry");
                 check(result.Links == 1, "prf run: one approval link, one prompt");
+                string startData = result.Seen.Count > 0 ? Between(result.Seen[0], "<script type=\"application/json\" id=\"start\">", "</script>") : "";
+                check(startData.Length > 0 && !startData.Contains("prfKey", StringComparison.Ordinal) && !System.Net.WebUtility.HtmlDecode(result.Seen[0]).Contains(PrfClient.ApprovalHint, StringComparison.Ordinal), "prf run: the run's approval page asks the passkey for no PRF output (its start data has no key to seal one to)");
 
-                // The enrolled second key opens the same master key and runs too.
+                // The enrolled second admin opens the same master key and runs too.
                 (byte[] master2, string privateHex2) = Open(db, phone);
                 check(master.AsSpan().SequenceEqual(master2) && privateHex == privateHex2, "prf run: the second key's slot opens the same master key and the same private key");
                 result = await RunWith(db, passkeys, store, (url, origin, rp) => TestState.Approve(client, url, origin, rp, phone));
@@ -225,8 +227,7 @@ internal static partial class WebApprovalTests
                 SecretValues.Clear(master2);
             }
 
-            // (3b) The sign-in names no credential, so the authenticator picks one of the passkeys: a credential that is not in the manifest is
-            // denied; and with two keys enrolled, whichever one is chosen opens its own slot (the same master key).
+            // (3b) The sign-in names no credential, so the authenticator picks one of the passkeys: a credential that is not in the manifest is denied; and with two keys enrolled, whichever one is chosen approves.
             {
                 (StateDatabase db, PasskeyStore passkeys, SecretStore store, CountingCipher cipher) = NewState(phone);
                 using TestAuthenticator stranger = TestAuthenticator.ES256();
@@ -236,77 +237,63 @@ internal static partial class WebApprovalTests
                 {
                     int before = cipher.Decrypts;
                     var result = await RunWith(db, passkeys, store, (url, origin, rp) => TestState.Approve(client, url, origin, rp, chosen));
-                    check(result.Code == 0 && result.Ran && cipher.Decrypts == before + 1, "prf run: the passkey chosen from several (" + label + ") opens its own slot and the run decrypts (" + result.Code + " " + result.Err + ")");
+                    check(result.Code == 0 && result.Ran && cipher.Decrypts == before + 1, "prf run: the passkey chosen from several (" + label + ") approves and the run decrypts (" + result.Code + " " + result.Err + ")");
                 }
             }
 
-            // (4) A wrong PRF payload denies (exit 3), decrypts nothing and never starts the child; there is no fallback.
-            foreach ((PrfMode mode, string label) in new[]
-            {
-                (PrfMode.Missing, "no PRF payload"), (PrfMode.Garbled, "a garbled PRF payload"), (PrfMode.WrongBind, "a PRF payload sealed for another page"),
-                (PrfMode.OtherCredential, "the PRF output of another credential"), (PrfMode.ShortOutput, "a PRF output of the wrong size"),
-            })
-            {
-                (StateDatabase db, PasskeyStore passkeys, SecretStore store, CountingCipher cipher) = NewState(phone);
-                int before = cipher.Decrypts;
-                var result = await RunWith(db, passkeys, store, (url, origin, rp) => TestState.Approve(client, url, origin, rp, laptop, mode, phone));
-                string audit = StateDatabaseTests.AuditText(db.FilePath);
-                check(result.Code is RunCommand.Denied or RunCommand.StoreError && (mode == PrfMode.OtherCredential || result.Code == RunCommand.Denied) && !result.Ran && cipher.Decrypts == before, "prf run: " + label + " is refused (exit 3; exit 4 when only the slot cannot open), the child never ran and nothing was decrypted (" + result.Code + " " + result.Err + ")");
-                check(!result.Out.Contains(PrfA, StringComparison.Ordinal) && !result.Err.Contains(PrfA, StringComparison.Ordinal) && !audit.Contains(PrfA, StringComparison.Ordinal), "prf run: " + label + ": no value in the output, the messages or the audit");
-            }
-
-            // (4a) Key A signs, the page sends key B's valid PRF output for B's own salt: the slot is chosen by the signing key, so
-            // nothing opens. (A store that tried every slot would accept this.)
-            {
-                (StateDatabase db, PasskeyStore passkeys, SecretStore store, CountingCipher cipher) = NewState(phone);
-                var result = await RunWith(db, passkeys, store, (url, origin, rp) => TestState.Approve(client, url, origin, rp, laptop, PrfMode.OtherOwnSalt, phone));
-                check(result.Code is RunCommand.Denied or RunCommand.StoreError && !result.Ran && cipher.Decrypts == 0 && !result.Out.Contains(PrfA, StringComparison.Ordinal), "prf run: key A's assertion with key B's valid PRF output for B's own salt opens nothing (" + result.Code + " " + result.Err + ")");
-            }
-
-            // (4b) The state a PRF payload was made against: a payload for a salt the key does not have in its slot decrypts nothing.
+            // (4) A run page asks for no PRF output: a proof that carries one anyway (sealed to any key) is refused, nothing is decrypted and the child never starts.
             {
                 (StateDatabase db, PasskeyStore passkeys, SecretStore store, CountingCipher cipher) = NewState();
-                int before = cipher.Decrypts;
                 var result = await RunWith(db, passkeys, store, (url, origin, rp) =>
                 {
-                    // The same page, but the key answers with the PRF output for a salt of its own choosing.
                     (_, string page) = TestState.Get(client, url);
                     using JsonDocument start = JsonDocument.Parse(Between(page, "<script type=\"application/json\" id=\"start\">", "</script>"));
                     byte[] bind = Base64Url.DecodeFromChars(start.RootElement.GetProperty("bind").GetString()!);
-                    (string epk, string iv, string ct) = PrfBrowser.Seal(start.RootElement.GetProperty("prfKey").GetString()!, bind, laptop.Prf(RandomNumberGenerator.GetBytes(32))!);
+                    (_, string sealTo) = SecretCrypto.NewServerKey();
+                    (string epk, string iv, string ct) = PrfBrowser.Seal(sealTo, bind, laptop.Prf(RandomNumberGenerator.GetBytes(32))!);
                     string assertion = laptop.Assert(ReuseBinding.Challenge(bind, 0), origin, rp, TestState.NextCount());
 
                     return TestState.Post(client, url + "/proof", "{\"reuse\":0,\"proof\":" + assertion + ",\"prf\":{\"epk\":\"" + epk + "\",\"iv\":\"" + iv + "\",\"ct\":\"" + ct + "\"}}");
                 });
-                check(result.Code is RunCommand.Denied or RunCommand.StoreError && !result.Ran && cipher.Decrypts == before, "prf run: the PRF output for another salt opens nothing (" + result.Code + " " + result.Err + ")");
+                string audit = StateDatabaseTests.AuditText(db.FilePath);
+                check(result.Code == RunCommand.Denied && !result.Ran && cipher.Decrypts == 0 && !result.Out.Contains(PrfA, StringComparison.Ordinal) && !audit.Contains(PrfA, StringComparison.Ordinal), "prf run: a proof with a PRF member the run page did not ask for is refused; nothing is decrypted and the child never ran (" + result.Code + " " + result.Err + ")");
             }
 
-            // (5) Enrolling a key: one without PRF is refused before anything is stored (nothing changes); one with PRF gets a slot that
-            // opens the same master key, and then runs.
+            // (5) Enrolling convenience keys needs no PRF. Enrolling admins needs PRF from both keys.
             {
                 (StateDatabase db, PasskeyStore passkeys, SecretStore store, CountingCipher cipher) = NewState();
                 long version = TestState.Current(db)!.Version;
-                (ApprovalDecision? decision, List<string> lines) = await PasskeyTargetRun(client, passkeys, local, local, false, item => item.Enroll(), laptop, noPrf, newName: "nokey");
-                check(decision is { Approved: false } && decision.Detail.Contains(PrfClient.CannotPrf, StringComparison.Ordinal) && passkeys.All().Count == 1 && TestState.Current(db)!.Version == version, "prf enroll: a passkey without PRF is refused with the PRF message and nothing is stored (" + decision?.Detail + ")");
+                List<string> pages = [];
+                (ApprovalDecision? decision, List<string> lines) = await PasskeyTargetRun(client, passkeys, local, local, false, item => item.Enroll(), laptop, noPrf, pages: pages, newName: "nokey", approval: PrfMode.Missing);
+                check(decision is { Approved: true } && passkeys.All().Single(item => item.Name == "nokey") is { Admin: false, Slot: null }
+                    && TestState.Current(db)!.Version == version + 1 && pages.Count == 3 && !pages[0].Contains("\"prfKey\":", StringComparison.Ordinal),
+                    "prf enroll: a new convenience key needs no PRF from either passkey (" + decision?.Detail + ")");
+                using TestAuthenticator noPrfAdmin = TestAuthenticator.ES256(prf: false);
+                (decision, _) = await PasskeyTargetRun(client, passkeys, local, local, false, item => item.Enroll(), laptop, noPrfAdmin, true, newName: "noadmin");
+                check(decision is { Approved: false } && decision.Detail.Contains(PrfClient.CannotPrf, StringComparison.Ordinal)
+                    && passkeys.All().Count == 2 && TestState.Current(db)!.Version == version + 1, "prf enroll: a new admin without PRF is refused and nothing is stored (" + decision?.Detail + ")");
 
-                (decision, lines) = await PasskeyTargetRun(client, passkeys, local, local, false, item => item.Enroll(), laptop, phone, newName: "phone");
-                check(decision is { Approved: true } && passkeys.All().Count == 2 && TestState.Current(db)!.Version == version + 1, "prf enroll: a passkey with PRF is enrolled (" + decision?.Detail + "; " + string.Join(" | ", lines) + ")");
+                (decision, lines) = await PasskeyTargetRun(client, passkeys, local, local, false, item => item.Enroll(), laptop, phone, true, newName: "phone");
+                check(decision is { Approved: true } && passkeys.All().Count == 3 && TestState.Current(db)!.Version == version + 2, "prf enroll: an admin passkey with PRF is enrolled (" + decision?.Detail + "; " + string.Join(" | ", lines) + ")");
                 (byte[] masterLaptop, _) = Open(db, laptop);
                 (byte[] masterPhone, string hexPhone) = Open(db, phone);
                 check(masterLaptop.AsSpan().SequenceEqual(masterPhone) && JweCipher.Instance.Derive(hexPhone) == TestState.Current(db)!.Store, "prf enroll: the new key's slot opens the same master key and the vault");
-                check(TestState.Current(db)!.Keys.Select(key => key.Slot!.Salt).Distinct().Count() == 1, "prf enroll: every key's slot has the same salt (the store's)");
+                string salt = TestState.Current(db)!.Admins.Single(key => key.Name == "laptop").Slot!.Salt;
+                check(TestState.Current(db)!.Admins.All(key => key.Slot?.Salt == salt), "prf enroll: every admin key's slot has the same salt (the store's)");
                 var result = await RunWith(db, passkeys, store, (url, origin, rp) => TestState.Approve(client, url, origin, rp, phone));
                 check(result.Code == 0 && cipher.Decrypts == 1, "prf enroll: the new key approves a run and it decrypts (" + result.Code + " " + result.Err + ")");
                 var firstResult = await RunWith(db, passkeys, store, (url, origin, rp) => TestState.Approve(client, url, origin, rp, laptop));
                 check(firstResult.Code == 0 && cipher.Decrypts == 2, "prf enroll: both keys open the vault through the one eval salt (" + firstResult.Code + " " + firstResult.Err + ")");
                 string everything = string.Join("\n", lines) + (decision?.Detail ?? "") + StateDatabaseTests.AuditText(db.FilePath);
-                check(!Shows([everything], masterLaptop, laptop.Prf(Base64Url.DecodeFromChars(TestState.Current(db)!.Keys[0].Slot!.Salt))!, phone.Prf(Base64Url.DecodeFromChars(TestState.Current(db)!.Keys[1].Slot!.Salt))!), "prf enroll: the master key and the PRF outputs are in no message or audit entry");
+                check(!Shows([everything], masterLaptop, laptop.Prf(Base64Url.DecodeFromChars(salt))!, phone.Prf(Base64Url.DecodeFromChars(salt))!), "prf enroll: the master key and the PRF outputs are in no message or audit entry");
                 SecretValues.Clear(masterLaptop);
                 SecretValues.Clear(masterPhone);
 
                 // Enrolling when the approving admin releases nothing: no slot can be made, so nothing is added.
-                (decision, _) = await PasskeyTargetRun(client, passkeys, local, local, false, item => item.Enroll(), laptop, phone, newName: "again", approval: PrfMode.Missing);
-                check(decision is { Approved: false } && passkeys.All().Count == 2, "prf enroll: an approval that does not release the key adds nothing (" + decision?.Detail + ")");
+                using TestAuthenticator anotherAdmin = TestAuthenticator.ES256();
+                (decision, _) = await PasskeyTargetRun(client, passkeys, local, local, false, item => item.Enroll(), laptop, anotherAdmin, true, newName: "again", approval: PrfMode.Missing);
+                check(decision is { Approved: false } && passkeys.All().Count == 3 && TestState.Current(db)!.Version == version + 2,
+                    "prf enroll: no admin is added when the approving admin does not release the master key (" + decision?.Detail + ")");
             }
 
             // (6) The vault and the slots are signed: an edit is a failed verification (exit 4), nobody is asked and nothing is decrypted.
@@ -321,17 +308,17 @@ internal static partial class WebApprovalTests
                 (StateDatabase db, PasskeyStore passkeys, SecretStore store, CountingCipher cipher) = NewState();
                 string original = field(TestState.Current(db)!);
                 ManifestTests.Execute(db.FilePath, "UPDATE manifest SET text = replace(text, '" + original + "', '" + Flip(original) + "')");
-                FakeApprover asked = new(true, unlock: () => TestVault.Unlock(db, laptop));
+                FakeApprover asked = new(true);
                 StringWriter errors = new();
                 int code = await new RunCommand(new SecretStore(new StateDatabase(db.FilePath), cipher), asked, new StringWriter(), errors).ExecuteAsync(args, scripts);
                 check(!new StateDatabase(db.FilePath).TryCheck(out _) && code == RunCommand.StoreError && asked.Requests.Count == 0 && cipher.Decrypts == 0, "prf tamper: " + label + " fails verification: exit 4, nobody is asked, nothing is decrypted (" + code + " " + errors + ")");
             }
-            // (7) A run asks for the key release and offers nothing else.
+            // (7) A run outside the service offers no reuse.
             {
                 (StateDatabase db, _, SecretStore store, _) = NewState();
                 FakeApprover asked = new(false);
                 await new RunCommand(store, asked, new StringWriter(), new StringWriter()).ExecuteAsync(args, scripts);
-                check(asked.Requests.Count == 1 && asked.Requests[0].Reuse is null && asked.Requests[0].Unlock, "prf run: the request asks for the key release and offers no reuse");
+                check(asked.Requests.Count == 1 && asked.Requests[0].Reuse is null, "prf run: the request offers no reuse");
             }
         }
         finally

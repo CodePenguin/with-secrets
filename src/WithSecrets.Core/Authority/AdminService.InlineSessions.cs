@@ -25,6 +25,13 @@ public sealed partial class AdminService
     internal Task<(InlineLoginView? View, AdminStart Start, string? Ticket)> BeginInlineLoginAsync(string browserId, string origin, CancellationToken cancel)
     {
         string caller = AdminSessions.BrowserCaller(browserId);
+        if (IsRemote)
+        {
+            Refused(OpLogin, RemoteAdminRefusal, caller);
+
+            return Task.FromResult<(InlineLoginView?, AdminStart, string?)>((null, new AdminStart(null, RemoteAdminRefusal, 409), null));
+        }
+
         if (!TakeStart(caller)) return Task.FromResult<(InlineLoginView?, AdminStart, string?)>((null, new AdminStart(null, "too many requests; wait a minute", 429), null));
         if (_p.Lock.IsLocked) return Task.FromResult<(InlineLoginView?, AdminStart, string?)>((null, new AdminStart(null, "the authority is locked: unlock it first", 423), null));
 
@@ -80,7 +87,7 @@ public sealed partial class AdminService
         }
         VerifiedCredential? credential = result.Credential;
         Sessions.CompleteLogin(login.Code, result.Ok ? credential?.Name ?? result.Admin?.Signer ?? "(unnamed)" : null,
-            result.Ok ? null : result.Detail, credential is null ? SessionScope.Approval : SessionCapabilities.FromAdminFlag(credential.Admin));
+            result.Ok ? null : result.Detail, credential is null ? SessionScope.Approval : SessionCapabilities.FromAdminFlag(credential.Admin), credential);
         return result.Ok;
     }
 

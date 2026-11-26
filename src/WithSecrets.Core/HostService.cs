@@ -87,9 +87,6 @@ public sealed class HostServiceOptions
     /// </summary>
     internal AuthorityLock? Lock { get; init; }
 
-    /// <summary>How the unattended unlock material is protected on this platform (default: the platform's mechanism, or none with a clear message). Only used when the policy is unattended.</summary>
-    public IUnlockProtection? UnlockProtection { get; init; }
-
     /// <summary>The asker for the admin page's operations: given where to announce the link of the one-use passkey page. Default: admin passkeys of this user's state, on the approval settings' page.</summary>
     public Func<Action<string>, IAdminAsker>? AdminAskerFactory { get; init; }
 
@@ -111,9 +108,6 @@ public sealed class HostServiceOptions
     /// <summary>For tests.</summary>
     internal Action? AfterCommit { get; init; }
 
-    /// <summary>For tests: replaces the key provider (default: the passkey tap).</summary>
-    internal Func<IApprover, IStoreKeyProvider>? KeyProviderFactory { get; init; }
-
     /// <summary>
     /// Serve the machine listener (HTTPS: TLS 1.3 mutual authentication, HTTP/2 only) so that another machine's host service, for example the one in WSL, can ask this authority for launches. Null (the default): nothing listens
     /// beyond the loopback API. It serves nothing but the machine API: never the administration application, the API, the approval pages or a run (those stay on the loopback listener).
@@ -126,8 +120,8 @@ public sealed class HostServiceOptions
     /// <summary>Called (with the port) when the machine listener starts after the service did: at the first approval that makes the authority signing key. Null: nothing is told.</summary>
     public Action<int>? MachineListenerStarted { get; init; }
 
-    /// <summary>Registers host-bundled providers with the local authority's lock and review key.</summary>
-    public Action<ProviderRegistry, AuthorityLock, ReviewKeys>? ConfigureProviders { get; init; }
+    /// <summary>Registers host-bundled providers with the local authority's lock and unlocked keys.</summary>
+    public Action<ProviderRegistry, AuthorityLock, UnlockedKeys>? ConfigureProviders { get; init; }
 
     public Func<InteractiveProviderRefreshRequest, ISigningKey, CancellationToken, Task<IInteractiveProviderRefresh>>? LaunchInteractiveRefresh { get; init; }
 
@@ -173,7 +167,6 @@ public sealed class HostService : IDisposable
     private readonly SemaphoreSlim _identitySlots = new(4);
     private readonly CancellationTokenSource _stop = new();
     private Task _pump = Task.CompletedTask;
-    private string? _startupUnlockNote;
     private bool _endpointStarted;
 
     /// <summary>The most launches in progress at once; each holds an approval page and a thread.</summary>
@@ -191,10 +184,9 @@ public sealed class HostService : IDisposable
         TimeProvider authorityClock = options.Deployment.Clock ?? TimeProvider.System;
         Approvals = new ApprovalQueue(authorityClock, () => options.TimeLimit ?? ApprovalSettings.Load(options.State, out _).Timeout);
 
-        // The authority starts LOCKED. The lock gates the authority signing key, the authority's decisions and grants, this host's runs and the memory it holds for a grant.
-        // A host whose authority is remote has no authority lock of its own: the lock that matters is the authority's, enforced at its endpoint (a locked authority delivers nothing).
-        Lock = options.Lock ?? new AuthorityLock();
-        Review = options.Deployment.Remote is null ? new ReviewKeys() : null;
+        // In remote mode the unused local authority stays disabled. Runs depend only on the remote authority's lock.
+        Lock = (Authorization.IsRemote ? null : options.Lock) ?? new AuthorityLock();
+        Keys = Authorization.IsRemote ? null : new UnlockedKeys();
         options.Deployment.Keys.LockState = Lock;
         Authorization.LockState = Authorization.IsRemote ? null : Lock;
         if (options.Deployment.Remote is { } remoteAuthority)
@@ -203,15 +195,18 @@ public sealed class HostService : IDisposable
             remoteAuthority.LinkEnded += () => options.Gate.Invalidate();
         }
 
-        Lock.OnLock(reason =>
+        if (!Authorization.IsRemote)
         {
-            Review?.Close();
-            Volatile.Write(ref _ready, false);
-            Authorization.Discard(reason);
+            Lock.OnLock(reason =>
+            {
+                Keys?.Close();
+                Volatile.Write(ref _ready, false);
+                Authorization.Discard(reason);
 
-            // Every approval page that is open (a run, a grant) closes: nothing is decided, signed or granted after the lock.
-            CancelActive();
-        });
+                // Every approval page that is open (a run, a grant) closes: nothing is decided, signed or granted after the lock.
+                CancelActive();
+            });
+        }
         IApprovalVerifier verifier = options.Deployment.Authority.Verifier ?? new ManifestApprovalVerifier(options.State);
         Func<Action<string>, IAdminAsker> askers = options.AdminAskerFactory ?? (announce =>
         {
@@ -221,9 +216,19 @@ public sealed class HostService : IDisposable
             return new TargetAdminAsker(primary, local);
         });
         IPasskeyAdmin? passkeys = options.PasskeyAdminFactory?.Invoke() ?? (options.State is { } passkeyState
-            ? new StatePasskeyAdmin(passkeyState) { RekeyReview = Review is null ? null : RekeyReviewData }
+            ? new StatePasskeyAdmin(passkeyState)
+            {
+                RekeyReview = Keys is null ? null : RekeyReviewData,
+                AfterStoreChange = Keys is null ? null : () =>
+                {
+                    if (Keys.OpenedBy is { } opener && (!passkeyState.TryManifest(out Manifest? current, out _)
+                        || current is null || !current.IsAdmin(opener.Id) || (current.Store.Length != 0 && !Keys.CanUseStoreKey(current))))
+                    {
+                        Lock.Lock("the unlocked authority keys no longer match the store");
+                    }
+                },
+            }
             : null);
-        IUnlockProtection protection = options.UnlockProtection ?? UnlockProtections.ForThisPlatform();
         options.Deployment.Store.EndOpenInvitations(); // an invitation's key is only in memory, so one made before this start can no longer be answered
         Pairing = new PairingService(options.Deployment.Store, options.Deployment.IdentityCertificate, () => MachineUrl, options.Deployment.Clock);
         Func<IProofMethod?> approvalProof = () =>
@@ -233,8 +238,8 @@ public sealed class HostService : IDisposable
             (EnrollmentTarget proofPrimary, EnrollmentTarget proofLocal) = CommandWiring.Targets(options.State, proofSettings, _ => { }, null);
             return EnrollmentTarget.FirstThatCanProve(proofPrimary, proofLocal)?.Method;
         };
-        Admin = new AdminService(new AdminServiceParts(options.Deployment.Store, Lock, new AdminAuthorizer(options.Deployment.Store, verifier, options.Deployment.Clock), askers, protection, AfterUnlock, port,
-            options.Deployment.Keys, options.Deployment.Authority, options.Deployment.HostConfig, options.Deployment.Fingerprint, passkeys, options.Deployment.Clock, Pairing, Approvals, approvalProof, Review));
+        Admin = new AdminService(new AdminServiceParts(options.Deployment.Store, Lock, new AdminAuthorizer(options.Deployment.Store, verifier, options.Deployment.Clock), askers, AfterUnlock, port,
+            options.Deployment.Keys, options.Deployment.Authority, options.Deployment.HostConfig, options.Deployment.Fingerprint, passkeys, options.Deployment.Clock, Pairing, Approvals, approvalProof, Keys, Authorization.IsRemote));
 
         // The host's audit: events are signed with the machine key and committed to the outbox tables before a run decrypts anything; the uploader sends them on its own.
         HostAuditOutbox outbox = new(options.Deployment.Store.Database, options.Deployment.MachineKey, options.Deployment.Clock);
@@ -242,26 +247,28 @@ public sealed class HostService : IDisposable
 
         // The human commands' and the admin app's events (type admin) take the same road as a run's: signed with the machine key, committed to this outbox, sent by this uploader.
         options.State.Audit = new AdminAudit(() => Audit, options.State.Database);
+        ISecretSource runs = options.Store;
         if (options.Store is SecretStore secretStore)
         {
             Admin.Secrets = new SecretFlows(secretStore, options.State.Audit, approvalProof, options.Deployment.Clock ?? TimeProvider.System);
 
-            // The authority's runs read the native store plus every mounted secret (10.3); a name no mount selects is served by the native store as before. A host whose
-            // authority is remote has none of this: the adapters run at the authority.
-            if (Review is { } review)
+            // The authority's runs decrypt with the keys an administrator's unlock opened, inside this lock, and read the native store plus every mounted secret (10.3); a name no mount selects is served by the native store as before. A host whose authority is remote has none of this: it holds no keys and decrypts nothing.
+            if (Keys is { } unlocked)
             {
+                SecretStore unlocking = secretStore.Unlocking(unlocked, Lock);
                 ProviderRegistry registry = options.ProviderRegistry ?? new ProviderRegistry(authorityClock);
-                options.ConfigureProviders?.Invoke(registry, Lock, review);
-                Providers = new ProviderAuthority(secretStore, options.Deployment.Store, options.Deployment.Keys, registry, Audit, authorityClock);
+                options.ConfigureProviders?.Invoke(registry, Lock, unlocked);
+                Providers = new ProviderAuthority(unlocking, options.Deployment.Store, options.Deployment.Keys, registry, Audit, authorityClock);
                 Admin.Providers = new ProviderAdmin(Providers, options.State.Audit, options.SealOnePasswordConfiguration,
                     options.SealVaultConfiguration, options.LaunchInteractiveRefresh is not null);
                 if (options.LaunchInteractiveRefresh is { } launch)
                     Admin.InteractiveRefreshes = new(Providers, options.State.Audit, options.Deployment.Keys, authorityClock,
                         () => secretStore.Current().Manifest?.Store, launch);
+                runs = Providers.Source;
             }
         }
 
-        _secrets = Providers?.Source ?? options.Store;
+        _secrets = runs;
     }
 
     private readonly ISecretSource _secrets;
@@ -269,7 +276,8 @@ public sealed class HostService : IDisposable
     /// <summary>The authority's provider side (null for a host whose authority is remote, or a service built over a source that is not the native store).</summary>
     internal ProviderAuthority? Providers { get; }
 
-    public ReviewKeys? Review { get; }
+    /// <summary>The secret store key and review key an admin unlock opens; null on a host whose authority is remote (it holds no keys).</summary>
+    public UnlockedKeys? Keys { get; }
 
     internal string? RekeyReviewData(Microsoft.Data.Sqlite.SqliteConnection connection, Microsoft.Data.Sqlite.SqliteTransaction transaction, string oldReviewPrivate, string newReviewPublic)
     {
@@ -289,11 +297,11 @@ public sealed class HostService : IDisposable
 
             IReadOnlyList<Guid> providers = ProviderStore.RekeyConfigurations(connection, transaction, oldReviewPrivate, newReviewPublic);
             Lock.EnsureUnlocked();
-            if (Review is { } review)
+            if (Keys is { } unlocked)
             {
                 WithSecretsDatabase.AfterCommit(transaction, () =>
                 {
-                    review.Close();
+                    unlocked.Close();
                     if (Providers is { } authority && providers.Count != 0)
                     {
                         authority.ReloadConfigurationsAsync(providers).GetAwaiter().GetResult();
@@ -343,11 +351,8 @@ public sealed class HostService : IDisposable
     /// <summary>The authority's in-memory pending run-approval queue (never persisted).</summary>
     public ApprovalQueue Approvals { get; }
 
-    /// <summary>The authority's admin page and its operations (status, unlock, lock, unlock policy).</summary>
+    /// <summary>The authority's admin page and its operations (status, unlock, lock).</summary>
     public AdminService Admin { get; }
-
-    /// <summary>What the unattended start came to (null when the policy is manual): one line for the startup output.</summary>
-    public string? StartupUnlockNote => _startupUnlockNote;
 
     private void AfterUnlock()
     {
@@ -404,9 +409,7 @@ public sealed class HostService : IDisposable
                 LocalEndpoint endpoint = LocalEndpoint.Loopback(port, withIpv6);
                 WebApplication app = Build(options, endpoint);
                 service = new HostService(options, app, port);
-                // Locked by default; unattended unlock applies only when the administrator chose it. Before any request is accepted: check machine status, host name binding and security
-                // revision with the authority (it also vouches for the machine), which needs the authority unlocked.
-                service._startupUnlockNote = service.Lock.IsLocked ? UnattendedUnlock.TryUnlock(options.Deployment.Store, options.Deployment.Keys, service.Lock, options.UnlockProtection ?? UnlockProtections.ForThisPlatform()) : null;
+                // Before any request is accepted: check machine status, host name binding and security revision with the authority (it also vouches for the machine), which needs the authority unlocked.
                 if (service.Authorization.IsRemote || !service.Lock.IsLocked)
                 {
                     service.StartupReconcile();
@@ -701,8 +704,14 @@ public sealed class HostService : IDisposable
                 return;
             }
 
-            response.ContentType = "application/json";
-            await response.WriteAsync("{\"protocolVersion\":" + LaunchProtocol.Version + ",\"running\":true,\"locked\":" + (Lock.IsLocked ? "true" : "false") + ",\"adminPort\":" + Port.ToString(System.Globalization.CultureInfo.InvariantCulture) + "}");
+            await response.WriteAsJsonAsync(new
+            {
+                protocolVersion = LaunchProtocol.Version,
+                running = true,
+                locked = !Authorization.IsRemote && Lock.IsLocked,
+                remote = Authorization.IsRemote,
+                adminPort = Port,
+            }, options: null, contentType: "application/json");
 
             return;
         }
@@ -962,8 +971,6 @@ public sealed class HostService : IDisposable
             {
                 reconnected = true;
 
-                // Fail closed: with the authority out of reach (or refusing) the host keeps no store key it was lent.
-                Authorization.DropKey("the authority link failed");
                 if (error is RemoteRefusedException { Code: "machine-not-trusted" })
                 {
                     // The authority turns this machine away: whatever it was told, it is not trusted now. Nothing it holds may be used; the next check-in says what it is now.
@@ -981,10 +988,6 @@ public sealed class HostService : IDisposable
                 }
 
                 pause = TimeSpan.FromTicks(Math.Min(pause.Ticks * 2, Math.Max(TimeSpan.FromSeconds(10).Ticks, floor.Ticks)));
-            }
-            finally
-            {
-                Authorization.SweepKey();
             }
         }
     }
@@ -1020,11 +1023,6 @@ public sealed class HostService : IDisposable
                 catch (Exception error) when (error is not OperationCanceledException)
                 {
                     AppLog.Warn("applying an invalidation failed: {Type}", error.GetType().Name);
-                }
-                finally
-                {
-                    // Whatever the authority did or did not answer, a held key outlives neither its grant nor the authority's vouching.
-                    Authorization.SweepKey();
                 }
             }
         }
@@ -1367,7 +1365,7 @@ public sealed class HostService : IDisposable
 
             ReuseOffer reuse = ReuseSettings.Load(_options.State);
             IApprover approver = Authorization.IsRemote ? new RefusingApprover("approval happens at the authority") : _options.ApproverFactory?.Invoke(settings, announce) ?? LocalApprover(announce);
-            RunCommand run = new(_secrets, approver, stdout, stderr, reuse, keyProvider: _options.KeyProviderFactory?.Invoke(approver) ?? new HeldStoreKeyProvider(approver, Authorization, reuse.IsOn ? reuse.MaxMinutes : ReuseSettings.DefaultMaxMinutes));
+            RunCommand run = new(_secrets, approver, stdout, stderr, reuse);
             int code = await run.ExecuteAsync(launch, context, approve);
             stdout.Complete();
             stderr.Complete();
@@ -1411,6 +1409,7 @@ public sealed class HostService : IDisposable
             return;
         }
 
+        Keys?.Dispose();
         _stop.Cancel();
         try
         {
@@ -1430,7 +1429,6 @@ public sealed class HostService : IDisposable
 
         Admin.InteractiveRefreshes?.CancelAll();
         Providers?.Dispose();
-        Authorization.Keys.Dispose();
         CancellationTokenSource[] sources;
         lock (_lock)
         {
@@ -1452,7 +1450,6 @@ public sealed class HostService : IDisposable
 
         Admin.Secrets?.Dispose();
         Admin.ClearAuthorizations();
-        Review?.Dispose();
         Approvals.Dispose();
 
         try

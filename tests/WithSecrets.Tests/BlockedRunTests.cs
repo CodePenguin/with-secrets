@@ -65,6 +65,7 @@ internal static class BlockedRunTests
         }
 
         using HostService service = HostService.Start(new HostServiceOptions { CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), Lock = AuthorityLock.UnlockedForTests(), State = db, Store = store, Deployment = machine.Deployment, Port = 0, TimeLimit = limit, ApproverFactory = (settings, announce) => CommandWiring.RunApprover(db, settings, announce) });
+        SecretStoreTests.OpenKeys(service, db);
         using HttpClient browser = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(30) };
         StringWriter stdout = new();
         StringWriter stderr = new();

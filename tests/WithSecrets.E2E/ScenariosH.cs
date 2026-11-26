@@ -6,7 +6,7 @@ namespace WithSecrets.E2E;
 /// <summary>Page behaviours: Cancel and retry, resend after an aborted POST, a lost reply, the Continue fallback, the tap rule.</summary>
 internal static class ScenariosH
 {
-    private static async Task<(Rig Rig, Ctx C)> Fixture(Host host)
+    private static async Task<(Rig Rig, Ctx C, SpaApp App)> Fixture(Host host, S s)
     {
         Rig rig = new();
         Ctx c = await Ctx.NewAsync(host);
@@ -14,17 +14,21 @@ internal static class ScenariosH
         await Scenarios3.SeedSecret(rig, c);
         rig.WriteScript("show", "got");
 
-        return (rig, c);
+        SpaApp app = new(rig, unlocked: false, directApproval: true);
+        await Spa.Unlock(c, app, s);
+
+        return (rig, c, app);
     }
 
-    private static Cmd<int> ShowRun(Rig rig) => Cmds.Run(rig, "E2E_SECRET", Rig.ScriptCommand("show"));
+    private static Cmd<int> ShowRun(Rig rig, SpaApp app) => Cmds.Run(rig, "E2E_SECRET", Rig.ScriptCommand("show"), app, directApproval: true);
 
     /// <summary>Cancel while the passkey prompt is pending, a refused passkey (NotAllowedError), and a retry that works.</summary>
     public static async Task CancelAndRetry(Host host, S s)
     {
-        (Rig rig, Ctx c) = await Fixture(host);
+        (Rig rig, Ctx c, SpaApp app) = await Fixture(host, s);
         using Rig _ = rig;
-        using Cmd<int> run = ShowRun(rig);
+        using SpaApp _app = app;
+        using Cmd<int> run = ShowRun(rig, app);
         await c.Page.GotoAsync(await run.LinkAsync());
         await c.TextAppears("#request");
 
@@ -45,7 +49,7 @@ internal static class ScenariosH
 
         // 3. A prompt nobody answers: the tapped button reads Cancel; Cancel abandons the attempt and sends nothing.
         // (Chromium keeps the abandoned request open, so an immediate second tap says "A request is already pending": a hand test on real devices.)
-        using Cmd<int> second = ShowRun(rig);
+        using Cmd<int> second = ShowRun(rig, app);
         await c.Page.GotoAsync(await second.LinkAsync());
         await c.TextAppears("#request");
         await c.Presence(false);
@@ -66,9 +70,10 @@ internal static class ScenariosH
     /// <summary>The first proof POST is aborted before it reaches the program: the page shows Diagnostics, resends, and the run is approved once.</summary>
     public static async Task ResendAfterAbort(Host host, S s)
     {
-        (Rig rig, Ctx c) = await Fixture(host);
+        (Rig rig, Ctx c, SpaApp app) = await Fixture(host, s);
         using Rig _ = rig;
-        using Cmd<int> run = ShowRun(rig);
+        using SpaApp _app = app;
+        using Cmd<int> run = ShowRun(rig, app);
         c.Ignore("net::ERR");
         int posts = 0;
         string statusAtResend = "";
@@ -136,8 +141,9 @@ internal static class ScenariosH
     /// <summary>Navigation to the next step is blocked: the page shows the link and a Continue button; Continue then works.</summary>
     public static async Task ContinueFallback(Host host, S s)
     {
-        (Rig rig, Ctx c) = await Fixture(host);
+        (Rig rig, Ctx c, SpaApp app) = await Fixture(host, s);
         using Rig _ = rig;
+        using SpaApp _app = app;
         using Cmd<int> cmd = Cmds.Rotate(rig);
         string link = await cmd.LinkAsync();
         c.Ignore("net::ERR");
@@ -178,8 +184,9 @@ internal static class ScenariosH
     /// <summary>The tap rule: loading a page never starts a passkey prompt; only a tap does.</summary>
     public static async Task TapRule(Host host, S s)
     {
-        (Rig rig, Ctx c) = await Fixture(host);
+        (Rig rig, Ctx c, SpaApp app) = await Fixture(host, s);
         using Rig _ = rig;
+        using SpaApp _app = app;
         (int Credentials, long Signs) baseline = await c.AuthOps();
         async Task Idle(string what, Cmd<int> cmd)
         {
@@ -191,7 +198,7 @@ internal static class ScenariosH
             await cmd.Result.WaitAsync(TimeSpan.FromSeconds(30));
         }
 
-        using (Cmd<int> run = ShowRun(rig))
+        using (Cmd<int> run = ShowRun(rig, app))
         {
             await Idle("run approval", run);
         }

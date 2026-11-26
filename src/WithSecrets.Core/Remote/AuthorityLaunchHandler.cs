@@ -15,11 +15,10 @@ public interface IRemoteLaunchHandler
 
 /// <summary>
 /// The authority's side of a remote launch (architecture 10.2 as decided by the maintainer: the authority holds the store). For a request from an enrolled machine it (1) verifies the machine's
-/// signatures through the same <see cref="LocalAuthority" /> that serves local launches, (2) when a valid grant covers the request, uses the key the authority itself holds for that grant (or
-/// asks for the one tap that releases and holds it), else shows the ordinary approval page here with the passkey tap and PRF unlock, and records the decision exactly as a local approval is
-/// recorded, (3) decrypts only the named secrets, and (4) returns them as a signed <see cref="SecretsDelivery" />. Nothing decrypted outlives the call: the values are zeroed by the
-/// caller after the answer is sealed, the store key material released by the tap is zeroed here, and a held key (the maintainer's grant decision) is bound to its grant, scope, revisions and end,
-/// kept per machine in this process only, and dropped on a lock, a revoke, an end, a disable, a revision change and any failure. A request id is delivered at most once.
+/// signatures through the same <see cref="LocalAuthority" /> that serves local launches, (2) when a valid grant covers the request, reads what that grant rests on again, else shows the ordinary
+/// approval page here with its passkey tap and records the decision exactly as a local approval is recorded, (3) decrypts only the named secrets with the store key an administrator's unlock
+/// opened, inside the authority's lock, and (4) returns them as a signed <see cref="SecretsDelivery" />. Nothing decrypted outlives the call: the values are zeroed by the caller after the answer
+/// is sealed. A request id is delivered at most once.
 /// </summary>
 public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
 {
@@ -33,12 +32,7 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
     private readonly ApprovalQueue? _approvals;
     private readonly Lock _gate = new();
     private readonly HashSet<CancellationTokenSource> _open = [];
-    private readonly Dictionary<string, Held> _held = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTimeOffset> _delivered = new(StringComparer.Ordinal);
-    private readonly CancellationTokenSource _stop = new();
-    private readonly Task _sweeper;
-
-    private sealed record Held(StoreKeyHolder Holder, int SecurityRevision);
 
     private sealed class NoopDisposable : IDisposable
     {
@@ -47,7 +41,7 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
         public void Dispose() { }
     }
 
-    public AuthorityLaunchHandler(LocalAuthority authority, AuthorityKeyRing keys, AuthorityStore store, ISecretSource secrets, Func<Action<string>, IApprover> approver, AuthorityLock? lockState, TimeProvider? clock = null, TimeSpan? sweepInterval = null, ApprovalQueue? approvals = null)
+    public AuthorityLaunchHandler(LocalAuthority authority, AuthorityKeyRing keys, AuthorityStore store, ISecretSource secrets, Func<Action<string>, IApprover> approver, AuthorityLock? lockState, TimeProvider? clock = null, ApprovalQueue? approvals = null)
     {
         _authority = authority;
         _keys = keys;
@@ -57,42 +51,25 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
         _lock = lockState;
         _clock = clock ?? TimeProvider.System;
         _approvals = approvals;
-        lockState?.OnLock(reason =>
-        {
-            CancelAll();
-            DropKeys("authority locked");
-        });
-        _sweeper = Task.Run(() => SweepLoopAsync(sweepInterval ?? TimeSpan.FromSeconds(1)));
+        lockState?.OnLock(_ => CancelAll());
     }
 
     /// <summary>TEST ONLY: runs once an approval from the approval page is committed durably and before it is checked for delivery, with the session's token (a test ends the session here to put the end exactly between the two).</summary>
     internal static Action<CancellationToken>? AfterApprovalCommitted { get; set; }
 
+    /// <summary>TEST ONLY: runs once a grant was found to cover a request and before what it rests on is read again (a test changes the machine or the grant here).</summary>
+    internal static Action? BeforeGrantDelivery { get; set; }
+
+    /// <summary>TEST ONLY: runs after the last lock check of a delivery and immediately before the values are read.</summary>
+    internal static Action? BeforeDecrypt { get; set; }
+
+    /// <summary>TEST ONLY: runs with the delivery's copies of the values once they are made, before the delivery is signed and recorded.</summary>
+    internal static Action<IReadOnlyList<byte[]>>? AfterDecrypt { get; set; }
+
     /// <summary>How many secret reads this handler made for launches (for tests and status; a count only).</summary>
     public int Decryptions => Volatile.Read(ref _decryptions);
 
     private int _decryptions;
-
-    /// <summary>The number of machines for which a store key is held right now (for tests and status).</summary>
-    public int HeldKeys
-    {
-        get
-        {
-            lock (_gate)
-            {
-                return _held.Values.Count(item => item.Holder.IsHeld);
-            }
-        }
-    }
-
-    /// <summary>For tests: the held key bytes of a machine, to show they are zeroed after a drop.</summary>
-    internal byte[]? HeldBytes(string machineFingerprint)
-    {
-        lock (_gate)
-        {
-            return _held.TryGetValue(machineFingerprint, out Held? held) ? held.Holder.HeldBytes : null;
-        }
-    }
 
     /// <summary>Cancels every approval page that is open for a launch (the authority locked, or the handler stops).</summary>
     public void CancelAll()
@@ -112,80 +89,6 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
             catch (ObjectDisposedException)
             {
                 // Ended already.
-            }
-        }
-    }
-
-    private void DropKeys(string reason)
-    {
-        lock (_gate)
-        {
-            foreach (Held held in _held.Values)
-            {
-                held.Holder.Drop(reason);
-            }
-        }
-    }
-
-    private async Task SweepLoopAsync(TimeSpan interval)
-    {
-        using PeriodicTimer timer = new(interval);
-        try
-        {
-            while (await timer.WaitForNextTickAsync(_stop.Token))
-            {
-                try
-                {
-                    Sweep();
-                }
-                catch (Exception error) when (error is not OutOfMemoryException)
-                {
-                    AppLog.Warn("sweeping the held keys failed: {Type}", error.GetType().Name);
-                    DropKeys("sweep failed");
-                }
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            // Stopping.
-        }
-    }
-
-    /// <summary>Drops every held key whose justification is gone: the grant is not usable or changed, the machine is not Trusted or its security revision moved, or the grant ended.</summary>
-    public void Sweep()
-    {
-        KeyValuePair<string, Held>[] all;
-        lock (_gate)
-        {
-            all = [.. _held];
-        }
-
-        foreach ((string machineFingerprint, Held held) in all)
-        {
-            if (held.Holder.Binding is not { } bound)
-            {
-                continue;
-            }
-
-            MachineRecord? machine = _store.Find(machineFingerprint);
-            GrantRecord? grant = _store.FindGrant(bound.GrantId);
-            DateTimeOffset now = _clock.GetUtcNow();
-            if (_lock?.IsLocked == true)
-            {
-                held.Holder.Drop("authority locked");
-            }
-            else if (machine is not { Status: MachineStatus.Trusted } || machine.SecurityRevision != held.SecurityRevision)
-            {
-                held.Holder.Drop("machine changed");
-            }
-            else if (grant is null || !grant.IsUsable(now) || grant.Revision != bound.Revision || grant.ScopeKey != bound.ScopeKey
-                || _store.Sealer is not { } sealer || sealer.Problem(grant) is not null)
-            {
-                held.Holder.Drop("grant ended or changed");
-            }
-            else if (bound.Expires is { } end && now >= end)
-            {
-                held.Holder.Drop("grant expired");
             }
         }
     }
@@ -270,7 +173,7 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
             GrantResponse grant = await _authority.GrantAsync(message.Use, linked.Token);
             if (grant.Outcome == GrantOps.Granted && grant.GrantId.Length > 0 && grant.ScopeKey == message.Use.ScopeKey)
             {
-                return await ViaGrantAsync(machine, message, page, grant, announceLink, linked.Token, Deny);
+                return ViaGrant(machine, message, grant, linked.Token, Deny);
             }
 
             // Every approval is a grant: what the person signs on the page names what the once-only grant records (its scope, the machine's security revision, its contents).
@@ -294,7 +197,7 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
         Dictionary<string, string> sources = request.SecretNames.ToDictionary(name => name, _secrets.LabelFor, StringComparer.Ordinal);
         string name = string.IsNullOrWhiteSpace(machine.FriendlyName) ? machine.HostName : machine.FriendlyName!;
 
-        return new ApprovalRequest(request.Program, context.ResolvedProgram, context.Arguments, request.WorkingDirectory, request.Reason, request.SecretNames, null, request.Arguments, context.Links, context.FingerprintKey, sources, _secrets.NeedsUnlock, context.Script, context.ProgramFile,
+        return new ApprovalRequest(request.Program, context.ResolvedProgram, context.Arguments, request.WorkingDirectory, request.Reason, request.SecretNames, null, request.Arguments, context.Links, context.FingerprintKey, sources, context.Script, context.ProgramFile,
             [.. request.Mappings.Select(mapping => new SecretMapping(mapping.Variable, mapping.Secret))], request.EnvFiles, request.EnvNames, request.EnvVariables, request.InheritedEnvironment,
             Decrypts: [.. request.Encrypted.Select(item => new DecryptItem(item.Variable, item.File, item.PublicKey, DecryptItem.HashOf(item.Ciphertext)))],
             DotenvxInputDigest: request.DotenvxInputDigest,
@@ -366,7 +269,6 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
             return deny(ReasonCodes.RequestIdReused, machine.SecurityRevision);
         }
 
-        Unlock? unlock = null;
         try
         {
             AuthorityResponse response;
@@ -375,7 +277,6 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
                 response = await _authority.DecideAsync(message.Decide, cancel);
             }
 
-            unlock = decision?.Unlock;
             if (response.Decision != AuthorityDecision.Approved)
             {
                 return new LaunchAnswer(null, response);
@@ -416,66 +317,30 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
                 return deny(once.ReasonCode, once.SecurityRevision);
             }
 
-            return Deliver(message, SecretsDelivery.ViaPage, "", response.SecurityRevision, unlock, deny);
+            return Deliver(message, SecretsDelivery.ViaPage, "", response.SecurityRevision, deny, new AuditKeys(Key: once.Keys?.GrantApproved ?? decision.Credential));
         }
         finally
         {
-            unlock ??= decision?.Unlock;
-            unlock?.Dispose();
             // Remove only the entry this handler created if the durable authority decision failed or the offer was withdrawn.
             if (ownsQueueRegistration) _approvals?.Withdraw(request.RequestId);
         }
     }
 
-    private async Task<LaunchAnswer> ViaGrantAsync(MachineRecord machine, LaunchAuthorize message, ApprovalRequest page, GrantResponse grant, Action<string> announceLink, CancellationToken cancel, Func<string, int, LaunchAnswer> deny)
+    private LaunchAnswer ViaGrant(MachineRecord machine, LaunchAuthorize message, GrantResponse grant, CancellationToken cancel, Func<string, int, LaunchAnswer> deny)
     {
-        Unlock? unlock = null;
-        try
+        BeforeGrantDelivery?.Invoke();
+        if (cancel.IsCancellationRequested)
         {
-            if (_secrets.NeedsUnlock)
-            {
-                unlock = Borrow(machine.Fingerprint, grant);
-                if (unlock is null)
-                {
-                    // The first run under the grant: one tap releases the key, and the authority keeps it for the grant (the page says so, and the passkey signs that text).
-                    string keep = HeldStoreKeyProvider.KeepText(grant.GrantId, grant.Indefinite ? null : grant.GrantExpires);
-                    ApprovalRequest shown = page with { Heading = HeldStoreKeyProvider.KeepHeading, ExtraLines = [.. page.ExtraLines ?? [], keep] };
-                    ApprovalDecision tap = await Task.Run(() => _approver(Announce(announceLink)).Request(shown, cancel), cancel);
-                    if (!tap.Approved)
-                    {
-                        tap.Unlock?.Dispose();
-
-                        return deny(cancel.IsCancellationRequested ? ReasonCodes.Cancelled : tap.TimedOut ? ReasonCodes.ApprovalTimeout : ReasonCodes.UserDenied, grant.SecurityRevision);
-                    }
-
-                    unlock = tap.Unlock;
-                    if (unlock is not null)
-                    {
-                        Hold(machine.Fingerprint, grant, unlock);
-                    }
-                }
-            }
-
-            if (cancel.IsCancellationRequested)
-            {
-                return deny(ReasonCodes.Cancelled, grant.SecurityRevision);
-            }
-
-            // The decision above was made before a person tapped (which can take minutes): what it rested on is read again now, at the authority, before anything is decrypted. The machine must still
-            // be Trusted at the same security revision and the grant must be the same, active grant; otherwise nothing is decrypted and the key just held is dropped.
-            if (ChangedSince(machine.Fingerprint, grant))
-            {
-                DropKeys("authorization changed during the approval");
-
-                return deny(ReasonCodes.AuthorizationChanged, grant.SecurityRevision);
-            }
-
-            return Deliver(message, SecretsDelivery.ViaGrant, grant.GrantId, grant.SecurityRevision, unlock, deny);
+            return deny(ReasonCodes.Cancelled, grant.SecurityRevision);
         }
-        finally
+
+        // What the grant's decision rested on is read again now, at the authority, immediately before anything is decrypted. The machine must still be Trusted at the same security revision and the grant must be the same, active, sealed grant; otherwise nothing is decrypted.
+        if (ChangedSince(machine.Fingerprint, grant))
         {
-            unlock?.Dispose();
+            return deny(ReasonCodes.AuthorizationChanged, grant.SecurityRevision);
         }
+
+        return Deliver(message, SecretsDelivery.ViaGrant, grant.GrantId, grant.SecurityRevision, deny, grant.Keys);
     }
 
     private bool ChangedSince(string machineFingerprint, GrantResponse grant)
@@ -488,83 +353,55 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
             || _store.Sealer is not { } sealer || sealer.Problem(row) is not null;
     }
 
-    private Unlock? Borrow(string machineFingerprint, GrantResponse grant)
-    {
-        lock (_gate)
-        {
-            if (!_held.TryGetValue(machineFingerprint, out Held? held) || held.Holder.Binding is not { } bound)
-            {
-                return null;
-            }
-
-            DateTimeOffset? end = grant.Indefinite ? null : grant.GrantExpires;
-            if (bound.GrantId != grant.GrantId || bound.ScopeKey != grant.ScopeKey || bound.Revision != grant.GrantRevision || bound.Expires != end || held.SecurityRevision != grant.SecurityRevision)
-            {
-                held.Holder.Drop("grant changed");
-
-                return null;
-            }
-
-            return held.Holder.Borrow(grant.GrantId, grant.ScopeKey);
-        }
-    }
-
-    private void Hold(string machineFingerprint, GrantResponse grant, Unlock key)
-    {
-        lock (_gate)
-        {
-            if (!_held.TryGetValue(machineFingerprint, out Held? held))
-            {
-                _held[machineFingerprint] = held = new Held(new StoreKeyHolder(), grant.SecurityRevision);
-            }
-            else if (held.SecurityRevision != grant.SecurityRevision)
-            {
-                held.Holder.Dispose();
-                _held[machineFingerprint] = held = new Held(new StoreKeyHolder(), grant.SecurityRevision);
-            }
-
-            held.Holder.Hold(key, new HeldKeyBinding(grant.GrantId, grant.ScopeKey, grant.GrantRevision, grant.Indefinite ? null : grant.GrantExpires));
-        }
-    }
-
-    private LaunchAnswer Deliver(LaunchAuthorize message, string via, string grantId, int revision, Unlock? unlock, Func<string, int, LaunchAnswer> deny)
+    private LaunchAnswer Deliver(LaunchAuthorize message, string via, string grantId, int revision, Func<string, int, LaunchAnswer> deny, AuditKeys? attribution)
     {
         LaunchRequest request = message.Decide.Request;
 
-        // A lock since the approval ends it here: nothing is decrypted.
+        // A lock since the approval ends it here: nothing is decrypted (the store decrypts inside the lock as well, so a lock that begins now decrypts nothing either).
         _lock?.EnsureUnlocked();
+        BeforeDecrypt?.Invoke();
         SecretValues values;
         try
         {
             Interlocked.Increment(ref _decryptions);
-            values = request.SecretNames.Count == 0 ? new SecretValues(new Dictionary<string, byte[]>()) : _secrets.GetValues(request.SecretNames, unlock);
+            values = request.SecretNames.Count == 0 ? new SecretValues(new Dictionary<string, byte[]>()) : _secrets.GetValues(request.SecretNames);
         }
         catch (Exception error) when (error is not OutOfMemoryException and not AuthorityLockedException)
         {
             AppLog.Warn("the authority could not decrypt for a launch: {Type}", error.GetType().Name);
-            if (via == SecretsDelivery.ViaGrant)
-            {
-                DropKeys("decrypt failed");
-            }
 
             return deny(ReasonCodes.Internal, revision);
         }
 
-        // The delivery's byte arrays are the SecretValues' own: the caller zeroes them once the answer is sealed (see AuthorityEndpoint).
+        // The delivery's copies of the values belong to the answer once it is returned (the caller zeroes them after sealing, see AuthorityEndpoint); on any failure before that they are zeroed here.
+        List<DeliveredValue> list = [];
+        SecretsDelivery? delivery = null;
+        bool handedOver = false;
         try
         {
             DateTimeOffset issued = _clock.GetUtcNow();
-            List<DeliveredValue> list = [.. values.Names.Select(name => new DeliveredValue(name, [.. values.Bytes(name)]))];
-            SecretsDelivery delivery = SecretsDelivery.Create(request.RequestId, request.Digest(), message.Decide.MachineFingerprint, via, grantId, revision, issued, issued + SecretsDelivery.MaxLifetime, list, _keys.Current());
+            list = [.. values.Names.Select(name => new DeliveredValue(name, [.. values.Bytes(name)]))];
+            AfterDecrypt?.Invoke([.. list.Select(item => item.Value)]);
+            AuditKeys audit = (attribution ?? new AuditKeys()) with { Unlock = values.OpenedBy };
+            delivery = SecretsDelivery.Create(request.RequestId, request.Digest(), message.Decide.MachineFingerprint, via, grantId, revision, issued, issued + SecretsDelivery.MaxLifetime, list, _keys.Current(), audit);
 
             // Written before the answer can be sent: a restart cannot prepare values for this id again.
-            _store.RecordDeliveryEvent(message.Decide.MachineFingerprint, request.RequestId, "delivery-prepared", via == SecretsDelivery.ViaGrant ? "by grant " + grantId : "by the approval page");
+            _store.RecordDeliveryEvent(message.Decide.MachineFingerprint, request.RequestId, "delivery-prepared", via == SecretsDelivery.ViaGrant ? "by grant " + grantId : "by the approval page", audit.Key, (audit with { Key = null }).Metadata());
+            handedOver = true;
 
             return new LaunchAnswer(delivery, null);
         }
         finally
         {
             values.Dispose();
+            if (!handedOver)
+            {
+                delivery?.Zero();
+                foreach (DeliveredValue item in list)
+                {
+                    SecretValues.Clear(item.Value);
+                }
+            }
         }
     }
 
@@ -579,29 +416,6 @@ public sealed class AuthorityLaunchHandler : IRemoteLaunchHandler, IDisposable
             AppLog.Warn("a delivery outcome could not be recorded: {Type}", error.GetType().Name);
         }
     }
-    public void Dispose()
-    {
-        _stop.Cancel();
-        try
-        {
-            _sweeper.Wait(TimeSpan.FromSeconds(2));
-        }
-        catch (Exception error) when (error is AggregateException or OperationCanceledException)
-        {
-            // Stopped.
-        }
 
-        CancelAll();
-        lock (_gate)
-        {
-            foreach (Held held in _held.Values)
-            {
-                held.Holder.Dispose();
-            }
-
-            _held.Clear();
-        }
-
-        _stop.Dispose();
-    }
+    public void Dispose() => CancelAll();
 }

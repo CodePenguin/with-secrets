@@ -107,7 +107,7 @@ public sealed class AuthorityKeyRing(AuthorityStore store, Func<int, ISigningKey
     }
 
     /// <summary>Routine rotation: a new key, introduced by a transition that the current key signs. Hosts that pinned the current key accept the new one through that transition.</summary>
-    public KeyTransition Rotate(string actor)
+    public KeyTransition Rotate(string actor, VerifiedCredential? key = null)
     {
         LockState?.EnsureUnlocked();
         lock (_lock)
@@ -116,7 +116,7 @@ public sealed class AuthorityKeyRing(AuthorityStore store, Func<int, ISigningKey
             ISigningKey current = Open(active);
             ISigningKey next = (create ?? open)(active.Generation + 1);
             KeyTransition transition = KeyTransition.Create(current, next.PublicKey, _clock.GetUtcNow());
-            AuthorityKeyRecord recorded = store.RecordRotation(transition, actor, tx => GrantSeals.Reseal(tx, current.PublicKey, next));
+            AuthorityKeyRecord recorded = store.RecordRotation(transition, actor, tx => GrantSeals.Reseal(tx, current.PublicKey, next), key);
             Remember(recorded, next);
 
             return transition;
@@ -124,14 +124,14 @@ public sealed class AuthorityKeyRing(AuthorityStore store, Func<int, ISigningKey
     }
 
     /// <summary>Recovery after the current key was lost or must not be trusted: a new key with no transition. Hosts accept it only after an explicit administrator action (<see cref="HostConfigFile.Pin" />).</summary>
-    public AuthorityKeyRecord Recover(string actor)
+    public AuthorityKeyRecord Recover(string actor, VerifiedCredential? key = null)
     {
         LockState?.EnsureUnlocked();
         lock (_lock)
         {
             AuthorityKeyRecord active = store.ActiveKey() ?? CurrentRecord();
             ISigningKey next = (create ?? open)(active.Generation + 1);
-            AuthorityKeyRecord recorded = store.RecordRecovery(next.PublicKey, actor);
+            AuthorityKeyRecord recorded = store.RecordRecovery(next.PublicKey, actor, key);
             Remember(recorded, next);
 
             return recorded;
@@ -230,12 +230,14 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
         string digest = request.Digest();
         keys.Current();
         DateTimeOffset now = _clock.GetUtcNow();
-        AuthorityResponse Answer(AuthorityDecision decision, string reason, int revision)
+        AuthorityResponse Answer(AuthorityDecision decision, string reason, int revision) => AnswerWithKeys(decision, reason, revision, null);
+
+        AuthorityResponse AnswerWithKeys(AuthorityDecision decision, string reason, int revision, AuditKeys? auditKeys)
         {
             // Issued when it is signed (the approval may have taken minutes); the host checks the request's own expiry separately. The key is taken now, not at the start: a lock in between refuses.
             DateTimeOffset issued = _clock.GetUtcNow();
 
-            return AuthorityResponse.Create(request.RequestId, digest, envelope.MachineFingerprint, decision, reason, revision, issued, issued + ResponseLifetime, keys.Current());
+            return AuthorityResponse.Create(request.RequestId, digest, envelope.MachineFingerprint, decision, reason, revision, issued, issued + ResponseLifetime, keys.Current(), auditKeys);
         }
 
         // Who is asking: a known machine, proved by its signature over exactly these fields. Nothing is stored for a stranger.
@@ -309,10 +311,15 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
                     : string.IsNullOrWhiteSpace(answered.Actor) ? null : ApprovalSummary.Clean(answered.Actor));
             if (!answered.Approved)
             {
-                return new DecisionPlan(Answer(AuthorityDecision.Denied, answered.ReasonCode ?? (cancelled ? ReasonCodes.Cancelled : answered.TimedOut ? ReasonCodes.ApprovalTimeout : ReasonCodes.UserDenied), current.SecurityRevision), null, detail, Actor: actor);
+                AuditKeys? auditKeys = answered.Credential is null && answered.SessionKey is null
+                    ? null : new AuditKeys(Key: answered.Credential, SessionKey: answered.SessionKey);
+                string reason = answered.ReasonCode ?? (cancelled ? ReasonCodes.Cancelled : answered.TimedOut ? ReasonCodes.ApprovalTimeout : ReasonCodes.UserDenied);
+
+                return new DecisionPlan(AnswerWithKeys(AuthorityDecision.Denied, reason, current.SecurityRevision, auditKeys), null, detail,
+                    Actor: actor, Key: answered.Credential, Metadata: new AuditKeys(SessionKey: answered.SessionKey).Metadata());
             }
 
-            return new DecisionPlan(Answer(AuthorityDecision.Approved, ReasonCodes.Approved, current.SecurityRevision), null, detail, Actor: actor);
+            return new DecisionPlan(Answer(AuthorityDecision.Approved, ReasonCodes.Approved, current.SecurityRevision), null, detail, Actor: actor, Key: answered.Credential, Metadata: new AuditKeys(SessionKey: answered.SessionKey).Metadata());
         });
 
         // Notify the in-memory read model only after RecordDecision has committed its transaction.
@@ -395,7 +402,7 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
             return done.Fingerprint == machine.Fingerprint && done.RequestDigest == digest ? done.Response : Refuse(ReasonCodes.RequestIdReused, machine.SecurityRevision);
         }
 
-        if (envelope.Operation is not (GrantOps.Use or GrantOps.Approve))
+        if (envelope.Operation is not (GrantOps.Use or GrantOps.Recheck or GrantOps.Approve))
         {
             return Refuse(GrantReasons.BadOperation, machine.SecurityRevision);
         }
@@ -420,7 +427,7 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
             return Refuse(problem, machine.SecurityRevision);
         }
 
-        return envelope.Operation == GrantOps.Use ? UseGrant(envelope, machine, Answer, Refuse) : ApproveGrant(envelope, machine, cancel, Answer, Refuse);
+        return envelope.Operation is GrantOps.Use or GrantOps.Recheck ? UseGrant(envelope, machine, Answer, Refuse) : ApproveGrant(envelope, machine, cancel, Answer, Refuse);
     }
 
     private GrantResponse UseGrant(GrantEnvelope envelope, MachineRecord machine, Func<string, string, GrantInfo?, int, GrantResponse> answer, Func<string, int, GrantResponse> refuse)
@@ -465,7 +472,7 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
                 return new AuthorityStore.GrantPlan(answer(GrantOps.None, GrantReasons.Expired, null, current.SecurityRevision), null, "", false);
             }
 
-            return new AuthorityStore.GrantPlan(answer(GrantOps.Granted, GrantReasons.Ok, grant.Info, current.SecurityRevision), "grant-use", $"grant {grant.Id} revision {grant.Revision}", false);
+            return new AuthorityStore.GrantPlan(answer(GrantOps.Granted, GrantReasons.Ok, grant.Info, current.SecurityRevision), envelope.Operation == GrantOps.Recheck ? null : "grant-use", $"grant {grant.Id} revision {grant.Revision}", false, Metadata: grant.Info.Keys?.Metadata());
         }, replay: false);
     }
 
@@ -546,7 +553,7 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
                 ? tx.Create(machine.Fingerprint, envelope.ScopeKey, request.Program, request.WorkingDirectory, names, expires, current.SecurityRevision, approvedBy, stored, now)
                 : tx.SetExpiry(existing.Id, expires, approvedBy, stored, now, (request.Program, request.WorkingDirectory, names));
 
-            return new AuthorityStore.GrantPlan(answer(GrantOps.Granted, GrantReasons.Ok, grant.Info, current.SecurityRevision), existing is null ? "grant-created" : "grant-updated", $"grant {grant.Id}, {(answered.ReuseMinutes == ReuseOffer.Always ? "no end" : answered.ReuseMinutes + " min")}, by {approvedBy}");
+            return new AuthorityStore.GrantPlan(answer(GrantOps.Granted, GrantReasons.Ok, grant.Info, current.SecurityRevision), existing is null ? "grant-created" : "grant-updated", $"grant {grant.Id}, {(answered.ReuseMinutes == ReuseOffer.Always ? "no end" : answered.ReuseMinutes + " min")}, by {approvedBy}", Key: existing is null ? grant.ApprovedKey : grant.ChangedKey);
         }, sealRefusal: current => SealRefusal(refuse(GrantReasons.BadEvidence, current?.SecurityRevision ?? 0)));
     }
 
@@ -581,7 +588,7 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
         PlainEvidence stored = new(GrantEvidence.ApproveKind, evidence, 0);
         GrantRecord grant = tx.Create(fingerprint, scopeKey, request.Program, request.WorkingDirectory, GrantEvidence.NamesText(request.SecretNames), null, securityRevision, approvedBy, stored, now, GrantUsage.Once, consumed: true);
 
-        return new AuthorityStore.GrantPlan(answer(GrantOps.Recorded, GrantReasons.Ok, grant.Info, securityRevision), "grant-once-recorded", $"grant {grant.Id}, once, by {approvedBy}");
+        return new AuthorityStore.GrantPlan(answer(GrantOps.Recorded, GrantReasons.Ok, grant.Info, securityRevision), "grant-once-recorded", $"grant {grant.Id}, once, by {approvedBy}", Key: grant.ApprovedKey);
     }
 
     /// <summary>
@@ -751,7 +758,7 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
                 case GrantOps.Revoke:
                     GrantRecord revoked = tx.Revoke(grant.Id);
 
-                    return new AuthorityStore.GrantPlan(Answer(GrantOps.Revoked, GrantReasons.Ok, revoked.Info, revision), "grant-revoked", $"grant {grant.Id} by {command.Actor}");
+                    return new AuthorityStore.GrantPlan(Answer(GrantOps.Revoked, GrantReasons.Ok, revoked.Info, revision), "grant-revoked", $"grant {grant.Id} by {command.Actor}", Key: Verifier?.Verify(command.Evidence!, 0).Credential);
                 case GrantOps.Extend:
                     if (grant.IsExpired(now))
                     {
@@ -765,7 +772,7 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
 
                     GrantRecord extended = tx.SetExpiry(grant.Id, command.Indefinite ? null : command.NewEnd, command.Actor, adminEvidence, now);
 
-                    return new AuthorityStore.GrantPlan(Answer(GrantOps.Extended, GrantReasons.Ok, extended.Info, revision), "grant-extended", $"grant {grant.Id} by {command.Actor}; " + (command.Indefinite ? "indefinite" : $"{command.Minutes} min"));
+                    return new AuthorityStore.GrantPlan(Answer(GrantOps.Extended, GrantReasons.Ok, extended.Info, revision), "grant-extended", $"grant {grant.Id} by {command.Actor}; " + (command.Indefinite ? "indefinite" : $"{command.Minutes} min"), Key: extended.ChangedKey);
                 default:
                     if (!grant.IsExpired(now) || !command.Indefinite && command.NewEnd <= now)
                     {
@@ -774,7 +781,7 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
 
                     GrantRecord renewed = tx.SetExpiry(grant.Id, command.Indefinite ? null : command.NewEnd, command.Actor, adminEvidence, now);
 
-                    return new AuthorityStore.GrantPlan(Answer(GrantOps.Renewed, GrantReasons.Ok, renewed.Info, revision), "grant-renewed", $"grant {grant.Id} by {command.Actor}; " + (command.Indefinite ? "indefinite" : $"{command.Minutes} min"));
+                    return new AuthorityStore.GrantPlan(Answer(GrantOps.Renewed, GrantReasons.Ok, renewed.Info, revision), "grant-renewed", $"grant {grant.Id} by {command.Actor}; " + (command.Indefinite ? "indefinite" : $"{command.Minutes} min"), Key: renewed.ChangedKey);
             }
         }, sealRefusal: machine => SealRefusal(Answer(GrantOps.Denied, GrantReasons.BadEvidence, null, machine?.SecurityRevision ?? 0), store: false));
     }
@@ -828,7 +835,7 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
         GrantRecord made = tx.Create(original.Fingerprint, original.ScopeKey, original.Program, original.WorkingDirectory, original.SecretNames, command.Indefinite ? null : command.NewEnd, original.SecurityRevision, command.Actor, adminEvidence, now,
             GrantUsage.Reusable, replaces: original.Id, id: command.NewGrantId);
 
-        return new AuthorityStore.GrantPlan(answer(GrantOps.Replaced, GrantReasons.Ok, made.Info, machine.SecurityRevision), "grant-replaced", $"grant {made.Id} replaces {original.Id} by {command.Actor}; " + (command.Indefinite ? "indefinite" : $"{command.Minutes} min"));
+        return new AuthorityStore.GrantPlan(answer(GrantOps.Replaced, GrantReasons.Ok, made.Info, machine.SecurityRevision), "grant-replaced", $"grant {made.Id} replaces {original.Id} by {command.Actor}; " + (command.Indefinite ? "indefinite" : $"{command.Minutes} min"), Key: made.ChangedKey);
     }
 
     public Task<ReconcileResponse> ReconcileAsync(ReconcileEnvelope envelope, CancellationToken cancel = default)

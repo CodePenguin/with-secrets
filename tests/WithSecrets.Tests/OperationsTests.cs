@@ -153,7 +153,7 @@ internal static class OperationsTests
         check(machinesAfter.Count == machinesBefore.Count && machinesAfter.Zip(machinesBefore).All(pair => pair.First with { PublicKey = [] } == pair.Second with { PublicKey = [] } && pair.First.PublicKey.AsSpan().SequenceEqual(pair.Second.PublicKey)) && second.Store.Find(primary.Fingerprint) is { FriendlyName: "first machine", Status: MachineStatus.Trusted }, "restore: the machine records (status, revision, names) are as they were (" + string.Join(" | ", machinesAfter.Select(m => m.FriendlyName + m.Status + m.SecurityRevision)) + " vs " + string.Join(" | ", machinesBefore.Select(m => m.FriendlyName + m.Status + m.SecurityRevision)) + ")");
         check(second.Store.History(primary.Fingerprint).SequenceEqual(historyBefore), "restore: the machine's status history is as it was");
         check(GrantAuthorityTests.SameGrant(second.Store.Grants().Single(), grant) && GrantSeals.Verifies(grant, second.Store.ActiveKey()!.PublicKey), "restore: the grant is there and its seal verifies against the backed-up authority public key");
-        check(second.Store.Audit(1000).Take(auditBefore.Count).SequenceEqual(auditBefore), "restore: the authority's audit history is as it was");
+        check(SameAudit(second.Store.Audit(1000).Take(auditBefore.Count), auditBefore), "restore: the authority's audit history is as it was");
         (bool verifies, int transitions, int recoveries) = Chain(second.Store);
         check(verifies && transitions == 2 && recoveries == 0 && second.Store.AuthorityKeys().Zip(keysBefore).All(pair => pair.First.Fingerprint == pair.Second.Fingerprint && pair.First.How == pair.Second.How && pair.First.Status == pair.Second.Status && pair.First.PublicKey.AsSpan().SequenceEqual(pair.Second.PublicKey)), "restore: the key history is as it was and every transition (" + transitions + ") verifies against the key before it (" + verifies + " " + recoveries + " " + second.Store.AuthorityKeys().Count + " vs " + keysBefore.Count + ")");
 
@@ -207,7 +207,7 @@ internal static class OperationsTests
         HostServiceTests.Raw working = await HostServiceTests.Post(second.Rig, HostServiceTests.Req(second.Rig, Show(second)));
         check(working.Result is { Outcome: LaunchOutcome.Exited } && second.Secrets.Reads == 1 && working.Stdout.Contains("[REDACTED]", StringComparison.Ordinal), "restore: after the recovery and the approval the second machine runs a command (" + working.Status + " " + working.Result + ")");
         IReadOnlyList<AuditEntry> auditAfter = second.Store.Audit(1000);
-        check(auditAfter.Count > audits && auditAfter.Take(auditBefore.Count).SequenceEqual(auditBefore) && auditAfter.Any(entry => entry.Event == "authority-key-recovered") && auditAfter.Select(entry => entry.Id).SequenceEqual(auditAfter.Select(entry => entry.Id).Order()), "restore: the audit history continues after the restore (the old rows unchanged, new ones after them, ids rising)");
+        check(auditAfter.Count > audits && SameAudit(auditAfter.Take(auditBefore.Count), auditBefore) && auditAfter.Any(entry => entry.Event == "authority-key-recovered") && auditAfter.Select(entry => entry.Id).SequenceEqual(auditAfter.Select(entry => entry.Id).Order()), "restore: the audit history continues after the restore (the old rows unchanged, new ones after them, ids rising)");
         check(second.Store.Find(primary.Fingerprint) is { Status: MachineStatus.Trusted }, "restore: the first machine's record is still Trusted at the authority until an administrator disables it (disable it if the first machine is gone)");
     }
 
@@ -307,41 +307,41 @@ internal static class OperationsTests
     {
         using AdminApp app = new(root, approver: () => new FakeApprover(true));
         string program = Show(app);
-        byte[] material = [.. Enumerable.Range(1, 32).Select(item => (byte)(item * 11))];
         for (int cycle = 1; cycle <= 3; cycle++)
         {
             string label = "cycle " + cycle;
             AdminBrowser b = await app.SignedIn();
-            HostAuthorization host = app.Service.Authorization;
-            host.Keys.Hold(new Unlock("test-credential", material), new HeldKeyBinding("g" + cycle, "s", 1, null));
-            byte[] held = host.Keys.HeldBytes!;
+            UnlockedKeys keys = app.Service.Keys!;
+            if (!keys.IsOpen)
+            {
+                using Unlock release = TestVault.Unlock(app.State, app.Laptop)!;
+                keys.TryOpen(TestState.Current(app.State)!, release);
+            }
+
+            byte[] held = keys.HeldForTests.Store!;
             int audits = app.Store.Audit(1000).Count;
             Tapped locked = await b.OpAsync(AdminService.OpLock, app.Laptop);
-            check(locked.ApproveStatus == 200 && await HostServiceTests.WaitFor(() => app.Service.Lock.IsLocked && !host.Keys.IsHeld) && held.All(value => value == 0), label + ": a lock by tap drops the held key and zeroes its bytes");
+            check(locked.ApproveStatus == 200 && await HostServiceTests.WaitFor(() => app.Service.Lock.IsLocked && !keys.IsOpen) && held.All(value => value == 0), label + ": a lock by tap closes the unlocked keys and zeroes the store key");
             HostServiceTests.Raw whileLocked = await HostServiceTests.Post(app.Rig, HostServiceTests.Req(app.Rig, program));
             check(whileLocked.Status == HttpStatusCode.Locked && app.Secrets.Reads == cycle - 1, label + ": while locked a run is refused (423) and nothing is decrypted");
 
             // A restart is a lock too: memory only, so the service comes back locked with nothing held and no session.
             app.Start(false);
-            check(app.Service.Lock.IsLocked && app.Service.Admin.Sessions.Count == 0 && !app.Service.Authorization.Keys.IsHeld, label + ": after a restart the service is locked, holds no key and has no session");
+            check(app.Service.Lock.IsLocked && app.Service.Admin.Sessions.Count == 0 && !app.Service.Keys!.IsOpen, label + ": after a restart the service is locked, holds no key and has no session");
             AdminBrowser again = app.Browser();
             Tapped stranger = await again.OpAsync(AdminService.OpUnlock, app.Phone);
             check(stranger.ApproveStatus == 403 && app.Service.Lock.IsLocked, label + ": a key that is not an admin does not unlock");
             Tapped unlock = await again.OpAsync(AdminService.OpUnlock, app.Laptop);
-            check(unlock.MutationStatus == 200 && !app.Service.Lock.IsLocked && !app.Service.Authorization.Keys.IsHeld, label + ": an admin's fresh tap unlocks, and the unlock holds no key");
+            check(unlock.MutationStatus == 200 && !app.Service.Lock.IsLocked && app.Service.Keys!.IsOpen && app.Service.Keys.OpenedBy?.Id == TestAuthenticator.Encode(app.Laptop.CredentialId), label + ": an admin's fresh tap unlocks and opens the keys");
             HostServiceTests.Raw runs = await HostServiceTests.Post(app.Rig, HostServiceTests.Req(app.Rig, program));
             check(runs.Result is { Outcome: LaunchOutcome.Exited } && app.Secrets.Reads == cycle, label + ": after the unlock a run works");
             check(app.Store.Audit(1000).Count >= audits + 2 && app.Store.Audit(1000).Count(entry => entry.Event == "admin-operation") >= cycle * 2, label + ": the lock and the unlock are in the audit history");
-            Array.Clear(material);
-            material = [.. Enumerable.Range(1, 32).Select(item => (byte)(item * 11))];
         }
 
         // Stopping the service zeroes what it holds.
-        HostAuthorization last = app.Service.Authorization;
-        last.Keys.Hold(new Unlock("test-credential", material), new HeldKeyBinding("g-stop", "s", 1, null));
-        byte[] stopping = last.Keys.HeldBytes!;
+        (byte[]? stopping, byte[]? stoppingReview) = app.Service.Keys!.HeldForTests;
         app.Service.Dispose();
-        check(stopping.All(value => value == 0), "stop: stopping the service zeroes the key it held");
+        check(stopping is not null && stoppingReview is not null && stopping.All(value => value == 0) && stoppingReview.All(value => value == 0), "stop: stopping the service zeroes the keys it held");
     }
 
     // ---- a host name change, end to end ----
@@ -417,5 +417,12 @@ internal static class OperationsTests
         HostServiceTests.Raw dockerHost = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, "docker", args, [("API_TOKEN", "API_TOKEN")], env), tweak: message => message.Headers.Host = "host.docker.internal:" + rig.Service.Port);
         HostServiceTests.Raw bridge = await HostServiceTests.Post(rig, HostServiceTests.Req(rig, "docker", args, [("API_TOKEN", "API_TOKEN")], env), tweak: message => message.Headers.Host = "172.17.0.1:" + rig.Service.Port);
         check((int)dockerHost.Status == 421 && (int)bridge.Status == 421 && rig.Approvers.Count == asked, "docker: a request that names host.docker.internal or a bridge address is refused (421) and nothing is asked; a container client is not supported until that is decided");
+    }
+
+    private static bool SameAudit(IEnumerable<AuditEntry> actual, IEnumerable<AuditEntry> expected)
+    {
+        static string Text(AuditEntry entry) => (entry with { Metadata = null }) + string.Join(";", (entry.Metadata ?? new Dictionary<string, string>()).OrderBy(item => item.Key, StringComparer.Ordinal).Select(item => item.Key + "=" + item.Value));
+
+        return actual.Select(Text).SequenceEqual(expected.Select(Text));
     }
 }

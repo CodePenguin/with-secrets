@@ -5,6 +5,7 @@ using System.Net;
 using System.Net.WebSockets;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 
 using Microsoft.Data.Sqlite;
 
@@ -15,17 +16,16 @@ namespace WithSecrets.Tests;
 
 /// <summary>
 /// Phase 5b: the authority holds the store. A host service whose authority is remote (the WSL path: WSL host service -> encrypted machine connection -> Windows host service and authority) shows no page
-/// of its own, reads no store and holds no key: the approval page, the passkey tap, the PRF unlock and the decryption are the authority's, and the values come back only as a signed
+/// of its own, reads no store and holds no key: the approval page, the passkey tap and the decryption (with the keys the authority's admin unlock opened) are the authority's, and the values come back only as a signed
 /// <see cref="SecretsDelivery" /> inside the end-to-end encrypted session. The suite runs the real thing over real HTTP and WebSocket: an authority service with its machine endpoint (an embedded relay and the authority
 /// endpoint), host services with their own machine identities in remote mode, the approval page driven by a test authenticator, and checks where the values are and are not (canary scans of the relay's raw frames, the
-/// client's events, the logs, the audit trail and the host's disk), hostile and broken deliveries, a locked or vanished authority, grants without a page, the key held for a grant, and two independently enrolled hosts.
+/// client's events, the logs, the audit trail and the host's disk), hostile and broken deliveries, a locked or vanished authority, grants without a page (what a grant rests on read again before anything is decrypted), and two independently enrolled hosts.
 /// </summary>
 internal static class RemoteLaunchTests
 {
     private const string Real = "Remote-Canary-7e41c9d2b8a3";
     private const string RealOther = "Remote-Canary-OTHER-5d0a77e1";
     private const string Decoy = "DECOY-LOCAL-0f3b6c9a";
-    private const string KeyCanary = "KEY-CANARY-PRF-31c7a0d9e5b2f48a";
 
     private static readonly TimeSpan Fast = TimeSpan.FromMilliseconds(100);
 
@@ -111,7 +111,7 @@ internal static class RemoteLaunchTests
 
         public IReadOnlyList<ApprovalRequest> Pages => [.. Approvers.OfType<FakeApprover>().SelectMany(item => item.Requests)];
 
-        public static Auth Create(string root, Func<IApprover>? approver = null, bool realPage = false, bool needsUnlock = false, TimeSpan? idle = null, Dictionary<string, string>? values = null, bool queue = false)
+        public static Auth Create(string root, Func<IApprover>? approver = null, bool realPage = false, TimeSpan? idle = null, Dictionary<string, string>? values = null, bool queue = false)
         {
             Auth auth = new();
             string folder = Path.Combine(root, "auth-" + Guid.NewGuid().ToString("N")[..8], "state");
@@ -119,7 +119,7 @@ internal static class RemoteLaunchTests
             auth.State = StateDatabase.InFolder(folder);
             TestState.Add(auth.State, auth.Laptop.Record("localhost", "laptop") with { Created = DateTimeOffset.UtcNow }, withStore: true);
             TestSigner.Enroll(auth.State);
-            auth.Store = new HostServiceTests.CountingStore(values ?? new Dictionary<string, string> { ["TOKEN"] = Real, ["OTHER_KEY"] = RealOther }, needsUnlock);
+            auth.Store = new HostServiceTests.CountingStore(values ?? new Dictionary<string, string> { ["TOKEN"] = Real, ["OTHER_KEY"] = RealOther });
             if (approver is not null)
             {
                 auth.Maker = approver;
@@ -129,7 +129,6 @@ internal static class RemoteLaunchTests
             {
                 CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(),
                 Lock = auth.Gate,
-                UnlockProtection = new ReversibleProtection(),
                 State = auth.State,
                 Store = auth.Store,
                 Deployment = auth.Machine.Deployment,
@@ -231,7 +230,7 @@ internal static class RemoteLaunchTests
         public string Folder => Path.GetDirectoryName(Rig.State.FilePath)!;
 
         /// <summary>A host service in its own folder with its own machine identity, paired with the authority (public data in host.json), enrolled Pending and, unless told otherwise, approved by the administrator at the authority.</summary>
-        public static async Task<Host> Create(string root, Auth auth, string hostName, bool approve = true, bool startLocked = false)
+        public static async Task<Host> Create(string root, Auth auth, string hostName, bool approve = true)
         {
             Host host = new();
             host.Machine = new TestMachine(Path.Combine(root, "wsl-" + Guid.NewGuid().ToString("N")[..8], "state"), trusted: false, hostName: hostName);
@@ -243,11 +242,7 @@ internal static class RemoteLaunchTests
                 throw new InvalidOperationException("the host could not pair: " + paired.Message);
             }
 
-            RemoteAuthorityConfig config = host.Machine.Deployment.HostConfig.Load().Config!.Remote!;
-            host.Remote = new RemoteAuthority(config, host.Machine.Deployment.Tls, host.Machine.Deployment.HostConfig) { RetryPause = TimeSpan.FromMilliseconds(50), Retries = 6 };
-            host.Machine.Deployment.UseRemote(host.Remote);
-            host.Proxy = new LaunchProxy(host.Remote);
-            host.Machine.Deployment.Link = host.Proxy;
+            host.Connect();
 
             if (approve)
             {
@@ -258,9 +253,33 @@ internal static class RemoteLaunchTests
                 }
             }
 
-            host.Rig = new HostServiceTests.Rig(root, new Dictionary<string, string> { ["TOKEN"] = Decoy, ["OTHER_KEY"] = Decoy + "-2" }, machine: host.Machine, auditInterval: TimeSpan.FromMilliseconds(300), startLocked: startLocked);
+            host.Rig = new HostServiceTests.Rig(root, new Dictionary<string, string> { ["TOKEN"] = Decoy, ["OTHER_KEY"] = Decoy + "-2" }, machine: host.Machine, auditInterval: TimeSpan.FromMilliseconds(300), startLocked: true);
 
             return host;
+        }
+
+        private void Connect()
+        {
+            RemoteAuthorityConfig config = Machine.Deployment.HostConfig.Load().Config!.Remote!;
+            Remote = new RemoteAuthority(config, Machine.Deployment.Tls, Machine.Deployment.HostConfig) { RetryPause = TimeSpan.FromMilliseconds(50), Retries = 6 };
+            Machine.Deployment.UseRemote(Remote);
+            Proxy = new LaunchProxy(Remote);
+            Machine.Deployment.Link = Proxy;
+        }
+
+        public void Restart()
+        {
+            Rig.Service.Dispose();
+            Remote.Dispose();
+            Connect();
+            Rig.Service = HostService.Start(new HostServiceOptions
+            {
+                CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(),
+                State = Rig.State,
+                Store = Rig.Store,
+                Deployment = Machine.Deployment,
+                Port = 0,
+            });
         }
 
         public void Dispose() => Rig.Dispose();
@@ -385,7 +404,7 @@ internal static class RemoteLaunchTests
             await HostileAuthorityInput(check, root);
             await LockedAndGone(check, root);
             await Grants(check, root);
-            await ChangeDuringKeepTap(check, root);
+            await ChangeBeforeGrantDelivery(check, root);
             await RequestedRecordFailsClosed(check, root);
             await LockCancelsUncommitted(check, root);
             await GrantContents(check, root);
@@ -503,7 +522,7 @@ internal static class RemoteLaunchTests
         AppLog.Close();
         string logText = string.Join("\n", FilesUnder(logs).Select(file => File.ReadAllText(file))) + "\n" + capture.Everything();
         check(!Leaks(logText, Real) && !Leaks(logText, RealOther), "canary: the logs (file and events) carry no value");
-        check(!Leaks(audit, Real) && !DiskLeaks(host.Folder, Real, RealOther, KeyCanary), "canary: the host's disk (state, with-secrets.db, audit outbox, host.json) holds no value and no key");
+        check(!Leaks(audit, Real) && !DiskLeaks(host.Folder, Real, RealOther), "canary: the host's disk (state, with-secrets.db, audit outbox, host.json) holds no value and no key");
         AppLog.Configure(false);
 
         // One file per machine, and on a remote host it is only the outbox: the store, grants, machines, keys and providers are at the authority.
@@ -936,7 +955,6 @@ internal static class RemoteLaunchTests
             auth.Gate.Lock("test during the page");
             Ran ended = await running.WaitAsync(TimeSpan.FromSeconds(30));
             check(asked && !ended.Started && ended.Raw.Result is { Outcome: not LaunchOutcome.Exited } && auth.Store.Reads == 0 && open.Cancelled, "locked: locking the authority while its page is open cancels the page; nothing is decrypted and nothing runs (" + ended.Raw.Stderr.Trim() + ")");
-            check(auth.Service.Launches!.HeldKeys == 0, "locked: no key is held after the lock");
         }
 
         // The host's session breaks while the page is open: the host launches nothing, and the authority never decrypts for a session that is gone.
@@ -962,15 +980,52 @@ internal static class RemoteLaunchTests
             auth.Gate.Lock("test");
             await Task.Delay(500);
             Ran locked = await Run(host, "locked-exit");
-            check(!locked.Started && locked.Raw.Result is { ExitCode: LaunchClient.AuthorityLocked } && locked.Raw.Stderr.Contains("locked", StringComparison.Ordinal), "locked: a lock the authority reports at the handshake gives the locked outcome and exit code 8, not 'could not be asked' (" + locked.Raw.Result + " " + locked.Raw.Stderr.Trim() + ")");
+            check(!locked.Started && locked.Raw.Result is { ExitCode: LaunchClient.AuthorityLocked } && locked.Raw.Stderr.Contains("locked", StringComparison.Ordinal)
+                && !host.Rig.Service.Admin.Status().Locked, "locked: a lock the authority reports at the handshake gives exit code 8 without reporting a local lock (" + locked.Raw.Result + " " + locked.Raw.Stderr.Trim() + ")");
         }
 
-        // L2: in remote mode the host's own local authority (key ring, admin app) keeps a real lock that starts locked, and it does not gate a remote run.
+        // L2: a remote host has no lock ceremony. The unused local authority remains disabled.
         using (Auth auth = Auth.Create(root))
         {
-            using Host host = await Host.Create(root, auth, "wsl-own-lock", startLocked: true);
+            using Host host = await Host.Create(root, auth, "wsl-no-lock");
             Ran served = await Run(host, "own-lock");
-            check(host.Rig.Service.Lock.IsLocked && served.Started && served.Value == Real, "locked: a remote-mode host's own authority lock is a real lock that starts locked (no test seam), and the run is served by the remote authority anyway (" + host.Rig.Service.Lock.IsLocked + " " + served.Raw.Status + " " + served.Raw.Body.Trim() + ")");
+            HostService service = host.Rig.Service;
+            check(served.Started && served.Value == Real && host.Rig.Approvers.IsEmpty, "remote host: a run on a fresh host is served by its authority with no local tap (" + served.Raw.Stderr.Trim() + ")");
+
+            AdminBrowser browser = new(service, host.Rig.Http);
+            await browser.LoadAsync();
+            (_, string statusBody, _) = await browser.GetAsync("/api/v1/status");
+            using JsonDocument status = JsonDocument.Parse(statusBody);
+            (string commandStatus, int? adminPort) = await AdminAppCommand.StatusAsync(host.Rig.Http, service.Endpoint);
+            check(status.RootElement.TryGetProperty("remote", out JsonElement remote) && remote.ValueKind == JsonValueKind.True && !status.RootElement.GetProperty("locked").GetBoolean()
+                && commandStatus == "running, using a remote authority" && adminPort == service.Port,
+                "remote host: browser and command line status identify remote mode with no local lock");
+
+            foreach (string op in new[] { AdminService.OpLock, AdminService.OpUnlock })
+            {
+                foreach (string route in new[] { "/api/v1/authorizations", "/api/v1/authorizations/inline" })
+                {
+                    (int refusedStatus, string refusedBody) = await browser.PostAsync(route, AdminBrowser.AuthorizationBody(op));
+                    check(refusedStatus == 409 && refusedBody.Contains(AdminService.RemoteLockRefusal, StringComparison.Ordinal)
+                        && !refusedBody.Contains("\"link\"", StringComparison.Ordinal) && !refusedBody.Contains("\"proof\"", StringComparison.Ordinal),
+                        "remote host: " + op + " refuses at " + route + " before creating a passkey page or challenge");
+                }
+
+                (int mutationStatus, string mutationBody) = await browser.PostAsync("/api/v1/" + op, """{"authorization":"unused-id"}""");
+                check(mutationStatus == 409 && mutationBody.Contains(AdminService.RemoteLockRefusal, StringComparison.Ordinal), "remote host: " + op + " mutation reports the same refusal");
+            }
+
+            foreach (string route in new[] { "/api/v1/session", "/api/v1/session/inline" })
+            {
+                (int signIn, string signInBody) = await browser.PostAsync(route, "{}");
+                check(signIn == 409 && signInBody.Contains(AdminService.RemoteAdminRefusal, StringComparison.Ordinal) && !browser.HasSession,
+                    "remote host: local sign-in stays disabled at " + route);
+            }
+
+            check((await browser.GetAsync("/api/v1/machines")).Status == 401
+                && (await browser.PostAsync("/api/v1/authorizations", AdminBrowser.AuthorizationBody("set-audit-retention", ("days", "1")))).Status == 401,
+                "remote host: removing the lock ceremony leaves protected reads and changes unavailable without a session");
+
             bool refused = false;
             try
             {
@@ -981,7 +1036,7 @@ internal static class RemoteLaunchTests
                 refused = true;
             }
 
-            check(refused, "locked: the host's own local authority key cannot be used while that lock is locked");
+            check(refused, "remote host: the unused local authority signing key remains inaccessible");
         }
 
         // L3: a lock that arrives between the decryption and the send: the values are not sent, and the authority's record says so.
@@ -1082,10 +1137,16 @@ internal static class RemoteLaunchTests
         Ran ok = await Run(orphan, "before-gone");
         gone.Dispose();
         Ran away = await Run(orphan, "after-gone");
-        check(ok.Started && !away.Started && away.Raw.Result is { Outcome: not LaunchOutcome.Exited } && orphan.Rig.Store.Reads == 0, "disconnected: with the authority gone the host runs nothing and falls back to nothing local (" + away.Raw.Stderr.Trim() + ")");
+        check(ok.Started && !away.Started && away.Raw.Result is { Outcome: not LaunchOutcome.Exited } && orphan.Rig.Store.Reads == 0,
+            "disconnected: with the authority gone the host runs nothing and falls back to nothing local (" + away.Raw.Stderr.Trim() + ")");
+        orphan.Restart();
+        Ran afterRestart = await Run(orphan, "still-gone");
+        check(!afterRestart.Started && (afterRestart.Raw.Status == HttpStatusCode.ServiceUnavailable || afterRestart.Raw.Result is { Outcome: not LaunchOutcome.Exited })
+            && orphan.Rig.Store.Reads == 0 && !orphan.Rig.Service.Admin.Status().Locked,
+            "disconnected: a remote host that starts with the authority unreachable runs nothing, reads no local secrets and has no local lock");
     }
 
-    // ---------- grants and the held key ----------
+    // ---------- grants ----------
 
     private static ApprovalEvidence Sign(TestAuthenticator who, string text, int minutes)
     {
@@ -1113,7 +1174,7 @@ internal static class RemoteLaunchTests
 
     private static async Task Grants(Action<bool, string> check, string root)
     {
-        // A store that needs no unlock: a grant stands in for the page.
+        // A grant stands in for the page.
         using (Auth auth = Auth.Create(root))
         {
             using Host host = await Host.Create(root, auth, "wsl-grant");
@@ -1122,8 +1183,9 @@ internal static class RemoteLaunchTests
             check(viaPage.Started && viaPage.Value == Real && auth.Pages.Count == 1, "grant: the first run goes through the page");
             string grantId = await MakeGrant(auth, host, auth.Pages[0], 60, viaPage.Request);
             check(grantId.Length > 0, "grant: a grant for this machine and exactly this request exists at the authority");
+            host.Restart();
             Ran viaGrant = await Run(host, "grant", existing: program);
-            check(viaGrant.Started && viaGrant.Value == Real && auth.Pages.Count == 1 && auth.Store.Reads == 2, "grant: the next run is delivered with no page (approver asked " + auth.Pages.Count + " time), decrypted at the authority (" + viaGrant.Raw.Stderr.Trim() + ")");
+            check(viaGrant.Started && viaGrant.Value == Real && auth.Pages.Count == 1 && auth.Store.Reads == 2, "grant: after the remote host restarts the next run is delivered with no page (approver asked " + auth.Pages.Count + " time), decrypted at the authority (" + viaGrant.Raw.Stderr.Trim() + ")");
             check(host.Rig.Store.Reads == 0 && host.Rig.Approvers.IsEmpty, "grant: the host still reads no store and shows no page");
             bool recorded = await HostServiceTests.WaitFor(() => auth.Machine.Deployment.Store.AuditHistory(new AuditQuery(Limit: 100, Type: AuditEventTypes.Authorization)).Any(item => item.Event.Outcome == "granted"));
             check(recorded, "grant: the host's signed audit trail names the grant-authorized run");
@@ -1139,80 +1201,43 @@ internal static class RemoteLaunchTests
             Ran after = await Run(host, "grant", existing: program);
             check(!after.Started && auth.Store.Reads == reads, "grant: when the authority disables the machine the grant stops (nothing decrypted, nothing run)");
         }
-
-        // A store that needs the passkey's PRF: the first run under the grant needs one tap (the page says the key is kept), the authority holds the key for the grant, later runs need no tap.
-        Func<IApprover> maker = () => new FakeApprover(true, unlock: () => new Unlock("cred", Encoding.UTF8.GetBytes(KeyCanary)));
-        using (Auth auth = Auth.Create(root, maker, needsUnlock: true))
-        {
-            using Host host = await Host.Create(root, auth, "wsl-keyed");
-            (string program, _) = ValueScript(host.Rig, "keyed");
-            Ran page = await Run(host, "keyed", existing: program);
-            check(page.Started && page.Value == Real && auth.Store.KeyedReads == 1 && auth.Service.Launches!.HeldKeys == 0, "key: an ordinary page approval releases the key for one run and the authority holds nothing");
-            string grantId = await MakeGrant(auth, host, auth.Pages[0], 60, page.Request);
-            Ran tap = await Run(host, "keyed", existing: program);
-            ApprovalRequest tapPage = auth.Pages[^1];
-            check(grantId.Length > 0 && tap.Started && tapPage.Heading == HeldStoreKeyProvider.KeepHeading && (tapPage.ExtraLines ?? []).Any(line => line.StartsWith("KEY HELD", StringComparison.Ordinal)) && auth.Service.Launches!.HeldKeys == 1, "key: the first run under the grant takes one tap whose page says the authority keeps the key for the grant, and it holds it (grant " + grantId + ", started " + tap.Started + ", heading " + tapPage.Heading + ", held " + auth.Service.Launches!.HeldKeys + ", " + tap.Raw.Stderr.Trim() + ")");
-            int pages = auth.Pages.Count;
-            Ran silent = await Run(host, "keyed", existing: program);
-            check(silent.Started && silent.Value == Real && auth.Pages.Count == pages && auth.Store.KeyedReads == 3, "key: later runs under the grant need no tap and no page; the held key opens the store each time");
-            byte[]? held = auth.Service.Launches!.HeldBytes(host.Fingerprint);
-            check(held is not null && held.Any(b => b != 0), "key: the held key is in the authority's memory only");
-            check(!DiskLeaks(host.Folder, Real, KeyCanary), "key: it is never on the host's disk and");
-
-            auth.Machine.Deployment.Store.Disable(host.Fingerprint, "test admin");
-            auth.Service.Launches!.Sweep();
-            check(auth.Service.Launches!.HeldKeys == 0 && held!.All(b => b == 0), "key: when the authority disables the machine the held key is dropped and its bytes are zeroed");
-        }
-
-        using (Auth auth = Auth.Create(root, maker, needsUnlock: true))
-        {
-            using Host host = await Host.Create(root, auth, "wsl-keyed-lock");
-            (string program, _) = ValueScript(host.Rig, "keyed2");
-            Ran firstKeyed = await Run(host, "keyed2", existing: program);
-            await MakeGrant(auth, host, auth.Pages[0], 60, firstKeyed.Request);
-            await Run(host, "keyed2", existing: program);
-            byte[]? held = auth.Service.Launches!.HeldBytes(host.Fingerprint);
-            bool was = auth.Service.Launches!.HeldKeys == 1 && held!.Any(b => b != 0);
-            auth.Gate.Lock("test");
-            check(was && auth.Service.Launches!.HeldKeys == 0 && held!.All(b => b == 0), "key: locking the authority drops and zeroes the held key at once");
-        }
     }
 
-    // ---------- a change while the keep-the-key page is open ----------
+    // ---------- a change between the grant's decision and the decryption ----------
 
-    private sealed class HookedTap(Action during) : IApprover
-    {
-        public ApprovalDecision Request(ApprovalRequest request)
-        {
-            during();
-
-            return ApprovalDecision.Allow("approved", 0, null, new Unlock("cred", Encoding.UTF8.GetBytes(KeyCanary)));
-        }
-    }
-
-    private static async Task ChangeDuringKeepTap(Action<bool, string> check, string root)
+    private static async Task ChangeBeforeGrantDelivery(Action<bool, string> check, string root)
     {
         foreach (string change in new[] { "disable", "untrust", "revoke" })
         {
-            Action? during = null;
-            using Auth auth = Auth.Create(root, () => during is null ? new FakeApprover(true, unlock: () => new Unlock("cred", Encoding.UTF8.GetBytes(KeyCanary))) : new HookedTap(during), needsUnlock: true);
-            using Host host = await Host.Create(root, auth, "wsl-keep-" + change);
-            (string program, _) = ValueScript(host.Rig, "keep" + change);
-            Ran page = await Run(host, "keep" + change, existing: program);
+            using Auth auth = Auth.Create(root);
+            using Host host = await Host.Create(root, auth, "wsl-change-" + change);
+            (string program, _) = ValueScript(host.Rig, "change" + change);
+            Ran page = await Run(host, "change" + change, existing: program);
             string grantId = await MakeGrant(auth, host, auth.Pages[0], 60, page.Request);
-            check(page.Started && grantId.Length > 0, "keep tap (" + change + "): a run by page and a grant exist");
+            check(page.Started && grantId.Length > 0, "grant change (" + change + "): a run by page and a grant exist");
 
-            // The next run under the grant needs the keep-the-key tap; while that page is open the machine is disabled or untrusted, or the grant is revoked.
+            // The next run is covered by the grant; right after the authority found that and before it decrypts, the machine is disabled or untrusted, or the grant is revoked.
             AuthorityStore store = auth.Machine.Deployment.Store;
-            during = change switch
+            Action apply = change switch
             {
                 "disable" => () => store.Disable(host.Fingerprint, "test admin"),
                 "untrust" => () => store.Untrust(host.Fingerprint, "test admin"),
                 _ => () => Sql(auth, "UPDATE grants SET status = 'revoked' WHERE id = $id", ("$id", grantId)),
             };
             int reads = auth.Store.Reads;
-            Ran tapped = await Run(host, "keep" + change, existing: program);
-            check(!tapped.Started && auth.Store.Reads == reads && auth.Service.Launches!.HeldKeys == 0, "keep tap (" + change + "): the tap arrives after the change; nothing is decrypted, nothing is delivered or run, no key is kept");
+            int pages = auth.Pages.Count;
+            AuthorityLaunchHandler.BeforeGrantDelivery = apply;
+            Ran changed;
+            try
+            {
+                changed = await Run(host, "change" + change, existing: program);
+            }
+            finally
+            {
+                AuthorityLaunchHandler.BeforeGrantDelivery = null;
+            }
+
+            check(!changed.Started && auth.Store.Reads == reads && auth.Pages.Count == pages, "grant change (" + change + "): what the grant rests on is read again immediately before the decryption; nothing is decrypted, delivered or run (" + changed.Raw.Stderr.Trim() + ")");
         }
     }
 

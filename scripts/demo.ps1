@@ -3,7 +3,7 @@
     Runs every Playwright end-to-end scenario and records a browser video for each scenario.
 
 .DESCRIPTION
-    Uses the same isolated test rigs and real browser scenarios as the ordinary E2E runner.
+    Uses the same isolated test rigs and real browser scenarios as the ordinary E2E runner. The recordings include the admin unlock and approval with a convenience passkey.
     Videos, failure evidence and an HTML index are written under artifacts\demo by default.
     The default output is artifacts\demo\latest, which each run replaces: only the last demo is kept.
     An explicit output directory must be under artifacts\demo and empty: the script never overwrites

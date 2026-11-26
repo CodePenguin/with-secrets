@@ -21,16 +21,10 @@ public interface ISecretSource
     IReadOnlyList<string> ListNames();
 
     /// <summary>
-    /// True when the values can be opened only with what the approving passkey released (WebAuthn PRF, see <see cref="Unlock" />):
-    /// then every run is approved by a passkey tap.
+    /// Decrypts only the named values, with the store key an administrator's unlock opened (<see cref="UnlockedKeys" />). Called only after the run was authorized.
+    /// Throws when a name is missing, the source cannot be trusted, the authority is locked or the key is not open.
     /// </summary>
-    bool NeedsUnlock => false;
-
-    /// <summary>
-    /// Decrypts only the named values. <paramref name="unlock" /> is what the approving passkey released, or null when the
-    /// approval released nothing. Throws when a name is missing, the source cannot be trusted, or the key cannot be opened.
-    /// </summary>
-    SecretValues GetValues(IReadOnlyCollection<string> names, Unlock? unlock);
+    SecretValues GetValues(IReadOnlyCollection<string> names);
 }
 
 /// <summary>
@@ -52,6 +46,7 @@ public sealed class SecretValues : IDisposable
     }
 
     public IReadOnlyList<string> Names { get; }
+    internal VerifiedCredential? OpenedBy { get; init; }
 
     /// <summary>The value's bytes (not a copy). Valid until Dispose.</summary>
     public byte[] Bytes(string name)
@@ -111,16 +106,20 @@ public sealed class SecretStoreException(string message, Exception? inner = null
 /// manifest holds the store's public key and <see cref="Hash" /> of every ciphertext, because anyone with the public key can
 /// write a valid ciphertext: a row is used only when it matches its signed hash, and a row without a hash, or a hash without a
 /// row, is a store that failed verification. Every read checks every row's hash (no decrypt); <see cref="GetValues" /> then
-/// decrypts only the requested rows, with the private key opened from the manifest's vault by what an approving passkey released
-/// (WebAuthn PRF, see <see cref="KeyVault" />), held in memory for the call and passed as a parameter (never an
-/// environment variable or a file). Changes go through <see cref="TryApply" />: the rows and the new manifest (signed by an
-/// admin) are one transaction that re-checks the version it replaces.
+/// decrypts only the requested rows, with the private key an administrator's unlock opened (<paramref name="keys" />), used inside the authority's
+/// lock (<paramref name="lockState" />) and passed as a parameter (never an environment variable or a file). A store made without keys decrypts nothing.
+/// Changes go through <see cref="TryApply" />: the rows and the new manifest (signed by an admin) are one transaction that re-checks the version it replaces.
 /// </summary>
-public sealed class SecretStore(StateDatabase db, ISecretCipher? cipher = null) : ISecretSource
+public sealed class SecretStore(StateDatabase db, ISecretCipher? cipher = null, UnlockedKeys? keys = null, AuthorityLock? lockState = null) : ISecretSource
 {
     public const string GlobalLabel = "global";
 
+    private const string NoKeys = "the secret store key is not open here: an administrator unlocks the authority with an admin passkey, so nothing was decrypted";
+
     private readonly ISecretCipher _cipher = cipher ?? JweCipher.Instance;
+
+    /// <summary>The same store over the same database and cipher, decrypting with <paramref name="unlocked" /> while <paramref name="authority" /> is unlocked.</summary>
+    internal SecretStore Unlocking(UnlockedKeys unlocked, AuthorityLock authority) => new(db, _cipher, unlocked, authority);
 
     public string Label => GlobalLabel;
 
@@ -134,45 +133,52 @@ public sealed class SecretStore(StateDatabase db, ISecretCipher? cipher = null) 
 
     public IReadOnlyList<string> ListNames() => Verified((manifest, _, _) => (IReadOnlyList<string>)[.. manifest?.Secrets.Keys ?? []]);
 
-    /// <summary>The key to the values is released by the approving passkey at every run.</summary>
-    public bool NeedsUnlock => true;
+    /// <summary>
+    /// Decrypts only the named values with the unlocked store key, inside the authority's lock: a lock that has begun decrypts nothing, and the key is used once for the
+    /// whole call. The hex text of the key is a .NET string for the decrypt call and cannot be wiped.
+    /// </summary>
+    public SecretValues GetValues(IReadOnlyCollection<string> names)
+    {
+        (Manifest? current, Dictionary<string, string> picked) = ReadRows(names);
+
+        return WithStoreKey(current, privateKey => new SecretValues(DecryptRows(privateKey, picked)) { OpenedBy = OpenedBy });
+    }
 
     /// <summary>
-    /// Decrypts only the named values. <paramref name="unlock" /> is what the approving passkey released (WebAuthn PRF): it
-    /// opens that key's slot (the master key), which opens the vault (the store's private key). Without it, or when it opens
-    /// nothing, nothing is decrypted. The private key, the master key and the slot key are zeroed before this returns; the
-    /// hex text of the private key is a .NET string for the decrypt call and cannot be wiped.
+    /// The verified manifest and the ciphertexts of exactly <paramref name="names" />, read after every row was checked against its signed hash. Decrypts nothing.
+    /// Throws <see cref="SecretStoreException" /> when a name is not valid or not stored, or the store fails verification.
     /// </summary>
-    public SecretValues GetValues(IReadOnlyCollection<string> names, Unlock? unlock)
+    internal (Manifest? Manifest, Dictionary<string, string> Rows) ReadRows(IReadOnlyCollection<string> names)
     {
         if (names.Any(name => !SecretNames.IsValid(name)) || names.Distinct(StringComparer.Ordinal).Count() != names.Count)
         {
             throw new SecretStoreException("the secret names are not valid");
         }
 
-        // Only the requested rows are read for decryption, after every row was checked against its signed hash.
-        (Manifest? current, Dictionary<string, string> picked) = Verified((manifest, connection, transaction) =>
+        return Verified((manifest, connection, transaction) =>
         {
             Dictionary<string, string> rows = new(StringComparer.Ordinal);
             foreach (string name in names)
             {
-                rows[name] = WithSecretsDatabase.Scalar(connection!, transaction, "SELECT ciphertext FROM secrets WHERE name = $name", ("$name", name)) as string
+                rows[name] = (connection is null ? null : WithSecretsDatabase.Scalar(connection, transaction, "SELECT ciphertext FROM secrets WHERE name = $name", ("$name", name)) as string)
                     ?? throw new SecretStoreException(name + " is not in the store");
             }
 
             return (manifest, rows);
         });
+    }
 
-        string privateKey = OpenStoreKey(current, unlock);
-
+    /// <summary>The values of <paramref name="rows" /> decrypted with <paramref name="privateKey" />; on any failure every value made so far is zeroed and nothing is returned.</summary>
+    internal Dictionary<string, byte[]> DecryptRows(string privateKey, IReadOnlyDictionary<string, string> rows)
+    {
         Dictionary<string, byte[]> values = new(StringComparer.Ordinal);
         try
         {
-            foreach (string name in names)
+            foreach ((string name, string ciphertext) in rows)
             {
                 try
                 {
-                    values[name] = Encoding.UTF8.GetBytes(_cipher.Decrypt(privateKey, picked[name]));
+                    values[name] = Encoding.UTF8.GetBytes(_cipher.Decrypt(privateKey, ciphertext));
                 }
                 catch (Exception failure)
                 {
@@ -180,7 +186,7 @@ public sealed class SecretStore(StateDatabase db, ISecretCipher? cipher = null) 
                 }
             }
 
-            return new SecretValues(values);
+            return values;
         }
         catch
         {
@@ -194,34 +200,40 @@ public sealed class SecretStore(StateDatabase db, ISecretCipher? cipher = null) 
     }
 
     /// <summary>
-    /// The store's private key (hex text) opened from the vault of <paramref name="current" /> by what the approving passkey released. The master key and the
-    /// key bytes are zeroed before this returns; the hex string cannot be wiped. Throws <see cref="SecretStoreException" /> (saying nothing about why) when it cannot.
+    /// Runs <paramref name="use" /> with the unlocked store key of <paramref name="current" />, inside the authority's lock (see <see cref="AuthorityLock.UseWhileUnlocked" />).
+    /// Throws <see cref="AuthorityLockedException" /> while locked, and <see cref="SecretStoreException" /> when this store has no keys, there is no store yet, or the key is
+    /// not open or not the current one (<see cref="UnlockedKeys.UseStoreKey" />).
     /// </summary>
-    internal static string OpenStoreKey(Manifest? current, Unlock? unlock)
+    internal T WithStoreKey<T>(Manifest? current, Func<string, T> use)
     {
-        if (unlock is null || current is null)
+        if (keys is null || lockState is null || current is null || current.Store.Length == 0)
         {
-            throw new SecretStoreException("the approval did not release the secret store key (a passkey with PRF must approve), so nothing was decrypted");
+            throw new SecretStoreException(NoKeys);
         }
 
-        byte[]? master = null;
-        byte[]? keyBytes = null;
-        try
-        {
-            master = KeyVault.OpenMaster(current, unlock);
-            keyBytes = KeyVault.UnwrapVault(current.Vault, master, current.Store);
+        return lockState.UseWhileUnlocked(() => keys.UseStoreKey(current, use));
+    }
 
-            return Encoding.UTF8.GetString(keyBytes);
-        }
-        catch (Exception)
+    internal VerifiedCredential? OpenedBy => keys?.OpenedBy;
+
+    /// <summary>Runs <paramref name="use" /> inside the authority's lock without the store key (a call that decrypts nothing). Throws as <see cref="WithStoreKey" /> does when locked or when this store has no lock.</summary>
+    internal T WhileUnlocked<T>(Func<T> use) => lockState is null ? throw new SecretStoreException(NoKeys) : lockState.UseWhileUnlocked(use);
+
+    /// <summary>
+    /// Throws as <see cref="WithStoreKey" /> would, now, without using the key: a caller checks this before work that is useless without the key (a provider retrieval). The
+    /// decryption itself still runs through <see cref="WithStoreKey" />, which checks again.
+    /// </summary>
+    internal void EnsureStoreKey(Manifest? current)
+    {
+        if (keys is null || lockState is null || current is null || current.Store.Length == 0)
         {
-            // Nothing about why: not which key, not which input.
-            throw new SecretStoreException("the secret store key cannot be opened with this approval, so nothing was decrypted");
+            throw new SecretStoreException(NoKeys);
         }
-        finally
+
+        lockState.EnsureUnlocked();
+        if (!keys.CanUseStoreKey(current))
         {
-            SecretValues.Clear(master);
-            SecretValues.Clear(keyBytes);
+            throw new SecretStoreException(NoKeys);
         }
     }
 

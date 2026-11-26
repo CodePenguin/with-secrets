@@ -31,6 +31,9 @@ public static class GrantOps
     /// <summary>The host asks whether a grant applies to this request.</summary>
     public const string Use = "use";
 
+    /// <summary>The host asks again, immediately before it decrypts for a run it already found covered: answered as <see cref="Use" />, but a grant that still applies records no second use.</summary>
+    public const string Recheck = "recheck";
+
     /// <summary>The human approval (the page) that creates or updates a grant for a scope.</summary>
     public const string Approve = "approve";
 
@@ -157,7 +160,8 @@ public sealed record GrantResponse(
     DateTimeOffset Issued,
     DateTimeOffset Expires,
     string AuthorityKeyId,
-    byte[] Signature) : ISignedAnswer
+    byte[] Signature,
+    AuditKeys? Keys = null) : ISignedAnswer
 {
     public const string Domain = "with-secrets grant response v1\n";
 
@@ -198,6 +202,8 @@ public sealed record GrantResponse(
         ToolSettings.QuoteJson(text, CanonicalJson.Time(Expires));
         text.Append(",\"authorityKeyId\":");
         ToolSettings.QuoteJson(text, AuthorityKeyId);
+        text.Append(",\"auditKeys\":");
+        ToolSettings.QuoteJson(text, Keys?.Wire() ?? "null");
     }
 
     public string ToJson()
@@ -213,7 +219,7 @@ public sealed record GrantResponse(
     public static GrantResponse Create(string requestId, string requestDigest, string machineFingerprint, string operation, string outcome, string reasonCode, GrantInfo? grant, int securityRevision, DateTimeOffset issued, DateTimeOffset expires, ISigningKey key)
     {
         GrantResponse unsigned = new(LaunchProtocol.Version, requestId, requestDigest, machineFingerprint, operation, outcome, reasonCode, grant?.Id ?? "", grant?.ScopeKey ?? "", grant?.Revision ?? 0,
-            grant is { Expires: null }, grant?.Expires, securityRevision, issued, expires, KeyIdentity.Fingerprint(key.PublicKey), []);
+            grant is { Expires: null }, grant?.Expires, securityRevision, issued, expires, KeyIdentity.Fingerprint(key.PublicKey), [], grant?.Keys);
 
         return unsigned with { Signature = key.Sign(WireText.Bytes(Domain, unsigned.Canonical())) };
     }
@@ -235,12 +241,12 @@ public sealed record GrantResponse(
 
         using (doc)
         {
-            ContractReader reader = new(doc!.RootElement, "protocolVersion", "requestId", "requestDigest", "machineFingerprint", "operation", "outcome", "reasonCode", "grantId", "scopeKey", "grantRevision", "grantExpires", "securityRevision", "issued", "expires", "authorityKeyId", "signature");
+            ContractReader reader = new(doc!.RootElement, "protocolVersion", "requestId", "requestDigest", "machineFingerprint", "operation", "outcome", "reasonCode", "grantId", "scopeKey", "grantRevision", "grantExpires", "securityRevision", "issued", "expires", "authorityKeyId", "auditKeys", "signature");
             if (reader.Problem is not null || !reader.Int("protocolVersion", out int version) || !reader.Text("requestId", out string? id) || !reader.Text("requestDigest", out string? digest)
                 || !reader.Text("machineFingerprint", out string? machine) || !reader.Text("operation", out string? operation) || !reader.Text("outcome", out string? outcome) || !reader.Text("reasonCode", out string? reason)
                 || !reader.Text("grantId", out string? grantId) || !reader.Text("scopeKey", out string? scope) || !reader.Int("grantRevision", out int grantRevision) || !reader.Text("grantExpires", out string? ends)
                 || !reader.Int("securityRevision", out int revision) || !reader.Time("issued", out DateTimeOffset issued) || !reader.Time("expires", out DateTimeOffset expires)
-                || !reader.Text("authorityKeyId", out string? keyId) || !reader.Text("signature", out string? signature))
+                || !reader.Text("authorityKeyId", out string? keyId) || !reader.Text("auditKeys", out string? auditKeys) || !AuditKeys.TryRead(auditKeys, out AuditKeys? attribution) || !reader.Text("signature", out string? signature))
             {
                 error = reader.Problem;
 
@@ -270,7 +276,7 @@ public sealed record GrantResponse(
             }
 
             error = null;
-            response = new GrantResponse(version, id!, digest!, machine!, operation!, outcome!, reason!, grantId!, scope!, grantRevision, indefinite, grantExpires, revision, issued, expires, keyId!, bytes);
+            response = new GrantResponse(version, id!, digest!, machine!, operation!, outcome!, reason!, grantId!, scope!, grantRevision, indefinite, grantExpires, revision, issued, expires, keyId!, bytes, attribution);
 
             return true;
         }
@@ -278,17 +284,17 @@ public sealed record GrantResponse(
 }
 
 /// <summary>What the host needs to know about a grant: its id, scope key and revision, and when it ends (null: indefinite).</summary>
-public sealed record GrantInfo(string Id, string ScopeKey, int Revision, DateTimeOffset? Expires);
+public sealed record GrantInfo(string Id, string ScopeKey, int Revision, DateTimeOffset? Expires, AuditKeys? Keys = null);
 
 /// <summary>A grant as the authority stores it. <see cref="Status"/> is active, revoked, invalidated or consumed (a once-only grant after its run); <see cref="Expires"/> null is an indefinite grant.</summary>
-public sealed record GrantRecord(string Id, string Fingerprint, string ScopeKey, string Program, string WorkingDirectory, string SecretNames, DateTimeOffset Created, DateTimeOffset Updated, DateTimeOffset? Expires, int Revision, int SecurityRevision, string Status, string ApprovedBy, DateTimeOffset? Revoked, StoredEvidence? Evidence = null, string Usage = GrantUsage.Reusable, DateTimeOffset? Consumed = null, string? Replaces = null, string? ReviewKey = null, string? SealKey = null, byte[]? Seal = null)
+public sealed record GrantRecord(string Id, string Fingerprint, string ScopeKey, string Program, string WorkingDirectory, string SecretNames, DateTimeOffset Created, DateTimeOffset Updated, DateTimeOffset? Expires, int Revision, int SecurityRevision, string Status, string ApprovedBy, DateTimeOffset? Revoked, StoredEvidence? Evidence = null, string Usage = GrantUsage.Reusable, DateTimeOffset? Consumed = null, string? Replaces = null, string? ReviewKey = null, string? SealKey = null, byte[]? Seal = null, VerifiedCredential? ApprovedKey = null, VerifiedCredential? ChangedKey = null)
 {
     public bool IsExpired(DateTimeOffset now) => Expires is { } at && now >= at;
 
     /// <summary>True for an active, unexpired, reusable grant: a once-only row never authorizes a run, whatever its status says.</summary>
     public bool IsUsable(DateTimeOffset now) => Status == "active" && Usage == GrantUsage.Reusable && !IsExpired(now);
 
-    public GrantInfo Info => new(Id, ScopeKey, Revision, Expires);
+    public GrantInfo Info => new(Id, ScopeKey, Revision, Expires, new AuditKeys(GrantApproved: ApprovedKey, GrantChanged: ChangedKey));
 }
 
 /// <summary>A notification that a grant was revoked, for the machine it belongs to. The source of truth is the answer to a use request; this lets a connected host stop at once.</summary>

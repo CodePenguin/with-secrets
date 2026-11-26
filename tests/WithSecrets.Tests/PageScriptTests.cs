@@ -90,7 +90,7 @@ internal static class PageScriptTests
         foreach ((string name, string page) in new[] { ("enroll", enroll), ("config", firstRun) })
         {
             string script = Script(page);
-            check(script.Contains("extensions: { prf: { eval: { first: fromBase64Url(", StringComparison.Ordinal) && script.Contains("function sealPrf(", StringComparison.Ordinal) && script.Contains("with-secrets/v1 prf", StringComparison.Ordinal), "prf: the " + name + " script asks for the PRF output at create and has the sealing function");
+            check(script.Contains("prf: { eval: { first: fromBase64Url(", StringComparison.Ordinal) && script.Contains("function sealPrf(", StringComparison.Ordinal) && script.Contains("with-secrets/v1 prf", StringComparison.Ordinal), "prf: the " + name + " script asks for the PRF output at create and has the sealing function");
             check(script.IndexOf("sealPrf(output", StringComparison.Ordinal) > 0 && script.Contains(".prfCt = sealed.ct;", StringComparison.Ordinal) && !script.Contains("prfCt = output", StringComparison.Ordinal), "prf: the " + name + " script sends only the sealed output (prfEpk, prfIv, prfCt)");
             check(page.Contains(PrfClient.RequiredText, StringComparison.Ordinal), "prf: the " + name + " page says a PRF passkey is required");
         }

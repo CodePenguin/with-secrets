@@ -84,7 +84,7 @@ internal static partial class WebApprovalTests
                 link.TrySetResult(line);
             }, TimeSpan.Zero);
             RunArgs args = CliArgs.ParseRun(["--reason", "encrypted env test", "--", "./" + program], out _)!;
-            RunCommand command = new(store, approver, TextWriter.Synchronized(stdout), errors, environment: name => os?.Invoke(name));
+            RunCommand command = new(SecretStoreTests.Unlocked(store), approver, TextWriter.Synchronized(stdout), errors, environment: name => os?.Invoke(name));
             Task<int> running = Task.Run(() => command.ExecuteAsync(args, project, TestAudit.Sink(db)));
             string page = "";
             string reply = "";

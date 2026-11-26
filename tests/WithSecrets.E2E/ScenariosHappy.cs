@@ -24,7 +24,9 @@ internal static class ScenariosHappy
         // 1. First run: one page, one passkey, and the recovery code. This is the only step that is not in the administration app.
         await c.DemoCaptionAsync("1. First run: the command line prints a link. The person opens it to create the first passkey and the recovery code.");
         await Flows.Configure(rig, c, null, keepSetup: true);
-        using SpaApp app = new(rig, machineEndpoint: true, timeLimit: TimeSpan.FromSeconds(20));
+        using SpaApp app = new(rig, unlocked: false, machineEndpoint: true, timeLimit: TimeSpan.FromSeconds(20));
+        await c.DemoCaptionAsync("The admin passkey unlocks the authority and opens the store and Review keys.");
+        await Spa.Unlock(c, app, s);
 
         // 2. Sign in to the administration app with the passkey: one click.
         await c.DemoCaptionAsync("2. Open the administration app and sign in with the passkey: one click.");
@@ -68,20 +70,11 @@ internal static class ScenariosHappy
             await c.DemoCaptionAsync("The grant exists. The next run of that command will not ask.");
         }
 
-        // The first run under a grant releases the store key to the service: one more tap. After that, runs under the grant do not ask.
-        using (Cmd<int> first = Cmds.Run(rig, "E2E_SECRET", Rig.ScriptCommand("check"), app: app))
-        {
-            await c.DemoCaptionAsync("The first run under the grant asks for one tap, so that the service can keep the key for it.");
-            await Spa.OpenRequest(c, first, app, s);
-            await Spa.ApproveOnce(c);
-            int exit = await first.Result.WaitAsync(TimeSpan.FromSeconds(30));
-            s.Check(exit == 0 && first.Out.Text.Contains("script-value=" + StreamRedactor.Mask), "the first run under the grant runs after that tap");
-        }
-
+        // The existing grant covers the first matching run while the authority is unlocked.
         using (Cmd<int> again = Cmds.Run(rig, "E2E_SECRET", Rig.ScriptCommand("check"), app: app))
         {
             int exit = await again.Result.WaitAsync(TimeSpan.FromSeconds(30));
-            s.Check(exit == 0 && again.Out.Text.Contains("script-value=" + StreamRedactor.Mask), "later runs under the grant go through without asking (exit " + exit + ": " + again.Err.Text.Replace('\n', ' ') + ")");
+            s.Check(exit == 0 && again.Out.Text.Contains("script-value=" + StreamRedactor.Mask), "the first run under the grant goes through without asking (exit " + exit + ": " + again.Err.Text.Replace('\n', ' ') + ")");
             await c.DemoCaptionAsync("The next run of that command went through without asking.");
         }
 

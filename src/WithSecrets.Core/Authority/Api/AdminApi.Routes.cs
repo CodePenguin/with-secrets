@@ -64,10 +64,7 @@ internal sealed partial class AdminApi
     internal static readonly (string Operation, string[] Parameters)[] Operations =
     [
         (AdminService.OpUnlock, []),
-        (AdminService.OpReviewUnlock, []),
         (AdminService.OpLock, []),
-        (AdminService.OpPolicyManual, []),
-        (AdminService.OpPolicyUnattended, []),
         ("set-audit-retention", ["days"]),
         ("set-session-timeouts", ["idle", "absolute"]),
         ("authority-key-rotate", []),
@@ -124,11 +121,10 @@ internal sealed partial class AdminApi
         "absolute" => S.Int(1, AuthorityStore.MaxSessionAbsoluteMinutes, description: "Minutes after which a session ends however busy."),
         "minutes" => S.Int(1, ReuseSettings.MaxMinutes, description: "Minutes to add to (extend) or to grant from now (renew)."),
         "indefinite" => S.Bool("True for a grant with no end (instead of minutes)."),
-        "policy" => S.Str(values: [UnlockPolicies.Manual, UnlockPolicies.Unattended], description: "The unlock mode."),
         _ => throw new InvalidOperationException("unknown parameter " + name),
     };
 
-    private static readonly string[] RequiredParameters = ["days", "idle", "absolute", "confirm", "policy", "type", "config", "max-stale-seconds", "revision", "instance", "kind", "path", "base"];
+    private static readonly string[] RequiredParameters = ["days", "idle", "absolute", "confirm", "type", "config", "max-stale-seconds", "revision", "instance", "kind", "path", "base"];
 
     /// <summary>A mutation route: the body names the parameters of the operation (those not in the path) and carries the authorization id.</summary>
     private ApiRoute Mutation(string method, string template, string operation, string id, string summary, string tag, params string[] body)
@@ -139,7 +135,7 @@ internal sealed partial class AdminApi
         members.AddRange(body.Select(name => (name, ParameterSchema(name))));
         JsonObject request = S.Obj(members, members.Select(item => item.Item1).Where(name => name != "authorization" && !required.Contains(name)));
 
-        return new ApiRoute(method, Prefix + template, id, summary, tag, ApiAccess.Mutation, 200, "MutationResponse", request, [], operation == "" ? null : operation,
+        return new ApiRoute(method, Prefix + template, id, summary, tag, ApiAccess.Mutation, 200, "MutationResponse", request, [], operation,
             call => AdminService.IsProviderOperation(operation) && admin.Providers is null ? Task.FromResult(ProvidersUnavailable()) : MutateAsync(call, operation, pathParams),
             operation is "passkey-enroll" or "passkey-unenroll" or "store-key-rotate" ? ["202"] : null,
             BodyLimit: body.Contains("config") ? ConfigurationBodyLimit : 0);
@@ -170,16 +166,15 @@ internal sealed partial class AdminApi
     [
         ("flowId", S.Str(max: 64, min: 8)),
         ("proof", ApprovalAssertionSchema()),
-        ("prf", ApprovalPrfSchema()),
         ("minutes", S.Int(min: 0, max: ReuseOffer.Always)),
-    ], ["prf", "minutes"]);
+    ], ["minutes"]);
 
     private IReadOnlyList<ApiRoute> BuildRoutes()
     {
         List<ApiRoute> routes =
         [
             new("GET", Prefix + "/openapi.json", "getOpenApi", "The OpenAPI 3.1 document of this API (public; it carries no secret).", "meta", ApiAccess.Public, 200, null, null, [], null, _ => Task.FromResult(new ApiResult(200, null))),
-            new("GET", Prefix + "/status", "getStatus", "Whether the service is running, locked or unlocked, the unlock mode and the versions (public).", "status", ApiAccess.Public, 200, "Status", null, [], null, _ => Task.FromResult(new ApiResult(200, admin.StatusView()))),
+            new("GET", Prefix + "/status", "getStatus", "Whether the service is running, whether it uses a remote authority, the local authority's lock state and the versions (public).", "status", ApiAccess.Public, 200, "Status", null, [], null, _ => Task.FromResult(new ApiResult(200, admin.StatusView()))),
             new("POST", Prefix + "/browser", "startBrowser", "Make this browser's pre-session cookie and give its anti-forgery value (once, in this answer: keep it in the page and send it as X-Admin-Token). Needed before a sign-in or an unlock. Changes nothing in the authority.", "session", ApiAccess.Open, 201, "Browser", S.Obj([]), [], null, StartBrowserAsync),
             new("GET", Prefix + "/session", "getSession", "Who is signed in (a read-only session) and how a sign-in in progress stands. Read-only: it claims nothing and sets no cookie; a session is recognized only with its cookie AND its own secret (X-Admin-Token).", "session", ApiAccess.Owner, 200, "Session", null, [], null, GetSessionAsync),
             new("POST", Prefix + "/session", "startSession", "Start a sign-in: answers the link of the one-use passkey page whose tap (user verification) starts a read-only session for this browser. Then GET /session until the login is ready, then POST /session/claim.", "session", ApiAccess.Login, 202, "LoginStarted", S.Obj([]), [], null, StartSessionAsync),
@@ -208,11 +203,11 @@ internal sealed partial class AdminApi
             new("GET", Prefix + "/machines/{fingerprint}", "getMachine", "One machine, by its fingerprint or an unambiguous start of it (read-only session).", "machines", ApiAccess.Read, 200, "Machine", null, [], null, GetMachineAsync),
             new("GET", Prefix + "/grants", "listGrants", "The grants and what can be done to each (read-only session).", "grants", ApiAccess.Read, 200, "GrantList", null, [], null, _ => Task.FromResult(new ApiResult(200, new { items = admin.GrantsView() }))),
             new("GET", Prefix + "/grants/{id}", "getGrant", "One grant, by its id or an unambiguous start of it (read-only session).", "grants", ApiAccess.Read, 200, "Grant", null, [], null, GetGrantAsync),
-            new("GET", Prefix + "/grants/{id}/review", "getGrantReview", "The signed approval text of a grant, available while review is open (state open, locked or none); an approval-only session gets 403 admin-required.", "grants", ApiAccess.Read, 200, "GrantReview", null, [], null, GetGrantReviewAsync),
+            new("GET", Prefix + "/grants/{id}/review", "getGrantReview", "The signed approval text of a grant, available while the authority is unlocked, which opens review (state open, locked or none).", "grants", ApiAccess.Read, 200, "GrantReview", null, [], null, GetGrantReviewAsync),
             new("GET", Prefix + "/audit/events", "searchAuditEvents", "Search the host events the authority holds (authorization, launch and execution outcomes). Every filter is optional.", "audit", ApiAccess.Read, 200, "AuditEventList", null, AuditQueries(), null, AuditEventsAsync),
             new("GET", Prefix + "/audit/changes", "searchAuditChanges", "Search the authority's own audit history (administrator operations, machine and grant changes). Filters: machine, since, until, text, last.", "audit", ApiAccess.Read, 200, "AuditChangeList", null, AuditQueries(), null, AuditChangesAsync),
             new("GET", Prefix + "/audit/gaps", "listAuditGaps", "The open holes in a machine's audit numbering. Filter: machine.", "audit", ApiAccess.Read, 200, "AuditGapList", null, [new ApiQuery("machine", S.Str(max: 80), "A machine's fingerprint or the start of it.")], null, AuditGapsAsync),
-            new("GET", Prefix + "/settings", "getSettings", "Audit retention, the unlock mode, the session timeouts and the authority key in use (read-only session).", "settings", ApiAccess.Read, 200, "Settings", null, [], null, _ => Task.FromResult(new ApiResult(200, admin.SettingsView()))),
+            new("GET", Prefix + "/settings", "getSettings", "Audit retention, the session timeouts and the authority key in use (read-only session).", "settings", ApiAccess.Read, 200, "Settings", null, [], null, _ => Task.FromResult(new ApiResult(200, admin.SettingsView()))),
             new("GET", Prefix + "/pairing/invitations", "listPairingInvitations", "The pairing invitations by status only (pending, consumed, expired or revoked); never a code or a bundle (read-only session).", "pairing", ApiAccess.Read, 200, "InvitationList", null, [], null, _ => Task.FromResult(new ApiResult(200, new { items = admin.InvitationsView() }))),
             new("GET", Prefix + "/passkeys", "listPasskeys", "The enrolled passkeys (names and kinds; no key material).", "passkeys", ApiAccess.Read, 200, "Passkeys", null, [], null, _ => Task.FromResult(new ApiResult(200, admin.PasskeysView()))),
             .. ProviderRoutes(),
@@ -221,10 +216,8 @@ internal sealed partial class AdminApi
             new("POST", Prefix + "/authorizations/{id}/proof", "submitInlineAuthorizationProof", "Verify the assertion for this exact pending operation and apply it once when valid.", "authorizations", ApiAccess.Authorize, 200, "Done", S.Obj([("proof", S.Str(max: 12000)), ("prf", ApprovalPrfSchema())], ["prf"]), [], null, SubmitInlineAuthorizationProofAsync),
             new("GET", Prefix + "/authorizations/{id}", "getAuthorization", "Where an authorization stands (pending, verified, refused, consumed or expired) and, once its tap was verified, how the change it authorized came out (`result`: the service applies it at the tap, so this is readable after a reload or from another tab; a new invitation's bundle is given once, when collect=invitation is asked for or by the first retry of the mutation). Only for the caller it was made for (its session, or for the unlock its browser).", "authorizations", ApiAccess.Owner, 200, "Authorization", null, [new ApiQuery("collect", S.Str(values: ["invitation"]), "Give the bundle of a new invitation in this answer (once; it is never given again).")], null, GetAuthorizationAsync),
             new("DELETE", Prefix + "/authorizations/{id}", "cancelAuthorization", "Cancel an authorization whose passkey tap has not been made: a tap on its page afterwards changes nothing. Only for the caller it was made for. 409 when the tap was already judged (its change was made or refused and cannot be taken back).", "authorizations", ApiAccess.Owner, 200, "Done", null, [], null, CancelAuthorizationAsync),
-            Mutation("POST", "/unlock", AdminService.OpUnlock, "unlockAuthority", "Unlock the authority (needs no session, but its own authorization).", "authority"),
-            Mutation("POST", "/review/unlock", AdminService.OpReviewUnlock, "unlockReview", "Open approved command text for review with an administrator passkey's key release.", "authority"),
-            Mutation("POST", "/lock", AdminService.OpLock, "lockAuthority", "Lock the authority now: secret requests stop, held keys are discarded and every session and authorization ends.", "authority"),
-            Mutation("PUT", "/settings/unlock-policy", "", "setUnlockPolicy", "Set the unlock mode (manual, or the weaker unattended mode).", "settings", "policy"),
+            Mutation("POST", "/unlock", AdminService.OpUnlock, "unlockAuthority", "Unlock the local authority (needs no session, but its own authorization). Remote hosts refuse this operation.", "authority"),
+            Mutation("POST", "/lock", AdminService.OpLock, "lockAuthority", "Lock the local authority: secret requests stop, held keys are discarded and every session and authorization ends. Remote hosts refuse this operation.", "authority"),
             Mutation("PUT", "/settings/audit-retention", "set-audit-retention", "setAuditRetention", "Set how many days audit events are kept (0 keeps everything).", "settings", "days"),
             Mutation("PUT", "/settings/session-timeouts", "set-session-timeouts", "setSessionTimeouts", "Set the idle and absolute timeouts of administrator sessions.", "settings", "idle", "absolute"),
             Mutation("POST", "/authority-key/rotate", "authority-key-rotate", "rotateAuthorityKey", "Rotate the authority signing key (a transition the current key signs).", "authority"),

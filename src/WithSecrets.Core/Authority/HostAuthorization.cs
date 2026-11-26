@@ -1,8 +1,7 @@
 namespace WithSecrets;
 
 /// <summary>
-/// What the host learned from the authority: <see cref="Decision" /> is the person's own answer when the authority approved (it
-/// carries the unlock material the page released, which never travels through the authority's response), or a denial.
+/// What the host learned from the authority: <see cref="Decision" /> is the person's own answer when the authority approved, or a denial.
 /// <see cref="AuthorityMessage" /> is the one-line text for a denial that did not come from the person (the machine's status, an
 /// answer that did not verify, an authority that did not answer); null otherwise. <see cref="Code" /> is the reason code.
 /// </summary>
@@ -48,96 +47,10 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
 
     public string Fingerprint { get; } = KeyIdentity.Fingerprint(machineKey.PublicKey);
 
-    /// <summary>The store key material held for one grant after its approving tap (see <see cref="StoreKeyHolder" />). Dropped by <see cref="SweepKey" /> whenever what justified holding it is gone.</summary>
-    public StoreKeyHolder Keys { get; } = new();
-
-    /// <summary>The authority's lock when this host and the authority are one service. While it is locked this host authorizes nothing, uses no grant and lends no key (the service also refuses the request before it gets here).</summary>
+    /// <summary>The authority's lock when this host and the authority are one service. While it is locked this host authorizes nothing, uses no grant and decrypts nothing (the service also refuses the request before it gets here).</summary>
     public AuthorityLock? LockState { get; set; }
 
     private bool Locked => LockState?.IsLocked == true;
-
-    /// <summary>
-    /// Drops the held key unless this host still vouches for its grant: the grant is synchronized and has not ended, and the authority still vouches for this machine (a revision
-    /// change or a disable forgets every grant, which ends here). Called wherever one of those can change, and before a key is lent.
-    /// </summary>
-    public void SweepKey()
-    {
-        lock (_lock)
-        {
-            if (Keys.Binding is not { } bound)
-            {
-                return;
-            }
-
-            // The key is bound to what was true at the tap (grant, scope, revision, end). Whatever the host learns later never moves that: a grant that
-            // changed (any new revision, even an authenticated extension) or a scope that differs ends the hold and the next run taps again.
-            SyncedGrant? grant = _synced.Values.FirstOrDefault(item => item.GrantId == bound.GrantId);
-            if (grant is null)
-            {
-                Keys.Drop("grant gone");
-            }
-            else if (grant.ScopeKey != bound.ScopeKey || grant.Revision != bound.Revision)
-            {
-                Keys.Drop("grant changed");
-            }
-            else if (!_vouched)
-            {
-                Keys.Drop("authority no longer vouches");
-            }
-            else if (bound.Expires is { } end && _clock.GetUtcNow() >= end)
-            {
-                Keys.Drop("grant expired");
-            }
-        }
-    }
-
-    /// <summary>A copy of the held key for a run under <paramref name="grantId" />, or null (swept first, so a stale key is never lent).</summary>
-    public Unlock? BorrowKey(string grantId, string scopeKey)
-    {
-        lock (_lock)
-        {
-            if (Locked)
-            {
-                return null;
-            }
-
-            SweepKey();
-
-            return Keys.Borrow(grantId, scopeKey);
-        }
-    }
-
-    /// <summary>The end of a synchronized grant as the host knows it (null: no end) and whether the host vouches for it now, for the page of a key-holding tap.</summary>
-    public (bool Known, DateTimeOffset? Expires) GrantEnd(string grantId)
-    {
-        lock (_lock)
-        {
-            SyncedGrant? grant = _synced.Values.FirstOrDefault(item => item.GrantId == grantId);
-
-            return grant is null ? (false, null) : (true, grant.Expires);
-        }
-    }
-
-    /// <summary>The host's own clock (the same one the grants are judged by).</summary>
-    public DateTimeOffset Now => _clock.GetUtcNow();
-
-    /// <summary>
-    /// Holds a copy of the key a tap released for this grant, if the host still vouches for the grant. <paramref name="until" /> ends the hold sooner than the grant
-    /// does (a grant with no end is held only that long, so the service has to be tapped again after it).
-    /// </summary>
-    public void HoldKey(string grantId, string scopeKey, Unlock key, DateTimeOffset? until = null)
-    {
-        lock (_lock)
-        {
-            SyncedGrant? grant = _synced.Values.FirstOrDefault(item => item.GrantId == grantId && item.ScopeKey == scopeKey && (item.Expires is null || _clock.GetUtcNow() < item.Expires));
-            if (_vouched && grant is not null)
-            {
-                Keys.Hold(key, new HeldKeyBinding(grant.GrantId, grant.ScopeKey, grant.Revision, until is { } cap && (grant.Expires is null || cap < grant.Expires) ? cap : grant.Expires));
-            }
-        }
-    }
-
-    public void DropKey(string reason) => Keys.Drop(reason);
 
     /// <summary>The grants this host has synchronized with the authority (what the authority last said covers this machine; every use is still checked with the authority).</summary>
     public IReadOnlyList<SyncedGrant> SyncedGrants
@@ -166,9 +79,8 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
     }
 
     /// <summary>
-    /// The authority locked: forget everything that lets this host authorize a run without asking the authority again. The held store key is zeroed and dropped, the
-    /// synchronized grants are cleared, and every launch that has not committed is cancelled. Nothing is restored by unlocking: the
-    /// host checks in again and the next run that needs a key taps again.
+    /// The authority locked (<paramref name="reason" />, or the machine is no longer trusted): forget everything that lets this host authorize a run without asking the authority again.
+    /// The synchronized grants are cleared and every launch that has not committed is cancelled. Nothing is restored by unlocking: the host checks in again.
     /// </summary>
     public void Discard(string reason)
     {
@@ -176,7 +88,6 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
         {
             Forget();
             _knownRevision = null;
-            Keys.Drop(reason);
             gate.Invalidate();
         }
     }
@@ -186,7 +97,6 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
     {
         _synced.Clear();
         _vouched = false;
-        Keys.Drop("authorization changed");
         _reconcileNotBefore = 0;
     }
 
@@ -249,7 +159,6 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
-            local?.Unlock?.Dispose();
             AppLog.Warn("the authority did not answer: {Type}", error.GetType().Name);
 
             return Deny("authority-unavailable", "the authority could not be asked (" + error.GetType().Name + "). Nothing was run");
@@ -267,8 +176,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
-            // A failure while checking the answer (the database, host.json) is a denial, and what the page released is zeroed.
-            local?.Unlock?.Dispose();
+            // A failure while checking the answer (the database, host.json) is a denial.
             AppLog.Warn("the authority's answer could not be checked: {Type}", error.GetType().Name);
 
             return Deny("response-invalid", "the authority's answer could not be verified (" + error.GetType().Name + "). Nothing was run");
@@ -276,15 +184,11 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
 
         if (problem is not null)
         {
-            local?.Unlock?.Dispose();
-
             return Deny("response-invalid", "the authority's answer could not be verified (" + problem + "). Nothing was run");
         }
 
         if (revisionProblem is not null)
         {
-            local?.Unlock?.Dispose();
-
             return Deny(ReasonCodes.AuthorizationChanged, revisionProblem);
         }
 
@@ -292,23 +196,18 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
         {
             if (local is not { Approved: true })
             {
-                local?.Unlock?.Dispose();
-
                 return Deny("no-approval", "the authority approved, but this host has no approval of its own for it. Nothing was run");
             }
 
             // The authority must vouch for this machine (a verified, Trusted check-in): a host that cannot reach its authority fails closed.
             if (!await EnsureVouchedAsync(cancel))
             {
-                local.Unlock?.Dispose();
-
                 return Deny("not-vouched", NotVouchedMessage);
             }
 
             return new AuthorizationOutcome(local, null, response.ReasonCode, response.SecurityRevision);
         }
 
-        local?.Unlock?.Dispose();
         if (response.ReasonCode is ReasonCodes.UserDenied or ReasonCodes.Cancelled or ReasonCodes.ApprovalTimeout && local is not null)
         {
             return new AuthorizationOutcome(local, null, response.ReasonCode, response.SecurityRevision);
@@ -477,7 +376,6 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
                     _synced.Remove(scope);
                 }
 
-                Keys.Drop("grant revoked");
                 gate.Invalidate();
             }
 
@@ -485,15 +383,13 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
         }
     }
 
-    /// <summary>Checks in now when nothing vouches for the machine (and the back-off after a refusal has passed); then a held key that outlived its grant or the authority's vouching is dropped.</summary>
+    /// <summary>Checks in now when nothing vouches for the machine (and the back-off after a refusal has passed).</summary>
     public async Task ReconcileIfNeededAsync(CancellationToken cancel = default)
     {
         if (!Vouched && _monotonic.Milliseconds >= Volatile.Read(ref _reconcileNotBefore))
         {
             await ReconcileAsync(cancel);
         }
-
-        SweepKey();
     }
 
     /// <summary>What a check-in with the authority came to.</summary>
@@ -527,7 +423,6 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
             if (load.Problem is not null || load.Config?.Authority is null || load.Config.MachineFingerprint != Fingerprint)
             {
                 ClearVouched();
-                Keys.Drop("not vouched");
                 Volatile.Write(ref _reconcileNotBefore, _monotonic.Milliseconds + 5000);
 
                 return Reconciliation.Unverified;
@@ -551,7 +446,6 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
                 if (await Verify(response, envelope.RequestId, envelope.Digest(), cancel) is not null || response.Status == "Unknown")
                 {
                     ClearVouched();
-                    Keys.Drop("not vouched");
                     Volatile.Write(ref _reconcileNotBefore, _monotonic.Milliseconds + 5000);
 
                     return Reconciliation.Unverified;
@@ -561,7 +455,6 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
             {
                 AppLog.Warn("the authority's check-in answer could not be checked: {Type}", error.GetType().Name);
                 ClearVouched();
-                Keys.Drop("check-in failed");
                 Volatile.Write(ref _reconcileNotBefore, _monotonic.Milliseconds + 5000);
 
                 return Reconciliation.Unverified;
@@ -573,7 +466,6 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
                 {
                     // An answer for an older revision than the one applied is not accepted, and nothing vouches for the machine because of it.
                     _vouched = false;
-                    Keys.Drop("check-in older than the applied revision");
 
                     return Reconciliation.Unverified;
                 }
@@ -599,7 +491,6 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
                     // A machine that is not Trusted keeps nothing: nothing vouches for it, no synchronized grant.
                     _vouched = false;
                     _synced.Clear();
-                    Keys.Drop("authority no longer trusts this machine");
                     Volatile.Write(ref _reconcileNotBefore, _monotonic.Milliseconds + 5000);
                 }
             }
@@ -636,9 +527,10 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
     /// <summary>
     /// Is there a grant for exactly this request (the scope key the host made from it)? Online, the authority answers (signed); a grant it names is then
     /// remembered here as synchronized. When the authority cannot be reached nothing is used: a grant remembered here is never used on its own.
-    /// Anything that is not a verified, applicable grant is <see cref="GrantUseKind.NoGrant" />, and the request then goes through the ordinary approval.
+    /// Anything that is not a verified, applicable grant is <see cref="GrantUseKind.NoGrant" />, and the request then goes through the ordinary approval. With <paramref name="recheck" />
+    /// the authority is asked again for a run already found covered (<see cref="GrantOps.Recheck" />): the same checks, and a grant that still applies records no second use.
     /// </summary>
-    public async Task<GrantUse> TryUseGrantAsync(LaunchRequest launch, string scopeKey, CancellationToken cancel)
+    public async Task<GrantUse> TryUseGrantAsync(LaunchRequest launch, string scopeKey, CancellationToken cancel, bool recheck = false)
     {
         GrantUse NoGrant() => new(GrantUseKind.NoGrant, "");
         if (Locked)
@@ -652,7 +544,8 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
             return NoGrant();
         }
 
-        GrantEnvelope envelope = GrantEnvelope.Create(GrantOps.Use, launch, scopeKey, hostName, machineKey);
+        string operation = recheck ? GrantOps.Recheck : GrantOps.Use;
+        GrantEnvelope envelope = GrantEnvelope.Create(operation, launch, scopeKey, hostName, machineKey);
         GrantResponse response;
         try
         {
@@ -676,7 +569,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
         try
         {
             problem = await Verify(response, launch.RequestId, envelope.RequestDigest, cancel);
-            if (problem is null && response.Operation != GrantOps.Use)
+            if (problem is null && response.Operation != operation)
             {
                 problem = "another operation";
             }
@@ -713,17 +606,15 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
             lock (_lock)
             {
                 _synced[scopeKey] = new SyncedGrant(response.GrantId, scopeKey, response.GrantRevision, response.Indefinite ? null : response.GrantExpires);
-                SweepKey();
             }
 
-            return new GrantUse(GrantUseKind.Granted, "", response.GrantId);
+            return new GrantUse(GrantUseKind.Granted, "", response.GrantId, response.Keys);
         }
 
         // The authority says there is none (or it ended): nothing is remembered for the scope.
         lock (_lock)
         {
             _synced.Remove(scopeKey);
-            SweepKey();
         }
 
         return NoGrant();
@@ -732,14 +623,14 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
     /// <summary>
     /// The human approval that creates or updates the grant for this request's scope (no launch). <paramref name="present" /> shows the page; the
     /// authority calls it only when the machine may ask, and records the grant for the time chosen there. Needs the authority: while it cannot be
-    /// reached nothing is approved. What the page released (the unlock material) is never used here and is zeroed.
+    /// reached nothing is approved.
     /// </summary>
     public Task<GrantApproval> ApproveGrantAsync(LaunchRequest launch, string scopeKey, Func<ApprovalDecision> present, CancellationToken cancel) => ApproveAsync(launch, scopeKey, present, false, cancel);
 
     /// <summary>
     /// Records the consumed once-only grant of a run the person approved once (<paramref name="decision" />, already made on the page, is presented to the authority
-    /// with no time and no unlock material). <see cref="GrantApproval.Granted" /> is true only when the authority answered <see cref="GrantOps.Recorded" />. The
-    /// grant is never synchronized here and no store key is held for it: it covers no further run. Needs the authority: while it cannot be reached nothing is recorded.
+    /// with no time). <see cref="GrantApproval.Granted" /> is true only when the authority answered <see cref="GrantOps.Recorded" />. The
+    /// grant is never synchronized here: it covers no further run. Needs the authority: while it cannot be reached nothing is recorded.
     /// </summary>
     public Task<GrantApproval> RecordOnceGrantAsync(LaunchRequest launch, string scopeKey, ApprovalDecision decision, CancellationToken cancel)
     {
@@ -748,7 +639,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
             return Task.FromResult(new GrantApproval(false, "only an approval given once records a once-only grant", GrantReasons.NoTime, null));
         }
 
-        return ApproveAsync(launch, scopeKey, () => decision with { Unlock = null, ReuseMinutes = 0 }, true, cancel);
+        return ApproveAsync(launch, scopeKey, () => decision with { ReuseMinutes = 0 }, true, cancel);
     }
 
     private async Task<GrantApproval> ApproveAsync(LaunchRequest launch, string scopeKey, Func<ApprovalDecision> present, bool once, CancellationToken cancel)
@@ -780,7 +671,6 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
-            local?.Unlock?.Dispose();
             AppLog.Warn("the authority did not answer a grant approval: {Type}", error.GetType().Name);
 
             return Deny("the authority could not be asked (" + error.GetType().Name + "); a new approval needs the authority, so nothing was saved", "authority-unavailable");
@@ -806,7 +696,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
 
             if (once)
             {
-                // Recorded, never granted: nothing is remembered for the scope and no key is held for it.
+                // Recorded, never granted: nothing is remembered for the scope.
                 if (response.Outcome == GrantOps.Recorded && !response.HasGrant && response.ScopeKey == scopeKey && response.GrantId.Length > 0 && local is { Approved: true, ReuseMinutes: 0 })
                 {
                     return new GrantApproval(true, "", response.ReasonCode, response.GrantId, null);
@@ -840,10 +730,6 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
 
             return Deny("the authority's answer could not be verified (" + error.GetType().Name + "). Nothing was saved", "response-invalid");
         }
-        finally
-        {
-            local?.Unlock?.Dispose();
-        }
     }
 
     // ---- a launch whose approval and decryption happen at the authority (remote mode) ----
@@ -861,7 +747,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
     /// </summary>
     public async Task<RemoteAuthorization> AuthorizeRemoteAsync(LaunchRequest launch, string scopeKey, PageContext context, Action<string> onLink, CancellationToken cancel)
     {
-        RemoteAuthorization Deny(string code, string message) => new(false, message, code, null, "", "");
+        RemoteAuthorization Deny(string code, string message, AuditKeys? keys = null) => new(false, message, code, null, "", "", keys);
         if (authority is not ILaunchAuthority remote)
         {
             return Deny("no-remote-authority", "this host has no remote authority to ask. Nothing was run");
@@ -940,7 +826,7 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
                 return Deny(ReasonCodes.AuthorizationChanged, revision);
             }
 
-            return Deny(refusal.ReasonCode, Message(refusal.ReasonCode));
+            return Deny(refusal.ReasonCode, Message(refusal.ReasonCode), refusal.Keys);
         }
 
         SecretsDelivery delivery = answer.Delivery!;
@@ -993,10 +879,10 @@ public sealed class HostAuthorization(IAuthority authority, ISigningKey machineK
                 }
             }
 
-            SecretValues values = new(delivery.Values.ToDictionary(item => item.Name, item => item.Value, StringComparer.Ordinal));
+            SecretValues values = new(delivery.Values.ToDictionary(item => item.Name, item => item.Value, StringComparer.Ordinal)) { OpenedBy = delivery.Keys?.Unlock };
             accepted = true;
 
-            return new RemoteAuthorization(true, "", ReasonCodes.Approved, values, delivery.Via, delivery.GrantId);
+            return new RemoteAuthorization(true, "", ReasonCodes.Approved, values, delivery.Via, delivery.GrantId, delivery.Keys);
         }
         finally
         {
@@ -1024,10 +910,10 @@ public enum GrantUseKind
 }
 
 /// <summary>The answer to a grant check.</summary>
-public sealed record GrantUse(GrantUseKind Kind, string Message, string GrantId = "");
+public sealed record GrantUse(GrantUseKind Kind, string Message, string GrantId = "", AuditKeys? Keys = null);
 
 /// <summary>The result of an approval that makes a grant: the grant (id and end, null for indefinite) or why not (a message with no value in it).</summary>
 public sealed record GrantApproval(bool Granted, string Message, string Code, string? GrantId, DateTimeOffset? Expires = null);
 
 /// <summary>The result of <see cref="HostAuthorization.AuthorizeRemoteAsync" />: either the verified values (the caller owns and disposes them) and how the authority authorized, or a denial with a message that has no value in it.</summary>
-public sealed record RemoteAuthorization(bool Ok, string Message, string Code, SecretValues? Values, string Via, string GrantId);
+public sealed record RemoteAuthorization(bool Ok, string Message, string Code, SecretValues? Values, string Via, string GrantId, AuditKeys? Keys = null);

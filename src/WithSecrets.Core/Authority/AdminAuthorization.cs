@@ -16,6 +16,9 @@ public interface IAdminAsker
 
     /// <summary>As <see cref="Ask(ApprovalPrompt)" />; an asker that waits for a person closes its page and refuses when <paramref name="cancel" /> is set.</summary>
     ApprovalDecision Ask(ApprovalPrompt prompt, CancellationToken cancel) => Ask(prompt);
+
+    /// <summary>As <see cref="Ask(ApprovalPrompt, CancellationToken)" />, and the page also asks the passkey for its PRF output (<see cref="ApprovalDecision.Unlock" />). An asker without pages releases nothing.</summary>
+    ApprovalDecision AskWithKeyRelease(ApprovalPrompt prompt, CancellationToken cancel) => Ask(prompt, cancel);
 }
 
 /// <summary>An <see cref="IAdminAsker" /> over page targets. Administrative changes use admin credentials; sign-in and run approval may use any enrolled credential.</summary>
@@ -27,13 +30,17 @@ public sealed class TargetAdminAsker(EnrollmentTarget primary, EnrollmentTarget 
 
     public ApprovalDecision Ask(ApprovalPrompt prompt) => Ask(prompt, CancellationToken.None);
 
-    public ApprovalDecision Ask(ApprovalPrompt prompt, CancellationToken cancel)
+    public ApprovalDecision Ask(ApprovalPrompt prompt, CancellationToken cancel) => Ask(prompt, false, cancel);
+
+    public ApprovalDecision AskWithKeyRelease(ApprovalPrompt prompt, CancellationToken cancel) => Ask(prompt, true, cancel);
+
+    private ApprovalDecision Ask(ApprovalPrompt prompt, bool unlock, CancellationToken cancel)
     {
         EnrollmentTarget? target = EnrollmentTarget.FirstThatCanProve(primary.Admin(), local.Admin());
 
         return target is null
             ? ApprovalDecision.Deny(Enrollment.NoTargetMessage(primary.Admin().Method.Id, primary.Admin().Host, local.Admin().Host))
-            : target.Approver.Ask(prompt, cancel);
+            : target.Approver.Ask(prompt, unlock, cancel);
     }
 }
 
@@ -59,20 +66,22 @@ public sealed class VerifiedAdmin
 {
     private int _spent;
 
-    internal VerifiedAdmin(string operation, string parameters, string signer)
+    internal VerifiedAdmin(string operation, string parameters, VerifiedCredential key)
     {
         Operation = operation;
         Parameters = parameters;
-        Signer = signer;
+        Key = key;
     }
 
     public string Operation { get; }
 
     public string Parameters { get; }
 
-    public string Signer { get; }
+    public VerifiedCredential Key { get; }
 
-    public string Actor => (Operation == AdminService.OpLogin ? "passkey " : "admin passkey ") + (Signer.Length > 0 ? Signer : "(unnamed)");
+    public string Signer => Key.Name;
+
+    public string Actor => (Key.Admin && Operation != AdminService.OpLogin ? "admin passkey " : "passkey ") + (Signer.Length > 0 ? Signer : "(unnamed)");
 
     /// <summary>True once, and only for the operation and parameters that were authorized.</summary>
     public bool Consume(string operation, string parameters)
@@ -81,7 +90,7 @@ public sealed class VerifiedAdmin
     }
 
     /// <summary>For tests of a store method in isolation: a token as the authorizer would issue it. It exists in the library, as the lock's test seam does; no command or setting reaches it.</summary>
-    internal static VerifiedAdmin ForTests(string operation, string parameters, string signer = "test admin") => new(operation, parameters, signer);
+    internal static VerifiedAdmin ForTests(string operation, string parameters, string signer = "test admin")  => new(operation, parameters, new VerifiedCredential("test-admin", signer, true));
 }
 
 /// <summary>What <see cref="AdminAuthorizer.Authorize" /> came to. <see cref="Evidence" /> is the verified signed page, for an operation whose own authority re-checks it (a grant change).</summary>
@@ -174,28 +183,32 @@ public sealed class AdminAuthorizer(AuthorityStore store, IApprovalVerifier veri
             catch (AuthorityDatabaseException) { return Refuse(operation, "the spent-proof record cannot be written, so no session was started", parameterText); }
             if (!firstLogin) return Refuse(operation, "this sign-in proof was already used", parameterText);
 
-            VerifiedAdmin login = new(operation, parameterText, full.Credential.Name);
-            Record(operation, "authorized", login.Actor, parameterText);
+            VerifiedAdmin login = new(operation, parameterText, full.Credential);
+            Record(operation, "authorized", login.Actor, parameterText, login.Key);
             return new AdminAuthorization(login, "authorized", evidence, full.Credential);
         }
 
         ApprovalCheck check = verifier.Verify(evidence, 0);
-        if (!check.Ok || !check.Admin)
+        if (!check.Ok || (!check.Admin && !OperationPolicy.AnyKey(operation)))
         {
-            return Refuse(operation, "the approval was not signed by an enrolled admin key (" + check.Detail + ")", parameterText);
+            return Refuse(operation, "the approval was not signed by an enrolled " + (OperationPolicy.AnyKey(operation) ? "passkey" : "admin key") + " (" + check.Detail + ")", parameterText, check.Credential);
         }
 
         bool first;
         try { first = store.TrySpendAdminNonce(evidence.Nonce, now.AddMinutes(ApprovalSettings.MaxTimeoutMinutes + 5)); }
         catch (AuthorityDatabaseException) { return Refuse(operation, "the spent-proof record cannot be written, so nothing was applied", parameterText); }
-        if (!first) return Refuse(operation, "this approval was already used", parameterText);
+        if (!first) return Refuse(operation, "this approval was already used", parameterText, check.Credential);
 
-        VerifiedAdmin admin = new(operation, parameterText, check.SignerName);
-        Record(operation, "authorized", admin.Actor, parameterText);
+        VerifiedAdmin admin = new(operation, parameterText, check.Credential ?? new VerifiedCredential("", check.SignerName, check.Admin));
+        Record(operation, "authorized", admin.Actor, parameterText, admin.Key);
         return new AdminAuthorization(admin, "authorized", evidence, full.Credential);
     }
 
-    public AdminAuthorization Authorize(IAdminAsker asker, string heading, string sentence, string operation, IReadOnlyList<(string Name, string Value)> parameters, CancellationToken cancel = default)
+    /// <summary>
+    /// With <paramref name="wantsPrf" /> the page also asks the passkey for its PRF output; an authorization that is granted carries it (<see cref="AdminAuthorization.Unlock" />, for the caller to
+    /// dispose), and every refusal disposes it here.
+    /// </summary>
+    public AdminAuthorization Authorize(IAdminAsker asker, string heading, string sentence, string operation, IReadOnlyList<(string Name, string Value)> parameters, CancellationToken cancel = default, bool wantsPrf = false)
     {
         string parameterText = Canonical(parameters);
         if (!Record(operation, "requested", "", parameterText))
@@ -210,9 +223,9 @@ public sealed class AdminAuthorizer(AuthorityStore store, IApprovalVerifier veri
         try
         {
             ApprovalPrompt prompt = new(heading, PageText(sentence, operation, parameters) + "\n" + TicketPrefix + ticket, "Confirm this change", "Change confirmed. The change was made.");
-            asked = operation == AdminService.OpLogin
+            asked = OperationPolicy.AnyKey(operation)
                 ? asker.ApprovalTarget()?.Approver.Ask(prompt, cancel) ?? ApprovalDecision.Deny("no enrolled passkey can prove at this address")
-                : asker.Ask(prompt, cancel);
+                : wantsPrf ? asker.AskWithKeyRelease(prompt, cancel) : asker.Ask(prompt, cancel);
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
@@ -220,6 +233,19 @@ public sealed class AdminAuthorizer(AuthorityStore store, IApprovalVerifier veri
             return Refuse(operation, "the passkey page could not be shown", parameterText);
         }
 
+        AdminAuthorization judged = Judge(asked, ticket, operation, parameters, parameterText);
+        if (judged.Ok && operation != AdminService.OpLogin && asked.Unlock is { } released)
+        {
+            return judged with { Unlock = released };
+        }
+
+        asked.Unlock?.Dispose();
+
+        return judged;
+    }
+
+    private AdminAuthorization Judge(ApprovalDecision asked, string ticket, string operation, IReadOnlyList<(string Name, string Value)> parameters, string parameterText)
+    {
         if (!asked.Approved)
         {
             return Refuse(operation, asked.Detail, parameterText);
@@ -251,15 +277,15 @@ public sealed class AdminAuthorizer(AuthorityStore store, IApprovalVerifier veri
             catch (AuthorityDatabaseException) { return Refuse(operation, "the spent-proof record cannot be written, so no session was started", parameterText); }
             if (!firstLogin) return Refuse(operation, "this sign-in proof was already used", parameterText);
 
-            VerifiedAdmin login = new(operation, parameterText, asked.Credential.Name);
-            Record(operation, "authorized", login.Actor, parameterText);
+            VerifiedAdmin login = new(operation, parameterText, asked.Credential);
+            Record(operation, "authorized", login.Actor, parameterText, login.Key);
             return new AdminAuthorization(login, "authorized", evidence, asked.Credential);
         }
 
         ApprovalCheck check = verifier.Verify(evidence, 0);
-        if (!check.Ok || !check.Admin)
+        if (!check.Ok || (!check.Admin && !OperationPolicy.AnyKey(operation)))
         {
-            return Refuse(operation, "the approval was not signed by an enrolled admin key (" + check.Detail + ")", parameterText);
+            return Refuse(operation, "the approval was not signed by an enrolled " + (OperationPolicy.AnyKey(operation) ? "passkey" : "admin key") + " (" + check.Detail + ")", parameterText, check.Credential);
         }
 
         // A proof is accepted once, and the record outlives a restart (it is kept in with-secrets.db until the proof could no longer be fresh).
@@ -275,11 +301,11 @@ public sealed class AdminAuthorizer(AuthorityStore store, IApprovalVerifier veri
 
         if (!first)
         {
-            return Refuse(operation, "this approval was already used", parameterText);
+            return Refuse(operation, "this approval was already used", parameterText, check.Credential);
         }
 
-        VerifiedAdmin admin = new(operation, parameterText, check.SignerName);
-        Record(operation, "authorized", admin.Actor, parameterText);
+        VerifiedAdmin admin = new(operation, parameterText, check.Credential ?? new VerifiedCredential("", check.SignerName, check.Admin));
+        Record(operation, "authorized", admin.Actor, parameterText, admin.Key);
 
         return new AdminAuthorization(admin, "authorized", evidence);
     }
@@ -288,7 +314,7 @@ public sealed class AdminAuthorizer(AuthorityStore store, IApprovalVerifier veri
     public void RecordRefusal(string operation, string reason, string parameters = "") => Record(operation, "refused: " + ApprovalSummary.Clean(reason), "", parameters);
 
     /// <summary>Records how an authorized operation ended (applied, or failed after the tap).</summary>
-    public void Outcome(VerifiedAdmin admin, string outcome) => Record(admin.Operation, outcome, admin.Actor, admin.Parameters);
+    public void Outcome(VerifiedAdmin admin, string outcome) => Record(admin.Operation, outcome, admin.Actor, admin.Parameters, admin.Key);
 
     private string? Check(ApprovalEvidence evidence, DateTimeOffset now, string operation, IReadOnlyList<(string Name, string Value)> parameters)
     {
@@ -322,19 +348,19 @@ public sealed class AdminAuthorizer(AuthorityStore store, IApprovalVerifier veri
         return null;
     }
 
-    private AdminAuthorization Refuse(string operation, string reason, string parameters)
+    private AdminAuthorization Refuse(string operation, string reason, string parameters, VerifiedCredential? key = null)
     {
-        Record(operation, "refused: " + ApprovalSummary.Clean(reason), "", parameters);
+        Record(operation, "refused: " + ApprovalSummary.Clean(reason), "", parameters, key);
 
         return new AdminAuthorization(null, reason);
     }
 
     /// <summary>Writes one row of the authority's audit history for an administrator operation (an attempt, an outcome). False when it cannot be written.</summary>
-    public bool Record(string operation, string outcome, string actor, string parameters)
+    public bool Record(string operation, string outcome, string actor, string parameters, VerifiedCredential? key = null, IReadOnlyDictionary<string, string>? metadata = null)
     {
         try
         {
-            store.RecordAdminAttempt(operation, outcome, actor, parameters);
+            store.RecordAdminAttempt(operation, outcome, actor, parameters, key, metadata);
 
             return true;
         }

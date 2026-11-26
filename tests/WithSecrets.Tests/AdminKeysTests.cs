@@ -48,7 +48,7 @@ internal static class AdminKeysTests
     {
         using TestAuthenticator laptop = TestAuthenticator.ES256();
         using TestAuthenticator phone = TestAuthenticator.ES256();
-        using TestAuthenticator tablet = TestAuthenticator.ES256();
+        using TestAuthenticator tablet = TestAuthenticator.ES256(prf: false);
         StateDatabase db = StateDatabase.InFolder(Path.Combine(root, "box"));
         DateTimeOffset when = new(2026, 11, 2, 9, 0, 0, TimeSpan.Zero);
         TestState.Add(db, laptop.Record("localhost", "laptop") with { Created = when });
@@ -56,10 +56,10 @@ internal static class AdminKeysTests
         // Not ticked: the new key only approves runs.
         List<string> replies = [];
         ApprovalDecision? decision = await GrantTests.Enroll(client, db, laptop, tablet, "tablet", false, false, replies);
-        check(decision is { Approved: true } && new PasskeyStore(db).All().Single(key => key.Name == "tablet") is { Admin: false } && TestState.Current(db)!.Admins.Count == 1,
-            "admin box: not ticked, the new key is not an admin (" + decision?.Detail + ")");
+        check(decision is { Approved: true } && new PasskeyStore(db).All().Single(key => key.Name == "tablet") is { Admin: false, Slot: null } && TestState.Current(db)!.Admins.Count == 1,
+            "admin box: without the box, a non-PRF passkey enrolls with no slot (" + decision?.Detail + ")");
         check(replies.Count == 3 && replies[0].Contains("<input id=\"make-admin\" type=\"checkbox\">", StringComparison.Ordinal), "admin box: the enroll page has the box");
-        check(Rows(db).Single(row => row.Event == "key-enrolled").Detail.Contains("(approves runs only)", StringComparison.Ordinal), "admin box: the audit row says the key is not an admin");
+        check(Rows(db).Single(row => row.Event == "key-enrolled").Detail.Contains("(convenience key)", StringComparison.Ordinal), "admin box: the audit row says the key is not an admin");
 
         // Ticked: the manifest the admin signs makes the new key an admin, the page is told, and every admin is listed.
         replies.Clear();
@@ -67,15 +67,20 @@ internal static class AdminKeysTests
         Manifest current = TestState.Current(db)!;
         string phoneId = TestAuthenticator.Encode(phone.CredentialId);
         check(decision is { Approved: true } && current.Keys.Single(key => key.Id == phoneId).Admin && current.Admins.Count == 2, "admin box: ticked, the new key is an admin (" + decision?.Detail + ")");
-        if (replies.Count == 3)
+        if (replies.Count == 5)
         {
-            using JsonDocument step = JsonDocument.Parse(replies[1]);
-            JsonElement sign = step.RootElement.GetProperty("sign");
+            const string open = "<script type=\"application/json\" id=\"start\">";
+            string page = replies[3];
+            int start = page.IndexOf(open, StringComparison.Ordinal) + open.Length;
+            using JsonDocument step = JsonDocument.Parse(page[start..page.IndexOf("</script>", start, StringComparison.Ordinal)]);
+            JsonElement sign = step.RootElement;
             Manifest? signed = Manifest.Parse(sign.GetProperty("manifest").GetString()!, out _);
-            check(signed is not null && signed.Keys.Single(key => key.Id == phoneId).Admin && sign.GetProperty("makeAdmin").GetBoolean(), "admin box: the manifest to sign makes the new key an admin, and the page is told so");
-            check(!sign.TryGetProperty("allowCredentials", out _), "admin box: the sign step names no credential (the server checks the signer is an admin)");
+            check(signed is not null && signed.Keys.Single(key => key.Id == phoneId) is { Admin: true, Slot: not null }
+                && page.Contains("The new passkey will be an admin", StringComparison.Ordinal), "admin box: the manifest to sign makes the new key an admin with a slot, and the page says so");
+            using JsonDocument payload = JsonDocument.Parse(sign.GetProperty("payload").GetString()!);
+            check(!payload.RootElement.TryGetProperty("allowCredentials", out _), "admin box: the sign step names no credential (the server checks the signer is an admin)");
             string expected = "Admins: laptop " + GrantTests.Expected(laptop) + ", phone " + GrantTests.Expected(phone);
-            check(replies[2].Contains(JsonSerializer.Serialize(expected)[1..^1], StringComparison.Ordinal), "admin box: the code reply lists both admins (" + replies[2] + ")");
+            check(page.Contains(expected, StringComparison.Ordinal), "admin box: the confirmation page lists both admins");
             check(AdminKey.Line(db) == expected, "admin box: the fingerprint line lists both admins (" + AdminKey.Line(db) + ")");
         }
         else

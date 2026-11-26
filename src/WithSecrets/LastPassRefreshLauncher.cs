@@ -1,7 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO.Pipes;
-using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -71,7 +70,7 @@ internal sealed class LastPassRefreshLauncher : IInteractiveProviderRefresh
             // Unix terminal applications may spawn through a desktop daemon. Only a dedicated executable
             // identifies the resulting helper independently of an attacker-controlled command line.
             if (!OperatingSystem.IsWindows()) throw TerminalUnavailable();
-            string assembly = Assembly.GetEntryAssembly()?.Location ?? "";
+            string assembly = Path.GetFullPath(Environment.GetCommandLineArgs()[0]);
             if (!Path.IsPathFullyQualified(assembly) || !File.Exists(assembly)) throw TerminalUnavailable();
             command.Add(assembly);
         }

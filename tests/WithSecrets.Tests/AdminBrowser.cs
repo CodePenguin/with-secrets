@@ -172,7 +172,7 @@ internal sealed class AdminBrowser(HostService service, HttpClient http)
     /// <summary>The mutation request for an operation: the route of the API that names it, the path parameters filled in and the authorization id in the body.</summary>
     public (HttpMethod Method, string Path, string Body) MutationRequest(string op, string? authorization, params (string Name, string Value)[] args)
     {
-        ApiRoute route = service.Admin.Api.Routes.First(item => item.Access == ApiAccess.Mutation && (item.Operation == op || (item.Operation is null && op.StartsWith("policy-", StringComparison.Ordinal))));
+        ApiRoute route = service.Admin.Api.Routes.First(item => item.Access == ApiAccess.Mutation && item.Operation == op);
         string path = route.Template;
         Dictionary<string, object> body = [];
         if (authorization is not null)
@@ -190,11 +190,6 @@ internal sealed class AdminBrowser(HostService service, HttpClient http)
             {
                 body[name] = Typed(name, value);
             }
-        }
-
-        if (route.Operation is null)
-        {
-            body["policy"] = op["policy-".Length..];
         }
 
         return (new HttpMethod(route.Method), path, JsonSerializer.Serialize(body));

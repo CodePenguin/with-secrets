@@ -157,7 +157,7 @@ internal sealed class InteractiveRefreshes(ProviderAuthority providers, AdminAud
         }
     }
 
-    public string? Commit(Guid id, AdminSession owner, string digest, string signer)
+    public string? Commit(Guid id, AdminSession owner, string digest, VerifiedCredential signer)
     {
         Flow? flow = Remove(id, owner.Id);
         if (flow?.Staged is not { } stage || stage.Digest != digest || flow.Request.Expires <= clock.GetUtcNow())
@@ -173,7 +173,7 @@ internal sealed class InteractiveRefreshes(ProviderAuthority providers, AdminAud
         CacheWrite written = providers.Cache.PutInteractive(request.InstanceId, stage.Ciphertexts, stage.Verified,
             request.StorePublicKey, flow.Generation, (connection, transaction) => audit.Append(connection, transaction,
                 AdminEvent.Provider("provider-values-refreshed", [.. request.Mappings.Select(mapping => mapping.LocalName)],
-                    $"refreshed {request.ProviderName} ({request.InstanceId:D})", signer)));
+                    $"refreshed {request.ProviderName} ({request.InstanceId:D})", signer.Name, signer)));
         return written == CacheWrite.Written ? null : "The provider cache changed. Start a new refresh.";
     }
 

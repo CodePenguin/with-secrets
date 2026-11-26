@@ -61,6 +61,13 @@ internal static class ManifestTests
         check(second.Keys.Select(key => key.Id).SequenceEqual(second.Keys.Select(key => key.Id).Order(StringComparer.Ordinal)), "manifest: keys are sorted by id");
         Manifest parsed = Manifest.Parse(second.Canonical(), out string? error)!;
         check(parsed is not null && error is null && parsed.Canonical() == second.Canonical() && parsed.Keys.SequenceEqual(second.Keys) && parsed.Settings == second.Settings, "manifest: round trip (" + error + ")");
+        using JsonDocument both = JsonDocument.Parse(second.Canonical());
+        check(both.RootElement.GetProperty("keys").EnumerateArray().All(key => key.TryGetProperty("slot", out _) == key.GetProperty("admin").GetBoolean()),
+            "manifest: canonical JSON includes a slot only for an admin");
+        Manifest leftSlot = second with { Keys = [.. second.Keys.Select(key => key.Admin ? key : key with { Slot = laptopRecord.Slot })] };
+        Manifest missingSlot = second with { Keys = [.. second.Keys.Select(key => key.Admin ? key with { Slot = null } : key)] };
+        check(leftSlot.Problem() == "a key that is not an admin has a key slot" && missingSlot.Problem() == "an admin key has no valid key slot",
+            "manifest: validation requires an admin slot and rejects a convenience slot");
         Manifest settings = second.WithSettings(ToolSettings.Defaults with { Port = 8765 });
         check(settings.Version == 3 && settings.Settings.Port == 8765 && settings.Keys.SequenceEqual(second.Keys), "manifest: a settings change is version + 1 with the same keys");
         Manifest removed = settings.WithoutKey(TestAuthenticator.Encode(phone.CredentialId));
@@ -99,7 +106,7 @@ internal static class ManifestTests
 
         Manifest.Parse(text.Replace("\"admin\":true", "\"admin\":false", StringComparison.Ordinal), out string? none);
         check(none == "the manifest has no admin key", "manifest parse: zero admins says so (" + none + ")");
-        string both = text.Replace("\"admin\":false", "\"admin\":true", StringComparison.Ordinal);
+        string both = Manifest.First(Record(laptop, "laptop"), ToolSettings.Defaults).WithKey(Record(phone, "phone"), true).Canonical();
         check(Manifest.Parse(both, out string? two) is { Admins.Count: 2 } && two is null, "manifest parse: two admins are valid (" + two + ")");
     }
 
@@ -126,7 +133,7 @@ internal static class ManifestTests
         check(ToolSettings.Load(again, out error).Port == 8765 && error is null, "manifest store: settings come from the manifest");
         check(TestState.Current(again)!.Version == 2, "manifest store: the version is 2 after two changes");
         check(Tables(db.FilePath).SequenceEqual(WithSecretsDatabase.Tables), "manifest store: one layout includes the state, authority and audit tables");
-        check(WithSecretsDatabase.SchemaVersion == 3, "manifest store: the slots, vault and recovery slot live in the manifest");
+        check(WithSecretsDatabase.SchemaVersion == 4, "manifest store: the slots, vault and recovery slot live in the manifest");
     }
 
     private static string[] Tables(string path)
@@ -311,7 +318,7 @@ internal static class ManifestTests
         Manifest swapped = current with
         {
             Version = current.Version + 1,
-            Keys = [.. current.Keys.Select(key => key with { Admin = false }).Append(ManifestKey.From(tabletRecord, true)).OrderBy(key => key.Id, StringComparer.Ordinal)],
+            Keys = [.. current.Keys.Select(key => key with { Admin = false, Slot = null }).Append(ManifestKey.From(tabletRecord, true)).OrderBy(key => key.Id, StringComparer.Ordinal)],
         };
         problem = db.Write((connection, transaction) => db.TryReplace(connection, transaction, current.Version, TestState.Sign(tablet, swapped.Canonical())));
         check(swapped.Problem() is null && problem is not null && TestState.Current(db)!.Admins.Single().Id == TestAuthenticator.Encode(laptop.CredentialId), "manifest stale: a new manifest with another admin key, signed by it, is refused (" + problem + ")");
@@ -347,7 +354,7 @@ internal static class ManifestTests
         string? Replace(Manifest next, TestAuthenticator signer) => db.Write((connection, transaction) => db.TryReplace(connection, transaction, next.Version - 1, TestState.Sign(signer, next.Canonical())));
 
         // Promoting oneself: the tablet is not an admin in the stored manifest, so its signature over a manifest that makes it one is refused.
-        Manifest promoted = v2 with { Version = 3, Keys = [.. v2.Keys.Select(key => key.Name == "tablet" ? key with { Admin = true } : key)] };
+        Manifest promoted = v2 with { Version = 3, Keys = [.. v2.Keys.Select(key => key.Name == "tablet" ? key with { Admin = true, Slot = v2.Admins.Single().Slot } : key)] };
         string? problem = Replace(promoted, tablet);
         check(promoted.Problem() is null && problem is not null && problem.Contains("not an admin", StringComparison.Ordinal) && TestState.Current(db)!.Version == 2, "manifest admins: a key that is an admin only in the new manifest cannot sign it (" + problem + ")");
         Manifest withPhone = v2.WithKey(Record(phone, "phone") with { Created = Created.AddDays(1) }, true);

@@ -16,7 +16,7 @@ public sealed class WithSecretsDatabaseException(string message, Exception? inne
 public sealed partial class WithSecretsDatabase
 {
     public const string FileName = "with-secrets.db";
-    public const int SchemaVersion = 3;
+    public const int SchemaVersion = 4;
     public static readonly TimeSpan DefaultBusyTimeout = TimeSpan.FromSeconds(5);
     internal static readonly string[] OldFiles = ["state.db", "authority.db", "audit-outbox.db"];
 

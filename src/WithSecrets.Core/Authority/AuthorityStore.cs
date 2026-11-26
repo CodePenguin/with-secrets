@@ -32,12 +32,12 @@ public sealed record ProcessedGrant(string RequestId, string Fingerprint, string
 /// <summary>An authority signing key's public part and where it stands. <see cref="Status" /> is Active or Retired; <see cref="How" /> is created, rotated or recovered.</summary>
 public sealed record AuthorityKeyRecord(int Generation, string Fingerprint, byte[] PublicKey, string Status, DateTimeOffset Created, string? PreviousFingerprint, byte[]? TransitionSignature, string How);
 
-public sealed record AuditEntry(long Id, DateTimeOffset Time, string Event, string? Fingerprint, string? RequestId, string Actor, string Detail);
+public sealed record AuditEntry(long Id, DateTimeOffset Time, string Event, string? Fingerprint, string? RequestId, string Actor, string Detail, VerifiedCredential? Key = null, IReadOnlyDictionary<string, string>? Metadata = null);
 
 public sealed record HistoryEntry(long Id, string Fingerprint, DateTimeOffset Time, string Kind, string? FromStatus, string? ToStatus, int SecurityRevision, string Actor, string Detail);
 
 /// <summary>What <see cref="AuthorityStore.RecordDecision" /> stores: the signed answer, a host name to record as pending review, the audit text, and the server-derived actor (null keeps the legacy literal <c>authority</c> for non-human system refusals).</summary>
-public sealed record DecisionPlan(AuthorityResponse Response, string? HostMismatch, string AuditDetail, bool Store = true, string? Actor = null);
+public sealed record DecisionPlan(AuthorityResponse Response, string? HostMismatch, string AuditDetail, bool Store = true, string? Actor = null, VerifiedCredential? Key = null, IReadOnlyDictionary<string, string>? Metadata = null);
 
 /// <summary>
 /// <c>with-secrets.db</c> in the store folder: the authority's durable state in SQLite (WAL): machines and their
@@ -113,7 +113,8 @@ public sealed partial class AuthorityStore
     {
         return Read(connection => connection is null ? [] : Query(connection, null, "SELECT * FROM audit_history ORDER BY id LIMIT $limit", reader => new AuditEntry(
             reader.GetInt64(0), ParseTime(reader.GetString(1)), reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3), reader.IsDBNull(4) ? null : reader.GetString(4),
-            reader.GetString(5), reader.GetString(6)), ("$limit", limit)));
+            reader.GetString(5), reader.GetString(6), reader.IsDBNull(7) ? null : new VerifiedCredential(reader.GetString(7), reader.GetString(8), reader.GetBoolean(9)),
+            reader.IsDBNull(10) ? null : System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(10))), ("$limit", limit)));
     }
 
     /// <summary>
@@ -211,21 +212,21 @@ public sealed partial class AuthorityStore
     };
 
     /// <summary>Pending to Trusted: needs a friendly name. No revision change: there is no earlier authorization to end.</summary>
-    public TransitionResult Approve(string fingerprint, string friendlyName, string actor, int? expectedRevision = null)
+    public TransitionResult Approve(string fingerprint, string friendlyName, string actor, int? expectedRevision = null, VerifiedCredential? key = null)
     {
         if (Enrollment.NameError(friendlyName) is { } nameProblem)
         {
             return new TransitionResult(false, "the friendly name is not usable: " + nameProblem, null);
         }
 
-        return Change(fingerprint, "approve", actor, expectedRevision, machine => TransitionProblem("approve", machine) is { } problem ? Plan.Refuse(problem)
+        return Change(fingerprint, "approve", actor, expectedRevision, key, machine => TransitionProblem("approve", machine) is { } problem ? Plan.Refuse(problem)
             : new Plan(null, MachineStatus.Trusted, friendlyName.Trim(), false, null, "approved with friendly name " + friendlyName.Trim()));
     }
 
     /// <summary>Trusted to Disabled. Increments the security revision, invalidates the machine's grants and records the invalidation to deliver.</summary>
-    public TransitionResult Disable(string fingerprint, string actor, int? expectedRevision = null)
+    public TransitionResult Disable(string fingerprint, string actor, int? expectedRevision = null, VerifiedCredential? key = null)
     {
-        return Change(fingerprint, "disable", actor, expectedRevision, machine => TransitionProblem("disable", machine) is { } problem ? Plan.Refuse(problem)
+        return Change(fingerprint, "disable", actor, expectedRevision, key, machine => TransitionProblem("disable", machine) is { } problem ? Plan.Refuse(problem)
             : new Plan(null, MachineStatus.Disabled, machine.FriendlyName, true, null, "disabled"));
     }
 
@@ -233,46 +234,46 @@ public sealed partial class AuthorityStore
     /// Trusted, Disabled or Pending to Untrusted. From Trusted it increments the security revision and invalidates grants like
     /// <see cref="Disable" />; from the others there is no authorization to end, so the revision stays.
     /// </summary>
-    public TransitionResult Untrust(string fingerprint, string actor, int? expectedRevision = null)
+    public TransitionResult Untrust(string fingerprint, string actor, int? expectedRevision = null, VerifiedCredential? key = null)
     {
-        return Change(fingerprint, "untrust", actor, expectedRevision, machine => TransitionProblem("untrust", machine) is { } problem ? Plan.Refuse(problem)
+        return Change(fingerprint, "untrust", actor, expectedRevision, key, machine => TransitionProblem("untrust", machine) is { } problem ? Plan.Refuse(problem)
             : new Plan(null, MachineStatus.Untrusted, machine.FriendlyName, machine.Status == MachineStatus.Trusted, null, "trust withdrawn"));
     }
 
     /// <summary>Disabled to Trusted. Starts clean: grants that existed before were invalidated when it was disabled and stay invalid.</summary>
-    public TransitionResult Enable(string fingerprint, string actor, int? expectedRevision = null)
+    public TransitionResult Enable(string fingerprint, string actor, int? expectedRevision = null, VerifiedCredential? key = null)
     {
-        return Change(fingerprint, "enable", actor, expectedRevision, machine => TransitionProblem("enable", machine) is { } problem ? Plan.Refuse(problem)
+        return Change(fingerprint, "enable", actor, expectedRevision, key, machine => TransitionProblem("enable", machine) is { } problem ? Plan.Refuse(problem)
             : new Plan(null, MachineStatus.Trusted, machine.FriendlyName, false, null, "re-enabled; starts clean"));
     }
 
     /// <summary>Untrusted to Trusted. <paramref name="confirmedFingerprint" /> is what the administrator typed; it is compared with the machine's real fingerprint <paramref name="fingerprint" /> (taken from the record, not from the typed text). Starts clean.</summary>
-    public TransitionResult Trust(string fingerprint, string confirmedFingerprint, string actor, int? expectedRevision = null)
+    public TransitionResult Trust(string fingerprint, string confirmedFingerprint, string actor, int? expectedRevision = null, VerifiedCredential? key = null)
     {
         if (!string.Equals(KeyIdentity.ParseHex(confirmedFingerprint, true), fingerprint, StringComparison.Ordinal))
         {
             return new TransitionResult(false, "the confirmation is not this machine's full fingerprint", null);
         }
 
-        return Change(fingerprint, "trust", actor, expectedRevision, machine => TransitionProblem("trust", machine) is { } problem ? Plan.Refuse(problem)
+        return Change(fingerprint, "trust", actor, expectedRevision, key, machine => TransitionProblem("trust", machine) is { } problem ? Plan.Refuse(problem)
             : new Plan(null, MachineStatus.Trusted, machine.FriendlyName, false, null, "trusted again after explicit confirmation of the fingerprint; starts clean"));
     }
 
     /// <summary>Display only: audited, no revision change, grants and cache stay.</summary>
-    public TransitionResult Rename(string fingerprint, string friendlyName, string actor, int? expectedRevision = null)
+    public TransitionResult Rename(string fingerprint, string friendlyName, string actor, int? expectedRevision = null, VerifiedCredential? key = null)
     {
         if (Enrollment.NameError(friendlyName) is { } nameProblem)
         {
             return new TransitionResult(false, "the friendly name is not usable: " + nameProblem, null);
         }
 
-        return Change(fingerprint, "rename", actor, expectedRevision, machine => new Plan(null, machine.Status, friendlyName.Trim(), false, null, $"friendly name changed from {machine.FriendlyName ?? "(none)"} to {friendlyName.Trim()}"));
+        return Change(fingerprint, "rename", actor, expectedRevision, key, machine => new Plan(null, machine.Status, friendlyName.Trim(), false, null, $"friendly name changed from {machine.FriendlyName ?? "(none)"} to {friendlyName.Trim()}"));
     }
 
     /// <summary>An administrator accepts the host name the machine presented: it becomes the bound name. No revision change.</summary>
-    public TransitionResult ApproveHostChange(string fingerprint, string actor, int? expectedRevision = null, string? expectedHostName = null)
+    public TransitionResult ApproveHostChange(string fingerprint, string actor, int? expectedRevision = null, string? expectedHostName = null, VerifiedCredential? key = null)
     {
-        return Change(fingerprint, "approve-host-change", actor, expectedRevision, machine => TransitionProblem("approve-host-change", machine) is { } problem ? Plan.Refuse(problem)
+        return Change(fingerprint, "approve-host-change", actor, expectedRevision, key, machine => TransitionProblem("approve-host-change", machine) is { } problem ? Plan.Refuse(problem)
             : expectedHostName is not null && expectedHostName != machine.PendingHostName ? Plan.Refuse("the host name waiting for approval is not the one that was shown; nothing was done")
             : new Plan(null, machine.Status, machine.FriendlyName, false, machine.PendingHostName, $"host name changed from {machine.HostName} to {machine.PendingHostName}"));
     }
@@ -306,7 +307,7 @@ public sealed partial class AuthorityStore
         public static Plan Refuse(string error) => new(error, MachineStatus.Pending, null, false, null, "");
     }
 
-    private TransitionResult Change(string fingerprint, string kind, string actor, int? expectedRevision, Func<MachineRecord, Plan> plan)
+    private TransitionResult Change(string fingerprint, string kind, string actor, int? expectedRevision, VerifiedCredential? key, Func<MachineRecord, Plan> plan)
     {
         return Write((connection, transaction) =>
         {
@@ -346,7 +347,7 @@ public sealed partial class AuthorityStore
 
             History(connection, transaction, fingerprint, kind, machine.Status, chosen.Status, revision, actor, detail);
             Fault?.Invoke("after-history");
-            Audit(connection, transaction, "machine-" + kind, fingerprint, null, actor, detail);
+            Audit(connection, transaction, "machine-" + kind, fingerprint, null, actor, detail, key);
             Fault?.Invoke("before-commit");
 
             return new TransitionResult(true, detail, Query(connection, transaction, "SELECT * FROM machines WHERE fingerprint = $fp", Machine, ("$fp", fingerprint)).Single());
@@ -389,7 +390,7 @@ public sealed partial class AuthorityStore
                     ("$id", requestId), ("$fp", fingerprint), ("$digest", requestDigest), ("$response", plan.Response.ToJson()), ("$now", Time(Now)));
                 Fault?.Invoke("after-result");
                 string actor = string.IsNullOrWhiteSpace(plan.Actor) ? "authority" : ApprovalSummary.Clean(plan.Actor);
-                Audit(connection, transaction, "decision-" + plan.Response.Decision.ToString().ToLowerInvariant(), fingerprint, requestId, actor, plan.Response.ReasonCode + (plan.AuditDetail.Length > 0 ? "; " + plan.AuditDetail : "") + "; request " + requestDigest[..12]);
+                Audit(connection, transaction, "decision-" + plan.Response.Decision.ToString().ToLowerInvariant(), fingerprint, requestId, actor, plan.Response.ReasonCode + (plan.AuditDetail.Length > 0 ? "; " + plan.AuditDetail : "") + "; request " + requestDigest[..12], plan.Key, plan.Metadata);
             }
 
             Fault?.Invoke("before-commit");
@@ -442,7 +443,7 @@ public sealed partial class AuthorityStore
     /// Routine rotation, atomically: the current key is retired and the new one becomes active with the transition the current key
     /// signed. Refused when <paramref name="transition" /> does not name the active key.
     /// </summary>
-    public AuthorityKeyRecord RecordRotation(KeyTransition transition, string actor, Action<GrantTx>? reseal = null)
+    public AuthorityKeyRecord RecordRotation(KeyTransition transition, string actor, Action<GrantTx>? reseal = null, VerifiedCredential? key = null)
     {
         return Write((connection, transaction) =>
         {
@@ -453,22 +454,22 @@ public sealed partial class AuthorityStore
             }
 
             reseal?.Invoke(new GrantTx(this, connection, transaction));
-            return Replace(connection, transaction, active, transition.NewPublicKey, transition.Signature, "rotated", actor, transition.Created);
+            return Replace(connection, transaction, active, transition.NewPublicKey, transition.Signature, "rotated", actor, transition.Created, key);
         });
     }
 
     /// <summary>Recovery: the active key is retired without a transition (it is lost or not trusted), and the new key becomes active. Hosts pin it only through an explicit administrator action.</summary>
-    public AuthorityKeyRecord RecordRecovery(byte[] newPublicKey, string actor)
+    public AuthorityKeyRecord RecordRecovery(byte[] newPublicKey, string actor, VerifiedCredential? key = null)
     {
         return Write((connection, transaction) =>
         {
             AuthorityKeyRecord active = ActiveIn(connection, transaction) ?? throw new AuthorityDatabaseException("there is no active authority key");
 
-            return Replace(connection, transaction, active, newPublicKey, null, "recovered", actor);
+            return Replace(connection, transaction, active, newPublicKey, null, "recovered", actor, key: key);
         });
     }
 
-    private AuthorityKeyRecord Replace(SqliteConnection connection, SqliteTransaction transaction, AuthorityKeyRecord active, byte[] newPublicKey, byte[]? signature, string how, string actor, DateTimeOffset? created = null)
+    private AuthorityKeyRecord Replace(SqliteConnection connection, SqliteTransaction transaction, AuthorityKeyRecord active, byte[] newPublicKey, byte[]? signature, string how, string actor, DateTimeOffset? created = null, VerifiedCredential? key = null)
     {
         // A transition is signed over its creation time, so the stored time must be that one.
         string now = Time(created ?? Now);
@@ -479,7 +480,7 @@ public sealed partial class AuthorityStore
         WithSecretsDatabase.Execute(connection, transaction, "INSERT INTO authority_keys (generation, fingerprint, public_key, status, created, retired, previous_fingerprint, transition_signature, how) VALUES ($gen, $fp, $key, 'Active', $now, NULL, $previous, $signature, $how)",
             ("$gen", generation), ("$fp", fingerprint), ("$key", Convert.ToBase64String(newPublicKey)), ("$now", now), ("$previous", active.Fingerprint),
             ("$signature", signature is null ? null : Convert.ToBase64String(signature)), ("$how", how));
-        Audit(connection, transaction, "authority-key-" + how, null, null, actor, $"generation {active.Generation} to {generation}; {active.Fingerprint} to {fingerprint}");
+        Audit(connection, transaction, "authority-key-" + how, null, null, actor, $"generation {active.Generation} to {generation}; {active.Fingerprint} to {fingerprint}", key);
         Fault?.Invoke("before-commit");
 
         return new AuthorityKeyRecord(generation, fingerprint, newPublicKey, "Active", ParseTime(now), active.Fingerprint, signature, how);
@@ -509,7 +510,7 @@ public sealed partial class AuthorityStore
 
     internal const string ClearGrantEvidence = "evidence_kind = NULL, evidence_nonce = NULL, evidence_ciphertext = NULL, evidence_proof = NULL, evidence_minutes = NULL, review_key = NULL, seal_key = NULL, seal = NULL";
 
-    private const string GrantColumns = "id, fingerprint, scope_key, program, working_directory, secret_names, created, updated, expires, grant_revision, security_revision, status, approved_by, revoked, evidence_kind, evidence_nonce, evidence_ciphertext, evidence_proof, evidence_minutes, usage, consumed, replaces, review_key, seal_key, seal";
+    private const string GrantColumns = "id, fingerprint, scope_key, program, working_directory, secret_names, created, updated, expires, grant_revision, security_revision, status, approved_by, revoked, evidence_kind, evidence_nonce, evidence_ciphertext, evidence_proof, evidence_minutes, usage, consumed, replaces, review_key, seal_key, seal, approved_key_id, approved_key_name, approved_key_admin, changed_key_id, changed_key_name, changed_key_admin";
 
     private static GrantRecord ReadGrant(SqliteDataReader reader)
     {
@@ -517,8 +518,13 @@ public sealed partial class AuthorityStore
             reader.IsDBNull(8) ? null : ParseTime(reader.GetString(8)), reader.GetInt32(9), reader.GetInt32(10), reader.GetString(11), reader.GetString(12), reader.IsDBNull(13) ? null : ParseTime(reader.GetString(13)),
             reader.IsDBNull(14) || reader.IsDBNull(15) || reader.IsDBNull(16) || reader.IsDBNull(17) || reader.IsDBNull(18) ? null : new StoredEvidence(reader.GetString(14), reader.GetString(15), reader.GetString(16), reader.GetString(17), reader.GetInt32(18)),
             reader.GetString(19), reader.IsDBNull(20) ? null : ParseTime(reader.GetString(20)), reader.IsDBNull(21) ? null : reader.GetString(21),
-            reader.IsDBNull(22) ? null : reader.GetString(22), reader.IsDBNull(23) ? null : reader.GetString(23), reader.GetValue(24) as byte[]);
+            reader.IsDBNull(22) ? null : reader.GetString(22), reader.IsDBNull(23) ? null : reader.GetString(23), reader.GetValue(24) as byte[], ReadCredential(reader, 25), ReadCredential(reader, 28));
     }
+
+    /// <summary>A key a grant row names. A row that fills only some of a key's three columns still names a key (one that matches no seal), so the edited row covers nothing.</summary>
+    private static VerifiedCredential? ReadCredential(SqliteDataReader reader, int offset) =>
+        reader.IsDBNull(offset) && reader.IsDBNull(offset + 1) && reader.IsDBNull(offset + 2)
+            ? null : new VerifiedCredential(reader.IsDBNull(offset) ? "" : reader.GetString(offset), reader.IsDBNull(offset + 1) ? "" : reader.GetString(offset + 1), !reader.IsDBNull(offset + 2) && reader.GetBoolean(offset + 2));
 
     /// <summary>Every grant (of one machine when <paramref name="fingerprint" /> is given), oldest first.</summary>
     public IReadOnlyList<GrantRecord> Grants(string? fingerprint = null)
@@ -550,7 +556,7 @@ public sealed partial class AuthorityStore
         {
             int revision = Query(connection, transaction, "SELECT * FROM machines WHERE fingerprint = $fp", Machine, ("$fp", fingerprint)).Single().SecurityRevision;
             string now = Time(Now);
-            WithSecretsDatabase.Execute(connection, transaction, $"INSERT INTO grants ({GrantColumns}) VALUES ($id, $fp, $scope, 'test', 'test', 'TEST', $now, $now, $expires, 1, $revision, 'active', 'test', NULL, NULL, NULL, NULL, NULL, NULL, 'reusable', NULL, NULL, NULL, NULL, NULL)",
+            WithSecretsDatabase.Execute(connection, transaction, $"INSERT INTO grants ({GrantColumns}) VALUES ($id, $fp, $scope, 'test', 'test', 'TEST', $now, $now, $expires, 1, $revision, 'active', 'test', NULL, NULL, NULL, NULL, NULL, NULL, 'reusable', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)",
                 ("$id", id), ("$fp", fingerprint), ("$scope", scopeDigest), ("$now", now), ("$expires", expires is { } at ? Time(at) : null), ("$revision", revision));
 
             return 0;
@@ -581,9 +587,12 @@ public sealed partial class AuthorityStore
         internal void WriteEvidence(GrantRecord row)
         {
             WithSecretsDatabase.Execute(_connection, _transaction,
-                "UPDATE grants SET evidence_kind = $kind, evidence_nonce = $nonce, evidence_ciphertext = $text, evidence_proof = $proof, evidence_minutes = $minutes, review_key = $review, seal_key = $key, seal = $seal WHERE id = $id",
+                "UPDATE grants SET evidence_kind = $kind, evidence_nonce = $nonce, evidence_ciphertext = $text, evidence_proof = $proof, evidence_minutes = $minutes, review_key = $review, seal_key = $key, seal = $seal, " +
+                "approved_key_id = $approvedId, approved_key_name = $approvedName, approved_key_admin = $approvedAdmin, changed_key_id = $changedId, changed_key_name = $changedName, changed_key_admin = $changedAdmin WHERE id = $id",
                 ("$kind", row.Evidence?.Kind), ("$nonce", row.Evidence?.Nonce), ("$text", row.Evidence?.Ciphertext), ("$proof", row.Evidence?.Proof),
-                ("$minutes", row.Evidence?.Minutes), ("$review", row.ReviewKey), ("$key", row.SealKey), ("$seal", row.Seal), ("$id", row.Id));
+                ("$minutes", row.Evidence?.Minutes), ("$review", row.ReviewKey), ("$key", row.SealKey), ("$seal", row.Seal), ("$id", row.Id),
+                ("$approvedId", row.ApprovedKey?.Id), ("$approvedName", row.ApprovedKey?.Name), ("$approvedAdmin", row.ApprovedKey?.Admin),
+                ("$changedId", row.ChangedKey?.Id), ("$changedName", row.ChangedKey?.Name), ("$changedAdmin", row.ChangedKey?.Admin));
         }
 
         internal string? SealProblem(GrantRecord row) => _store.Sealer is { } sealer ? sealer.Problem(this, row) : "the grant has no seal";
@@ -591,7 +600,13 @@ public sealed partial class AuthorityStore
         private void Seal(string id, PlainEvidence evidence)
         {
             GrantSealer sealer = _store.Sealer ?? throw new GrantSealException("no verifier for approvals is configured");
-            sealer.Write(this, Find(id)!, evidence);
+            GrantRecord row = Find(id)!;
+            if (row.Replaces is { } replaces && Find(replaces) is { } previous)
+            {
+                row = row with { ApprovedKey = previous.ApprovedKey };
+            }
+
+            sealer.Write(this, row, evidence);
         }
 
         public GrantRecord? Find(string id) => Query(_connection, _transaction, $"SELECT {GrantColumns} FROM grants WHERE id = $id", ReadGrant, ("$id", id)).FirstOrDefault();
@@ -606,7 +621,7 @@ public sealed partial class AuthorityStore
         {
             id ??= GrantOps.NewGrantId();
             string now = Time(at);
-            WithSecretsDatabase.Execute(_connection, _transaction, $"INSERT INTO grants ({GrantColumns}) VALUES ($id, $fp, $scope, $program, $dir, $names, $now, $now, $expires, 1, $revision, $status, $by, NULL, NULL, NULL, NULL, NULL, NULL, $usage, $consumed, $replaces, NULL, NULL, NULL)",
+            WithSecretsDatabase.Execute(_connection, _transaction, $"INSERT INTO grants ({GrantColumns}) VALUES ($id, $fp, $scope, $program, $dir, $names, $now, $now, $expires, 1, $revision, $status, $by, NULL, NULL, NULL, NULL, NULL, NULL, $usage, $consumed, $replaces, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)",
                 ("$status", consumed ? "consumed" : "active"), ("$usage", usage), ("$consumed", consumed ? now : null), ("$replaces", replaces), ("$id", id), ("$fp", fingerprint), ("$scope", scopeKey), ("$program", program), ("$dir", workingDirectory), ("$names", secretNames), ("$now", now), ("$expires", expires is { } end ? Time(end) : null), ("$revision", securityRevision), ("$by", approvedBy));
             Seal(id, evidence);
             _store.Fault?.Invoke("after-grant");
@@ -641,7 +656,7 @@ public sealed partial class AuthorityStore
     }
 
     /// <summary>What a grant operation decided: the signed answer, the audit event and text (when it should be recorded), and whether the answer is stored for retries.</summary>
-    public sealed record GrantPlan(GrantResponse Response, string? AuditEvent, string AuditDetail, bool Store = true);
+    public sealed record GrantPlan(GrantResponse Response, string? AuditEvent, string AuditDetail, bool Store = true, VerifiedCredential? Key = null, IReadOnlyDictionary<string, string>? Metadata = null);
 
     /// <summary>
     /// One durable grant operation, atomically: the stored answer when the request id was done before (nothing is done again; the
@@ -686,7 +701,7 @@ public sealed partial class AuthorityStore
 
             if (plan.AuditEvent is { } auditEvent)
             {
-                Audit(connection, transaction, auditEvent, fingerprint, requestId, "authority", plan.Response.ReasonCode + (plan.AuditDetail.Length > 0 ? "; " + plan.AuditDetail : "") + "; request " + requestDigest[..Math.Min(12, requestDigest.Length)]);
+                Audit(connection, transaction, auditEvent, fingerprint, requestId, "authority", plan.Response.ReasonCode + (plan.AuditDetail.Length > 0 ? "; " + plan.AuditDetail : "") + "; request " + requestDigest[..Math.Min(12, requestDigest.Length)], plan.Key, plan.Metadata);
             }
 
             Fault?.Invoke("before-commit");
@@ -764,11 +779,11 @@ public sealed partial class AuthorityStore
     /// A durable note about a delivery of secret values to a machine (<c>delivery-prepared</c> before they are sent, then <c>delivery-sent</c>, <c>delivery-not-sent</c> or <c>approved-not-delivered</c>). The
     /// <c>delivery-prepared</c> row is also what makes a request id deliverable once across restarts. It holds no value.
     /// </summary>
-    public void RecordDeliveryEvent(string fingerprint, string requestId, string eventName, string detail)
+    public void RecordDeliveryEvent(string fingerprint, string requestId, string eventName, string detail, VerifiedCredential? key = null, IReadOnlyDictionary<string, string>? metadata = null)
     {
         Write((connection, transaction) =>
         {
-            Audit(connection, transaction, eventName, fingerprint, requestId, "authority", detail);
+            Audit(connection, transaction, eventName, fingerprint, requestId, "authority", detail, key, metadata);
 
             return 0;
         });
@@ -788,10 +803,11 @@ public sealed partial class AuthorityStore
             ("$fp", fingerprint), ("$now", Time(Now)), ("$kind", kind), ("$from", from?.ToString()), ("$to", to?.ToString()), ("$revision", revision), ("$actor", actor), ("$detail", detail));
     }
 
-    private void Audit(SqliteConnection connection, SqliteTransaction transaction, string eventName, string? fingerprint, string? requestId, string actor, string detail)
+    private void Audit(SqliteConnection connection, SqliteTransaction transaction, string eventName, string? fingerprint, string? requestId, string actor, string detail, VerifiedCredential? key = null, IReadOnlyDictionary<string, string>? metadata = null)
     {
-        WithSecretsDatabase.Execute(connection, transaction, "INSERT INTO audit_history (time, event, fingerprint, request_id, actor, detail) VALUES ($now, $event, $fp, $id, $actor, $detail)",
-            ("$now", Time(Now)), ("$event", eventName), ("$fp", fingerprint), ("$id", requestId), ("$actor", actor), ("$detail", detail));
+        WithSecretsDatabase.Execute(connection, transaction, "INSERT INTO audit_history (time, event, fingerprint, request_id, actor, detail, key_id, key_name, key_admin, metadata) VALUES ($now, $event, $fp, $id, $actor, $detail, $keyId, $keyName, $keyAdmin, $metadata)",
+            ("$now", Time(Now)), ("$event", eventName), ("$fp", fingerprint), ("$id", requestId), ("$actor", actor), ("$detail", detail),
+            ("$keyId", key?.Id), ("$keyName", key?.Name), ("$keyAdmin", key?.Admin), ("$metadata", metadata is null ? null : System.Text.Json.JsonSerializer.Serialize(metadata)));
     }
 
     private static MachineRecord Machine(SqliteDataReader reader)

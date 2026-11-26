@@ -21,7 +21,8 @@ public sealed partial class WithSecretsDatabase
             secret_names TEXT NOT NULL, created TEXT NOT NULL, updated TEXT NOT NULL, expires TEXT, grant_revision INTEGER NOT NULL,
             security_revision INTEGER NOT NULL, status TEXT NOT NULL, approved_by TEXT NOT NULL, revoked TEXT,
             evidence_kind TEXT, evidence_nonce TEXT, evidence_ciphertext TEXT, evidence_proof TEXT, evidence_minutes INTEGER,
-            usage TEXT NOT NULL, consumed TEXT, replaces TEXT, review_key TEXT, seal_key TEXT, seal BLOB);
+            usage TEXT NOT NULL, consumed TEXT, replaces TEXT, review_key TEXT, seal_key TEXT, seal BLOB, approved_key_id TEXT, approved_key_name TEXT, approved_key_admin INTEGER,
+            changed_key_id TEXT, changed_key_name TEXT, changed_key_admin INTEGER);
         CREATE TABLE provider_instances (
             id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, provider_type TEXT NOT NULL, configuration TEXT NOT NULL,
             max_stale_seconds INTEGER NOT NULL CHECK (max_stale_seconds BETWEEN 0 AND 86400), revision INTEGER NOT NULL);
@@ -44,7 +45,7 @@ public sealed partial class WithSecretsDatabase
             created TEXT NOT NULL, retired TEXT, previous_fingerprint TEXT, transition_signature TEXT, how TEXT NOT NULL);
         CREATE TABLE audit_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT NOT NULL, event TEXT NOT NULL, fingerprint TEXT, request_id TEXT,
-            actor TEXT NOT NULL, detail TEXT NOT NULL);
+            actor TEXT NOT NULL, detail TEXT NOT NULL, key_id TEXT, key_name TEXT, key_admin INTEGER, metadata TEXT);
         CREATE TABLE processed_requests (
             request_id TEXT PRIMARY KEY NOT NULL, fingerprint TEXT NOT NULL, request_digest TEXT NOT NULL, response TEXT NOT NULL,
             created TEXT NOT NULL);

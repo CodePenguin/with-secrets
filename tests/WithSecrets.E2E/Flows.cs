@@ -45,29 +45,13 @@ internal static class Cmds
         return command ?? throw new InvalidOperationException("bad test arguments: " + error);
     }
 
-    /// <summary>
-    /// A run of a program with secrets, on its own task. Without <paramref name="app" /> the command's own page shows the approval (what a run does while "allow again
-    /// for a few minutes" is on). With it the run goes to that app's service and the request waits in its Approvals queue, as it does by default.
-    /// </summary>
-    public static Cmd<int> Run(Rig rig, string secrets, string[] program, TimeSpan? timeLimit = null, SpaApp? app = null)
+    /// <summary>A run through the host service, using its approval queue or a direct page.</summary>
+    public static Cmd<int> Run(Rig rig, string secrets, string[] program, SpaApp app, bool directApproval = false)
     {
         CliCommand.Run run = (CliCommand.Run)Parse(["--secrets", secrets, "--reason", "e2e run", "--", .. program]);
 
-        // The run goes through the host service, as the program does: the service is in this process on a free port, and the CLI client
-        // talks to it over HTTP. The page listens on the port the harness chose (the --port of the run).
         return new Cmd<int>((port, o, e) =>
-        {
-            // The machine is enrolled and approved through AdminActions (what the admin web app does after the passkey tap), with software keys.
-            E2EMachine machine = rig.Machine;
-            if (app is not null)
-            {
-                return LaunchClient.RunAsync(run.Args, rig.Work, app.Service.Endpoint, null, o, e, machine.Trust).GetAwaiter().GetResult();
-            }
-
-            using HostService service = HostService.Start(new HostServiceOptions { CommandLineEndpoint = E2EEndpoint.Make(), Lock = AuthorityLock.UnlockedForTests(), State = rig.State, Store = rig.Store, Deployment = machine.Deployment, Port = 0, TimeLimit = timeLimit, ApproverFactory = (settings, announce) => CommandWiring.RunApprover(rig.State, settings, announce) });
-
-            return LaunchClient.RunAsync(run.Args, rig.Work, service.Endpoint, port, o, e, machine.Trust).GetAwaiter().GetResult();
-        });
+            LaunchClient.RunAsync(run.Args, rig.Work, app.Service.Endpoint, directApproval ? port : null, o, e, rig.Machine.Trust).GetAwaiter().GetResult());
     }
 
     /// <summary>The passkey enrollment pages (what the admin app starts after its tap), with the confirmation code typed in this terminal.</summary>

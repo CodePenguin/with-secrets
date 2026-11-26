@@ -128,10 +128,6 @@ public sealed partial class AdminService
     {
         record.InlineProof?.Dispose();
         record.InlineProof = null;
-        if (record.Plan.Material is not null)
-        {
-            CryptographicOperations.ZeroMemory(record.Plan.Material);
-        }
     }
 
     private static bool Active(AuthorizationRecord record) => record.State is AuthorizationState.Pending or AuthorizationState.Verified;
@@ -259,9 +255,11 @@ public sealed partial class AdminService
             try
             {
                 IAdminAsker asker = _p.Askers(_ => { });
-                if (asker.InlineTarget() is not { } target)
+                bool anyKey = OperationPolicy.AnyKey(op);
+                EnrollmentTarget? target = anyKey ? asker.ApprovalTarget() : asker.InlineTarget();
+                if (target is null)
                 {
-                    throw new ProofUnavailableException("no enrolled admin passkey can prove at this address");
+                    throw new ProofUnavailableException(anyKey ? "no enrolled passkey can prove at this address" : "no enrolled admin passkey can prove at this address");
                 }
 
                 InlineAdminProof prepared = _p.Authorizer.PrepareInline(plan.Sentence, plan.Operation, plan.Parameters, target, $"http://localhost:{_p.Port.ToString(CultureInfo.InvariantCulture)}", plan.WantsPrf);
@@ -329,14 +327,15 @@ public sealed partial class AdminService
         AdminPlan asked = plan with { OnRefused = reason => Complete(new AdminAuthorization(null, reason)) };
         AdminStart started = await Run(asked, caller, epoch, cancel, (item, asker, announce, token) =>
         {
-            AdminAuthorization result = _p.Authorizer.Authorize(asker, Heading, item.Sentence, item.Operation, item.Parameters, token);
-            bool verified = Complete(result);
+            AdminAuthorization result = _p.Authorizer.Authorize(asker, Heading, item.Sentence, item.Operation, item.Parameters, token, item.WantsPrf);
+            using Unlock? released = result.Unlock;
+            bool verified = Complete(result with { Unlock = null });
             Note(item.Operation + (result.Ok ? ": authorized" : ": refused"));
             if (verified)
             {
                 if (plan.Delegated is null)
                 {
-                    ApplyAtTap(record, caller);
+                    ApplyAtTap(record, caller, released);
                 }
                 else
                 {
@@ -345,7 +344,7 @@ public sealed partial class AdminService
             }
 
             return result.Ok ? "authorized" : result.Detail;
-        }, keepMaterial: true, afterPage: () =>
+        }, afterPage: () =>
         {
             if (startDelegated)
             {

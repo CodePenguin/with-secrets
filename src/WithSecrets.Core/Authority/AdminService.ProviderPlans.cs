@@ -106,7 +106,7 @@ public sealed partial class AdminService
                 return "nothing was added: " + late;
             }
 
-            ProviderInstance added = providers.AddInstance(name, type, config, TimeSpan.FromSeconds(seconds), a.Admin!.Signer);
+            ProviderInstance added = providers.AddInstance(name, type, config, TimeSpan.FromSeconds(seconds), a.Admin!.Key);
             remark.Value = Wait(providers.StartAsync(added));
 
             return null;
@@ -166,9 +166,9 @@ public sealed partial class AdminService
                 return "nothing was changed: " + late;
             }
 
-            ProviderInstance changed = providers.Reconfigure(now, config, a.Admin!.Signer);
+            ProviderInstance changed = providers.Reconfigure(now, config, a.Admin!.Key);
             string? applied = Wait(providers.ApplyAsync(changed));
-            remark.Value = applied ?? Wait(providers.RefreshAfterChangeAsync([.. providers.Store.Mounts().Where(mount => mount.InstanceId == id)], a.Admin.Signer));
+            remark.Value = applied ?? Wait(providers.RefreshAfterChangeAsync([.. providers.Store.Mounts().Where(mount => mount.InstanceId == id)], a.Admin.Key));
 
             return null;
         }), Remark: remark), null, 200);
@@ -224,7 +224,7 @@ public sealed partial class AdminService
                 return $"the maximum staleness changed after this was authorized (it is {((int)now.MaxStale.TotalSeconds).ToString(CultureInfo.InvariantCulture)} seconds now); nothing was changed";
             }
 
-            providers.SetMaxStale(now, TimeSpan.FromSeconds(seconds), a.Admin!.Signer);
+            providers.SetMaxStale(now, TimeSpan.FromSeconds(seconds), a.Admin!.Key);
 
             return null;
         })), null, 200);
@@ -263,7 +263,7 @@ public sealed partial class AdminService
                 return "the provider instance has mounts now; nothing was removed";
             }
 
-            providers.RemoveInstance(providers.Store.Instance(id)!, a.Admin!.Signer);
+            providers.RemoveInstance(providers.Store.Instance(id)!, a.Admin!.Key);
             remark.Value = Wait(providers.StopAsync(id));
 
             return null;
@@ -349,9 +349,9 @@ public sealed partial class AdminService
             }
 
             // The grants the mount ends are counted again inside its transaction; another number than the signed one rolls it back.
-            Mount added = providers.AddMount(providers.Store.Instance(instanceId)!, mountKind, path, basePath, ending, a.Admin!.Signer);
+            Mount added = providers.AddMount(providers.Store.Instance(instanceId)!, mountKind, path, basePath, ending, a.Admin!.Key);
             remark.Value = providers.IsRegistered(instanceId)
-                ? Wait(providers.RefreshAfterChangeAsync([added], a.Admin.Signer))
+                ? Wait(providers.RefreshAfterChangeAsync([added], a.Admin.Key))
                 : "the provider instance is not running, so the namespace was not listed; refresh it once the instance runs";
 
             return null;
@@ -385,7 +385,7 @@ public sealed partial class AdminService
             }
 
             // Counted again inside the transaction, as for mount-add.
-            providers.RemoveMount(mount, instanceName, ending, a.Admin!.Signer);
+            providers.RemoveMount(mount, instanceName, ending, a.Admin!.Key);
 
             return null;
         })), null, 200);

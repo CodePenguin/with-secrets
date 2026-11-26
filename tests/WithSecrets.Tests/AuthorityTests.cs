@@ -176,6 +176,8 @@ internal static class AuthorityTests
             ["EnvVariables"] = request with { EnvVariables = new Dictionary<string, string> { ["A"] = "c" } },
             ["InheritedEnvironment"] = request with { InheritedEnvironment = new Dictionary<string, string> { ["PATH"] = "x" } },
             ["Encrypted"] = request with { Encrypted = [.. request.Encrypted, new LaunchEncrypted("V", "x.env", "DOTENV_PRIVATE_KEY", "encrypted:AAAA")] },
+            ["DotenvxInputDigest"] = request with { DotenvxInputDigest = new string('C', 64) },
+            ["DotenvxDynamicNames"] = request with { DotenvxDynamicNames = ["A"] },
         };
         string[] properties = [.. typeof(LaunchRequest).GetProperties(BindingFlags.Public | BindingFlags.Instance).Where(property => property.Name != "EqualityContract").Select(property => property.Name).Order(StringComparer.Ordinal)];
         check(properties.SequenceEqual(variants.Keys.Order(StringComparer.Ordinal)), "envelope: every field of the launch request is tested (a new field must be added here)");
@@ -204,6 +206,7 @@ internal static class AuthorityTests
             ["Expires"] = response with { Expires = issued.AddMinutes(10) },
             ["AuthorityKeyId"] = response with { AuthorityKeyId = KeyIdentity.Fingerprint(stranger.PublicKey) },
             ["Signature"] = response with { Signature = badSignature },
+            ["Keys"] = response with { Keys = new AuditKeys(SessionKey: new VerifiedCredential("phone-id", "phone", false)) },
         };
         string[] responseProperties = [.. typeof(AuthorityResponse).GetProperties(BindingFlags.Public | BindingFlags.Instance).Where(property => property.Name != "EqualityContract").Select(property => property.Name).Order(StringComparer.Ordinal)];
         check(responseProperties.SequenceEqual(responses.Keys.Order(StringComparer.Ordinal)), "response: every field is tested (a new field must be added here)");
@@ -218,6 +221,12 @@ internal static class AuthorityTests
         // Text form: round trip and strict parsing.
         string json = response.ToJson();
         check(AuthorityResponse.TryParse(json, out AuthorityResponse? parsed, out _) && parsed!.Verify(authority.PublicKey) && parsed.RequestId == "tamper-1" && parsed.SecurityRevision == 3 && parsed.Expires == response.Expires, "response: its JSON reads back and still verifies");
+        AuditKeys denialKeys = new(SessionKey: new VerifiedCredential("phone-id", "phone", false));
+        AuthorityResponse denial = AuthorityResponse.Create("tamper-1", request.Digest(), envelope.MachineFingerprint, AuthorityDecision.Denied,
+            ReasonCodes.UserDenied, 3, issued, issued.AddMinutes(1), authority, denialKeys);
+        check(AuthorityResponse.TryParse(denial.ToJson(), out AuthorityResponse? parsedDenial, out _) && parsedDenial!.Verify(authority.PublicKey)
+            && parsedDenial.Keys == denialKeys && !(parsedDenial with { Keys = null }).Verify(authority.PublicKey),
+            "response: denial attribution round-trips and is covered by the authority signature");
         string[] badJson =
         [
             json.Replace("\"reasonCode\":\"approved\",", "", StringComparison.Ordinal),
@@ -492,7 +501,7 @@ internal static class AuthorityTests
         using (authority.Offer(request.RequestId, request.Digest(), () =>
         {
             Interlocked.Increment(ref asked);
-            return ApprovalDecision.Allow(credential: new VerifiedCredential("approver", false));
+            return ApprovalDecision.Allow(credential: new VerifiedCredential("test-approver", "approver", false));
         }, response =>
         {
             committedNotice = response;
@@ -763,7 +772,7 @@ internal static class AuthorityTests
             mismatch = error;
         }
 
-        check(mismatch is not null && mismatch.Message == "with-secrets.db is not of schema version 3; delete with-secrets.db to start over", "schema: another schema version is refused with the delete-it message (" + mismatch?.Message + ")");
+        check(mismatch is not null && mismatch.Message == "with-secrets.db is not of schema version 4; delete with-secrets.db to start over", "schema: another schema version is refused with the delete-it message (" + mismatch?.Message + ")");
         AuthorityDatabaseException? writing = null;
         try
         {
@@ -892,16 +901,14 @@ internal static class AuthorityTests
             check(threw && !File.Exists(fx.Machine.Deployment.HostConfig.FilePath) && pinnedBefore.Length > 0, "pin: a key store that does not hold the key with-secrets.db names pins nothing");
         }
 
-        // L4: a failure while checking the answer is a denial, and what the page released is zeroed.
+        // L4: a failure while checking the answer is a denial (a run's approval carries no key material to zero).
         using (Fixture fx = new(parent))
         {
             using SoftwareSigningKey stranger = new();
             fx.Scripted.Tamper = r => Resign(r, stranger);
             fx.Scripted.Transitions = _ => throw new IOException("disk");
-            byte[] released = [1, 2, 3, 4];
-            Unlock unlock = new("cred", released);
-            AuthorizationOutcome outcome = await fx.Host.AuthorizeAsync(IdentityTests.Sample("l4-1", fx.Now), () => ApprovalDecision.Allow("ok", 0, null, unlock), CancellationToken.None);
-            check(!outcome.Decision.Approved && outcome.Code == "response-invalid" && released.All(value => value == 0), "cleanup: an exception while verifying denies and zeroes the unlock material");
+            AuthorizationOutcome outcome = await fx.Host.AuthorizeAsync(IdentityTests.Sample("l4-1", fx.Now), () => ApprovalDecision.Allow("ok", 0, null), CancellationToken.None);
+            check(!outcome.Decision.Approved && outcome.Code == "response-invalid", "cleanup: an exception while verifying denies");
         }
     }
 

@@ -74,18 +74,6 @@ internal sealed class StoppablePasskeys : IPasskeyAdmin
     public ApprovalDecision RotateStoreKey(Action<string> announce, Func<string?> stopReason) => Enroll(announce, stopReason);
 }
 
-/// <summary>Reversible protection for the unattended-unlock tests.</summary>
-internal sealed class ReversibleProtection : IUnlockProtection
-{
-    public string Name => "test protection";
-
-    public string? Unavailable => null;
-
-    public byte[] Seal(byte[] material) => [0x46, .. material.Select(item => (byte)(item ^ 0x5A))];
-
-    public byte[]? Open(byte[] sealedBlob) => [.. sealedBlob.Skip(1).Select(item => (byte)(item ^ 0x5A))];
-}
-
 /// <summary>
 /// A host service with an admin app for tests: one machine (a fake clock), a state with an admin key (laptop) and an ordinary key (phone), passkey pages with a time limit, and browsers.
 /// <see cref="Start" /> makes the service again over the same files (a restart).
@@ -95,7 +83,6 @@ internal sealed class AdminApp : IDisposable
     private readonly HostServiceTests.Rig _rig;
     private readonly Func<Action<string>, IAdminAsker> _askers;
     private readonly IPasskeyAdmin? _passkeys;
-    private readonly IUnlockProtection? _protection;
     private readonly AdminWebAssets? _web;
     private readonly Func<IApprover>? _approver;
     private readonly bool _machineEndpoint;
@@ -107,7 +94,7 @@ internal sealed class AdminApp : IDisposable
     private readonly Func<InteractiveProviderRefreshRequest, ISigningKey, CancellationToken, Task<IInteractiveProviderRefresh>>? _launchInteractiveRefresh;
 
     /// <summary>With <paramref name="providers" />, the service runs over a native secret store (not the counting one) and composes its provider side over that registry.</summary>
-    public AdminApp(string root, bool trusted = true, bool unlocked = true, int askSeconds = 4, IPasskeyAdmin? passkeys = null, bool protection = false, AdminWebAssets? web = null, AdminApp? restoreFrom = null, Func<IApprover>? approver = null, bool machineEndpoint = false,
+    public AdminApp(string root, bool trusted = true, bool unlocked = true, int askSeconds = 4, IPasskeyAdmin? passkeys = null, AdminWebAssets? web = null, AdminApp? restoreFrom = null, Func<IApprover>? approver = null, bool machineEndpoint = false,
         ProviderRegistry? providers = null, Func<string, string?>? sealOnePasswordConfiguration = null,
         Func<string, string?>? sealVaultConfiguration = null,
         Func<InteractiveProviderRefreshRequest, ISigningKey, CancellationToken, Task<IInteractiveProviderRefresh>>? launchInteractiveRefresh = null)
@@ -147,7 +134,6 @@ internal sealed class AdminApp : IDisposable
         }
         Http = new HttpClient(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false, UseCookies = false }) { Timeout = TimeSpan.FromSeconds(60) };
         _passkeys = passkeys;
-        _protection = protection || !OperatingSystem.IsWindows() ? new ReversibleProtection() : null;
         _askers = announce =>
         {
             ApprovalSettings settings = new(null, 0, TimeSpan.FromSeconds(askSeconds));
@@ -177,6 +163,13 @@ internal sealed class AdminApp : IDisposable
             count();
 
             return inner.Ask(prompt, cancel);
+        }
+
+        public ApprovalDecision AskWithKeyRelease(ApprovalPrompt prompt, CancellationToken cancel)
+        {
+            count();
+
+            return inner.AskWithKeyRelease(prompt, cancel);
         }
     }
 
@@ -235,7 +228,6 @@ internal sealed class AdminApp : IDisposable
             LaunchInteractiveRefresh = _launchInteractiveRefresh,
             Deployment = Machine.Restart(),
             Port = 0,
-            UnlockProtection = _protection,
             AdminAskerFactory = _askers,
             PasskeyAdminFactory = _passkeys is null ? null : () => _passkeys,
             WebAssets = _web,

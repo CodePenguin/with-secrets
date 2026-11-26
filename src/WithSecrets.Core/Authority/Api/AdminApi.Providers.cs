@@ -169,7 +169,7 @@ internal sealed partial class AdminApi
 
         try
         {
-            return new ApiResult(200, await providers.RefreshAsync(id, call.Session!.Identity, call.Context.RequestAborted));
+            return new ApiResult(200, await providers.RefreshAsync(id, call.Session!.Identity, call.Context.RequestAborted, call.Session.Key, fromSession: true));
         }
         catch (ProviderConfigurationException error)
         {

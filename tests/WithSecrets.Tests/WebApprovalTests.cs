@@ -159,7 +159,8 @@ internal static partial class WebApprovalTests
             PasskeyRecord second = two.Record("ws.example.com", "phone") with { Created = created.AddMinutes(1) };
             check(store.Add(first) && store.Add(second), "passkeys: add two records");
             IReadOnlyList<PasskeyRecord> loaded = new PasskeyStore(path).All();
-            check(loaded.Count == 2 && loaded[0] == first with { Slot = loaded[0].Slot } && loaded[1] == second with { Slot = loaded[1].Slot } && loaded.All(item => item.Slot is not null), "passkeys: records survive a new store (with a key slot, which the state re-wraps for its own master key); the first is the admin");
+            check(loaded.Count == 2 && loaded[0] == first with { Slot = loaded[0].Slot } && loaded[1] == second with { Slot = null }
+                && loaded[0].Slot is not null, "passkeys: records survive a new store; only the first key is an admin and has a slot");
             check(store.ForRp("localhost").Select(item => item.Id).SequenceEqual([first.Id]), "passkeys: ForRp filters");
             check(store.ForRp("other").Count == 0, "passkeys: ForRp with no match is empty");
             check(!store.Add(first with { Name = "again" }) && store.All().Count == 2, "passkeys: duplicate Id refused");
@@ -373,7 +374,7 @@ internal static partial class WebApprovalTests
                 check(decision is { Approved: false, Detail: Enrollment.LastAdmin } && lines.Count == 0 && store.All().Count == 1, "targets passkey: --unenroll of the last admin key is refused before anything opens (" + decision?.Detail + ")");
             }
 
-            // The cross-host third link carries the "Also make this key an admin" box: its text says so and its manifest makes the key an admin.
+            // Adding an admin across hosts asks for PRF, then signs the manifest that makes the key an admin.
             {
                 PasskeyStore store = new(Path.Combine(folder, "a-admin.json"));
                 using TestAuthenticator laptop = TestAuthenticator.ES256();
@@ -381,11 +382,12 @@ internal static partial class WebApprovalTests
                 check(store.Add(laptop.Record("localhost", "laptop")), "targets passkey admin: localhost key stored (the admin)");
                 List<string> pages = [];
                 (ApprovalDecision? decision, List<string> lines) = await PasskeyTargetRun(client, store, remote, localOnly, false, item => item.Enroll(), laptop, phone, true, pages);
-                string third = pages.Count == 4 ? pages[3] : "";
-                check(decision is { Approved: true } && lines.Count == 1 && store.All().Select(item => (item.Name, item.Admin)).SequenceEqual([("laptop", true), ("phone", true)]), "targets passkey admin: ticked on the enroll page, the new key is an admin after the third link (" + decision?.Detail + "; " + pages.Count + " pages)");
-                check(pages.Count == 4 && pages[2].Contains("\"next\":\"http", StringComparison.Ordinal) && !pages[2].Contains("\"code\"", StringComparison.Ordinal), "targets passkey admin: the code reply says the choice (" + (pages.Count > 2 ? pages[2] : "") + ")");
-                check(third.Contains("The new passkey will be an admin", StringComparison.Ordinal) && third.Contains("\\u0022admin\\u0022:true", StringComparison.Ordinal) && third.Split("\\u0022admin\\u0022:true").Length == 3,
-                    "targets passkey admin: the third link's text says the new key will be an admin, and the manifest it signs has two admins");
+                string signature = pages.Count == 5 ? pages[4] : "";
+                check(decision is { Approved: true } && lines.Count == 1 && store.All().Select(item => (item.Name, item.Admin)).SequenceEqual([("laptop", true), ("phone", true)]), "targets passkey admin: ticked on the enroll page, the new key is an admin after signing (" + decision?.Detail + "; " + pages.Count + " pages)");
+                check(pages.Count == 5 && pages[2].Contains("\"next\":\"http", StringComparison.Ordinal) && !pages[2].Contains("\"code\"", StringComparison.Ordinal)
+                    && pages[3].Contains("\"prfKey\":", StringComparison.Ordinal) && !pages[0].Contains("\"prfKey\":", StringComparison.Ordinal), "targets passkey admin: only the release page asks for PRF");
+                check(signature.Contains("The new passkey will be an admin", StringComparison.Ordinal) && signature.Split("\\u0022admin\\u0022:true").Length == 3,
+                    "targets passkey admin: the signature page says the new key will be an admin, and the manifest it signs has two admins");
                 (decision, lines) = await PasskeyTargetRun(client, store, remote, localOnly, false, item => item.Unenroll("laptop"), phone, null);
                 check(decision is { Approved: true } && store.All().Select(item => item.Name).SequenceEqual(["phone"]), "targets passkey admin: the new admin removes the first one at its own host (" + decision?.Detail + "; " + string.Join(" | ", lines) + ")");
             }
@@ -503,7 +505,7 @@ internal static partial class WebApprovalTests
                     string page = Text(Send(client, HttpMethod.Get, baseUrl));
                     pages?.Add(page);
                     byte[] challenge = Bytes(Options(page), "challenge");
-                    string registration = TestState.Register(creator, challenge, origin, link.IdnHost, "key");
+                    string registration = TestState.Register(creator, challenge, origin, link.IdnHost, "key", makeAdmin ? PrfMode.Normal : PrfMode.Missing);
                     registration = registration[..^1] + ",\"name\":" + JsonSerializer.Serialize(newName) + (makeAdmin ? ",\"admin\":true}" : "}");
 
                     string reply = Text(Send(client, HttpMethod.Post, baseUrl + "/create", registration));
@@ -822,7 +824,7 @@ internal static partial class WebApprovalTests
                 check(!System.Text.RegularExpressions.Regex.IsMatch(body, "\\son[a-z]+=", System.Text.RegularExpressions.RegexOptions.IgnoreCase), "enroll: no inline event attributes");
                 check(body.Contains("<input id=\"make-admin\" type=\"checkbox\">", StringComparison.Ordinal) && body.Contains("<label for=\"make-admin\">Also make this key an admin</label>", StringComparison.Ordinal)
                     && !System.Text.RegularExpressions.Regex.IsMatch(body, "id=\"make-admin\"[^>]*checked"), "enroll: the page has the \"Also make this key an admin\" box, not ticked");
-                check(script.Contains("admin: makeAdmin.checked", StringComparison.Ordinal), "enroll: the script sends the box with the registration");
+                check(script.Contains("var admin = makeAdmin.checked;", StringComparison.Ordinal) && script.Contains("admin: admin", StringComparison.Ordinal), "enroll: the script sends the box with the registration");
 
                 JsonElement options = Options(body);
                 byte[] challenge = Bytes(options, "challenge");

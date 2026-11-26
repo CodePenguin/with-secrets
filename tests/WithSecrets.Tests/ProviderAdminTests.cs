@@ -5,6 +5,8 @@ namespace WithSecrets.Tests;
 /// <summary>The provider administration facade (10.3.1, 10.5): views, proposed-configuration validation, the configuration screen, namespace refresh and the store's beforeCommit.</summary>
 internal static class ProviderAdminTests
 {
+    private static readonly VerifiedCredential Laptop = new("test-laptop-id", "laptop", true);
+
     private static readonly TimeSpan Hour = TimeSpan.FromHours(1);
 
     private sealed class CapturingAudit : IHostAudit
@@ -138,25 +140,28 @@ internal static class ProviderAdminTests
         using Rig rig = new();
         ProviderStore store = rig.Store;
         rig.Captured.Fail = true;
-        check(Fails(() => rig.Admin.AddInstance("vault-a", "test", """{"label":"a"}""", Hour, "laptop")) && store.Instances().Count == 0, "fail closed: no provider-added event, no instance");
+        check(Fails(() => rig.Admin.AddInstance("vault-a", "test", """{"label":"a"}""", Hour, Laptop)) && store.Instances().Count == 0, "fail closed: no provider-added event, no instance");
         ProviderInstance instance = store.AddInstance("vault-a", "test", """{"label":"a"}""", Hour);
-        check(Fails(() => rig.Admin.Reconfigure(instance, """{"label":"b"}""", "laptop")) && store.Instance(instance.Id) is { Revision: 1, Configuration: """{"label":"a"}""" }, "fail closed: no provider-config-changed event, no configuration change");
-        check(Fails(() => rig.Admin.SetMaxStale(instance, TimeSpan.FromMinutes(5), "laptop")) && store.Instance(instance.Id)!.MaxStale == Hour, "fail closed: no provider-max-stale-changed event, no change");
+        check(Fails(() => rig.Admin.Reconfigure(instance, """{"label":"b"}""", Laptop)) && store.Instance(instance.Id) is { Revision: 1, Configuration: """{"label":"a"}""" }, "fail closed: no provider-config-changed event, no configuration change");
+        check(Fails(() => rig.Admin.SetMaxStale(instance, TimeSpan.FromMinutes(5), Laptop)) && store.Instance(instance.Id)!.MaxStale == Hour, "fail closed: no provider-max-stale-changed event, no change");
         rig.Exec("INSERT INTO grants (id, fingerprint, scope_key, program, working_directory, secret_names, created, updated, grant_revision, security_revision, status, approved_by, usage) VALUES ('g1', 'fp', 'scope', 'p', 'd', 'team/A', 't', 't', 1, 1, 'active', 'x', 'reusable')");
-        check(Fails(() => rig.Admin.AddMount(instance, MountKind.Tree, "team", "kv", 1, "laptop")) && store.Mounts().Count == 0 && rig.Count("SELECT COUNT(*) FROM grants WHERE status = 'active'") == 1, "fail closed: no mount-added event, no mount, no grant ended");
+        check(Fails(() => rig.Admin.AddMount(instance, MountKind.Tree, "team", "kv", 1, Laptop)) && store.Mounts().Count == 0 && rig.Count("SELECT COUNT(*) FROM grants WHERE status = 'active'") == 1, "fail closed: no mount-added event, no mount, no grant ended");
         Mount mount = store.AddMount(instance.Id, MountKind.Tree, "other", "kv");
-        check(Fails(() => rig.Admin.RemoveMount(mount, "vault-a", 0, "laptop")) && store.Mounts().Count == 1, "fail closed: no mount-removed event, the mount stays");
+        check(Fails(() => rig.Admin.RemoveMount(mount, "vault-a", 0, Laptop)) && store.Mounts().Count == 1, "fail closed: no mount-removed event, the mount stays");
         rig.Captured.Fail = false;
-        check(Throws<ProviderConfigurationException>(() => rig.Admin.AddMount(instance, MountKind.Tree, "team", "kv", 0, "laptop")) && store.Mounts().Count == 1 && rig.Count("SELECT COUNT(*) FROM grants WHERE status = 'active'") == 1 && rig.Captured.Events.Count == 0,
+        check(Throws<ProviderConfigurationException>(() => rig.Admin.AddMount(instance, MountKind.Tree, "team", "kv", 0, Laptop)) && store.Mounts().Count == 1 && rig.Count("SELECT COUNT(*) FROM grants WHERE status = 'active'") == 1 && rig.Captured.Events.Count == 0,
             "grant count: a mount that would end another number of grants than signed is rolled back inside its transaction (no mount, no grant ended, no event)");
         rig.Captured.Fail = true;
         store.RemoveMount(mount.Id);
-        check(Fails(() => rig.Admin.RemoveInstance(instance, "laptop")) && store.Instance(instance.Id) is not null, "fail closed: no provider-removed event, the instance stays");
+        check(Fails(() => rig.Admin.RemoveInstance(instance, Laptop)) && store.Instance(instance.Id) is not null, "fail closed: no provider-removed event, the instance stays");
 
         rig.Captured.Fail = false;
-        rig.Admin.AddMount(instance, MountKind.Tree, "team", "kv", 1, "laptop");
+        rig.Admin.AddMount(instance, MountKind.Tree, "team", "kv", 1, Laptop);
         AuditFacts added = rig.Captured.Events.Single();
         check(added is { Outcome: "mount-added" } && added.Reason.Contains("1 active grants ended", StringComparison.Ordinal) && added.Arguments.SequenceEqual(["team"]), "audit: mount-added names the path and the number of grants that ended");
+        check(added.Metadata is { } metadata && metadata.GetValueOrDefault("keyId") == Laptop.Id
+            && metadata.GetValueOrDefault("keyName") == Laptop.Name && metadata.GetValueOrDefault("keyAdmin") == "true",
+            "audit: mount-added records the verifying admin credential in signed-event metadata");
     }
 
     private static void Screen(Action<bool, string> check)

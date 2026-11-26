@@ -1,11 +1,10 @@
 using System.Collections.Concurrent;
 using System.Globalization;
-using System.Security.Cryptography;
 
 namespace WithSecrets;
 
 /// <summary>What the admin page and <c>GET /v1/status</c> report. Nothing here is sensitive.</summary>
-public sealed record AuthorityStatus(bool Locked, UnlockPolicy Policy, bool ReviewOpen);
+public sealed record AuthorityStatus(bool Locked, bool ReviewOpen);
 
 /// <summary>The answer to a request to start an operation: a link to the one-use passkey page, or why none was made.</summary>
 public sealed record AdminStart(string? Link, string? Error, int Status = 200);
@@ -14,9 +13,9 @@ public sealed record AdminStart(string? Link, string? Error, int Status = 200);
 public sealed record AdminCaller(AdminSession? Session);
 
 /// <summary>What the service needs to run the administration of the authority.</summary>
-public sealed record AdminServiceParts(AuthorityStore Store, AuthorityLock Lock, AdminAuthorizer Authorizer, Func<Action<string>, IAdminAsker> Askers, IUnlockProtection Protection, Action OnUnlocked, int Port,
+public sealed record AdminServiceParts(AuthorityStore Store, AuthorityLock Lock, AdminAuthorizer Authorizer, Func<Action<string>, IAdminAsker> Askers, Action OnUnlocked, int Port,
     AuthorityKeyRing Keys, LocalAuthority Authority, HostConfigFile HostConfig, string? LocalFingerprint, IPasskeyAdmin? Passkeys, TimeProvider? Clock = null, PairingService? Pairing = null,
-    ApprovalQueue? Approvals = null, Func<IProofMethod?>? ApprovalProof = null, ReviewKeys? Review = null);
+    ApprovalQueue? Approvals = null, Func<IProofMethod?>? ApprovalProof = null, UnlockedKeys? Unlocked = null, bool Remote = false);
 
 /// <summary>
 /// The authority's administration, served by the service on its own loopback port as a small server-rendered web app (<see cref="AdminWeb" />). Everything an administrator does lives here;
@@ -31,10 +30,7 @@ public sealed record AdminServiceParts(AuthorityStore Store, AuthorityLock Lock,
 public sealed partial class AdminService
 {
     public const string OpUnlock = "unlock";
-    public const string OpReviewUnlock = "review-unlock";
     public const string OpLock = "lock";
-    public const string OpPolicyManual = "policy-manual";
-    public const string OpPolicyUnattended = "policy-unattended";
     public const string OpLogin = "admin-login";
 
     private const string Heading = "Check this change to the authority. Nothing is changed unless you approve here with your passkey.";
@@ -232,7 +228,11 @@ public sealed partial class AdminService
     /// <summary>The authority's page, for the message of a refused run and the startup lines. Public; it carries nothing.</summary>
     public string PageUrl => $"http://localhost:{_p.Port}/admin";
 
-    public AuthorityStatus Status() => new(_p.Lock.IsLocked, _p.Store.GetUnlockPolicy(), _p.Lock.WhileUnlocked(() => _p.Review?.IsOpen == true));
+    internal bool IsRemote => _p.Remote;
+
+    internal bool LocalAuthorityLocked => _p.Lock.IsLocked;
+
+    public AuthorityStatus Status() => new(!IsRemote && LocalAuthorityLocked, _p.Lock.WhileUnlocked(() => _p.Unlocked?.IsOpen == true));
 
     internal (GrantReviewDto? Review, string? Problem, int Status) GrantReview(string id)
     {
@@ -249,7 +249,7 @@ public sealed partial class AdminService
 
         bool verified = GrantVerified(grant);
         string? text = null;
-        _p.Lock.WhileUnlocked(() => (text = _p.Review?.TryDecrypt(evidence.Ciphertext, key)) is not null);
+        _p.Lock.WhileUnlocked(() => (text = _p.Unlocked?.TryDecryptReview(evidence.Ciphertext, key)) is not null);
         return (new GrantReviewDto(text is null ? "locked" : "open", text, verified), null, 200);
     }
 
@@ -333,7 +333,7 @@ public sealed partial class AdminService
     /// without a session share a limited number (a further one is refused, nothing waiting is closed). Lock pages have a lane of their own that nothing else uses up. <paramref name="epoch" /> is the lock
     /// count from before the plan was made: a lock since then ends the request.
     /// </summary>
-    private async Task<AdminStart> Run(AdminPlan plan, string caller, int epoch, CancellationToken cancel, Func<AdminPlan, IAdminAsker, Action<string>, CancellationToken, string>? execute = null, bool keepMaterial = false, Action? afterPage = null)
+    private async Task<AdminStart> Run(AdminPlan plan, string caller, int epoch, CancellationToken cancel, Func<AdminPlan, IAdminAsker, Action<string>, CancellationToken, string>? execute = null, Action? afterPage = null)
     {
         bool lockLane = plan.Operation == "lock-authority";
         string slot = (lockLane ? "L" : "") + caller;
@@ -411,11 +411,6 @@ public sealed partial class AdminService
             }
             finally
             {
-                if (plan.Material is not null && !keepMaterial)
-                {
-                    CryptographicOperations.ZeroMemory(plan.Material);
-                }
-
                 lock (_gate)
                 {
                     if (_slots.TryGetValue(slot, out Pending? held) && ReferenceEquals(held, pending))
@@ -468,7 +463,8 @@ public sealed partial class AdminService
             return detail;
         }
 
-        AdminAuthorization authorized = _p.Authorizer.Authorize(asker, Heading, plan.Sentence, plan.Operation, plan.Parameters, cancel);
+        AdminAuthorization authorized = _p.Authorizer.Authorize(asker, Heading, plan.Sentence, plan.Operation, plan.Parameters, cancel, plan.WantsPrf);
+        using Unlock? released = authorized.Unlock;
         if (authorized.Admin is not { } admin)
         {
             Note(plan.Operation + ": refused");
@@ -523,6 +519,13 @@ public sealed partial class AdminService
     public async Task<(AdminStart Start, string? Ticket)> BeginLoginAsync(string browserId, CancellationToken cancel)
     {
         string caller = AdminSessions.BrowserCaller(browserId);
+        if (IsRemote)
+        {
+            Refused(OpLogin, RemoteAdminRefusal, caller);
+
+            return (new AdminStart(null, RemoteAdminRefusal, 409), null);
+        }
+
         int epoch = Volatile.Read(ref _epoch);
         if (!TakeStart(caller))
         {
@@ -555,7 +558,7 @@ public sealed partial class AdminService
             {
                 VerifiedCredential? credential = authorization.Credential;
                 string identity = credential?.Name ?? (authorization.Admin!.Signer.Length > 0 ? authorization.Admin.Signer : "(unnamed)");
-                Sessions.CompleteLogin(code, identity, null, credential is null ? SessionScope.Approval : SessionCapabilities.FromAdminFlag(credential.Admin));
+                Sessions.CompleteLogin(code, identity, null, credential is null ? SessionScope.Approval : SessionCapabilities.FromAdminFlag(credential.Admin), credential);
 
                 return null;
             },
@@ -572,13 +575,19 @@ public sealed partial class AdminService
     /// <summary>Called once a browser's scoped session starts: the start is audited durably (no secret in it).</summary>
     public void RecordSessionStart(AdminSession session)
     {
-        _p.Authorizer.Record("admin-session", "started", "passkey " + ApprovalSummary.Clean(session.Identity), "");
+        _p.Authorizer.Record("admin-session", "started", "passkey " + ApprovalSummary.Clean(session.Identity), "", session.Key);
         Note("admin session started");
     }
 
     public void RecordSessionEnd(AdminSession session, string how)
     {
-        _p.Authorizer.Record("admin-session", how, "passkey " + ApprovalSummary.Clean(session.Identity), "");
+        Dictionary<string, string> metadata = new(StringComparer.Ordinal);
+        if (how == "ended: sign out")
+        {
+            session.Key?.AddTo(metadata, "sessionKey");
+        }
+
+        _p.Authorizer.Record("admin-session", how, "", "", metadata: metadata.Count == 0 ? null : metadata);
 
         // What the session had open (a secret entry with its key and sealed values) ends with it.
         Secrets?.CancelSession(session.Id);
@@ -591,6 +600,6 @@ public sealed partial class AdminService
 /// <see cref="Remark" /> holds one constant line that <see cref="Apply" /> may leave about a change that was applied but whose aftermath did not complete (a provider that
 /// did not take a committed configuration); it becomes the detail of the applied outcome.
 /// </summary>
-internal sealed record AdminPlan(string Operation, string Sentence, IReadOnlyList<(string Name, string Value)> Parameters, Func<AdminAuthorization, string?> Apply, byte[]? Material = null,
+internal sealed record AdminPlan(string Operation, string Sentence, IReadOnlyList<(string Name, string Value)> Parameters, Func<AdminAuthorization, string?> Apply,
     Func<Action<string>, Func<string?>, (bool Ok, string Detail, string Actor)>? Delegated = null, Action<string>? OnRefused = null, System.Runtime.CompilerServices.StrongBox<InvitationCreatedDto?>? Output = null,
     System.Runtime.CompilerServices.StrongBox<string?>? Remark = null, bool WantsPrf = false);

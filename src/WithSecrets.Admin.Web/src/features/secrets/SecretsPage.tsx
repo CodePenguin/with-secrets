@@ -2,6 +2,7 @@ import { useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api/client'
+import { useSession } from '../../api/queries'
 import { Button } from '../../components/Button'
 import { Empty, PageHeader } from '../../components/Card'
 import { Loading, Notice, ProblemAlert, useAnnounce } from '../../components/Feedback'
@@ -17,6 +18,8 @@ export function SecretsPage() {
   usePageTitle('Secrets')
   const announce = useAnnounce()
   const queryClient = useQueryClient()
+  const session = useSession()
+  const canChange = session.data?.capabilities.includes('admin.decide') === true
   const secrets = useQuery({ queryKey: secretsKey, queryFn: () => api.get('/api/v1/secrets') })
   const [search] = useSearchParams()
   const [name, setName] = useState(search.get('name') ?? '')
@@ -90,7 +93,7 @@ export function SecretsPage() {
   return (
     <>
       <PageHeader title="Secrets" />
-      <form
+      {canChange ? <form
         onSubmit={(event) => {
           event.preventDefault()
           void save()
@@ -111,7 +114,7 @@ export function SecretsPage() {
             {replacing ? 'Replace secret' : 'Save secret'}
           </Button>
         </p>
-      </form>
+      </form> : null}
       {done ? <Notice kind="ok">{done}</Notice> : null}
       {problem ? <ProblemAlert error={problem} title="Nothing was changed" /> : null}
       {cancelled ? <p role="status">Passkey prompt cancelled. Nothing was changed.</p> : null}
@@ -127,11 +130,11 @@ export function SecretsPage() {
               <div className={list.itemHeader}>
                 <h3>{stored}</h3>
               </div>
-              <div className={list.actions}>
+              {canChange ? <div className={list.actions}>
                 <Button variant="danger" disabled={busy} onClick={() => void remove(stored)}>
                   Remove <span className="visually-hidden">secret {stored}</span>
                 </Button>
-              </div>
+              </div> : null}
             </li>
           ))}
         </ul>

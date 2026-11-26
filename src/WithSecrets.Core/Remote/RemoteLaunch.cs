@@ -134,7 +134,7 @@ public sealed record DeliveredValue(string Name, byte[] Value);
 /// swapped or added value fails the signature without the signed text carrying the value). It answers one request id once: the host refuses a second delivery for an id, and the authority
 /// never repeats one. Never logged, never stored.
 /// </summary>
-public sealed record SecretsDelivery(int ProtocolVersion, string RequestId, string RequestDigest, string MachineFingerprint, string Via, string GrantId, int SecurityRevision, DateTimeOffset Issued, DateTimeOffset Expires, string AuthorityKeyId, IReadOnlyList<DeliveredValue> Values, byte[] Signature) : ISignedAnswer
+public sealed record SecretsDelivery(int ProtocolVersion, string RequestId, string RequestDigest, string MachineFingerprint, string Via, string GrantId, int SecurityRevision, DateTimeOffset Issued, DateTimeOffset Expires, string AuthorityKeyId, IReadOnlyList<DeliveredValue> Values, byte[] Signature, AuditKeys? Keys = null) : ISignedAnswer
 {
     public const string Domain = "with-secrets secrets delivery v1\n";
     public const string ViaPage = "page";
@@ -179,6 +179,8 @@ public sealed record SecretsDelivery(int ProtocolVersion, string RequestId, stri
         ToolSettings.QuoteJson(text, CanonicalJson.Time(Expires));
         text.Append(",\"authorityKeyId\":");
         ToolSettings.QuoteJson(text, AuthorityKeyId);
+        text.Append(",\"auditKeys\":");
+        ToolSettings.QuoteJson(text, Keys?.Wire() ?? "null");
         text.Append(",\"values\":[");
         bool first = true;
         foreach (DeliveredValue value in Values.OrderBy(item => item.Name, StringComparer.Ordinal))
@@ -194,9 +196,9 @@ public sealed record SecretsDelivery(int ProtocolVersion, string RequestId, stri
         return text.Append("]}").ToString();
     }
 
-    public static SecretsDelivery Create(string requestId, string requestDigest, string machineFingerprint, string via, string grantId, int revision, DateTimeOffset issued, DateTimeOffset expires, IReadOnlyList<DeliveredValue> values, ISigningKey key)
+    public static SecretsDelivery Create(string requestId, string requestDigest, string machineFingerprint, string via, string grantId, int revision, DateTimeOffset issued, DateTimeOffset expires, IReadOnlyList<DeliveredValue> values, ISigningKey key, AuditKeys? auditKeys = null)
     {
-        SecretsDelivery unsigned = new(LaunchProtocol.Version, requestId, requestDigest, machineFingerprint, via, grantId, revision, issued, expires, KeyIdentity.Fingerprint(key.PublicKey), values, []);
+        SecretsDelivery unsigned = new(LaunchProtocol.Version, requestId, requestDigest, machineFingerprint, via, grantId, revision, issued, expires, KeyIdentity.Fingerprint(key.PublicKey), values, [], auditKeys);
 
         return unsigned with { Signature = key.Sign(WireText.Bytes(Domain, unsigned.Canonical())) };
     }
@@ -237,6 +239,8 @@ public sealed record SecretsDelivery(int ProtocolVersion, string RequestId, stri
         ToolSettings.QuoteJson(text, CanonicalJson.Time(Expires));
         text.Append(",\"authorityKeyId\":");
         ToolSettings.QuoteJson(text, AuthorityKeyId);
+        text.Append(",\"auditKeys\":");
+        ToolSettings.QuoteJson(text, Keys?.Wire() ?? "null");
         text.Append(",\"values\":[");
         bool first = true;
         foreach (DeliveredValue value in Values.OrderBy(item => item.Name, StringComparer.Ordinal))
@@ -256,10 +260,10 @@ public sealed record SecretsDelivery(int ProtocolVersion, string RequestId, stri
     public static bool TryRead(JsonElement element, out SecretsDelivery? delivery)
     {
         delivery = null;
-        ContractReader reader = new(element, "protocolVersion", "requestId", "requestDigest", "machineFingerprint", "via", "grantId", "securityRevision", "issued", "expires", "authorityKeyId", "values", "signature");
+        ContractReader reader = new(element, "protocolVersion", "requestId", "requestDigest", "machineFingerprint", "via", "grantId", "securityRevision", "issued", "expires", "authorityKeyId", "auditKeys", "values", "signature");
         if (reader.Problem is not null || !reader.Int("protocolVersion", out int version) || !reader.Text("requestId", out string? id) || !reader.Text("requestDigest", out string? digest) || !reader.Text("machineFingerprint", out string? machine)
             || !reader.Text("via", out string? via) || !reader.Text("grantId", out string? grant) || !reader.Int("securityRevision", out int revision) || !reader.Time("issued", out DateTimeOffset issued) || !reader.Time("expires", out DateTimeOffset expires)
-            || !reader.Text("authorityKeyId", out string? keyId) || !reader.Array("values", out JsonElement array) || !reader.Text("signature", out string? signatureText) || array.GetArrayLength() > MaxValues)
+            || !reader.Text("authorityKeyId", out string? keyId) || !reader.Text("auditKeys", out string? auditKeys) || !AuditKeys.TryRead(auditKeys, out AuditKeys? attribution) || !reader.Array("values", out JsonElement array) || !reader.Text("signature", out string? signatureText) || array.GetArrayLength() > MaxValues)
         {
             return false;
         }
@@ -295,7 +299,7 @@ public sealed record SecretsDelivery(int ProtocolVersion, string RequestId, stri
             values.Add(new DeliveredValue(name, exact));
         }
 
-        delivery = new SecretsDelivery(version, id!, digest!, machine!, via!, grant!, revision, issued, expires, keyId!, values, signature);
+        delivery = new SecretsDelivery(version, id!, digest!, machine!, via!, grant!, revision, issued, expires, keyId!, values, signature, attribution);
 
         return true;
     }

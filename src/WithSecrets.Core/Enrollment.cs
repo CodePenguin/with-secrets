@@ -65,7 +65,7 @@ public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget 
     {
         if (!decision.Approved)
         {
-            audit?.TryWriteDenied(commandName, [], decision.Detail);
+            audit?.TryWriteDenied(commandName, [], decision.Detail, decision.Credential);
         }
 
         return decision;
@@ -104,28 +104,42 @@ public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget 
             using IDisposable flow = PageFlow.Enter();
             PageFlow.Plan("e", command.Approver.Settings);
             string text = $"Add a {Method.Id} for {command.Approver.Origin}. Its name is chosen on the next page.";
-            // The admin passkey that approves also releases the master key (WebAuthn PRF), so that the new key can get its slot.
-            ApprovalDecision asked = approval.Approver.Ask(new ApprovalPrompt(Heading, text), unlock: true);
-            try
+            ApprovalDecision asked = approval.Approver.Ask(new ApprovalPrompt(Heading, text));
+            if (!asked.Approved)
             {
-                if (!asked.Approved)
-                {
-                    return asked;
-                }
+                return asked;
+            }
 
-                if (Stopped() is { } stopped)
+            if (Stopped() is { } stopped)
+            {
+                return stopped;
+            }
+
+            PageFlow.Plan("a", approval.Approver.Settings);
+            string name = Suggest(entries.Select(item => item.Name));
+            ManifestApproval Sign(string manifest) =>
+                Guarded(() => approval.Approver.AskManifest(new ApprovalPrompt(Heading, SignText(manifest, entries)), manifest));
+
+            return Method is PasskeyMethod passkeys ? passkeys.EnrollWithAdminRelease(name, announce, Sign, Release) : Method.Enroll(name, announce, Sign);
+
+            ApprovalDecision Release(string adminName)
+            {
+                if (Stopped() is { } early)
                 {
-                    return stopped;
+                    return early;
                 }
 
                 PageFlow.Plan("a", approval.Approver.Settings);
+                ApprovalDecision released = approval.Approver.Ask(new ApprovalPrompt(Heading,
+                    $"Release the master key to add \"{adminName}\" as an admin passkey."), unlock: true);
+                if (Stopped() is not { } late)
+                {
+                    return released;
+                }
 
-                return Method.Enroll(Suggest(entries.Select(item => item.Name)), announce,
-                    manifest => Guarded(() => approval.Approver.AskManifest(new ApprovalPrompt(Heading, SignText(manifest, entries)), manifest)), asked.Unlock);
-            }
-            finally
-            {
-                asked.Unlock?.Dispose();
+                released.Unlock?.Dispose();
+
+                return late;
             }
         }
         catch (ProofUnavailableException failure)
@@ -146,11 +160,12 @@ public sealed class Enrollment(EnrollmentTarget commandTarget, EnrollmentTarget 
     private string SignText(string manifest, IReadOnlyList<EnrolledEntry> entries)
     {
         string text = $"Add a {Method.Id} for {command.Approver.Origin}.";
-        ManifestKey? added = Manifest.Parse(manifest, out _)?.Keys.FirstOrDefault(key => !entries.Any(item => string.Equals(item.Name, key.Name, StringComparison.OrdinalIgnoreCase)));
+        Manifest? next = Manifest.Parse(manifest, out _);
+        ManifestKey? added = next?.Keys.FirstOrDefault(key => !entries.Any(item => string.Equals(item.Name, key.Name, StringComparison.OrdinalIgnoreCase)));
         if (added is not null)
         {
             text += "\nNew key: " + added.Name + "\n" + (added.Admin
-                ? $"The new {Method.Id} will be an admin: it can change the settings and the {Method.Id}s."
+                ? $"The new {Method.Id} will be an admin: it can change the settings and the {Method.Id}s.\n" + AdminKey.Line(next)
                 : $"The new {Method.Id} will only approve runs (not an admin).");
         }
 

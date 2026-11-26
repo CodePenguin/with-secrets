@@ -47,14 +47,14 @@ export function problem(status: number, code: string, detail: string): Reply {
   return { status, problem: true, body: { type: 'urn:with-secrets:problem:' + code, title: 'Refused', status, detail, code } }
 }
 
-export const status = (extra: Partial<Status> = {}): Status => ({ running: true, locked: false, unlockMode: 'manual', apiVersion: 'v1', version: __APP_VERSION__, protocolVersion: 1, capabilities: { providers: false }, reviewOpen: false, ...extra })
+export const status = (extra: Partial<Status> = {}): Status => ({ running: true, locked: false, remote: false, apiVersion: 'v1', version: __APP_VERSION__, protocolVersion: 1, capabilities: { providers: false }, reviewOpen: false, ...extra })
 
 export const session = (extra: Partial<Session> = {}): Session => ({
   authenticated: true,
   admin: 'admin key',
   identity: null,
-  scope: null,
-  capabilities: [],
+  scope: 'admin',
+  capabilities: ['approvals.read', 'approvals.decide', 'admin.read', 'grants.decide', 'admin.decide'],
   started: '2026-11-09T10:00:00Z',
   idleExpires: '2026-11-09T10:15:00Z',
   absoluteExpires: '2026-11-09T18:00:00Z',
@@ -138,8 +138,6 @@ export const entry = (extra: Partial<NamespaceEntry> = {}): NamespaceEntry => ({
 })
 
 export const settings = (extra: Partial<Settings> = {}): Settings => ({
-  unlockMode: 'manual',
-  unlockModeDescription: 'Manual. An administrator unlocks it with a passkey.',
   auditRetentionDays: 90,
   sessionIdleMinutes: 15,
   sessionAbsoluteMinutes: 480,
@@ -262,7 +260,6 @@ export const approvalDetail = (extra: Partial<ApprovalDetail> = {}): ApprovalDet
       inheritedEnvironmentLine: null,
       extraLines: [],
       canonicalText: 'text',
-      requiresUnlock: false,
       heading: null,
       times: null,
       allowOnce: true,

@@ -50,12 +50,22 @@ internal static class ProviderDeliveryTests
                 }
             })
             { LockState = Lock };
-            Cache = new ProviderCache(Providers, Keys);
+            Cache = new ProviderCache(Providers, Keys, CacheCipher);
             Invalidation = new ProviderInvalidation(Providers, (_, _) => { });
             Retriever = new ProviderRetriever(id => _adapters[id], Clock, (_, _) => Task.CompletedTask);
-            Source = new ProviderSecretSource(Native, Providers, Retriever, Cache, Invalidation, Clock, records =>
+            using (Unlock? release = SecretStoreTests.AdminUnlock(Db))
+            {
+                Unlocked.TryOpen(TestState.Current(Db)!, release!);
+            }
+
+            Source = new ProviderSecretSource(Native.Unlocking(Unlocked, Lock), Providers, Retriever, Cache, Invalidation, Clock, records =>
             {
                 AuditCalls++;
+                if (FailAudit)
+                {
+                    throw new SecretStoreException("the audit cannot be committed (test)");
+                }
+
                 Audits.AddRange(records);
             });
 
@@ -71,6 +81,9 @@ internal static class ProviderDeliveryTests
 
         public CountingCipher Cipher { get; } = new();
 
+        /// <summary>The cipher of the provider cache: counts the decryptions of cached values.</summary>
+        public CountingCipher CacheCipher { get; } = new();
+
         public SecretStore Native { get; }
 
         public AuthorityStore Authority { get; }
@@ -78,6 +91,9 @@ internal static class ProviderDeliveryTests
         public ProviderStore Providers { get; }
 
         public AuthorityLock Lock { get; }
+
+        /// <summary>The keys the admin's unlock opened (the test opens them with the seeded admin's PRF output).</summary>
+        public UnlockedKeys Unlocked { get; } = new();
 
         public AuthorityKeyRing Keys { get; }
 
@@ -92,6 +108,9 @@ internal static class ProviderDeliveryTests
         public ProviderSecretSource Source { get; }
 
         public List<ProviderAudit> Audits { get; } = [];
+
+        /// <summary>When set, the audit sink throws (a sink that cannot commit).</summary>
+        public bool FailAudit { get; set; }
 
         /// <summary>How many times the sink was called (once per call that audits anything).</summary>
         public int AuditCalls { get; set; }
@@ -116,14 +135,9 @@ internal static class ProviderDeliveryTests
             Providers.ReplaceEntries(mount.Id, [.. entries.Select(entry => new NamespaceEntry(mount.Id, entry.Logical, entry.Provider, entry.External, null, DescriptionSource.Provider))]);
         }
 
-        public SecretValues Get(params string[] names)
-        {
-            using Unlock? unlock = SecretStoreTests.AdminUnlock(Db);
+        public SecretValues Get(params string[] names) => Source.GetValues(names);
 
-            return Source.GetValues(names, unlock);
-        }
-
-        /// <summary>The values as text, or null when the call threw <see cref="SecretStoreException" /> (its message in <paramref name="error" />).</summary>
+        /// <summary>The values as text, or null when the call threw <see cref="SecretStoreException" /> or <see cref="AuthorityLockedException" /> (its message in <paramref name="error" />).</summary>
         public Dictionary<string, string>? TryGet(out string error, params string[] names)
         {
             try
@@ -133,7 +147,7 @@ internal static class ProviderDeliveryTests
 
                 return values.Texts();
             }
-            catch (SecretStoreException failure)
+            catch (Exception failure) when (failure is SecretStoreException or AuthorityLockedException)
             {
                 error = failure.Message;
 
@@ -221,7 +235,7 @@ internal static class ProviderDeliveryTests
         Tampered(check);
         Listing(check);
         Races(check);
-        WrongUnlock(check);
+        ClosedKeys(check);
         CommitWindow(check);
 
         return Task.CompletedTask;
@@ -400,41 +414,17 @@ internal static class ProviderDeliveryTests
         }
     }
 
-    private static void WrongUnlock(Action<bool, string> check)
+    private static void ClosedKeys(Action<bool, string> check)
     {
         using Rig rig = new(Hour);
-        string credential;
-        using (Unlock? real = SecretStoreTests.AdminUnlock(rig.Db))
-        {
-            credential = real!.CredentialId;
-        }
-
-        using Unlock wrong = new(credential, System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
-        bool threw = false;
-        try
-        {
-            using SecretValues values = rig.Source.GetValues(["team/ALPHA"], wrong);
-        }
-        catch (SecretStoreException)
-        {
-            threw = true;
-        }
-
-        check(threw && rig.Invocations == 0 && rig.CacheRows() == 0, "delivery: a non-opening unlock fails the call even when every value would be Fresh (no provider read)");
+        rig.Unlocked.Close();
+        Dictionary<string, string>? got = rig.TryGet(out string error, "team/ALPHA");
+        check(got is null && rig.Invocations == 0 && rig.CacheRows() == 0, "delivery: with the store key not open the call fails even when every value would be Fresh (no provider read) (" + error + ")");
 
         using Rig empty = new(Hour, withStoreKey: false);
-        using Unlock other = new(credential, System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
-        Dictionary<string, string>? got = null;
-        try
-        {
-            using SecretValues values = empty.Source.GetValues(["team/ALPHA"], other);
-            got = values.Texts();
-        }
-        catch (SecretStoreException)
-        {
-        }
-
-        check(got?["team/ALPHA"] == Alpha, "delivery: with no store key yet there is no K to open; the fresh value is delivered");
+        empty.Unlocked.Close();
+        got = empty.TryGet(out error, "team/ALPHA");
+        check(got?["team/ALPHA"] == Alpha, "delivery: with no store key yet there is no K to use; the fresh value is delivered (" + error + ")");
     }
 
     private static void Fresh(Action<bool, string> check)
@@ -444,7 +434,7 @@ internal static class ProviderDeliveryTests
         check(got is not null && got["team/ALPHA"] == Alpha && rig.Invocations == 1 && rig.CacheRows() == 1, "delivery: fresh fetch delivers and caches (" + error + ")");
         check(rig.Audits.Count == 1 && rig.Audits[0].Outcome == RetrievalOutcomeKind.Fresh && rig.Audits[0].Path == "team/ALPHA", "delivery: a fresh fetch audits Fresh");
         check(rig.Row().LastVerified == rig.Clock.Now.UtcTicks, "delivery: the cached row's lastVerified is the retrieval time");
-        check(rig.Source.Label == SecretStore.GlobalLabel && rig.Source.NeedsUnlock, "delivery: label is the native label and an unlock is needed");
+        check(rig.Source.Label == SecretStore.GlobalLabel, "delivery: label is the native label");
     }
 
     private static void Freshness(Action<bool, string> check)
@@ -739,19 +729,10 @@ internal static class ProviderDeliveryTests
         check(rig.TryGet(out error, "team/ALPHA", "team/ALPHA") is null && error == "the secret names are not valid", "delivery: duplicate names are refused");
         check(rig.TryGet(out error, "bad name") is null && error == "the secret names are not valid", "delivery: invalid names are refused");
 
-        // Native fails (no unlock): the mounted value is not delivered either.
+        // The store key is not open: the native value cannot be decrypted, and the mounted value is not delivered either.
         int before = rig.Invocations;
-        bool threw = false;
-        try
-        {
-            rig.Source.GetValues(["NATIVE_ONE", "team/ALPHA"], null);
-        }
-        catch (SecretStoreException)
-        {
-            threw = true;
-        }
-
-        check(threw && rig.Invocations == before, "delivery: a native failure fails the whole call before any provider read");
+        rig.Unlocked.Close();
+        check(rig.TryGet(out error, "NATIVE_ONE", "team/ALPHA") is null && rig.Invocations == before, "delivery: a native failure fails the whole call before any provider read (" + error + ")");
     }
 
     private static void Audit(Action<bool, string> check)
@@ -784,13 +765,25 @@ internal static class ProviderDeliveryTests
         List<byte[]> zeroed = [];
         rig.Source.Discarded = buffers => zeroed.AddRange(buffers);
         Dictionary<string, string>? got = rig.TryGet(out _, "NATIVE_ONE", "team/ALPHA", "team/BRAVO");
-        check(got is null && zeroed.Count >= 2 && zeroed.All(buffer => buffer.Length > 0 && buffer.All(b => b == 0)), "delivery: values zeroed on failure (native and retrieved) (" + zeroed.Count + " buffers)");
+        check(got is null && zeroed.Count >= 1 && zeroed.All(buffer => buffer.Length > 0 && buffer.All(b => b == 0)) && rig.Cipher.Decrypts == 0, "delivery: on a failure the retrieved values are zeroed and the native value is never decrypted (it is decrypted only once every name was obtained) (" + zeroed.Count + " buffers)");
 
-        // A cached value decrypted before a later failure is zeroed too.
+        // A cached value is decrypted only once every name of the call was obtained: a call that fails decrypts none (and zeroes whatever it made).
         zeroed.Clear();
         rig.Clock.Advance(TimeSpan.FromMinutes(5));
+        int cachedDecrypts = rig.CacheCipher.Decrypts;
         got = rig.TryGet(out _, "team/ALPHA", "team/BRAVO");
-        check(got is null && rig.Invocations == 2 && zeroed.Count >= 1 && zeroed.All(buffer => buffer.Length > 0 && buffer.All(b => b == 0)), "delivery: a decrypted cached value is zeroed when the call fails");
+        bool alphaFromCache = rig.Invocations == 2 && rig.Adapter.Invocations[1].Select(request => request.Path).SequenceEqual(["kv/BRAVO"]);
+        check(got is null && alphaFromCache && rig.CacheCipher.Decrypts == cachedDecrypts && rig.Cipher.Decrypts == 0 && zeroed.All(buffer => buffer.All(b => b == 0)),
+            "delivery: a cached value (ALPHA, served from the cache, not retrieved) is not decrypted when another name of the call fails (" + (rig.CacheCipher.Decrypts - cachedDecrypts) + " cache decrypts, " + zeroed.Count + " buffers)");
+
+        // A failure after the one use of the store key (here the audit cannot be committed): the native value and the decrypted cached value are zeroed too.
+        zeroed.Clear();
+        int decryptsBefore = rig.Cipher.Decrypts;
+        rig.FailAudit = true;
+        got = rig.TryGet(out _, "NATIVE_ONE", "team/ALPHA");
+        rig.FailAudit = false;
+        check(got is null && rig.Invocations == 2 && rig.Cipher.Decrypts == decryptsBefore + 1 && rig.CacheCipher.Decrypts == cachedDecrypts + 1 && zeroed.Count >= 2 && zeroed.All(buffer => buffer.Length > 0 && buffer.All(b => b == 0)),
+            "delivery: values decrypted before a later failure (native and cached) are all zeroed (" + zeroed.Count + " buffers)");
 
         // On success the intermediate buffers are zeroed and the delivered ones are not.
         zeroed.Clear();
@@ -813,10 +806,9 @@ internal static class ProviderDeliveryTests
         check(rig.Audits is [{ Path: "team/ALPHA", Outcome: RetrievalOutcomeKind.Failed, ErrorKind: null }], "delivery: locked authority: the refused mounted name is audited Failed");
 
         rig.Audits.Clear();
-        using (SecretValues native = rig.Get("NATIVE_ONE"))
-        {
-            check(native.Text("NATIVE_ONE") == NativeValue && rig.Audits.Count == 0, "delivery: locked authority: a native-only call is not affected");
-        }
+        int decrypts = rig.Cipher.Decrypts;
+        check(rig.TryGet(out error, "NATIVE_ONE") is null && rig.Unlocked.IsOpen && rig.Cipher.Decrypts == decrypts && rig.Audits.Count == 0,
+            "delivery: locked authority: a native-only call decrypts nothing either, even while the keys are still open (a lock that has begun before its discards close them) (" + error + ")");
 
         rig.Clock.Advance(TimeSpan.FromMinutes(40));
         rig.Adapter.Fails("kv/ALPHA", ProviderErrorKind.Unavailable);
@@ -826,6 +818,28 @@ internal static class ProviderDeliveryTests
         rig.Lock.Unlock(UnlockMethod.Seam);
         got = rig.TryGet(out error, "team/ALPHA");
         check(got?["team/ALPHA"] == Alpha, "delivery: unlocked again: the mounted name is delivered (" + error + ")");
+
+        // A lock that begins while the call retrieves (after its lock check): the call fails at the decryption, while the keys are still open, and every buffer is zeroed.
+        using (Rig during = new(Hour))
+        {
+            List<byte[]> zeroed = [];
+            during.Source.Discarded = buffers => zeroed.AddRange(buffers);
+            during.Source.AfterReads = () => during.Lock.Lock("test: during the retrieval");
+            got = during.TryGet(out error, "NATIVE_ONE", "team/ALPHA");
+            check(got is null && during.Invocations == 1 && during.Unlocked.IsOpen && during.Cipher.Decrypts == 0 && during.CacheCipher.Decrypts == 0 && zeroed.Count >= 1 && zeroed.All(buffer => buffer.Length > 0 && buffer.All(b => b == 0)),
+                "delivery: a lock that begins during the retrieval fails the call, decrypts nothing and zeroes the retrieved values (" + error + ", " + zeroed.Count + " buffers)");
+        }
+
+        // The same with no store key yet (nothing to decrypt): the values are still assembled inside the lock, so a lock that began during the retrieval delivers nothing.
+        using (Rig keyless = new(Hour, withStoreKey: false))
+        {
+            List<byte[]> zeroed = [];
+            keyless.Source.Discarded = buffers => zeroed.AddRange(buffers);
+            keyless.Source.AfterReads = () => keyless.Lock.Lock("test: during the retrieval");
+            got = keyless.TryGet(out error, "team/ALPHA");
+            check(got is null && keyless.Invocations == 1 && zeroed.Count >= 1 && zeroed.All(buffer => buffer.Length > 0 && buffer.All(b => b == 0)),
+                "delivery: with no store key, a lock that begins during the retrieval still delivers nothing and the retrieved value is zeroed (" + error + ", " + zeroed.Count + " buffers)");
+        }
     }
 
     private static void NoStoreKey(Action<bool, string> check)

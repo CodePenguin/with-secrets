@@ -88,9 +88,8 @@ public static class SecretNames
 /// <see cref="Sources" /> comes from the agent. <see cref="Reuse" /> is the times a grant may last (set only for a request that makes a grant); null
 /// for every other request, which is approved once. <see cref="RequestId" /> is the request's fingerprint key (see <see cref="RequestFingerprint" />),
 /// shown in the text the person signs so that the approval names the request it covers. <see cref="Sources" /> is where
-/// each secret comes from (see <see cref="ISecretSource.Label" />), shown after each name. <see cref="Unlock" /> is true when the
-/// approving passkey must also release the secret store key (WebAuthn PRF, see <see cref="KeyVault" />). <see cref="Script" />
-/// is the script file the run executes and <see cref="ProgramFile" /> the program itself when it is a text file, each read once for the approval text (see <see cref="ApprovalSummary" />); null when there is none.
+/// each secret comes from (see <see cref="ISecretSource.Label" />), shown after each name. An approval releases no key: the values are decrypted with the
+/// store key an administrator's unlock opened (<see cref="UnlockedKeys" />). <see cref="Script" /> is the script file the run executes and <see cref="ProgramFile" /> the program itself when it is a text file, each read once for the approval text (see <see cref="ApprovalSummary" />); null when there is none.
 /// </summary>
 public sealed record ApprovalRequest(
     string Program,
@@ -104,7 +103,6 @@ public sealed record ApprovalRequest(
     IReadOnlyList<string>? Links = null,
     string? RequestId = null,
     IReadOnlyDictionary<string, string>? Sources = null,
-    bool Unlock = false,
     ScriptView? Script = null,
     ScriptView? ProgramFile = null,
     IReadOnlyList<SecretMapping>? Mappings = null,
@@ -128,8 +126,8 @@ public sealed record ApprovalEvidence(string Nonce, string Text, string Proof);
 /// <summary>
 /// The person's answer. <see cref="ReuseMinutes" /> is the reuse time they approved and signed; 0 is "once".
 /// <see cref="Evidence" /> is what they signed, when the proof method has one to keep (a passkey on a run approval page).
-/// <see cref="Unlock" /> is what the approving passkey released by WebAuthn PRF when the page asked for it (a run, or the approval
-/// that precedes an enrollment): the caller uses it once and disposes it, which zeroes it.
+/// <see cref="ApprovalDecision.Unlock" /> is what an administrator's passkey released by WebAuthn PRF when an admin page asked for it (an unlock, an enrollment,
+/// a rotation, the first setup; never a run or a grant): the caller uses it once and disposes it, which zeroes it.
 /// </summary>
 public sealed record DecisionActor
 {
@@ -147,7 +145,7 @@ public sealed record DecisionActor
     public static DecisionActor ForSession(string identity) => new("session", identity);
 }
 
-public sealed record ApprovalDecision(bool Approved, string Detail, int ReuseMinutes = 0, ApprovalEvidence? Evidence = null, Unlock? Unlock = null, string? Actor = null, string? ReasonCode = null, VerifiedCredential? Credential = null, DecisionActor? DecisionPrincipal = null)
+public sealed record ApprovalDecision(bool Approved, string Detail, int ReuseMinutes = 0, ApprovalEvidence? Evidence = null, Unlock? Unlock = null, string? Actor = null, string? ReasonCode = null, VerifiedCredential? Credential = null, DecisionActor? DecisionPrincipal = null, VerifiedCredential? SessionKey = null)
 {
     public static ApprovalDecision Allow(string detail = "approved", int reuseMinutes = 0, ApprovalEvidence? evidence = null, Unlock? unlock = null, string? actor = null, VerifiedCredential? credential = null)
         => new(true, detail, reuseMinutes, evidence, unlock, actor ?? credential?.Name, Credential: credential,

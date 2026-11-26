@@ -57,6 +57,7 @@ export function Shell() {
     },
   })
   const signedIn = session.data?.authenticated === true
+  const canRead = session.data?.capabilities.includes('admin.read') === true
 
   useEffect(() => {
     if (!navigationOpen) return
@@ -81,7 +82,8 @@ export function Shell() {
         {/* The sign-in page shows the name itself, large; the header repeats it only once signed in. */}
         {signedIn ? <p className={styles.brand}><Logo className={styles.logo} /> administration</p> : <span />}
         <div className={styles.headerStatus}>
-          {status.data ? status.data.locked ? <Badge tone="warn">Authority locked</Badge> : <Badge tone="ok">Authority unlocked</Badge> : null}
+          {status.data?.remote ? <Badge tone="neutral">Remote host</Badge> : null}
+          {status.data && !status.data.remote ? status.data.locked ? <Badge tone="warn">Authority locked</Badge> : <Badge tone="ok">Authority unlocked</Badge> : null}
           {signedIn ? (
             <>
               <span className={styles.who}>
@@ -107,7 +109,7 @@ export function Shell() {
             Menu
           </button>
           <ul id="main-navigation-links">
-            {links.filter((link) => link.to !== '/providers' || (status.data?.capabilities?.providers && session.data?.capabilities.includes('admin.read'))).map((link) => (
+            {links.filter((link) => link.to === '/' || link.to === '/access' || (canRead && (link.to !== '/providers' || status.data?.capabilities?.providers))).map((link) => (
               <li key={link.to}>
                 <NavLink
                   to={link.to}

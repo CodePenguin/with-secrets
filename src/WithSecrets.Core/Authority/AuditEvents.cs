@@ -7,6 +7,47 @@ using System.Text.RegularExpressions;
 namespace WithSecrets;
 
 /// <summary>The kinds of fact the audit records: three for a run (each is its own event: a decision is not an outcome, and a started program is not a finished one) and the administrative events.</summary>
+public sealed record AuditKeys(VerifiedCredential? Key = null, VerifiedCredential? SessionKey = null, VerifiedCredential? GrantApproved = null,
+    VerifiedCredential? GrantChanged = null, VerifiedCredential? Unlock = null)
+{
+    internal string Wire() => System.Text.Json.JsonSerializer.Serialize(this);
+
+    internal static bool TryRead(string? text, out AuditKeys? keys)
+    {
+        keys = null;
+        if (text is null || text.Length > 32000)
+        {
+            return false;
+        }
+
+        try
+        {
+            keys = System.Text.Json.JsonSerializer.Deserialize<AuditKeys>(text);
+            return true;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return false;
+        }
+    }
+
+    internal Dictionary<string, string> Metadata(Dictionary<string, string>? metadata = null)
+    {
+        metadata ??= new(StringComparer.Ordinal);
+        Key?.AddTo(metadata, "key");
+        SessionKey?.AddTo(metadata, "sessionKey");
+        GrantApproved?.AddTo(metadata, "grantApproved");
+        if (GrantChanged is { } changed && changed.Id != GrantApproved?.Id)
+        {
+            changed.AddTo(metadata, "grantChanged");
+        }
+
+        Unlock?.AddTo(metadata, "unlock");
+
+        return metadata;
+    }
+}
+
 public static class AuditEventTypes
 {
     /// <summary>Whether the run may use secrets: the person's approval, a grant, or a denial (with its code).</summary>

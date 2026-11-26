@@ -84,10 +84,13 @@ public static class AdminAppCommand
             client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
             using JsonDocument doc = JsonDocument.Parse(await client.GetStringAsync(new Uri(endpoint.BaseUri, "v1/status")));
             bool locked = doc.RootElement.TryGetProperty("locked", out JsonElement value) && value.ValueKind != JsonValueKind.False;
+            bool remote = doc.RootElement.TryGetProperty("remote", out JsonElement remoteValue) && remoteValue.ValueKind == JsonValueKind.True;
 
             int? adminPort = doc.RootElement.TryGetProperty("adminPort", out JsonElement portValue) && portValue.ValueKind == JsonValueKind.Number && portValue.TryGetInt32(out int reported) && reported is >= 1 and <= 65535 ? reported : null;
 
-            return (locked ? "running, LOCKED (unlock it in the app)" : "running, unlocked", adminPort);
+            string status = remote ? "running, using a remote authority" : locked ? "running, LOCKED (unlock it in the app)" : "running, unlocked";
+
+            return (status, adminPort);
         }
         catch (Exception error) when (error is HttpRequestException or TaskCanceledException or JsonException or IOException)
         {

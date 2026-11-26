@@ -88,11 +88,6 @@ export const unlock = (): OperationDef =>
     confirmLabel: 'Unlock',
   })
 
-export const unlockReview = (): OperationDef =>
-  simple('review-unlock', 'Unlock review text', 'review-unlock', 'Use your administrator passkey to open the approved command text.', 'Review text is open.', {
-    confirmLabel: 'Unlock review',
-  })
-
 export const lock = (): OperationDef =>
   simple('lock', 'Lock the authority', 'lock', 'Lock the authority now. Secret requests stop and every session ends.', 'The authority is locked.', {
     danger: true,
@@ -113,16 +108,6 @@ export const recoverAuthorityKey = (): OperationDef =>
   })
 
 // ---- settings ----
-
-export const setUnlockPolicy = (policy: 'manual' | 'unattended'): OperationDef =>
-  simple(
-    'policy-' + policy,
-    policy === 'manual' ? 'Require a manual unlock' : 'Allow unattended unlock',
-    policy === 'manual' ? 'policy-manual' : 'policy-unattended',
-    policy === 'manual' ? 'Unlock mode: manual. The authority stays locked after a start until you unlock it.' : 'Unlock mode: unattended. The authority unlocks itself at start, without a passkey.',
-    policy === 'manual' ? 'Unlock mode is now manual.' : 'Unlock mode is now unattended.',
-    policy === 'unattended' ? { danger: true, warning: 'Weaker: anyone who can start this service as you gets an unlocked authority.' } : {},
-  )
 
 const retentionField: FieldDef = { name: 'days', label: 'Days to keep audit events', kind: 'number', hint: '0 keeps everything.', required: true, min: 0, max: 36500 }
 

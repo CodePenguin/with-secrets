@@ -156,7 +156,7 @@ internal static class ConfigTests
         string path = SchemaOne(Path.Combine(root, "old-schema"));
         byte[] before = File.ReadAllBytes(path);
         StateDatabase db = new(path);
-        check(WithSecretsDatabase.SchemaVersion == 3, "db schema: the schema version is 3");
+        check(WithSecretsDatabase.SchemaVersion == 4, "db schema: the schema version is 4");
         check(!db.TryCheck(out string? error) && error is not null && error.Contains("delete with-secrets.db to start over", StringComparison.Ordinal), "db schema: an older database is an error that says to delete with-secrets.db (" + error + ")");
         check(!new PasskeyStore(db).TryAll(out _) && new PasskeyStore(db).All().Count == 0, "db schema: its passkeys are not used");
         check(ToolSettings.Load(db, out error) == ToolSettings.Defaults && error is not null && ReuseSettings.Load(db) == ReuseOffer.Off, "db schema: settings from it are an error");
@@ -174,8 +174,8 @@ internal static class ConfigTests
         }
 
         check(!StateDatabase.InFolder(newer).TryCheck(out string? newerError) && newerError is not null && newerError.Contains("delete with-secrets.db to start over", StringComparison.Ordinal), "db schema: a newer database is an error too (" + newerError + ")");
-        ManifestTests.Execute(newerDb.FilePath, "UPDATE schema_version SET version = 4");
-        check(!StateDatabase.InFolder(newer).TryCheck(out string? fourError) && fourError is not null && fourError.Contains("delete with-secrets.db to start over", StringComparison.Ordinal), "db schema: a schema 4 database (unsigned grants) is an error that says to delete with-secrets.db (" + fourError + ")");
+        ManifestTests.Execute(newerDb.FilePath, "UPDATE schema_version SET version = " + (WithSecretsDatabase.SchemaVersion - 1));
+        check(!StateDatabase.InFolder(newer).TryCheck(out string? fourError) && fourError is not null && fourError.Contains("delete with-secrets.db to start over", StringComparison.Ordinal), "db schema: a previous schema database is an error that says to delete with-secrets.db (" + fourError + ")");
     }
 
     /// <summary>An earlier store database with one passkey enrolled. Returns its path.</summary>

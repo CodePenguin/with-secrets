@@ -17,7 +17,7 @@ with-secrets --secrets DB_URL --reason "list tables in the staging database" -- 
 1. The agent runs `with-secrets --secrets NAME --reason "..." -- program args`. Nothing is decrypted yet.
 2. The command prints a one-use link. The agent shows it to you.
 3. You open the page. It shows the whole request: the full program path and arguments, the folder, the secret names, the agent's reason, and the full text of every script or inline command the program will read. Warnings appear for things that change which code runs or where data goes.
-4. You approve with a passkey. The passkey signs what you saw, and its PRF output is what unlocks the secret store, so the page alone cannot approve anything.
+4. You approve with an enrolled passkey that signs the exact request you reviewed. An admin passkey with PRF unlocks the authority after startup. Once unlocked, a convenience passkey can approve runs without PRF.
 5. The program decrypts only the named secrets, starts the child with them as environment variables, redacts them from the output, and writes a signed audit entry (names and a hash, never values).
 
 Deny, a wrong proof, an error or no answer before the time limit all end the run with exit code 3, and nothing is decrypted.
@@ -33,7 +33,7 @@ Deny, a wrong proof, an error or no answer before the time limit all end the run
 
 ## Install
 
-You need a passkey with the PRF extension (a phone passkey from iCloud Keychain or Google Password Manager, or a security key).
+You need an admin passkey with WebAuthn PRF for setup and unlock. You can then enroll a convenience passkey for approvals and grant changes.
 
 **From a release.** Download the file for your platform from the [releases page](https://github.com/CodePenguin/with-secrets/releases): `with-secrets-win-x64.exe`, `with-secrets-linux-x64.tar.gz` or `with-secrets-osx-arm64.tar.gz`, and check it against `SHA256SUMS`. It is one self-contained file with the admin app inside; nothing else to install.
 

@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Security.Cryptography;
 
 namespace WithSecrets;
 
@@ -40,22 +39,60 @@ public sealed partial class AdminService
         return text is { Length: > 0 and <= 6 } && int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out value) && value >= min && value <= max;
     }
 
-    private bool TryOpenReview(Unlock? unlock)
-    {
-        if (_p.Review is not { } review || unlock is null)
-        {
-            return false;
-        }
+    /// <summary>Why the unlock was refused when the tap released nothing that opens the keys.</summary>
+    internal const string NoKeyRelease = "the passkey did not release the secret store key (use an admin passkey with PRF); the authority stays locked";
 
+    internal const string RemoteLockRefusal = "this host has no lock: unlock the authority";
+
+    internal const string RemoteAdminRefusal = "manage access and secrets at the authority";
+
+    /// <summary>The current signed state, or null when it cannot be read.</summary>
+    private Manifest? CurrentManifest()
+    {
         try
         {
             StateDatabase state = new(_p.Store.Database);
-            Manifest? manifest = state.Read(connection => state.CurrentManifest(connection, null));
-            return manifest is not null && _p.Lock.WhileUnlocked(() => review.IsOpen || review.TryOpen(manifest, unlock));
+            return state.Read(connection => state.CurrentManifest(connection, null));
         }
         catch (Exception error) when (error is StateDatabaseException or WithSecretsDatabaseException)
         {
-            return false;
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Unlocks. Where the authority holds keys (not on a host whose authority is remote), the keys are opened with what the tap released first and the unlock happens only if they opened, both inside the
+    /// lock's gate: a refused or failed unlock holds nothing, and a lock that comes meanwhile never leaves keys held.
+    /// </summary>
+    private string? UnlockWithKeys(Unlock? unlock)
+    {
+        if (_p.Unlocked is not { } keys)
+        {
+            _p.Lock.Unlock(UnlockMethod.Manual);
+
+            return null;
+        }
+
+        if (unlock is null || CurrentManifest() is not { } manifest)
+        {
+            return NoKeyRelease;
+        }
+
+        return _p.Lock.UnlockWith(UnlockMethod.Manual, () => keys.TryOpen(manifest, unlock)) switch
+        {
+            UnlockOutcome.Unlocked => null,
+            UnlockOutcome.AlreadyUnlocked => "the authority is already unlocked",
+            UnlockOutcome.Locking => "the authority is locking; unlock it again",
+            _ => NoKeyRelease,
+        };
+    }
+
+    /// <summary>Locks when the passkey whose unlock opened the keys is no longer an admin key of the current state (it was just removed).</summary>
+    private void LockIfUnlockingKeyRemoved()
+    {
+        if (_p.Unlocked?.OpenedBy is { } opener && CurrentManifest()?.IsAdmin(opener.Id) != true)
+        {
+            _p.Lock.Lock("the admin passkey that unlocked the authority was removed");
         }
     }
 
@@ -65,7 +102,7 @@ public sealed partial class AdminService
     /// </summary>
     private async Task<(AdminPlan? Plan, string? Refusal, int Status)> PlanAsync(object owner, string op, IReadOnlyDictionary<string, string> args, CancellationToken cancel)
     {
-        if (op == "provider-refresh-values" && !_p.Lock.IsLocked)
+        if (!IsRemote && op == "provider-refresh-values" && !_p.Lock.IsLocked)
         {
             if (owner is not AdminSession session || InteractiveRefreshes is not { } refreshes
                 || !Guid.TryParseExact(Arg(args, "id"), "D", out Guid id)
@@ -78,13 +115,13 @@ public sealed partial class AdminService
                 string? refusal = null;
                 return _p.Lock.WhileUnlocked(() =>
                 {
-                    refusal = refreshes.Commit(id, session, digest, authorization.Admin!.Signer);
+                    refusal = refreshes.Commit(id, session, digest, authorization.Admin!.Key);
                     return true;
                 }) ? refusal : "The authority is locked.";
             })), null, 200);
         }
 
-        if (IsProviderOperation(op) && !_p.Lock.IsLocked)
+        if (!IsRemote && IsProviderOperation(op) && !_p.Lock.IsLocked)
         {
             return await ProviderPlanAsync(op, args, cancel);
         }
@@ -98,6 +135,13 @@ public sealed partial class AdminService
     {
         refusal = null;
         status = 409;
+        if (IsRemote)
+        {
+            refusal = NeedsNoSession(op) ? RemoteLockRefusal : RemoteAdminRefusal;
+
+            return null;
+        }
+
         if (op != OpUnlock && _p.Lock.IsLocked)
         {
             refusal = "the authority is locked; unlock it first";
@@ -117,9 +161,8 @@ public sealed partial class AdminService
                     return null;
                 }
 
-                System.Runtime.CompilerServices.StrongBox<string?> unlockRemark = new();
                 return new AdminPlan("unlock-authority",
-                    "unlock the authority so that it serves secret requests again. It creates no grant and widens none; every sensitive change still needs its own passkey tap",
+                    "unlock the authority so that it serves secret requests again: the secret store key and the review key are opened in its memory until it locks. It creates no grant and widens none; every sensitive change still needs its own passkey tap",
                     [("authority-key", key)],
                     authorization =>
                     {
@@ -128,31 +171,15 @@ public sealed partial class AdminService
                             return moved;
                         }
 
-                        _p.Lock.Unlock(UnlockMethod.Manual);
-                        if (_p.Review is not null && !TryOpenReview(authorization.Unlock))
+                        if (UnlockWithKeys(authorization.Unlock) is { } refused)
                         {
-                            unlockRemark.Value = "Unlocked. Review text stays locked: this passkey did not release the review key.";
+                            return refused;
                         }
+
                         _p.OnUnlocked();
 
                         return null;
-                    }, Remark: unlockRemark, WantsPrf: _p.Review is not null);
-
-            case OpReviewUnlock:
-                if (_p.Review is null)
-                {
-                    refusal = "review text is available at the authority";
-                    return null;
-                }
-
-                if (_p.Review.IsOpen)
-                {
-                    refusal = "the review text is open already";
-                    return null;
-                }
-
-                return new AdminPlan(OpReviewUnlock, "unlock the approved command text for review", [("authority-key", key)],
-                    authorization => KeyMoved(key) ?? (TryOpenReview(authorization.Unlock) ? null : "this passkey did not release the review key; nothing was opened"), WantsPrf: true);
+                    }, WantsPrf: _p.Unlocked is not null);
 
             case OpLock:
                 return new AdminPlan("lock-authority",
@@ -170,48 +197,6 @@ public sealed partial class AdminService
                         return null;
                     });
 
-            case OpPolicyManual:
-                if (_p.Store.GetUnlockPolicy() == UnlockPolicy.Manual)
-                {
-                    refusal = "unlock is manual already";
-
-                    return null;
-                }
-
-                return PolicyPlan(UnlockPolicy.Manual, "make unlock manual again: after a start an administrator unlocks with a passkey tap, and the unattended-unlock material is deleted", null, null, null);
-
-            case OpPolicyUnattended:
-                if (_p.Store.GetUnlockPolicy() == UnlockPolicy.Unattended)
-                {
-                    refusal = "unlock is unattended already";
-
-                    return null;
-                }
-
-                if (_p.Protection.Unavailable is { } unavailable)
-                {
-                    refusal = unavailable;
-
-                    return null;
-                }
-
-                byte[] material = RandomNumberGenerator.GetBytes(32);
-                try
-                {
-                    byte[] sealedBlob = _p.Protection.Seal(material);
-
-                    return PolicyPlan(UnlockPolicy.Unattended,
-                        "let the authority unlock itself after it starts, using material that " + _p.Protection.Name + " protects for this user. This is WEAKER than manual unlock: anything that can run as this user can unlock the service the same way. It does not remove the passkey tap for sensitive changes and creates no grant",
-                        sealedBlob, Convert.ToHexString(SHA256.HashData(material)), material);
-                }
-                catch (Exception error) when (error is CryptographicException or InvalidOperationException)
-                {
-                    CryptographicOperations.ZeroMemory(material);
-                    refusal = "the platform could not protect the unlock material";
-
-                    return null;
-                }
-
             case "authority-key-rotate":
                 return new AdminPlan("rotate-authority-key",
                     "rotate the authority signing key. The new key is introduced by a transition that the current key signs; hosts that pinned the current key accept it.\nCurrent key: " + key,
@@ -223,7 +208,7 @@ public sealed partial class AdminService
                             return moved;
                         }
 
-                        _p.Keys.Rotate(a.Admin!.Actor);
+                        _p.Keys.Rotate(a.Admin!.Actor, a.Admin.Key);
 
                         return null;
                     });
@@ -239,7 +224,7 @@ public sealed partial class AdminService
                             return moved;
                         }
 
-                        AdminActions.RecoverAuthority(_p.Keys, _p.HostConfig, _p.LocalFingerprint, a.Admin!.Actor);
+                        AdminActions.RecoverAuthority(_p.Keys, _p.HostConfig, _p.LocalFingerprint, a.Admin!.Actor, a.Admin.Key);
 
                         return null;
                     });
@@ -292,7 +277,7 @@ public sealed partial class AdminService
                 }
 
                 return new AdminPlan("enroll-passkey", "add a passkey that can approve runs (and, if you choose on its page, administer). The next pages ask an admin passkey for approval, make the new passkey and have an admin sign the new state", [],
-                    _ => null, null, (announce, stop) =>
+                    _ => null, (announce, stop) =>
                     {
                         ApprovalDecision decision = enrolling.Enroll(announce, stop);
 
@@ -308,9 +293,13 @@ public sealed partial class AdminService
                 }
 
                 return new AdminPlan("rotate-store-key", "rotate the secret store key and the master key: every secret is encrypted again and only the passkey you tap stays (the others must be added again). The next pages ask an admin passkey twice and show a new code for recovery once; the old one stops working", [],
-                    _ => null, null, (announce, stop) =>
+                    _ => null, (announce, stop) =>
                     {
                         ApprovalDecision decision = rotating.RotateStoreKey(announce, stop);
+                        if (decision.Approved)
+                        {
+                            _p.Lock.Lock("the secret store key was rotated");
+                        }
 
                         return (decision.Approved, decision.Detail, "admin passkey");
                     });
@@ -335,9 +324,13 @@ public sealed partial class AdminService
                 string removeName = name!.Trim();
 
                 return new AdminPlan("remove-passkey", $"remove the passkey named \"{ApprovalSummary.Clean(removeName)}\" (any key but the last admin key). Its page asks an admin passkey to sign the new state", [("name", removeName)],
-                    _ => null, null, (announce, stop) =>
+                    _ => null, (announce, stop) =>
                     {
                         ApprovalDecision decision = removing.Unenroll(removeName, announce, stop);
+                        if (decision.Approved)
+                        {
+                            LockIfUnlockingKeyRemoved();
+                        }
 
                         return (decision.Approved, decision.Detail, "admin passkey");
                     });
@@ -367,7 +360,7 @@ public sealed partial class AdminService
                     [("authority", authorityUrl), ("valid-minutes", lifetime.ToString(CultureInfo.InvariantCulture))],
                     a =>
                     {
-                        (CreatedInvitation? created, string? problem) = creating.Create(a.Admin!.Actor);
+                        (CreatedInvitation? created, string? problem) = creating.Create(a.Admin!.Actor, a.Admin.Key);
                         if (created is null)
                         {
                             return problem ?? "the invitation could not be made";
@@ -413,7 +406,7 @@ public sealed partial class AdminService
 
                 return new AdminPlan("revoke-pairing-invitation", $"revoke the pairing invitation {typedId} (created {CanonicalJson.Time(invitation.Created)}). It can no longer be used. A machine that already paired with it is not affected",
                     [("invitation", typedId)],
-                    a => revoking.Revoke(typedId, a.Admin!.Actor) ? null : "the invitation is no longer pending");
+                    a => revoking.Revoke(typedId, a.Admin!.Actor, a.Admin.Key) ? null : "the invitation is no longer pending");
         }
 
         if (op.StartsWith("machine-", StringComparison.Ordinal))
@@ -430,19 +423,6 @@ public sealed partial class AdminService
         status = 400;
 
         return null;
-    }
-
-    private AdminPlan? PolicyPlan(UnlockPolicy policy, string sentence, byte[]? sealedBlob, string? verifier, byte[]? material)
-    {
-        (string operation, IReadOnlyList<(string Name, string Value)> parameters) = AuthorityStore.PolicyOperation(policy);
-
-        return new AdminPlan(operation, sentence, parameters, a =>
-        {
-            // The authority key signs the unattended policy, so that only an administrator's tap (and not a plain write to with-secrets.db) can make one.
-            _p.Store.SetUnlockPolicy(policy, sealedBlob, verifier, a.Admin!, policy == UnlockPolicy.Unattended ? _p.Keys.Current() : null);
-
-            return null;
-        }, material);
     }
 
     // ---- machines ----
@@ -555,15 +535,16 @@ public sealed partial class AdminService
             }
 
             string actor = a.Admin!.Actor;
+            VerifiedCredential key = a.Admin.Key;
             TransitionResult result = kind switch
             {
-                "approve" => AdminActions.ApproveMachine(_p.Store, _p.Keys, _p.HostConfig, _p.LocalFingerprint, fingerprint, trimmed, actor, revision),
-                "disable" => _p.Store.Disable(fingerprint, actor, revision),
-                "enable" => _p.Store.Enable(fingerprint, actor, revision),
-                "untrust" => _p.Store.Untrust(fingerprint, actor, revision),
-                "trust" => _p.Store.Trust(fingerprint, confirmation!, actor, revision),
-                "rename" => _p.Store.Rename(fingerprint, trimmed, actor, revision),
-                _ => _p.Store.ApproveHostChange(fingerprint, actor, revision, pending),
+                "approve" => AdminActions.ApproveMachine(_p.Store, _p.Keys, _p.HostConfig, _p.LocalFingerprint, fingerprint, trimmed, actor, revision, key),
+                "disable" => _p.Store.Disable(fingerprint, actor, revision, key),
+                "enable" => _p.Store.Enable(fingerprint, actor, revision, key),
+                "untrust" => _p.Store.Untrust(fingerprint, actor, revision, key),
+                "trust" => _p.Store.Trust(fingerprint, confirmation!, actor, revision, key),
+                "rename" => _p.Store.Rename(fingerprint, trimmed, actor, revision, key),
+                _ => _p.Store.ApproveHostChange(fingerprint, actor, revision, pending, key),
             };
 
             return result.Ok ? null : result.Message;
@@ -711,7 +692,7 @@ public sealed partial class AdminService
             ? [("grant", grantId), ("new-grant", newGrantId!), ("new-end", GrantEvidence.EndText(newEnd))]
             : [("grant", grantId), ("revision", grantRevision.ToString(CultureInfo.InvariantCulture)), ("new-end", GrantEvidence.EndText(newEnd))];
 
-        return new AdminPlan(verb + "-grant", sentence, parameters, a =>
+        return new AdminPlan("grant-" + verb, sentence, parameters, a =>
         {
             GrantAdminCommand command = new("adm-" + Guid.NewGuid().ToString("N"), verb, grantId, minutes, indefinite, grantRevision, a.Admin!.Actor, newEnd, a.Evidence, newGrantId);
             GrantResponse response = _p.Authority.AdminGrant(command);
@@ -744,6 +725,8 @@ public sealed partial class AdminService
 public sealed class StatePasskeyAdmin(StateDatabase state) : IPasskeyAdmin
 {
     internal Func<Microsoft.Data.Sqlite.SqliteConnection, Microsoft.Data.Sqlite.SqliteTransaction, string, string, string?>? RekeyReview { get; init; }
+
+    internal Action? AfterStoreChange { get; init; }
 
     private Enrollment Make(Action<string> announce, Func<string?>? stopReason = null)
     {
@@ -778,9 +761,23 @@ public sealed class StatePasskeyAdmin(StateDatabase state) : IPasskeyAdmin
 
     public ApprovalDecision Enroll(Action<string> announce, Func<string?> stopReason) => Watch(() => Make(announce, stopReason).Enroll(), stopReason);
 
-    public ApprovalDecision Unenroll(string name, Action<string> announce, Func<string?> stopReason) => Watch(() => Make(announce, stopReason).Unenroll(name), stopReason);
+    // The worker can finish after Watch returns. Reconcile the held keys from the worker so a late commit is covered too.
+    private ApprovalDecision WatchStoreChange(Func<ApprovalDecision> flow, Func<string?> stopReason) => Watch(() =>
+    {
+        try
+        {
+            return flow();
+        }
+        finally
+        {
+            AfterStoreChange?.Invoke();
+        }
+    }, stopReason);
 
-    public ApprovalDecision RotateStoreKey(Action<string> announce, Func<string?> stopReason) => Watch(() =>
+    public ApprovalDecision Unenroll(string name, Action<string> announce, Func<string?> stopReason) =>
+        WatchStoreChange(() => Make(announce, stopReason).Unenroll(name), stopReason);
+
+    public ApprovalDecision RotateStoreKey(Action<string> announce, Func<string?> stopReason) => WatchStoreChange(() =>
     {
         ApprovalSettings settings = ApprovalSettings.Load(state, out _);
         (EnrollmentTarget primary, EnrollmentTarget local) = CommandWiring.Targets(state, settings, announce, null);

@@ -19,13 +19,21 @@ public sealed class GrantSealer(AuthorityStore store, AuthorityKeyRing keys, IAp
             throw new GrantSealException("the store has no review key, so no grant is made");
         }
 
-        ApprovalCheck Verify(ApprovalEvidence evidence, int minutes) => verifier is ManifestApprovalVerifier
-            ? ManifestApprovalVerifier.Verify(manifest, evidence, minutes)
-            : verifier.Verify(evidence, minutes);
+        ApprovalCheck check = verifier is ManifestApprovalVerifier
+            ? ManifestApprovalVerifier.Verify(manifest, plain.Evidence, plain.Minutes)
+            : verifier.Verify(plain.Evidence, plain.Minutes);
+        ApprovalCheck Verify(ApprovalEvidence _, int __) => check;
 
         if (GrantEvidence.RowProblem(Verify, row, plain) is { } problem)
         {
             throw new GrantSealException(problem);
+        }
+
+        if (check.Credential is { } credential)
+        {
+            row = row.ApprovedKey is null
+                ? row with { ApprovedKey = credential }
+                : row with { ChangedKey = credential };
         }
 
         ISigningKey key = keys.Current(tx.ActiveKey() ?? throw new GrantSealException("the authority has no signing key"));
@@ -67,15 +75,16 @@ public sealed class GrantSealer(AuthorityStore store, AuthorityKeyRing keys, IAp
             return "the evidence is for another review key";
         }
 
+        if (row.ApprovedKey is { } approver && !manifest.Keys.Any(key => key.Id == approver.Id)
+            || row.ChangedKey is { } changer && !manifest.Keys.Any(key => key.Id == changer.Id))
+        {
+            return "a passkey that approved or changed the grant is no longer enrolled";
+        }
+
         ApprovalCheck signer = verifier is ManifestApprovalVerifier
             ? ManifestApprovalVerifier.Signer(manifest, evidence.Proof)
             : verifier.Signer(evidence.Proof);
-        if (!signer.Ok)
-        {
-            return "the approving passkey is not enrolled";
-        }
-
-        return evidence.Kind == GrantEvidence.AdminKind && !signer.Admin ? "the approving passkey is not an admin key" : null;
+        return signer.Ok ? null : "the approving passkey is not enrolled";
     }
 }
 
@@ -92,6 +101,7 @@ public static class GrantSeals
             CanonicalJson.Time(row.Updated), Time(row.Expires), Number(row.Revision), Number(row.SecurityRevision), row.Status, row.Usage,
             Time(row.Consumed), row.Replaces ?? "", row.ApprovedBy, evidence.Kind, evidence.Nonce, Number(evidence.Minutes),
             SecretStore.Hash(evidence.Proof), SecretStore.Hash(evidence.Ciphertext), row.ReviewKey!, authorityFingerprint,
+            new AuditKeys(GrantApproved: row.ApprovedKey, GrantChanged: row.ChangedKey).Wire(),
         ];
         StringBuilder text = new StringBuilder(Context).Append('\n');
         foreach (string field in fields)

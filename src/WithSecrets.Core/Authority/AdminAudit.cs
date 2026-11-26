@@ -8,25 +8,27 @@ namespace WithSecrets;
 /// refused. It is recorded as a signed audit event of type <see cref="AuditEventTypes.Admin" />: the event name is the outcome, the detail (with the approving key's
 /// name) is the reason, and the secret, setting or key names are the arguments; the metadata repeats them with the full detail and the key name. Names only: no secret value, no ciphertext, no key material, no code.
 /// </summary>
-internal sealed record AdminEvent(string Name, IReadOnlyList<string> Names, string Detail, string Key)
+internal sealed record AdminEvent(string Name, IReadOnlyList<string> Names, string Detail, string Key, VerifiedCredential? Credential = null)
 {
+    internal VerifiedCredential? SessionKey { get; init; }
+
     /// <summary>The event of a change that was refused or failed.</summary>
     public const string ChangeDenied = "change-denied";
 
     /// <summary>A change to what can approve (a key added or removed, approvals revoked), approved by <paramref name="key" />.</summary>
-    public static AdminEvent Change(string name, string detail, string key) => new(name, [], detail, key);
+    public static AdminEvent Change(string name, string detail, string key, VerifiedCredential? credential = null) => new(name, [], detail, key, credential);
 
     /// <summary>A change to the secret store ("secrets-set" or "secrets-removed"), approved by <paramref name="key" />. Names only.</summary>
-    public static AdminEvent Secrets(string name, IReadOnlyList<string> names, string detail, string key) => new(name, names, detail, key);
+    public static AdminEvent Secrets(string name, IReadOnlyList<string> names, string detail, string key, VerifiedCredential? credential = null) => new(name, names, detail, key, credential);
 
     /// <summary>A change to provider instances or mounts, or a namespace refresh ("provider-added", "mount-removed", "namespace-refreshed" and so on). Names and counts only: never configuration values.</summary>
-    public static AdminEvent Provider(string outcome, IReadOnlyList<string> names, string detail, string key) => new(outcome, names, detail, key);
+    public static AdminEvent Provider(string outcome, IReadOnlyList<string> names, string detail, string key, VerifiedCredential? credential = null) => new(outcome, names, detail, key, credential);
 
     /// <summary>
     /// A change to the settings: the names of the settings that changed, "name old -> new" for each in the detail (no setting is secret), and the key that approved it.
     /// <paramref name="note" /> is added to the detail.
     /// </summary>
-    public static AdminEvent Settings(string name, IReadOnlyList<SettingChange> changes, string key, string? note = null)
+    public static AdminEvent Settings(string name, IReadOnlyList<SettingChange> changes, string key, VerifiedCredential? credential = null, string? note = null)
     {
         List<string> parts = [.. changes.Select(change => $"{change.Name} {change.Old} -> {change.New}")];
         if (parts.Count == 0)
@@ -39,7 +41,7 @@ internal sealed record AdminEvent(string Name, IReadOnlyList<string> Names, stri
             parts.Add(note);
         }
 
-        return new AdminEvent(name, [.. changes.Select(change => change.Name)], string.Join("; ", parts), key);
+        return new AdminEvent(name, [.. changes.Select(change => change.Name)], string.Join("; ", parts), key, credential);
     }
 
     internal AuditFacts ToFacts()
@@ -52,6 +54,9 @@ internal sealed record AdminEvent(string Name, IReadOnlyList<string> Names, stri
         {
             metadata["key"] = Key;
         }
+
+        Credential?.AddTo(metadata, "key");
+        SessionKey?.AddTo(metadata, "sessionKey");
 
         if (Names.Count > 0)
         {
@@ -139,9 +144,9 @@ public sealed class AdminAudit(Func<IHostAudit> source, WithSecretsDatabase data
     /// A change that was refused or failed: the operation (such as "set-secrets"), the secret names it named (names only) and why. Best effort: false when it could not be written.
     /// Nothing is written when there is no with-secrets.db yet, so a refusal never creates one.
     /// </summary>
-    internal bool TryWriteDenied(string command, IReadOnlyList<string> names, string reason)
+    internal bool TryWriteDenied(string command, IReadOnlyList<string> names, string reason, VerifiedCredential? credential = null)
     {
-        return File.Exists(database.FilePath) && TryRecord(new AdminEvent(AdminEvent.ChangeDenied, names, command + ": " + reason, ""));
+        return File.Exists(database.FilePath) && TryRecord(new AdminEvent(AdminEvent.ChangeDenied, names, command + ": " + reason, credential?.Name ?? "", credential));
     }
 }
 

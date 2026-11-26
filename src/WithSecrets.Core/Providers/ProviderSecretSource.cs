@@ -34,14 +34,15 @@ public sealed record ProviderAudit(string Path, Guid InstanceId, string Instance
 /// <summary>
 /// The run's secret source: the native <see cref="SecretStore" /> plus every mounted secret (10.3). A name that a mount selects (ruling 2, mount over native) is
 /// served by that mount's namespace entry and nothing else; any other name goes to the native store unchanged. For mounted names, per provider instance: cache rows
-/// that verify and are younger than 75% of MaxStaleDuration are decrypted with the store key the approving passkey released (<see cref="RetrievalOutcomeKind.Cached" />);
+/// that verify and are younger than 75% of MaxStaleDuration are decrypted with the store key an administrator's unlock opened (<see cref="RetrievalOutcomeKind.Cached" />);
 /// every other DISTINCT external id is requested in ONE retrieval batch for that instance; a success is cached (when caching is enabled, the store has a key, and the authority is
 /// unlocked) and delivered (<see cref="RetrievalOutcomeKind.Fresh" />); a final Unavailable or RateLimited may be answered from the row read before the retrieval,
 /// re-verified, while within MaxStaleDuration (<see cref="RetrievalOutcomeKind.Stale" />); anything else fails the whole call. When the instance generation moved
 /// while its batch was in flight (an invalidation), the batch's results are discarded and the call fails closed. Every returned array belongs to the
-/// returned <see cref="SecretValues" />; everything decrypted or retrieved on the way is zeroed, on success and on failure. While the authority is locked a call
-/// that names any mounted secret fails closed before anything is read or retrieved (native-only calls are unaffected); a lock that begins during the call only
-/// stops the fresh values being cached. A cache write that fails for any other reason fails the call.
+/// returned <see cref="SecretValues" />; everything decrypted or retrieved on the way is zeroed, on success and on failure. Everything the call decrypts (native rows and
+/// cache rows) is decrypted after the retrievals, in one use of the store key inside the authority's lock (<see cref="SecretStore.WithStoreKey" />). While the authority is
+/// locked a call that names any mounted secret fails closed before anything is read or retrieved, and a lock that begins during the call fails it at that decryption
+/// (it also stops the fresh values being cached). A cache write that fails for any other reason fails the call.
 /// <para>
 /// Audit: the records of one call are built in full and handed to <paramref name="audit" /> ONCE, after the outcome is known, so a sink that cannot commit leaves
 /// no record of values that were then zeroed (the call fails). A failed call records every mounted name as Failed: those whose retrieval failed with their kind,
@@ -60,8 +61,11 @@ public sealed class ProviderSecretSource(
 {
     private sealed record Selected(string Name, ProviderInstance Instance, NamespaceEntry Entry);
 
-    /// <summary>What one external id of one instance came to: its value (owned by the caller's zeroing list) or why not.</summary>
-    private sealed record Obtained(RetrievalOutcomeKind Outcome, byte[]? Value, ProviderErrorKind? ErrorKind, bool Invalidated = false);
+    /// <summary>
+    /// What one external id of one instance came to: its value (owned by the caller's zeroing list), the verified cache row it is to be decrypted from (cached or stale; decrypted
+    /// once, after every retrieval, in the one use of the store key), or why not.
+    /// </summary>
+    private sealed record Obtained(RetrievalOutcomeKind Outcome, byte[]? Value, ProviderErrorKind? ErrorKind, bool Invalidated = false, CachedSecret? Row = null);
 
     public string Label => native.Label;
 
@@ -76,8 +80,6 @@ public sealed class ProviderSecretSource(
         return providers.Instance(mount.InstanceId)?.Name ?? mount.InstanceId.ToString("D");
     }
 
-    public bool NeedsUnlock => true;
-
     /// <summary>For tests: receives every intermediate buffer after it was zeroed (and, on failure, the arrays that would have been returned).</summary>
     internal Action<IReadOnlyList<byte[]>>? Discarded { get; set; }
 
@@ -89,7 +91,7 @@ public sealed class ProviderSecretSource(
         return [.. native.ListNames().Concat(providers.Entries().Select(entry => entry.LogicalPath)).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)];
     }
 
-    public SecretValues GetValues(IReadOnlyCollection<string> names, Unlock? unlock)
+    public SecretValues GetValues(IReadOnlyCollection<string> names)
     {
         if (names.Any(name => !SecretNames.IsValid(name)) || names.Distinct(StringComparer.Ordinal).Count() != names.Count)
         {
@@ -107,6 +109,7 @@ public sealed class ProviderSecretSource(
         Dictionary<(Guid, string), Obtained>? obtained = null;
         bool delivered = false;
         bool audited = false;
+        VerifiedCredential? openedBy = null;
         try
         {
             if (unavailable.Count > 0)
@@ -121,41 +124,68 @@ public sealed class ProviderSecretSource(
                 throw new SecretStoreException("the authority is locked, so no mounted secret is delivered");
             }
 
-            if (mounted.Count > 0 && unlock is null)
+            // The native rows are read now and decrypted only with the store key below; their manifest is the one the key is checked against.
+            (Manifest? manifest, Dictionary<string, string> nativeRows) = nativeNames.Count > 0 ? native.ReadRows(nativeNames) : (native.Current().Manifest, new Dictionary<string, string>(StringComparer.Ordinal));
+            string storeKey = manifest?.Store ?? "";
+            if (mounted.Count > 0 && (storeKey.Length > 0 || nativeRows.Count > 0))
             {
-                throw new SecretStoreException("the approval did not release the secret store key (a passkey with PRF must approve), so nothing was decrypted");
+                // Nothing is retrieved for a call the store key could not finish.
+                native.EnsureStoreKey(manifest);
             }
 
-            if (nativeNames.Count > 0)
+            Dictionary<(Guid, string), Obtained> all = obtained = mounted.Count > 0 ? Task.Run(() => ObtainAsync(mounted, generations, storeKey, owned)).GetAwaiter().GetResult() : [];
+            List<Selected> failed = [.. mounted.Where(item => all[Key(item)].Outcome == RetrievalOutcomeKind.Failed)];
+            if (failed.Count > 0)
             {
-                using SecretValues values = native.GetValues(nativeNames, unlock);
-                foreach (string name in nativeNames)
-                {
-                    byte[] bytes = values.Bytes(name);
-                    owned.Add(bytes);
-                    result[name] = [.. bytes];
-                }
+                throw new SecretStoreException(string.Join("; ", failed.Select(item => Describe(item, all[Key(item)]))));
             }
 
-            if (mounted.Count > 0)
+            // The values are assembled inside the authority's lock, with one use of the store key for the native rows and every cached row (a store with a key needs it open and current); with no store key nothing is decrypted, but a lock that began during the retrievals still delivers nothing.
+            bool Assemble(string? privateKey)
             {
-                // K is opened up front whenever the store has one, so an unlock that does not open it fails the call whatever the cache holds. (The hex string
-                // of K cannot be wiped; its bytes are zeroed inside OpenStoreKey.)
-                (Manifest? manifest, _) = native.Current();
-                string storeKey = manifest?.Store ?? "";
-                string? privateKey = storeKey.Length > 0 ? SecretStore.OpenStoreKey(manifest, unlock) : null;
-                Dictionary<(Guid, string), Obtained> all = obtained = Task.Run(() => ObtainAsync(mounted, generations, storeKey, privateKey, owned)).GetAwaiter().GetResult();
-                List<Selected> failed = [.. mounted.Where(item => all[Key(item)].Outcome == RetrievalOutcomeKind.Failed)];
-                if (failed.Count > 0)
+                Dictionary<(Guid, string), byte[]> opened = [];
+                if (privateKey is not null)
                 {
-                    throw new SecretStoreException(string.Join("; ", failed.Select(item => Describe(item, all[Key(item)]))));
+                    foreach ((string name, byte[] value) in native.DecryptRows(privateKey, nativeRows))
+                    {
+                        result[name] = value;
+                    }
+
+                    foreach (((Guid, string) key, Obtained item) in all.Where(pair => pair.Value.Row is not null))
+                    {
+                        byte[] value = cache.Decrypt(item.Row!, privateKey);
+                        owned.Add(value);
+                        opened[key] = value;
+                    }
                 }
 
                 foreach (Selected item in mounted)
                 {
-                    result[item.Name] = [.. all[Key(item)].Value!];
+                    result[item.Name] = [.. all[Key(item)].Value ?? opened[Key(item)]];
                 }
 
+                return true;
+            }
+
+            if (nativeRows.Count > 0 || storeKey.Length > 0 || all.Values.Any(item => item.Row is not null))
+            {
+                native.WithStoreKey(manifest, privateKey =>
+                {
+                    openedBy = native.OpenedBy;
+                    return Assemble(privateKey);
+                });
+            }
+            else
+            {
+                native.WhileUnlocked(() =>
+                {
+                    openedBy = native.OpenedBy;
+                    return Assemble(null);
+                });
+            }
+
+            if (mounted.Count > 0)
+            {
                 // One step, after the outcome is known: a sink that throws fails the call, and every value is zeroed below.
                 audited = true;
                 audit([.. mounted.Select(item => Record(item, all[Key(item)].Outcome, all[Key(item)].ErrorKind))]);
@@ -163,7 +193,7 @@ public sealed class ProviderSecretSource(
 
             delivered = true;
 
-            return new SecretValues(result);
+            return new SecretValues(result) { OpenedBy = openedBy };
         }
         catch when ((mounted.Count > 0 || unavailable.Count > 0) && !audited)
         {
@@ -243,18 +273,12 @@ public sealed class ProviderSecretSource(
         return (nativeNames, mounted, unavailable);
     }
 
-    /// <summary>Every (instance, external id) of <paramref name="mounted" />, one instance at a time, each with at most one retrieval batch. Every buffer made is added to <paramref name="owned" />.</summary>
-    private async Task<Dictionary<(Guid, string), Obtained>> ObtainAsync(List<Selected> mounted, IReadOnlyDictionary<Guid, long> generations, string storeKey, string? privateKey, List<byte[]> owned)
+    /// <summary>
+    /// Every (instance, external id) of <paramref name="mounted" />, one instance at a time, each with at most one retrieval batch. Every buffer made is added to <paramref name="owned" />.
+    /// A value served from the cache is its verified row, decrypted later by the caller (nothing is decrypted here).
+    /// </summary>
+    private async Task<Dictionary<(Guid, string), Obtained>> ObtainAsync(List<Selected> mounted, IReadOnlyDictionary<Guid, long> generations, string storeKey, List<byte[]> owned)
     {
-        byte[] Open(CachedSecret row)
-        {
-            // A row verifies only for the current store key, and K was opened whenever there is one.
-            byte[] value = cache.Decrypt(row, privateKey ?? throw new SecretStoreException("a cached provider value cannot be decrypted (no store key)"));
-            owned.Add(value);
-
-            return value;
-        }
-
         Dictionary<(Guid, string), Obtained> obtained = [];
         foreach (IGrouping<Guid, Selected> group in mounted.GroupBy(item => item.Instance.Id))
         {
@@ -280,7 +304,7 @@ public sealed class ProviderSecretSource(
                 if (row is not null && Age(started, row) is { } age && (interactiveOnly
                     ? ProviderPolicy.WithinStaleWindow(age, instance.MaxStale) : ProviderPolicy.IsFreshEnough(age, instance.MaxStale)))
                 {
-                    byExternal[same.Key] = new Obtained(RetrievalOutcomeKind.Cached, Open(row), null);
+                    byExternal[same.Key] = new Obtained(RetrievalOutcomeKind.Cached, null, null, Row: row);
                     continue;
                 }
 
@@ -353,7 +377,7 @@ public sealed class ProviderSecretSource(
                     }
 
                     ProviderErrorKind kind = outcomes.GetValueOrDefault(request.RequestId) is RetrievalFailure failure ? failure.Kind : ProviderErrorKind.Unknown;
-                    byExternal[externalId] = Stale(instance, externalId, before[externalId], kind, now, storeKey, Open) ?? new Obtained(RetrievalOutcomeKind.Failed, null, kind);
+                    byExternal[externalId] = Stale(instance, externalId, before[externalId], kind, now, storeKey) ?? new Obtained(RetrievalOutcomeKind.Failed, null, kind);
                 }
             }
 
@@ -386,7 +410,7 @@ public sealed class ProviderSecretSource(
     }
 
     /// <summary>The row read before the retrieval, served stale only for a final Unavailable/RateLimited, within MaxStaleDuration, and when it still verifies unchanged now.</summary>
-    private Obtained? Stale(ProviderInstance instance, string externalId, CachedSecret? before, ProviderErrorKind kind, DateTimeOffset now, string storeKey, Func<CachedSecret, byte[]> open)
+    private Obtained? Stale(ProviderInstance instance, string externalId, CachedSecret? before, ProviderErrorKind kind, DateTimeOffset now, string storeKey)
     {
         if (!ProviderPolicy.StaleEligible(kind) || before is null || Age(now, before) is not { } age || !ProviderPolicy.WithinStaleWindow(age, instance.MaxStale))
         {
@@ -395,7 +419,7 @@ public sealed class ProviderSecretSource(
 
         CachedSecret? again = cache.TryGet(instance.Id, externalId, storeKey);
 
-        return again is not null && again == before ? new Obtained(RetrievalOutcomeKind.Stale, open(again), kind) : null;
+        return again is not null && again == before ? new Obtained(RetrievalOutcomeKind.Stale, null, kind, Row: again) : null;
     }
 
     private static void Discard(IGrouping<Guid, Selected> group, Dictionary<(Guid, string), Obtained> obtained, IReadOnlyDictionary<string, ProviderErrorKind>? kinds = null)

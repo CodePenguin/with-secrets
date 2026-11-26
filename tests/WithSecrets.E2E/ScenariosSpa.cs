@@ -450,7 +450,8 @@ internal static class ScenariosSpa
         await Flows.Configure(rig, c);
         await Scenarios3.SeedSecret(rig, c);
         rig.WriteScript("check", "script-value");
-        using SpaApp app = new(rig);
+        using SpaApp app = new(rig, unlocked: false);
+        await Spa.Unlock(c, app, s);
         await Spa.SignIn(c, app, s);
         using (Cmd<int> cmd = Cmds.Run(rig, "E2E_SECRET", Rig.ScriptCommand("check"), app: app))
         {
@@ -800,7 +801,8 @@ internal static class ScenariosSpa
         using Rig rig = new();
         await using Ctx c = await Ctx.NewAsync(host);
         await Flows.Configure(rig, c);
-        using SpaApp app = new(rig, timeLimit: TimeSpan.FromSeconds(12));
+        using SpaApp app = new(rig, unlocked: false, timeLimit: TimeSpan.FromSeconds(12));
+        await Spa.Unlock(c, app, s);
         await Spa.SignIn(c, app, s);
 
         // Add: type the name and the value, one tap.

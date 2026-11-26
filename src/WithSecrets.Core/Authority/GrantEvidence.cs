@@ -5,7 +5,7 @@ using System.Text;
 namespace WithSecrets;
 
 /// <summary>What <see cref="IApprovalVerifier" /> found: whether the passkey assertion verifies, who signed, and whether that key is an admin key.</summary>
-public sealed record ApprovalCheck(bool Ok, string SignerName, bool Admin, string Detail);
+public sealed record ApprovalCheck(bool Ok, string SignerName, bool Admin, string Detail, VerifiedCredential? Credential = null);
 
 /// <summary>
 /// Checks a passkey assertion the person made on an approval page (see <see cref="ApprovalEvidence" />) against the enrolled keys. The authority
@@ -58,7 +58,7 @@ public sealed class ManifestApprovalVerifier(StateDatabase db) : IApprovalVerifi
 
             AssertionResult result = WebAuthn.VerifyStored(signer.Record(0), challenge(), proof);
 
-            return new ApprovalCheck(result.Ok, signer.Name, signer.Admin, result.Ok ? "" : "the signature does not verify");
+            return new ApprovalCheck(result.Ok, signer.Name, signer.Admin, result.Ok ? "" : "the signature does not verify", result.Ok ? VerifiedCredential.From(signer) : null);
         }
         catch (Exception error) when (error is StateDatabaseException or System.Text.Json.JsonException or ArgumentException or InvalidOperationException)
         {
@@ -194,7 +194,7 @@ public static class GrantEvidence
     }
 
     /// <summary>
-    /// Null when the admin passkey's evidence in <paramref name="command" /> says exactly this change to <paramref name="grant" /> as it is now (the
+    /// Null when the passkey's evidence in <paramref name="command" /> says exactly this change to <paramref name="grant" /> as it is now (the
     /// authority checks it inside the transaction), else why not. Revoke needs the same proof, with no end. For replace, <paramref name="grant" /> is the
     /// original, and the evidence must name the command's new grant id, that original, its scope exactly, a reusable usage and revision 1.
     /// </summary>
@@ -202,7 +202,7 @@ public static class GrantEvidence
     {
         if (verifier is null || command.Evidence is not { } evidence)
         {
-            return "the change has no admin passkey evidence";
+            return "the change has no passkey evidence";
         }
 
         DateTimeOffset? issued = Issued(evidence.Text);
@@ -247,7 +247,7 @@ public static class GrantEvidence
 
         ApprovalCheck check = verifier.Verify(evidence, 0);
 
-        return check is { Ok: true, Admin: true } ? null : "the change was not signed by an admin key (" + check.Detail + ")";
+        return check.Ok ? null : "the change was not signed by an enrolled passkey (" + check.Detail + ")";
     }
 
     /// <summary>The value of the one line that starts with <paramref name="prefix" />, or null when there is none or more than one.</summary>
@@ -265,8 +265,8 @@ public static class GrantEvidence
 
     /// <summary>
     /// Null when a person's assertion backs the grant's present state, else why not (the row is then ignored, as if there were no grant). An active
-    /// grant counts only with evidence that fits the row exactly: the approval that made it (scope, security revision, minutes, time) or an admin's
-    /// extend or renew (grant, scope, machine, revisions, new end), or the admin's replace that made it (also the grant it replaces and its usage). A revocation or an
+    /// grant counts only with evidence that fits the row exactly: the approval that made it (scope, security revision, minutes, time) or a passkey's
+    /// extend or renew (grant, scope, machine, revisions, new end), or a replacement that made it (also the grant it replaces and its usage). A revocation or an
     /// invalidation is never evidence of a usable grant.
     /// </summary>
     internal static string? RowProblem(Func<ApprovalEvidence, int, ApprovalCheck> verify, GrantRecord row, PlainEvidence plain)
@@ -323,8 +323,8 @@ public static class GrantEvidence
             return "the signed text is not for this grant as it is now";
         }
 
-        ApprovalCheck checkedAdmin = verify(plain.Evidence, 0);
+        ApprovalCheck changed = verify(plain.Evidence, 0);
 
-        return checkedAdmin is { Ok: true, Admin: true } ? null : "the change was not signed by an admin key";
+        return changed.Ok ? null : "the change was not signed by an enrolled passkey";
     }
 }

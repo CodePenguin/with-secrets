@@ -11,18 +11,18 @@ import { Loading, Notice, ProblemAlert, useAnnounce } from '../../components/Fee
 import { flash } from '../../components/Flash'
 import { SplitButton } from '../../components/SplitButton'
 import { Time } from '../../lib/format'
-import { approveOnceChallenge, fromBase64Url, prfOutput, sealPrf, toBase64Url } from '../../lib/passkey'
+import { approveOnceChallenge, fromBase64Url, toBase64Url } from '../../lib/passkey'
 import { usePollInterval } from '../authorization/poll'
 import styles from './ApprovalDialog.module.css'
 
 /** The pause before Approve can be used, so that a request is read before it is approved. */
 const APPROVE_DELAY_MS = 2000
 
-type Prepared = { challenge: ApprovalChallenge; bind: Uint8Array<ArrayBuffer>; signed: Map<number, Uint8Array<ArrayBuffer>>; salt: Uint8Array<ArrayBuffer> | null; rpId: string; timeout: number }
+type Prepared = { challenge: ApprovalChallenge; signed: Map<number, Uint8Array<ArrayBuffer>>; rpId: string; timeout: number }
 
 /** What the service made for this request: the bytes the passkey signs are derived here, before the tap, so that the tap itself can start the passkey prompt at once. */
 async function prepare(challenge: ApprovalChallenge, minutes: readonly number[]): Promise<Prepared> {
-  const payload = challenge.payload as { bind?: unknown; rpId?: unknown; timeout?: unknown; salt?: unknown }
+  const payload = challenge.payload as { bind?: unknown; rpId?: unknown; timeout?: unknown }
   if (typeof payload.bind !== 'string' || typeof payload.rpId !== 'string' || typeof payload.timeout !== 'number') {
     throw new ApiError(0, 'challenge-invalid', 'Passkey unavailable', 'The service did not prepare a usable passkey challenge. Nothing was approved.')
   }
@@ -31,7 +31,7 @@ async function prepare(challenge: ApprovalChallenge, minutes: readonly number[])
   const signed = new Map<number, Uint8Array<ArrayBuffer>>()
   for (const time of minutes) signed.set(time, await approveOnceChallenge(bind, time))
 
-  return { challenge, bind, signed, salt: typeof payload.salt === 'string' ? fromBase64Url(payload.salt) : null, rpId: payload.rpId, timeout: payload.timeout }
+  return { challenge, signed, rpId: payload.rpId, timeout: payload.timeout }
 }
 
 function failure(error: unknown): unknown {
@@ -162,24 +162,15 @@ export function ApprovalDialog({ requestId, onClose }: { requestId: string; onCl
     const controller = new AbortController()
     passkeyAbort.current = controller
     try {
-      // The click itself starts the passkey prompt: nothing is awaited before it.
-      const wantsPrf = typeof prepared.challenge.prfKey === 'string'
-      const options: PublicKeyCredentialRequestOptions & { extensions?: unknown } = { challenge: prepared.signed.get(minutes)!, rpId: prepared.rpId, timeout: prepared.timeout, userVerification: 'required' }
-      if (wantsPrf && prepared.salt) options.extensions = { prf: { eval: { first: prepared.salt } } }
+      // The click itself starts the passkey prompt: nothing is awaited before it. The tap releases no key (the authority decrypts with the keys its unlock opened).
+      const options: PublicKeyCredentialRequestOptions = { challenge: prepared.signed.get(minutes)!, rpId: prepared.rpId, timeout: prepared.timeout, userVerification: 'required' }
       const credential = (await navigator.credentials.get({ publicKey: options, signal: controller.signal })) as PublicKeyCredential | null
       if (credential === null) throw new DOMException('cancelled', 'NotAllowedError')
       const response = credential.response as AuthenticatorAssertionResponse
-      const body: { flowId: string; minutes?: number; proof: { id: string; authenticatorData: string; clientDataJSON: string; signature: string }; prf?: { epk: string; iv: string; ct: string } } = {
+      const body: { flowId: string; minutes?: number; proof: { id: string; authenticatorData: string; clientDataJSON: string; signature: string } } = {
         flowId: prepared.challenge.flowId,
         ...(timed ? { minutes } : {}),
         proof: { id: toBase64Url(credential.rawId), authenticatorData: toBase64Url(response.authenticatorData), clientDataJSON: toBase64Url(response.clientDataJSON), signature: toBase64Url(response.signature) },
-      }
-      if (wantsPrf) {
-        const output = prfOutput(credential)
-        if (output === null) {
-          throw new ApiError(0, 'prf-missing', 'Passkey not usable here', 'This passkey cannot approve this request. Use a passkey from your phone or a security key.')
-        }
-        body.prf = await sealPrf(output, prepared.bind, fromBase64Url(prepared.challenge.prfKey as string))
       }
       setPhase('sending')
       await api.post('/api/v1/approvals/{requestId}/approve', { path: { requestId }, body })

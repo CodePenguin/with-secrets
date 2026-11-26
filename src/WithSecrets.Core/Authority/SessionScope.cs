@@ -6,7 +6,7 @@ public enum SessionScope
     /// <summary>Full administration reads plus Approvals.</summary>
     Admin,
 
-    /// <summary>Approvals and the minimum shell/session state only.</summary>
+    /// <summary>Approvals, administration reads and grant changes.</summary>
     Approval,
 }
 
@@ -17,11 +17,12 @@ public static class SessionCapabilities
     public const string ApprovalsDecide = "approvals.decide";
     public const string AdminRead = "admin.read";
     public const string AdminDecide = "admin.decide";
+    public const string GrantsDecide = "grants.decide";
 
     public static IReadOnlyList<string> For(SessionScope scope) => scope switch
     {
-        SessionScope.Admin => [AdminRead, AdminDecide, ApprovalsRead, ApprovalsDecide],
-        SessionScope.Approval => [ApprovalsRead, ApprovalsDecide],
+        SessionScope.Admin => [AdminRead, AdminDecide, ApprovalsRead, ApprovalsDecide, GrantsDecide],
+        SessionScope.Approval => [ApprovalsRead, ApprovalsDecide, AdminRead, GrantsDecide],
         _ => [],
     };
 

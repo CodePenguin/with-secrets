@@ -175,7 +175,7 @@ internal sealed class SecretFlows(SecretStore store, AdminAudit audit, Func<IPro
         End(flow);
         if (answer.Status != 200)
         {
-            audit.TryWriteDenied("set-secrets", [.. flow.Names.Where(SecretNames.IsValid)], "the entry in the web app ended without storing (" + answer.Status.ToString(System.Globalization.CultureInfo.InvariantCulture) + ")");
+            audit.TryWriteDenied("set-secrets", [.. flow.Names.Where(SecretNames.IsValid)], "the entry in the web app ended without storing (" + answer.Status.ToString(System.Globalization.CultureInfo.InvariantCulture) + ")", flow.Session.VerifiedFailure);
         }
 
         return answer;
@@ -270,7 +270,12 @@ internal sealed class SecretFlows(SecretStore store, AdminAudit audit, Func<IPro
             }
 
             SignedManifest signed = new(flow.Next.Canonical(), flow.Bind, assertion);
-            string? written = store.TryApply(flow.Current.Version, signed, new Dictionary<string, string>(), [.. flow.Names], AdminEvent.Secrets(RemoveCommand, [.. flow.Names], result.Detail, AdminAudit.KeyName(result.Detail)));
+            string? written = store.TryApply(flow.Current.Version, signed, new Dictionary<string, string>(), [.. flow.Names], AdminEvent.Secrets(RemoveCommand, [.. flow.Names], result.Detail, result.Credential?.Name ?? AdminAudit.KeyName(result.Detail), result.Credential));
+
+            if (written is not null)
+            {
+                audit.TryWriteDenied(RemoveCommand, flow.Names, "the verified change could not be stored", result.Credential);
+            }
 
             return written is null ? (200, "Removed " + string.Join(", ", flow.Names) + ".") : (500, written);
         }
@@ -383,8 +388,13 @@ internal sealed class SecretFlows(SecretStore store, AdminAudit audit, Func<IPro
             }
 
             SignedManifest signed = new(flow.Next.Canonical(), flow.Bind, assertion);
-            AdminEvent changed = AdminEvent.Settings(SettingsCommand, flow.Current.Settings.Changes(flow.Next.Settings), AdminAudit.KeyName(result.Detail));
+            AdminEvent changed = AdminEvent.Settings(SettingsCommand, flow.Current.Settings.Changes(flow.Next.Settings), result.Credential?.Name ?? AdminAudit.KeyName(result.Detail), result.Credential);
             string? written = store.TryApply(flow.Current.Version, signed, new Dictionary<string, string>(), [], changed);
+
+            if (written is not null)
+            {
+                audit.TryWriteDenied(SettingsCommand, [], "the verified change could not be stored", result.Credential);
+            }
 
             return written is null ? (200, "Changed the page settings.") : (500, written);
         }

@@ -8,7 +8,7 @@ public static class VaultProvider
     public const string MountVariable = "WITH_SECRETS_VAULT_MOUNT";
     public const string NamespaceVariable = "WITH_SECRETS_VAULT_NAMESPACE";
 
-    public static void Register(ProviderRegistry registry, AuthorityLock authorityLock, ReviewKeys review,
+    public static void Register(ProviderRegistry registry, AuthorityLock authorityLock, UnlockedKeys keys,
         string address, string mount, string? vaultNamespace)
     {
         registry.RegisterType(VaultAdapter.ProviderType, VaultAdapter.AdapterVersion,
@@ -16,13 +16,13 @@ public static class VaultProvider
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 authorityLock.EnsureUnlocked();
-                if (!review.IsOpen)
+                if (!keys.IsOpen)
                 {
                     throw new ProviderAdapterException(ProviderErrorKind.InteractionRequired,
-                        "Open the authority review key with an administrator passkey to use HashiCorp Vault.");
+                        "Unlock the authority with an administrator passkey to use HashiCorp Vault.");
                 }
 
-                return ValueTask.FromResult(review.TryDecryptCurrent(ciphertext));
+                return ValueTask.FromResult(keys.TryDecryptCurrentReview(ciphertext));
             }),
             () => new VaultConfiguration());
     }

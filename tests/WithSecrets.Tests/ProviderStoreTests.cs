@@ -77,7 +77,7 @@ internal static class ProviderStoreTests
         new ProviderStore(store).AddInstance("one", "fake", "{}", TimeSpan.Zero);
         string file = store.FilePath;
         long tables = Convert.ToInt64(Scalar(file, "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('provider_instances','mounts','namespace_entries','provider_cache')"));
-        check(WithSecretsDatabase.SchemaVersion == 3 && Convert.ToInt32(Scalar(file, "SELECT version FROM schema_version")) == 3 && tables == 4, "provider store: schema 3 is created with the four provider tables");
+        check(WithSecretsDatabase.SchemaVersion == 4 && Convert.ToInt32(Scalar(file, "SELECT version FROM schema_version")) == 4 && tables == 4, "provider store: schema 4 is created with the four provider tables");
 
         Exec(file, "UPDATE schema_version SET version = 6");
         AuthorityDatabaseException? old = null;
@@ -90,7 +90,7 @@ internal static class ProviderStoreTests
             old = error;
         }
 
-        check(old is not null && old.Message == "with-secrets.db is not of schema version 3; delete with-secrets.db to start over", "provider store: a schema 6 file is refused with the delete message (" + old?.Message + ")");
+        check(old is not null && old.Message == "with-secrets.db is not of schema version 4; delete with-secrets.db to start over", "provider store: a schema 6 file is refused with the delete message (" + old?.Message + ")");
         check(Throws<AuthorityDatabaseException>(() => new ProviderStore(AuthorityStore.InFolder(dir)).Instances()), "provider store: a schema 6 file is refused for provider reads too");
     }
 

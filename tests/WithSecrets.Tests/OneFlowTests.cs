@@ -150,7 +150,7 @@ internal static class OneFlowTests
         using JsonDocument document = JsonDocument.Parse(options.Groups[1].Value);
         byte[] challenge = Base64Url.DecodeFromChars(document.RootElement.GetProperty("challenge").GetString()!);
         TestState.Note(document.RootElement);
-        string registration = TestState.Register(creator, challenge, link.Origin, rpId, name);
+        string registration = TestState.Register(creator, challenge, link.Origin, rpId, name, admin ? PrfMode.Normal : PrfMode.Missing);
         registration = registration[..^1] + ",\"name\":" + JsonSerializer.Serialize(name) + ",\"admin\":" + (admin ? "true" : "false") + "}";
 
         LastCreate = registration;
@@ -248,8 +248,17 @@ internal static class OneFlowTests
             (string page, string reply) = two is null ? ("", "") : Create(client, two.Value, phone, "ws.example.com", "phone", admin);
             string? next2 = RecoveryTests.Member(reply, "next");
             (string Url, string Origin)? three = Next(reply);
-            check(next2 is not null && new Uri(next2).Host == "localhost" && new Uri(next2).Port == port && next2.Contains("/a/", StringComparison.Ordinal) && !reply.Contains("\"code\"", StringComparison.Ordinal), "enroll cross host: the create reply's next is the admin signing page at the admin key's host, and holds no code (" + reply + ")");
+            check(next2 is not null && new Uri(next2).Host == "localhost" && new Uri(next2).Port == port && next2.Contains("/a/", StringComparison.Ordinal) && !reply.Contains("\"code\"", StringComparison.Ordinal), "enroll cross host: the create reply leads to the admin key's host and holds no code (" + reply + ")");
             check(rig.Asked == 0 && new PasskeyStore(w.Db).All().Count == 1, "enroll cross host: the terminal has not asked for the code, nothing is stored, before the admin signed");
+
+            if (admin && three is { } release)
+            {
+                string releasePage = TestState.Get(client, release.Url).Body;
+                (int status, string released) = TestState.Approve(client, release.Url, release.Origin, "localhost", laptop);
+                three = Next(released);
+                check(status == 200 && releasePage.Contains("\"prfKey\":", StringComparison.Ordinal) && three is not null
+                    && !released.Contains("\"code\"", StringComparison.Ordinal), "enroll cross host: adding an admin asks the existing admin to release the master key before signing");
+            }
 
             string pageThree = three is null ? "" : TestState.Get(client, three.Value.Url).Body;
             (int status3, string body3) = three is null ? (0, "") : TestState.Approve(client, three.Value.Url, three.Value.Origin, "localhost", laptop);

@@ -21,7 +21,8 @@ internal static class ScenariosPairing
         using Rig rig = new();
         await using Ctx c = await Ctx.NewAsync(host);
         await Flows.Configure(rig, c);
-        using SpaApp app = new(rig, machineEndpoint: true);
+        using SpaApp app = new(rig, unlocked: false, machineEndpoint: true);
+        await Spa.Unlock(c, app, s);
         AuthorityStore store = rig.Machine.Deployment.Store;
         await Spa.SignIn(c, app, s);
         (_, long signsAfterSignIn) = await c.AuthOps();
@@ -150,7 +151,7 @@ internal static class ScenariosPairing
             && deniedAll.Contains("user-denied", StringComparison.Ordinal),
             "the paired host's request reached the Approvals page and Deny ended it (nothing ran)");
 
-        // 4b. A person approves a second request with their passkey; the sealed PRF output opens the secret for exactly this run.
+        // 4b. A person approves a second request with their passkey. The unlocked authority delivers the secret for this run.
         (LaunchEvent? approved, string approvedOutput, _) = await Launch("e2e paired host, approved", () => DecideOnApprovalsPage(c, s, approve: true, "e2e paired host, approved"));
         s.Check(approved is { Outcome: LaunchOutcome.Exited, ExitCode: 0 } && approvedOutput.Contains("remote-value=[REDACTED]", StringComparison.Ordinal) && !approvedOutput.Contains(SecretValue, StringComparison.Ordinal),
             "Approve on the Access screen, with one passkey tap, let the paired host's command run, its output redacted (" + approved?.Outcome + ", " + approved?.ExitCode + ", output: " + approvedOutput.Replace(SecretValue, "<secret>").Trim() + ")");

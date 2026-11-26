@@ -111,7 +111,7 @@
     "/api/v1/status": {
       "get": {
         "operationId": "getStatus",
-        "summary": "Whether the service is running, locked or unlocked, the unlock mode and the versions (public).",
+        "summary": "Whether the service is running, whether it uses a remote authority, the local authority\u0027s lock state and the versions (public).",
         "tags": [
           "status"
         ],
@@ -1271,29 +1271,6 @@
                       "authenticatorData",
                       "clientDataJSON",
                       "signature"
-                    ]
-                  },
-                  "prf": {
-                    "type": "object",
-                    "properties": {
-                      "epk": {
-                        "type": "string",
-                        "maxLength": 256
-                      },
-                      "iv": {
-                        "type": "string",
-                        "maxLength": 128
-                      },
-                      "ct": {
-                        "type": "string",
-                        "maxLength": 256
-                      }
-                    },
-                    "additionalProperties": false,
-                    "required": [
-                      "epk",
-                      "iv",
-                      "ct"
                     ]
                   },
                   "minutes": {
@@ -3645,7 +3622,7 @@
     "/api/v1/grants/{id}/review": {
       "get": {
         "operationId": "getGrantReview",
-        "summary": "The signed approval text of a grant, available while review is open (state open, locked or none); an approval-only session gets 403 admin-required.",
+        "summary": "The signed approval text of a grant, available while the authority is unlocked, which opens review (state open, locked or none).",
         "tags": [
           "grants"
         ],
@@ -4186,7 +4163,7 @@
     "/api/v1/settings": {
       "get": {
         "operationId": "getSettings",
-        "summary": "Audit retention, the unlock mode, the session timeouts and the authority key in use (read-only session).",
+        "summary": "Audit retention, the session timeouts and the authority key in use (read-only session).",
         "tags": [
           "settings"
         ],
@@ -4348,7 +4325,7 @@
         },
         "x-access": "authorization",
         "x-operation": "pairing-create",
-        "description": "Create a one-time pairing invitation for a new machine. The answer carries the invitation bundle (address, identifier and pairing code) ONCE; it is never stored in readable form, never logged and cannot be read again. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Create a one-time pairing invitation for a new machine. The answer carries the invitation bundle (address, identifier and pairing code) ONCE; it is never stored in readable form, never logged and cannot be read again. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -4570,7 +4547,7 @@
         },
         "x-access": "authorization",
         "x-operation": "passkey-enroll",
-        "description": "Add a passkey: after its authorization the enrollment pages (their own passkey taps) are started; the answer is the link of the first. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Add a passkey: after its authorization the enrollment pages (their own passkey taps) are started; the answer is the link of the first. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -4837,7 +4814,7 @@
         },
         "x-access": "authorization",
         "x-operation": "provider-add",
-        "description": "Add a provider instance. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Add a provider instance. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -5124,7 +5101,7 @@
         },
         "x-access": "authorization",
         "x-operation": "provider-remove",
-        "description": "Remove a provider instance with no mounts. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Remove a provider instance with no mounts. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -5565,7 +5542,7 @@
         },
         "x-access": "authorization",
         "x-operation": "mount-add",
-        "description": "Add a provider mount and end grants whose source changes. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Add a provider mount and end grants whose source changes. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -6980,7 +6957,7 @@
         },
         "x-access": "authorization",
         "x-operation": "provider-config",
-        "description": "Change a provider instance configuration. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Change a provider instance configuration. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -7177,7 +7154,7 @@
         },
         "x-access": "authorization",
         "x-operation": "provider-max-stale",
-        "description": "Change the provider instance cache policy. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Change the provider instance cache policy. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -7360,7 +7337,7 @@
         },
         "x-access": "authorization",
         "x-operation": "mount-remove",
-        "description": "Remove a provider mount and end grants whose source changes. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Remove a provider mount and end grants whose source changes. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -8186,7 +8163,7 @@
     "/api/v1/unlock": {
       "post": {
         "operationId": "unlockAuthority",
-        "summary": "Unlock the authority (needs no session, but its own authorization).",
+        "summary": "Unlock the local authority (needs no session, but its own authorization). Remote hosts refuse this operation.",
         "tags": [
           "authority"
         ],
@@ -8214,163 +8191,7 @@
         },
         "x-access": "authorization",
         "x-operation": "unlock",
-        "description": "Unlock the authority (needs no session, but its own authorization). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
-        "responses": {
-          "200": {
-            "description": "Success.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/MutationResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "The request is not valid (invalid-request, invalid-json).",
-            "content": {
-              "application/problem\u002Bjson": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
-            "content": {
-              "application/problem\u002Bjson": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "No browser session (session-required).",
-            "content": {
-              "application/problem\u002Bjson": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
-            "content": {
-              "application/problem\u002Bjson": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "423": {
-            "description": "The authority is locked (authority-locked).",
-            "content": {
-              "application/problem\u002Bjson": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "413": {
-            "description": "The body is too large (payload-too-large).",
-            "content": {
-              "application/problem\u002Bjson": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "415": {
-            "description": "The body is not application/json (unsupported-media-type).",
-            "content": {
-              "application/problem\u002Bjson": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "421": {
-            "description": "The Host is not a loopback name (host-not-allowed).",
-            "content": {
-              "application/problem\u002Bjson": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Too many requests (too-many-requests).",
-            "content": {
-              "application/problem\u002Bjson": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
-            "content": {
-              "application/problem\u002Bjson": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "sessionCookie": [],
-            "antiForgery": []
-          },
-          {
-            "browserCookie": [],
-            "antiForgery": []
-          }
-        ]
-      }
-    },
-    "/api/v1/review/unlock": {
-      "post": {
-        "operationId": "unlockReview",
-        "summary": "Open approved command text for review with an administrator passkey\u0027s key release.",
-        "tags": [
-          "authority"
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "authorization": {
-                    "type": "string",
-                    "minLength": 8,
-                    "maxLength": 64,
-                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
-                  }
-                },
-                "additionalProperties": false,
-                "required": [
-                  "authorization"
-                ]
-              }
-            }
-          }
-        },
-        "x-access": "authorization",
-        "x-operation": "review-unlock",
-        "description": "Open approved command text for review with an administrator passkey\u0027s key release. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Unlock the local authority (needs no session, but its own authorization). Remote hosts refuse this operation. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -8498,7 +8319,7 @@
     "/api/v1/lock": {
       "post": {
         "operationId": "lockAuthority",
-        "summary": "Lock the authority now: secret requests stop, held keys are discarded and every session and authorization ends.",
+        "summary": "Lock the local authority: secret requests stop, held keys are discarded and every session and authorization ends. Remote hosts refuse this operation.",
         "tags": [
           "authority"
         ],
@@ -8526,172 +8347,7 @@
         },
         "x-access": "authorization",
         "x-operation": "lock",
-        "description": "Lock the authority now: secret requests stop, held keys are discarded and every session and authorization ends. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
-        "responses": {
-          "200": {
-            "description": "Success.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/MutationResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "The request is not valid (invalid-request, invalid-json).",
-            "content": {
-              "application/problem\u002Bjson": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
-            "content": {
-              "application/problem\u002Bjson": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "No browser session (session-required).",
-            "content": {
-              "application/problem\u002Bjson": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
-            "content": {
-              "application/problem\u002Bjson": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "423": {
-            "description": "The authority is locked (authority-locked).",
-            "content": {
-              "application/problem\u002Bjson": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "413": {
-            "description": "The body is too large (payload-too-large).",
-            "content": {
-              "application/problem\u002Bjson": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "415": {
-            "description": "The body is not application/json (unsupported-media-type).",
-            "content": {
-              "application/problem\u002Bjson": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "421": {
-            "description": "The Host is not a loopback name (host-not-allowed).",
-            "content": {
-              "application/problem\u002Bjson": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Too many requests (too-many-requests).",
-            "content": {
-              "application/problem\u002Bjson": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
-            "content": {
-              "application/problem\u002Bjson": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problem"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "sessionCookie": [],
-            "antiForgery": []
-          },
-          {
-            "browserCookie": [],
-            "antiForgery": []
-          }
-        ]
-      }
-    },
-    "/api/v1/settings/unlock-policy": {
-      "put": {
-        "operationId": "setUnlockPolicy",
-        "summary": "Set the unlock mode (manual, or the weaker unattended mode).",
-        "tags": [
-          "settings"
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "authorization": {
-                    "type": "string",
-                    "minLength": 8,
-                    "maxLength": 64,
-                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
-                  },
-                  "policy": {
-                    "type": "string",
-                    "enum": [
-                      "manual",
-                      "unattended"
-                    ],
-                    "description": "The unlock mode."
-                  }
-                },
-                "additionalProperties": false,
-                "required": [
-                  "authorization",
-                  "policy"
-                ]
-              }
-            }
-          }
-        },
-        "x-access": "authorization",
-        "x-operation": "policy-manual | policy-unattended",
-        "description": "Set the unlock mode (manual, or the weaker unattended mode). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Lock the local authority: secret requests stop, held keys are discarded and every session and authorization ends. Remote hosts refuse this operation. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -8854,7 +8510,7 @@
         },
         "x-access": "authorization",
         "x-operation": "set-audit-retention",
-        "description": "Set how many days audit events are kept (0 keeps everything). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Set how many days audit events are kept (0 keeps everything). Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -9024,7 +8680,7 @@
         },
         "x-access": "authorization",
         "x-operation": "set-session-timeouts",
-        "description": "Set the idle and absolute timeouts of administrator sessions. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Set the idle and absolute timeouts of administrator sessions. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -9180,7 +8836,7 @@
         },
         "x-access": "authorization",
         "x-operation": "authority-key-rotate",
-        "description": "Rotate the authority signing key (a transition the current key signs). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Rotate the authority signing key (a transition the current key signs). Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -9336,7 +8992,7 @@
         },
         "x-access": "authorization",
         "x-operation": "authority-key-recover",
-        "description": "Recover the authority signing key (no transition; other hosts must enroll again). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Recover the authority signing key (no transition; other hosts must enroll again). Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -9511,7 +9167,7 @@
         },
         "x-access": "authorization",
         "x-operation": "machine-approve",
-        "description": "Approve a pending machine with a friendly name (or re-pin the authority key for this machine). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Approve a pending machine with a friendly name (or re-pin the authority key for this machine). Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -9690,7 +9346,7 @@
         },
         "x-access": "authorization",
         "x-operation": "machine-disable",
-        "description": "Disable a machine (it is denied until enabled; its grants end). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Disable a machine (it is denied until enabled; its grants end). Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -9869,7 +9525,7 @@
         },
         "x-access": "authorization",
         "x-operation": "machine-enable",
-        "description": "Enable a disabled machine (it starts clean). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Enable a disabled machine (it starts clean). Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -10048,7 +9704,7 @@
         },
         "x-access": "authorization",
         "x-operation": "machine-untrust",
-        "description": "Withdraw trust from a machine. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Withdraw trust from a machine. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -10233,7 +9889,7 @@
         },
         "x-access": "authorization",
         "x-operation": "machine-trust",
-        "description": "Trust an untrusted machine again, confirmed by typing its full fingerprint. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Trust an untrusted machine again, confirmed by typing its full fingerprint. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -10419,7 +10075,7 @@
         },
         "x-access": "authorization",
         "x-operation": "machine-rename",
-        "description": "Rename a machine (display only). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Rename a machine (display only). Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -10598,7 +10254,7 @@
         },
         "x-access": "authorization",
         "x-operation": "machine-host-change",
-        "description": "Accept the new host name a machine reported. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Accept the new host name a machine reported. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -10787,7 +10443,7 @@
         },
         "x-access": "authorization",
         "x-operation": "grant-extend",
-        "description": "Extend a grant by minutes, or to no end. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Extend a grant by minutes, or to no end. Needs a session with grants.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -10976,7 +10632,7 @@
         },
         "x-access": "authorization",
         "x-operation": "grant-renew",
-        "description": "Renew an ended grant for minutes from now, or to no end. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Renew an ended grant for minutes from now, or to no end. Needs a session with grants.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -11165,7 +10821,7 @@
         },
         "x-access": "authorization",
         "x-operation": "grant-replace",
-        "description": "Make a new grant with the same scope as a used once-only grant. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Make a new grant with the same scope as a used once-only grant. Needs a session with grants.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -11344,7 +11000,7 @@
         },
         "x-access": "authorization",
         "x-operation": "grant-revoke",
-        "description": "Revoke a grant (it ends now and its machine is told). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Revoke a grant (it ends now and its machine is told). Needs a session with grants.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -11523,7 +11179,7 @@
         },
         "x-access": "authorization",
         "x-operation": "pairing-revoke",
-        "description": "Revoke a pending pairing invitation (it can no longer be used). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Revoke a pending pairing invitation (it can no longer be used). Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -11689,7 +11345,7 @@
         },
         "x-access": "authorization",
         "x-operation": "store-key-rotate",
-        "description": "Rotate the secret store key and the master key: after its authorization the rotation pages (two admin passkey taps) are started; the answer is the link of the first. Only the tapped passkey stays and a new code for recovery is shown once. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Rotate the secret store key and the master key: after its authorization the rotation pages (two admin passkey taps) are started; the answer is the link of the first. Only the tapped passkey stays and a new code for recovery is shown once. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -11868,7 +11524,7 @@
         },
         "x-access": "authorization",
         "x-operation": "passkey-unenroll",
-        "description": "Remove a passkey (any key but the last admin key). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Remove a passkey (any key but the last admin key). Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -12277,12 +11933,8 @@
           "locked": {
             "type": "boolean"
           },
-          "unlockMode": {
-            "type": "string",
-            "enum": [
-              "manual",
-              "unattended"
-            ]
+          "remote": {
+            "type": "boolean"
           },
           "apiVersion": {
             "type": "string"
@@ -12313,7 +11965,7 @@
         "required": [
           "running",
           "locked",
-          "unlockMode",
+          "remote",
           "apiVersion",
           "version",
           "protocolVersion",
@@ -12806,7 +12458,8 @@
                 "approvals.read",
                 "approvals.decide",
                 "admin.read",
-                "admin.decide"
+                "admin.decide",
+                "grants.decide"
               ]
             }
           },
@@ -13237,9 +12890,6 @@
           "canonicalText": {
             "type": "string"
           },
-          "requiresUnlock": {
-            "type": "boolean"
-          },
           "heading": {
             "type": [
               "string",
@@ -13289,7 +12939,6 @@
           "inheritedEnvironmentLine",
           "extraLines",
           "canonicalText",
-          "requiresUnlock",
           "heading",
           "times",
           "allowOnce"
@@ -13416,12 +13065,6 @@
           "expiresAt": {
             "type": "string",
             "format": "date-time"
-          },
-          "prfKey": {
-            "type": [
-              "string",
-              "null"
-            ]
           }
         },
         "additionalProperties": false,
@@ -13429,8 +13072,7 @@
           "flowId",
           "mode",
           "payload",
-          "expiresAt",
-          "prfKey"
+          "expiresAt"
         ]
       },
       "CopyWarning": {
@@ -13866,6 +13508,15 @@
           },
           "detail": {
             "type": "string"
+          },
+          "metadata": {
+            "type": "object",
+            "maxProperties": 24,
+            "additionalProperties": {
+              "type": "string",
+              "maxLength": 2048
+            },
+            "description": "Credential roles and identities recorded with the change."
           }
         },
         "additionalProperties": false,
@@ -13875,7 +13526,8 @@
           "event",
           "machine",
           "actor",
-          "detail"
+          "detail",
+          "metadata"
         ]
       },
       "AuditChangeList": {
@@ -13956,16 +13608,6 @@
       "Settings": {
         "type": "object",
         "properties": {
-          "unlockMode": {
-            "type": "string",
-            "enum": [
-              "manual",
-              "unattended"
-            ]
-          },
-          "unlockModeDescription": {
-            "type": "string"
-          },
           "auditRetentionDays": {
             "type": "integer"
           },
@@ -13991,8 +13633,6 @@
         },
         "additionalProperties": false,
         "required": [
-          "unlockMode",
-          "unlockModeDescription",
           "auditRetentionDays",
           "sessionIdleMinutes",
           "sessionAbsoluteMinutes",
@@ -14080,10 +13720,7 @@
             "type": "string",
             "enum": [
               "unlock",
-              "review-unlock",
               "lock",
-              "policy-manual",
-              "policy-unattended",
               "set-audit-retention",
               "set-session-timeouts",
               "authority-key-rotate",
@@ -14232,10 +13869,7 @@
             "type": "string",
             "enum": [
               "unlock",
-              "review-unlock",
               "lock",
-              "policy-manual",
-              "policy-unattended",
               "set-audit-retention",
               "set-session-timeouts",
               "authority-key-rotate",
@@ -14402,10 +14036,7 @@
             "type": "string",
             "enum": [
               "unlock",
-              "review-unlock",
               "lock",
-              "policy-manual",
-              "policy-unattended",
               "set-audit-retention",
               "set-session-timeouts",
               "authority-key-rotate",

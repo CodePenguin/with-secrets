@@ -20,7 +20,7 @@ internal static class WithSecretsDatabaseTests
                 && authority.FilePath == state.FilePath && authority.Audit().Any(item => item.Event == "pairing-test"),
                 "database: an authority write shares an empty state store");
             check(db.FileLabel == "with-secrets.db" && (string?)RawScalar(db.FilePath, "PRAGMA journal_mode") == "wal"
-                && (long?)RawScalar(db.FilePath, "SELECT version FROM schema_version") == 3, "database: one file, WAL, schema version 3");
+                && (long?)RawScalar(db.FilePath, "SELECT version FROM schema_version") == 4, "database: one file, WAL, schema version 4");
             check(db.Read(connection =>
                 (long?)WithSecretsDatabase.Scalar(connection!, null, "PRAGMA synchronous") == 2
                 && (long?)WithSecretsDatabase.Scalar(connection!, null, "PRAGMA foreign_keys") == 1
@@ -100,7 +100,7 @@ internal static class WithSecretsDatabaseTests
             RawScalar(db.FilePath, "PRAGMA journal_mode = DELETE");
             RawScalar(db.FilePath, "UPDATE schema_version SET version = 2");
             check(Catch<WithSecretsDatabaseException>(() => new WithSecretsDatabase(db.FilePath).Read(_ => 0))?.Message
-                == "with-secrets.db is not of schema version 3; delete with-secrets.db to start over"
+                == "with-secrets.db is not of schema version 4; delete with-secrets.db to start over"
                 && (string?)RawScalar(db.FilePath, "PRAGMA journal_mode") == "delete", "database: a foreign schema version is refused without changing the database");
 
             WithSecretsDatabase edited = New(root, "edited");

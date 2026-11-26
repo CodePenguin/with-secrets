@@ -246,7 +246,7 @@ internal static class AuditTrailTests
         AuditEvent third = outbox.Append(Facts(AuditEventTypes.Execution, "exited", "", exit: 0));
         IReadOnlyList<AuditEvent> pending = outbox.Pending(10);
         check(new[] { first.Sequence, second.Sequence, third.Sequence }.SequenceEqual([1L, 2L, 3L]) && pending.Select(item => item.EventId).SequenceEqual([first.EventId, second.EventId, third.EventId]) && pending.All(item => item.Verify(key.PublicKey)), "outbox: events are numbered 1, 2, 3, kept in order, and stored signed");
-        check(Scalar(outbox.FilePath, "PRAGMA journal_mode") as string == "wal" && Convert.ToInt32(Scalar(outbox.FilePath, "SELECT version FROM schema_version")) == 3 && Path.GetFileName(outbox.FilePath) == "with-secrets.db", "outbox: shared database in WAL mode, schema version 3");
+        check(Scalar(outbox.FilePath, "PRAGMA journal_mode") as string == "wal" && Convert.ToInt32(Scalar(outbox.FilePath, "SELECT version FROM schema_version")) == 4 && Path.GetFileName(outbox.FilePath) == "with-secrets.db", "outbox: shared database in WAL mode, schema version 4");
 
         outbox.Acknowledge([first.EventId]);
         check(outbox.Count("pending") == 2 && outbox.LastSequence() == 3 && outbox.Append(Facts()).Sequence == 4, "outbox: an acknowledged event is removed, and its number is not used again");
@@ -308,7 +308,7 @@ internal static class AuditTrailTests
 
         Sql(outbox.FilePath, "UPDATE schema_version SET version = 99");
         AuditOutboxException? mismatch = Catch<AuditOutboxException>(() => HostAuditOutbox.InFolder(dir, key, clock).Append(Facts()));
-        check(mismatch?.Message == "with-secrets.db is not of schema version 3; delete with-secrets.db to start over", "outbox schema: another schema version is refused with the delete-it message (" + mismatch?.Message + ")");
+        check(mismatch?.Message == "with-secrets.db is not of schema version 4; delete with-secrets.db to start over", "outbox schema: another schema version is refused with the delete-it message (" + mismatch?.Message + ")");
 
         string blockedDir = Path.Combine(parent, "ob-blocked-" + Guid.NewGuid().ToString("N")[..6]);
         Directory.CreateDirectory(Path.Combine(blockedDir, WithSecretsDatabase.FileName));
@@ -639,7 +639,7 @@ internal static class AuditTrailTests
     {
         using TestMachine machine = new(Path.Combine(parent, "sc-" + Guid.NewGuid().ToString("N")[..6]));
         string file = machine.Deployment.Store.FilePath;
-        check(WithSecretsDatabase.SchemaVersion == 3 && Convert.ToInt32(Scalar(file, "SELECT version FROM schema_version")) == 3 && Convert.ToInt32(Scalar(file, "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('audit_events','audit_machine_state','audit_gaps','authority_settings')")) == 4, "schema: a new with-secrets.db is version 3 with the audit tables");
+        check(WithSecretsDatabase.SchemaVersion == 4 && Convert.ToInt32(Scalar(file, "SELECT version FROM schema_version")) == 4 && Convert.ToInt32(Scalar(file, "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('audit_events','audit_machine_state','audit_gaps','authority_settings')")) == 4, "schema: a new with-secrets.db is version 4 with the audit tables");
         Sql(file, "UPDATE schema_version SET version = 5");
         check(Catch<AuthorityDatabaseException>(() => AuthorityStore.InFolder(machine.Folder).AuditHistory(new AuditQuery())) is not null, "schema: another version is still refused");
     }

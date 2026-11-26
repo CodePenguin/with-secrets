@@ -289,7 +289,8 @@ internal static class Scenarios3
         await Flows.Configure(rig, c);
         await SeedSecret(rig, c);
         rig.WriteScript("check", "script-value");
-        using SpaApp app = new(rig, timeLimit: TimeSpan.FromSeconds(12));
+        using SpaApp app = new(rig, unlocked: false, timeLimit: TimeSpan.FromSeconds(12));
+        await Spa.Unlock(c, app, s);
         await Spa.SignIn(c, app, s);
 
         // 1. A script file: the request shows its contents; approve once; the program output appears.
@@ -365,7 +366,8 @@ internal static class Scenarios3
         rig.WriteScript("check", "script-value");
         File.WriteAllText(Path.Combine(rig.Work, ".env"), "NODE_OPTIONS=--require ./hook.js\nHTTPS_PROXY=http://proxy.example:3128\nLD_LIBRARY_PATH=/opt/lib\nGIT_SSH_COMMAND=ssh -o \"<img src=x onerror=alert(1)>\" & <b>\nLOG_LEVEL=quiet\n");
 
-        using SpaApp app = new(rig);
+        using SpaApp app = new(rig, unlocked: false);
+        await Spa.Unlock(c, app, s);
         await Spa.SignIn(c, app, s);
         using Cmd<int> run = Cmds.Run(rig, "E2E_SECRET", Rig.ScriptCommand("check"), app: app);
         await Spa.OpenRequest(c, run, app, s);
@@ -500,7 +502,7 @@ internal static class Scenarios6
         s.Check((await c.Text("#request")).Contains("Add a"), "page 1 asks an admin key to approve the new passkey");
         s.Check(await c.PasskeyCalls() == 0, "tap rule: no prompt on page 1");
         string adminAuth = c.AuthId;
-        string second = await c.AddAuthenticator(true, "usb"); // Chrome allows one internal authenticator: the second device is a security key
+        string second = await c.AddAuthenticator(false, "usb"); // Chrome allows one internal authenticator: the second device is a security key
         await c.Presence(false, second); // only the admin's device answers the approval
         await c.Click("#approve");
         await c.Page.WaitForURLAsync(u => u != url1, new() { Timeout = 20000 });
@@ -526,19 +528,42 @@ internal static class Scenarios6
         AuditChecks.Expect(s, rig, "setup", "secrets-set", "key-enrolled");
         s.Check(rig.State.TryManifest(out Manifest? manifest, out _) && manifest!.Keys.Count == 2 && manifest.Keys.Count(k => k.Admin) == 1 && manifest.Keys.Any(k => k.Name == "second key" && !k.Admin), "state: two keys, the new one is not an admin");
 
-        // The second key approves a run on its own: the first device is gone.
+        using SpaApp app = new(rig, unlocked: false);
+        await Spa.Unlock(c, app, s);
+
+        // The convenience key approves after the admin has unlocked the authority.
         await c.Presence(false, adminAuth);
         await c.Presence(true, second);
         rig.WriteScript("show", "got");
-        using Cmd<int> run = Cmds.Run(rig, "E2E_SECRET", Rig.ScriptCommand("show"));
-        await c.Page.GotoAsync(await run.LinkAsync());
-        await c.TextAppears("#request");
+        await Spa.SignIn(c, app, s);
         (int _, long signsFirst) = await c.AuthOps(adminAuth);
         (int _, long signsSecond) = await c.AuthOps(second);
-        await c.Click("#approve");
-        s.Check(await run.Result.WaitAsync(TimeSpan.FromSeconds(30)) == 0 && run.Out.Text.Contains("got=" + StreamRedactor.Mask), "the second key approved a run and the secret was released");
-        s.Check((await c.AuthOps(second)).Signs > signsSecond && (await c.AuthOps(adminAuth)).Signs == signsFirst, "the signature came from the second device");
+        using (Cmd<int> run = Cmds.Run(rig, "E2E_SECRET", Rig.ScriptCommand("show"), app))
+        {
+            await Spa.OpenRequest(c, run, app, s);
+            await Spa.ApproveFor(c, "Approve for 1 hour");
+            s.Check(await run.Result.WaitAsync(TimeSpan.FromSeconds(30)) == 0 && run.Out.Text.Contains("got=" + StreamRedactor.Mask), "the passkey without PRF approved the run and the secret was released");
+        }
+
+        AuthorityStore store = rig.Machine.Deployment.Store;
+        GrantRecord grant = store.Grants().Single(item => item.Usage == GrantUsage.Reusable);
+        await Spa.GoTo(c, "Access", "Access");
+        await Spa.Button(c, "Extend grant " + grant.Id).ClickAsync();
+        ILocator dialog = Spa.Dialog(c);
+        await dialog.GetByLabel("Minutes to add to the present end").FillAsync("30");
+        long beforeExtend = (await c.AuthOps(second)).Signs;
+        await Spa.Continue(c, s, dialog);
+        await dialog.GetByText("Done").First.WaitForAsync(new() { Timeout = 20000 });
+        GrantRecord? changed = store.FindGrant(grant.Id);
+        s.Check(grant.Expires is { } previous && changed?.Expires == previous.AddMinutes(30), "the convenience passkey extended the same grant by 30 minutes");
+        s.Check(beforeExtend > signsSecond && (await c.AuthOps(second)).Signs > beforeExtend && (await c.AuthOps(adminAuth)).Signs == signsFirst, "the approval and extension both came from the device without PRF");
         AuditChecks.Expect(s, rig, "setup", "secrets-set", "key-enrolled", "authorization-approved", "launch-started", "execution-exited");
+        IReadOnlyList<AuditEvent> events = AuditChecks.All(rig);
+        AuditEvent? written = events.SingleOrDefault(item => item.Outcome == "secrets-set");
+        s.Check(written is not null && written.Verify(E2EAudit.KeyFor(rig.Folder).PublicKey)
+            && written.Meta.GetValueOrDefault("keyId") == manifest!.Keys.Single(key => key.Admin).Id
+            && written.Meta.GetValueOrDefault("keyAdmin") == "true", "the signed secret-change event names the admin credential");
+        s.Check(changed?.ChangedKey is { Admin: false, Name: "second key" }, "the grant records who extended it");
         s.NoProblems(c);
     }
 }

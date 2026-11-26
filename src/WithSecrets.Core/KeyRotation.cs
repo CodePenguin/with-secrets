@@ -237,7 +237,7 @@ public sealed class KeyRotation(StateDatabase db, SecretStore store, EnrollmentT
                     string note = $"keys rotated; {removedNames.Count.ToString(CultureInfo.InvariantCulture)} key(s) removed"
                         + (removedNames.Count == 0 ? "" : ": " + string.Join(", ", removedNames.Select(ApprovalSummary.Clean))) + $"; {rows.Count.ToString(CultureInfo.InvariantCulture)} secret(s) encrypted again";
 
-                    return store.TryApply(manifest.Version, signed, rows, [], AdminEvent.Change("key-rotated", note, signer.Name), (connection, transaction) =>
+                    return store.TryApply(manifest.Version, signed, rows, [], AdminEvent.Change("key-rotated", note, signer.Name, VerifiedCredential.From(signer)), (connection, transaction) =>
                     {
                         if (RekeyReview is { } rekey && oldReview is not null)
                         {
@@ -268,7 +268,7 @@ public sealed class KeyRotation(StateDatabase db, SecretStore store, EnrollmentT
             }
 
             return new ConfigChange(0, $"Rotated the keys. Kept: {signer.Name}. Removed: {(removedNames.Count == 0 ? "none" : string.Join(", ", removedNames))}. "
-                + $"{rows.Count.ToString(CultureInfo.InvariantCulture)} secret(s) encrypted again. Tap to review again to open approved command text. The new recovery code is shown on the last page only once. If the page did not show it (lost connection), the old code is already dead: rotate again.");
+                + $"{rows.Count.ToString(CultureInfo.InvariantCulture)} secret(s) encrypted again. The authority is locked now: unlock it again with the kept passkey. The new recovery code is shown on the last page only once. If the page did not show it (lost connection), the old code is already dead: rotate again.");
         }
         finally
         {

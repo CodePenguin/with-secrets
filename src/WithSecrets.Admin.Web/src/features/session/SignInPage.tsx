@@ -87,7 +87,7 @@ export function SignInPage() {
   // The challenge is asked for as the page opens (asking is not a passkey prompt), so signing in is one click. After a failure the person starts again with the button.
   const autoStarted = useRef(false)
   // Not while the status is being read again: after a lock the cached status still says unlocked.
-  const unlocked = status.data !== undefined && !status.data.locked && !status.isFetching
+  const unlocked = status.data !== undefined && !status.data.remote && !status.data.locked && !status.isFetching
   const locked = status.data?.locked === true
   // A lock seen after an early start (the status was stale): forget it, so that the unlock starts the sign-in again.
   useEffect(() => {
@@ -100,6 +100,17 @@ export function SignInPage() {
     autoStarted.current = true
     start.mutate()
   }, [unlocked]) // eslint-disable-line react-hooks/exhaustive-deps -- once, when the authority is known to be unlocked
+
+  if (status.data?.remote) {
+    return (
+      <div className={styles.page}>
+        <div className={styles.brand}>
+          <h1 className={styles.name}><Logo className={styles.logo} /></h1>
+        </div>
+        <p>Open the administration app on the authority to manage access and secrets.</p>
+      </div>
+    )
+  }
 
   return (
     <div className={styles.page}>

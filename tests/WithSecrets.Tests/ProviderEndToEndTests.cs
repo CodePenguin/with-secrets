@@ -59,7 +59,6 @@ internal static class ProviderEndToEndTests
             {
                 CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(),
                 Lock = AuthorityLock.UnlockedForTests(),
-                UnlockProtection = new ReversibleProtection(),
                 State = State,
                 Store = Native,
                 Deployment = Machine.Deployment,
@@ -67,12 +66,7 @@ internal static class ProviderEndToEndTests
                 TimeLimit = TimeSpan.FromSeconds(30),
                 ApproverFactory = (_, _) =>
                 {
-                    FakeApprover made = new(true, unlock: () =>
-                    {
-                        During?.Invoke();
-
-                        return SecretStoreTests.AdminUnlock(State);
-                    });
+                    FakeApprover made = new(true, onApprove: () => During?.Invoke());
                     Approvers.Enqueue(made);
 
                     return made;
@@ -82,6 +76,10 @@ internal static class ProviderEndToEndTests
                 UseApprovalQueueForMachineLaunches = false,
                 AuditUploadInterval = TimeSpan.FromMilliseconds(300),
             });
+
+            // The admin's unlock: the store key is open for the runs that follow.
+            using Unlock release = SecretStoreTests.AdminUnlock(State)!;
+            Service.Keys!.TryOpen(TestState.Current(State)!, release);
         }
 
         public string Work { get; }
@@ -403,10 +401,17 @@ internal static class ProviderEndToEndTests
         HostAudit audit = new(outbox, new AuditUploader(outbox, () => throw new InvalidOperationException(), (_, _, _, _) => Task.FromResult<string?>(null), "fp"));
         AuthorityStore authority = AuthorityStore.InFolder(Path.Combine(dir, "authority"));
         ProviderStore providers = new(authority);
-        AuthorityKeyRing keys = new(authority, _ => signing) { LockState = AuthorityLock.UnlockedForTests() };
+        AuthorityLock unlocked = AuthorityLock.UnlockedForTests();
+        using UnlockedKeys opened = new();
+        using (Unlock release = SecretStoreTests.AdminUnlock(db)!)
+        {
+            opened.TryOpen(TestState.Current(db)!, release);
+        }
+
+        AuthorityKeyRing keys = new(authority, _ => signing) { LockState = unlocked };
         FakeProviderAdapter adapter = new();
         ProviderCache cache = new(providers, keys);
-        ProviderSecretSource source = new(native, providers, new ProviderRetriever(_ => adapter, TimeProvider.System, (_, _) => Task.CompletedTask), cache, new ProviderInvalidation(providers, (_, _) => { }), TimeProvider.System, ProviderAuthority.AuditSink(audit));
+        ProviderSecretSource source = new(native.Unlocking(opened, unlocked), providers, new ProviderRetriever(_ => adapter, TimeProvider.System, (_, _) => Task.CompletedTask), cache, new ProviderInvalidation(providers, (_, _) => { }), TimeProvider.System, ProviderAuthority.AuditSink(audit));
         ProviderInstance instance = providers.AddInstance("vault-sink", "test", "{}", Hour);
         Mount mount = providers.AddMount(instance.Id, MountKind.Tree, "team", "kv");
         providers.ReplaceEntries(mount.Id, [new NamespaceEntry(mount.Id, "team/A", "kv/A", "ext-a", null, DescriptionSource.Provider), new NamespaceEntry(mount.Id, "team/B", "kv/B", "ext-b", null, DescriptionSource.Provider)]);
@@ -424,8 +429,7 @@ internal static class ProviderEndToEndTests
         Exception? thrown = null;
         try
         {
-            using Unlock? unlock = SecretStoreTests.AdminUnlock(db);
-            source.GetValues(["team/A", "team/B"], unlock).Dispose();
+            source.GetValues(["team/A", "team/B"]).Dispose();
         }
         catch (Exception error)
         {
@@ -442,8 +446,7 @@ internal static class ProviderEndToEndTests
         bool failed = false;
         try
         {
-            using Unlock? unlock = SecretStoreTests.AdminUnlock(db);
-            source.GetValues(["team/A", "team/B"], unlock).Dispose();
+            source.GetValues(["team/A", "team/B"]).Dispose();
         }
         catch (SecretStoreException)
         {
@@ -462,8 +465,7 @@ internal static class ProviderEndToEndTests
         string unavailable = "";
         try
         {
-            using Unlock? unlock = SecretStoreTests.AdminUnlock(db);
-            source.GetValues(["team/A", "team/C"], unlock).Dispose();
+            source.GetValues(["team/A", "team/C"]).Dispose();
         }
         catch (SecretStoreException error)
         {
@@ -503,7 +505,7 @@ internal static class ProviderEndToEndTests
             refused = error.Message;
         }
 
-        check(refused is not null && refused.Contains("is not of schema version 3", StringComparison.Ordinal) && refused.Contains("delete with-secrets.db", StringComparison.Ordinal), "e2e schema: an with-secrets.db of schema 6 is refused with the delete message (" + refused + ")");
+        check(refused is not null && refused.Contains("is not of schema version 4", StringComparison.Ordinal) && refused.Contains("delete with-secrets.db", StringComparison.Ordinal), "e2e schema: an with-secrets.db of schema 6 is refused with the delete message (" + refused + ")");
     }
 
     /// <summary>Remote mode: the adapters run at the remote authority; the host's own store is never read and its approval is the authority's.</summary>

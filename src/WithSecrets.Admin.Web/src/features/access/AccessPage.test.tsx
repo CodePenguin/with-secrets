@@ -1,7 +1,7 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { approvalDetail, approvalItem, authorization, grant, problem, signedIn, status, violations } from '../../test/fakeApi'
+import { approvalDetail, approvalItem, authorization, grant, problem, session, signedIn, status, violations } from '../../test/fakeApi'
 import { renderApp } from '../../test/render'
 
 const challengePath = 'POST /api/v1/approvals/req-0001/challenge'
@@ -9,21 +9,13 @@ const approvePath = 'POST /api/v1/approvals/req-0001/approve'
 const denyPath = 'POST /api/v1/approvals/req-0001/deny'
 const detailPath = 'GET /api/v1/approvals/req-0001'
 
-/** Any valid uncompressed P-256 point stands in for the service's key for one request. */
-async function serverKey(): Promise<string> {
-  const pair = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits'])
-  const raw = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey))
-
-  return btoa(String.fromCharCode(...raw)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-}
-
-async function challenge(prf: boolean) {
+/** The challenge the service prepares for one request. With salt the payload also carries a slot salt, which a run approval must never use. */
+async function challenge(salt: boolean) {
   return {
     flowId: 'flow-0001',
     mode: 'webauthn' as const,
-    payload: { bind: 'AQIDBA', rpId: 'localhost', timeout: 60000, ...(prf ? { salt: 'BQYHCA' } : {}) },
+    payload: { bind: 'AQIDBA', rpId: 'localhost', timeout: 60000, ...(salt ? { salt: 'BQYHCA' } : {}) },
     expiresAt: new Date(Date.now() + 120_000).toISOString(),
-    prfKey: prf ? await serverKey() : null,
   }
 }
 
@@ -214,7 +206,7 @@ describe('approvals', () => {
     expect(await screen.findByText(/^Approved\. .* can run it now\.$/)).toBeInTheDocument()
   })
 
-  it('asks the passkey for its PRF output and sends it sealed, never plain', async () => {
+  it('never asks the passkey for a PRF output, even when the payload carries a salt, and sends none', async () => {
     const fake = signedIn({
       [detailPath]: { body: approvalDetail() },
       [challengePath]: { status: 201, body: await challenge(true) },
@@ -226,28 +218,11 @@ describe('approvals', () => {
 
     await waitFor(() => expect(fake.count(approvePath)).toBe(1))
     const options = credentials.get.mock.calls[0]![0].publicKey
-    expect(options.extensions.prf.eval.first).toBeInstanceOf(Uint8Array)
-    const body = fake.calls.find((call) => call.path === '/api/v1/approvals/req-0001/approve')!.body as { prf: { epk: string; iv: string; ct: string } }
-    expect(Object.keys(body.prf).sort()).toEqual(['ct', 'epk', 'iv'])
+    expect(options.extensions).toBeUndefined()
+    const body = fake.calls.find((call) => call.path === '/api/v1/approvals/req-0001/approve')!.body as Record<string, unknown>
+    expect(Object.keys(body).sort()).toEqual(['flowId', 'proof'])
     expect(JSON.stringify(body)).not.toContain('BwcH')
-    expect(body.prf.ct.length).toBeGreaterThan(40)
   })
-
-  it('sends nothing when the passkey gives no PRF output for a request that needs it', async () => {
-    credentials.get.mockResolvedValueOnce({
-      rawId: new Uint8Array([1]).buffer,
-      response: { authenticatorData: new Uint8Array([2]).buffer, clientDataJSON: new Uint8Array([3]).buffer, signature: new Uint8Array([4]).buffer },
-      getClientExtensionResults: () => ({}),
-    })
-    const fake = signedIn({ [detailPath]: { body: approvalDetail() }, [challengePath]: { status: 201, body: await challenge(true) } })
-    renderApp('/access/req-0001')
-
-    fireEvent.click(await enabledApprove())
-
-    expect(await screen.findByRole('alert')).toHaveTextContent('cannot approve this request')
-    expect(fake.count(approvePath)).toBe(0)
-  })
-
   it('says nothing was approved when the passkey prompt is cancelled, and asks for a fresh challenge', async () => {
     credentials.get.mockRejectedValueOnce(new DOMException('cancelled', 'NotAllowedError'))
     const fake = signedIn({ [detailPath]: { body: approvalDetail() }, [challengePath]: { status: 201, body: await challenge(false) } })
@@ -354,37 +329,49 @@ describe('grants: used once-only grants', () => {
   })
 })
 
-describe('grant review', () => {
-  it('opens locked review with sealed PRF output and renders signed text literally', async () => {
+describe('convenience passkey sessions', () => {
+  it('can manage grants and view secret names without secret change controls', async () => {
     const user = userEvent.setup()
-    const prfKey = await serverKey()
-    let open = false
-    const text = 'Command: deploy <script>token-canary</script>'
-    const authorizationItem = authorization({ operation: 'review-unlock', link: null, prfKey, proof: { mode: 'webauthn', payload: JSON.stringify({ bind: 'AQIDBA', rpId: 'localhost', timeout: 60000, salt: 'BQYHCA' }) } })
-    const fake = signedIn({
-      'GET /api/v1/status': () => ({ body: status({ reviewOpen: open }) }),
-      'GET /api/v1/grants/grant-0001/review': () => ({ body: { state: open ? 'open' : 'locked', text: open ? text : null, verified: true } }),
-      'POST /api/v1/authorizations/inline': { status: 201, body: authorizationItem },
-      'POST /api/v1/authorizations/auth-id-0001/proof': () => {
-        open = true
-        return { body: { ok: true } }
-      },
-      'GET /api/v1/authorizations/auth-id-0001': () => ({ body: open
-        ? authorization({ operation: 'review-unlock', link: null, state: 'consumed', result: { outcome: 'applied', link: null, detail: null, code: null, invitation: null, invitationGone: false } })
-        : authorizationItem }),
+    signedIn({
+      'GET /api/v1/session': { body: session({ admin: null, identity: 'phone', scope: 'approval', capabilities: ['approvals.read', 'approvals.decide', 'admin.read', 'grants.decide'] }) },
+      'GET /api/v1/secrets': { body: { items: ['TOKEN'] } },
+    })
+    renderApp('/access')
+
+    expect(await screen.findByRole('button', { name: /^Extend\s*grant grant-0001$/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Revoke\s*grant grant-0001$/ })).toBeInTheDocument()
+    await user.click(screen.getByRole('link', { name: 'Secrets' }))
+    expect(await screen.findByRole('heading', { name: 'TOKEN' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('Value')).toBeNull()
+    expect(screen.queryByRole('button', { name: /remove secret/i })).toBeNull()
+  })
+})
+
+describe('grant review', () => {
+  it('shows locked review text with no way to open it but the unlock', async () => {
+    const user = userEvent.setup()
+    signedIn({
+      'GET /api/v1/status': () => ({ body: status({ reviewOpen: false }) }),
+      'GET /api/v1/grants/grant-0001/review': () => ({ body: { state: 'locked', text: null, verified: true } }),
     })
     renderApp('/access')
 
     await user.click(await screen.findByRole('button', { name: /^Review\s*grant grant-0001$/ }))
-    const locked = await screen.findByRole('button', { name: 'Locked: tap to review' })
+    expect(await screen.findByText('Review text opens when an administrator unlocks the authority with an admin passkey.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /tap to review/i })).toBeNull()
     expect(await violations(document.body)).toEqual([])
-    await user.click(locked)
-    const dialog = await screen.findByRole('dialog', { name: 'Unlock review text' })
-    await user.click(await within(dialog).findByRole('button', { name: 'Unlock review' }))
-    await waitFor(() => expect(fake.calls.find((call) => call.path.endsWith('/auth-id-0001/proof'))?.body?.prf).toEqual({
-      epk: expect.any(String), iv: expect.any(String), ct: expect.any(String),
-    }))
-    await user.click(await within(dialog).findByRole('button', { name: 'Close' }))
+  })
+
+  it('renders open review text literally', async () => {
+    const user = userEvent.setup()
+    const text = 'Command: deploy <script>token-canary</script>'
+    signedIn({
+      'GET /api/v1/status': () => ({ body: status({ reviewOpen: true }) }),
+      'GET /api/v1/grants/grant-0001/review': () => ({ body: { state: 'open', text, verified: true } }),
+    })
+    renderApp('/access')
+
+    await user.click(await screen.findByRole('button', { name: /^Review\s*grant grant-0001$/ }))
     expect((await screen.findByText(text)).tagName).toBe('PRE')
     expect(document.querySelector('pre script')).toBeNull()
     expect(await violations(document.body)).toEqual([])

@@ -244,11 +244,19 @@ internal static class GrantTests
             byte[] challenge = Base64Url.DecodeFromChars(options.RootElement.GetProperty("challenge").GetString()!);
             TestState.Note(options.RootElement);
             // The page sends the "Also make this key an admin" box with the registration.
-            string registration = TestState.Register(creator, challenge, origin, link.IdnHost, name);
+            string registration = TestState.Register(creator, challenge, origin, link.IdnHost, name, makeAdmin ? PrfMode.Normal : PrfMode.Missing);
             registration = registration[..^1] + ",\"name\":" + JsonSerializer.Serialize(name) + ",\"admin\":" + (makeAdmin ? "true" : "false") + "}";
             (_, string reply) = TestState.Post(client, url + "/create", registration);
             replies?.Add(page);
             replies?.Add(reply);
+            while (RecoveryTests.Member(reply, "next") is { } nextStep)
+            {
+                link = new Uri(nextStep);
+                url = "http://127.0.0.1:" + link.Port + link.AbsolutePath;
+                origin = link.GetLeftPart(UriPartial.Authority);
+                replies?.Add(TestState.Get(client, url).Body);
+                (_, reply) = TestState.Approve(client, url, origin, link.IdnHost, admin);
+            }
             reply = TestState.SignStep(client, url, origin, reply, admin);
             replies?.Add(reply);
             using JsonDocument done = JsonDocument.Parse(reply);
@@ -288,7 +296,7 @@ internal static class GrantTests
         enrolled = await Enroll(client, db, admin, tablet, "tablet", false);
         AuditRow? added = Rows(db).SingleOrDefault(row => row.Event == "key-enrolled");
         check(enrolled is { Approved: true } && added is { KeyName: "laptop" } && added.Detail.Contains("\"tablet\"", StringComparison.Ordinal) && added.Detail.Contains("admin passkey laptop verified", StringComparison.Ordinal)
-            && added.Detail.Contains("(approves runs only)", StringComparison.Ordinal), "audit events: --enroll writes key-enrolled with the new key, that it is not an admin, and the approving admin (" + enrolled?.Detail + "; " + added?.Detail + ")");
+            && added.Detail.Contains("(convenience key)", StringComparison.Ordinal), "audit events: --enroll writes key-enrolled with the new key, that it is not an admin, and the approving admin (" + enrolled?.Detail + "; " + added?.Detail + ")");
 
         // --unenroll: a denial, then a success.
         Func<Action<string>, object?> unenroll = announce => new Enrollment(Targets(announce).Item1, Targets(announce).Item2, announce, db.Audit).Unenroll("phone");
@@ -303,7 +311,8 @@ internal static class GrantTests
         string shown = StateDatabaseTests.AuditText(db.FilePath);
         check(new[] { "key-enrolled", "key-removed", AdminEvent.ChangeDenied }.All(name => Rows(db).Any(row => row.Event == name)) && !shown.Contains(Secret, StringComparison.Ordinal), "audit events: the key and denial events are all recorded, and no value");
         check(TestAudit.Events(db).All(item => item.Verify(TestAudit.KeyOf(db).PublicKey)), "audit events: every event is signed by the machine key");
-        check(TestAudit.MetadataClean(db, [Secret], out _) && TestAudit.Events(db).Any(item => item.Outcome == "key-removed" && item.Meta.ContainsKey("key") && item.Meta.ContainsKey("detail")), "audit canary: the metadata of the admin events holds the key name and detail and no value");
+        check(TestAudit.MetadataClean(db, [Secret], out _) && TestAudit.Events(db).Any(item => item.Outcome == "key-removed" && item.Meta.GetValueOrDefault("key") == "laptop"
+            && item.Meta.GetValueOrDefault("keyId") == TestAuthenticator.Encode(admin.CredentialId) && item.Meta.GetValueOrDefault("keyAdmin") == "true" && item.Meta.ContainsKey("detail")), "audit canary: the metadata of the admin events holds the key name and detail and no value");
 
         // A refusal with no with-secrets.db creates nothing.
         StateDatabase none = StateDatabase.InFolder(Path.Combine(root, "events-none"));

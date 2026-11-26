@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client'
 import { Button } from '../../components/Button'
-import { Card } from '../../components/Card'
+import { Card, Facts } from '../../components/Card'
 import { Loading, Notice, ProblemAlert, useAnnounce } from '../../components/Feedback'
 import { removeChallenge } from '../../lib/passkey'
 import { assert, failure, promptCancelled } from '../../lib/manifestProof'
@@ -10,7 +10,7 @@ import { assert, failure, promptCancelled } from '../../lib/manifestProof'
 const pageSettingsKey = ['page-settings'] as const
 
 /** The settings of the pages this machine serves (a run approval, enrolling a passkey). Saving needs one admin passkey tap over the exact next state. */
-export function PageSettingsCard() {
+export function PageSettingsCard({ canChange }: { canChange: boolean }) {
   const announce = useAnnounce()
   const queryClient = useQueryClient()
   const settings = useQuery({ queryKey: pageSettingsKey, queryFn: () => api.get('/api/v1/page-settings') })
@@ -35,6 +35,19 @@ export function PageSettingsCard() {
 
   if (settings.isPending) return <Loading what="the page settings" />
   if (settings.isError) return <ProblemAlert error={settings.error} title="The page settings could not be read" />
+
+  if (!canChange) {
+    return (
+      <Card title="Approval pages">
+        <Facts items={[
+          ['Longest grant time', `${settings.data.reuseMaxMinutes} minutes`],
+          ['Address', settings.data.baseUrl ?? 'http://localhost'],
+          ['Port', settings.data.port],
+          ['Time limit', `${settings.data.timeoutMinutes} minutes`],
+        ]} />
+      </Card>
+    )
+  }
 
   const body = { reuseMaxMinutes: Number(reuseMax), baseUrl: baseUrl.trim() === '' ? null : baseUrl.trim(), port: Number(port), timeoutMinutes: Number(timeout) }
   const unchanged = body.reuseMaxMinutes === data?.reuseMaxMinutes && body.baseUrl === data?.baseUrl && body.port === data?.port && body.timeoutMinutes === data?.timeoutMinutes

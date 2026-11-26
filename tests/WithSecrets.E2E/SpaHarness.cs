@@ -6,9 +6,9 @@ namespace WithSecrets.E2E;
 /// <summary>The host service of a scenario, serving the embedded administration web application and the API on one loopback origin (a free port).</summary>
 internal sealed class SpaApp : IDisposable
 {
-    public SpaApp(Rig rig, bool unlocked = true, bool machineEndpoint = false, TimeSpan? timeLimit = null, ProviderRegistry? providers = null)
+    public SpaApp(Rig rig, bool unlocked = true, bool machineEndpoint = false, TimeSpan? timeLimit = null, ProviderRegistry? providers = null, bool directApproval = false)
     {
-        Service = HostService.Start(new HostServiceOptions { CommandLineEndpoint = E2EEndpoint.Make(), Lock = unlocked ? AuthorityLock.UnlockedForTests() : null, State = rig.State, Store = rig.Store, Deployment = rig.Machine.Deployment, Port = 0, MachineEndpoint = machineEndpoint ? new MachineListenerOptions { Port = 0 } : null, TimeLimit = timeLimit ?? TimeSpan.FromSeconds(60), ProviderRegistry = providers });
+        Service = HostService.Start(new HostServiceOptions { CommandLineEndpoint = E2EEndpoint.Make(), Lock = unlocked ? AuthorityLock.UnlockedForTests() : null, State = rig.State, Store = rig.Store, Deployment = rig.Machine.Deployment, Port = 0, MachineEndpoint = machineEndpoint ? new MachineListenerOptions { Port = 0 } : null, TimeLimit = timeLimit ?? TimeSpan.FromSeconds(60), ProviderRegistry = providers, ApproverFactory = directApproval ? (settings, announce) => CommandWiring.RunApprover(rig.State, settings, announce) : null });
     }
 
     public HostService Service { get; }
@@ -190,10 +190,25 @@ internal static class Spa
         return await dialog.TextContentAsync() ?? "";
     }
 
+    public static async Task Unlock(Ctx c, SpaApp app, S s)
+    {
+        await Open(c, app);
+        await Button(c, "Unlock the authority").ClickAsync();
+        ILocator dialog = Dialog(c);
+        await dialog.WaitForAsync();
+        await Continue(c, s, dialog);
+        await dialog.GetByText("Done").First.WaitForAsync(new() { Timeout = 20000 });
+        await dialog.GetByRole(AriaRole.Button, new() { Name = "Close" }).ClickAsync();
+        await c.Page.GetByText("Authority unlocked").First.WaitForAsync(new() { Timeout = 20000 });
+    }
+
     /// <summary>Signs in with a prepared challenge and an in-page WebAuthn gesture.</summary>
     public static async Task SignIn(Ctx c, SpaApp app, S s)
     {
-        await Open(c, app);
+        if (c.Page.Url.TrimEnd('/') != app.Url)
+        {
+            await Open(c, app);
+        }
         await Heading(c, "with-secrets").WaitForAsync();
         await Tap(c, s);
         await Heading(c, "Overview").WaitForAsync(new() { Timeout = 20000 });

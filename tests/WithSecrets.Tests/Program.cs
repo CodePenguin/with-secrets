@@ -6,9 +6,10 @@ namespace WithSecrets.Tests;
 
 /// <summary>
 /// Answers without a page. With <paramref name="signer" /> an approval for a time carries a signed approval as the page would
-/// make it (the request text, the page issued time, an assertion over the reuse challenge), so a grant can be saved.
+/// make it (the request text, the page issued time, an assertion over the reuse challenge), so a grant can be saved. <paramref name="onApprove" /> runs as the tap is made, before
+/// the approval is returned.
 /// </summary>
-internal sealed class FakeApprover(bool approve, int reuseMinutes = 0, TestAuthenticator? signer = null, Func<Unlock?>? unlock = null) : IApprover
+internal sealed class FakeApprover(bool approve, int reuseMinutes = 0, TestAuthenticator? signer = null, Action? onApprove = null) : IApprover
 {
     private static int _signs = 4_000_000;
 
@@ -31,7 +32,9 @@ internal sealed class FakeApprover(bool approve, int reuseMinutes = 0, TestAuthe
             evidence = new ApprovalEvidence(nonce, text, (signer ?? TestSigner.Default).Assert(ReuseBinding.Challenge(RequestBinding.Compute(nonce, text), reuseMinutes), TestState.Origin, "localhost", (uint)Interlocked.Increment(ref _signs)));
         }
 
-        return ApprovalDecision.Allow("approved", reuseMinutes, evidence, unlock?.Invoke());
+        onApprove?.Invoke();
+
+        return ApprovalDecision.Allow("approved", reuseMinutes, evidence);
     }
 }
 
@@ -78,7 +81,7 @@ internal sealed class MemoryStore(Dictionary<string, string> values) : ISecretSo
 
     public IReadOnlyList<string> ListNames() => values.Keys.ToList();
 
-    public SecretValues GetValues(IReadOnlyCollection<string> names, Unlock? unlock)
+    public SecretValues GetValues(IReadOnlyCollection<string> names)
         => new(names.ToDictionary(name => name, name => Encoding.UTF8.GetBytes(values[name]), StringComparer.Ordinal));
 }
 
@@ -387,6 +390,11 @@ internal static class Program
             KeyVaultTests.Run(Check).GetAwaiter().GetResult();
         }
 
+        if (Wants("UnlockedKeys"))
+        {
+            UnlockedKeysTests.Run(Check).GetAwaiter().GetResult();
+        }
+
         if (Wants("Manifest"))
         {
             ManifestTests.Run(Check).GetAwaiter().GetResult();
@@ -586,6 +594,16 @@ internal static class Program
         if (Wants("Prf"))
         {
             PrfFlowTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("ConvenienceKey"))
+        {
+            ConvenienceKeyTests.Run(Check).GetAwaiter().GetResult();
+        }
+
+        if (Wants("AuditKey"))
+        {
+            AuditKeyTests.Run(Check).GetAwaiter().GetResult();
         }
 
         if (Wants("Recovery"))

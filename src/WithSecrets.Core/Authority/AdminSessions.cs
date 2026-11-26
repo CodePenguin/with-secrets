@@ -7,12 +7,13 @@ namespace WithSecrets;
 /// <summary>An administrator's session on the admin web app. It authorizes read-only views and nothing else: every change still needs its own fresh passkey tap.</summary>
 public sealed class AdminSession
 {
-    internal AdminSession(string token, string identity, SessionScope scope, DateTimeOffset started, string csrf)
+    internal AdminSession(string token, string identity, SessionScope scope, DateTimeOffset started, string csrf, VerifiedCredential? key = null)
     {
         Token = token;
         Csrf = csrf;
         Id = Convert.ToHexString(RandomNumberGenerator.GetBytes(8));
         Identity = identity;
+        Key = key;
         Scope = scope;
         Started = started;
         LastSeen = started;
@@ -32,6 +33,7 @@ public sealed class AdminSession
 
     /// <summary>The trusted enrolled credential identity that signed in (a name, no key material).</summary>
     public string Identity { get; }
+    public VerifiedCredential? Key { get; }
 
     /// <summary>Deprecated compatibility alias; null for approval-only sessions. Never use this display field for authorization.</summary>
     public string? Admin => Scope == SessionScope.Admin ? Identity : null;
@@ -86,6 +88,7 @@ public sealed class AdminSessions(TimeProvider clock, Func<(TimeSpan Idle, TimeS
         public LoginState State { get; set; } = LoginState.Waiting;
 
         public string? Identity { get; set; }
+        public VerifiedCredential? Key { get; set; }
 
         public SessionScope Scope { get; set; } = SessionScope.Admin;
 
@@ -229,7 +232,7 @@ public sealed class AdminSessions(TimeProvider clock, Func<(TimeSpan Idle, TimeS
     }
 
     /// <summary>The passkey tap was verified (the trusted credential identity and scope are supplied) or refused (<paramref name="problem" />).</summary>
-    public void CompleteLogin(string code, string? identity, string? problem, SessionScope scope = SessionScope.Approval)
+    public void CompleteLogin(string code, string? identity, string? problem, SessionScope scope = SessionScope.Approval, VerifiedCredential? key = null)
     {
         lock (_lock)
         {
@@ -240,6 +243,7 @@ public sealed class AdminSessions(TimeProvider clock, Func<(TimeSpan Idle, TimeS
             }
 
             login.Identity = identity;
+            login.Key = key;
             login.Scope = scope;
             login.Problem = problem;
             login.State = identity is null ? LoginState.Failed : LoginState.Ready;
@@ -289,7 +293,7 @@ public sealed class AdminSessions(TimeProvider clock, Func<(TimeSpan Idle, TimeS
             }
 
             string token = NewToken();
-            AdminSession session = new(token, login.Identity, login.Scope, clock.GetUtcNow(), NewToken());
+            AdminSession session = new(token, login.Identity, login.Scope, clock.GetUtcNow(), NewToken(), login.Key);
             _sessions[KeyOf(token)] = session;
 
             return session;

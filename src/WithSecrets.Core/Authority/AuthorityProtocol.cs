@@ -113,7 +113,8 @@ public sealed record AuthorityResponse(
     DateTimeOffset Issued,
     DateTimeOffset Expires,
     string AuthorityKeyId,
-    byte[] Signature) : ISignedAnswer
+    byte[] Signature,
+    AuditKeys? Keys = null) : ISignedAnswer
 {
     /// <summary>The longest a response may be valid (issue to expiry); a host rejects a longer one.</summary>
     public static readonly TimeSpan MaxLifetime = TimeSpan.FromMinutes(5);
@@ -144,6 +145,11 @@ public sealed record AuthorityResponse(
         ToolSettings.QuoteJson(text, CanonicalJson.Time(Expires));
         text.Append(",\"authorityKeyId\":");
         ToolSettings.QuoteJson(text, AuthorityKeyId);
+        if (Keys is { } keys)
+        {
+            text.Append(",\"auditKeys\":");
+            ToolSettings.QuoteJson(text, keys.Wire());
+        }
     }
 
     /// <summary>The object with its signature, as stored and sent.</summary>
@@ -157,9 +163,9 @@ public sealed record AuthorityResponse(
         return text.Append('}').ToString();
     }
 
-    public static AuthorityResponse Create(string requestId, string requestDigest, string machineFingerprint, AuthorityDecision decision, string reasonCode, int revision, DateTimeOffset issued, DateTimeOffset expires, ISigningKey key)
+    public static AuthorityResponse Create(string requestId, string requestDigest, string machineFingerprint, AuthorityDecision decision, string reasonCode, int revision, DateTimeOffset issued, DateTimeOffset expires, ISigningKey key, AuditKeys? keys = null)
     {
-        AuthorityResponse unsigned = new(LaunchProtocol.Version, requestId, requestDigest, machineFingerprint, decision, reasonCode, revision, issued, expires, KeyIdentity.Fingerprint(key.PublicKey), []);
+        AuthorityResponse unsigned = new(LaunchProtocol.Version, requestId, requestDigest, machineFingerprint, decision, reasonCode, revision, issued, expires, KeyIdentity.Fingerprint(key.PublicKey), [], keys);
 
         return unsigned with { Signature = key.Sign(WireText.Bytes(WireText.ResponseDomain, unsigned.Canonical())) };
     }
@@ -182,7 +188,10 @@ public sealed record AuthorityResponse(
 
         using (doc)
         {
-            ContractReader reader = new(doc!.RootElement, "protocolVersion", "requestId", "requestDigest", "machineFingerprint", "decision", "reasonCode", "securityRevision", "issued", "expires", "authorityKeyId", "signature");
+            JsonElement root = doc!.RootElement;
+            string[] fields = ["protocolVersion", "requestId", "requestDigest", "machineFingerprint", "decision", "reasonCode", "securityRevision", "issued", "expires", "authorityKeyId", "signature"];
+            bool hasAuditKeys = root.ValueKind == JsonValueKind.Object && root.TryGetProperty("auditKeys", out _);
+            ContractReader reader = new(root, hasAuditKeys ? [.. fields, "auditKeys"] : fields);
             if (reader.Problem is not null || !reader.Int("protocolVersion", out int version) || !reader.Text("requestId", out string? id) || !reader.Text("requestDigest", out string? digest)
                 || !reader.Text("machineFingerprint", out string? machine) || !reader.Text("decision", out string? decisionName) || !reader.Text("reasonCode", out string? reason)
                 || !reader.Int("securityRevision", out int revision) || !reader.Time("issued", out DateTimeOffset issued) || !reader.Time("expires", out DateTimeOffset expires)
@@ -208,8 +217,16 @@ public sealed record AuthorityResponse(
                 return false;
             }
 
+            AuditKeys? keys = null;
+            if (hasAuditKeys && (!reader.Text("auditKeys", out string? text) || !AuditKeys.TryRead(text, out keys) || keys is null))
+            {
+                error = reader.Problem ?? "invalid audit keys";
+
+                return false;
+            }
+
             error = null;
-            response = new AuthorityResponse(version, id!, digest!, machine!, decision, reason!, revision, issued, expires, keyId!, bytes);
+            response = new AuthorityResponse(version, id!, digest!, machine!, decision, reason!, revision, issued, expires, keyId!, bytes, keys);
 
             return true;
         }

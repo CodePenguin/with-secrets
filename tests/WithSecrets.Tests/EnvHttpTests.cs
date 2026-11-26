@@ -68,7 +68,7 @@ internal static partial class WebApprovalTests
                 link.TrySetResult(line);
             }, TimeSpan.Zero);
             RunArgs args = CliArgs.ParseRun(["--reason", "env http test", "--", "./" + program], out _)!;
-            RunCommand command = new(store, approver, TextWriter.Synchronized(stdout), errors, environment: _ => null);
+            RunCommand command = new(SecretStoreTests.Unlocked(store), approver, TextWriter.Synchronized(stdout), errors, environment: _ => null);
             Task<int> running = Task.Run(() => command.ExecuteAsync(args, scripts, TestAudit.Sink(db)));
             List<string> seen = [];
             Task first = await Task.WhenAny(link.Task, running, Task.Delay(TimeSpan.FromSeconds(20)));

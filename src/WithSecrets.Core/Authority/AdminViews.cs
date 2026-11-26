@@ -5,8 +5,8 @@ namespace WithSecrets;
 // The read models of the administration API (what a session may look at). Metadata only: no secret value, proof, key or credential is part of any of them, and every text that came from
 // elsewhere (a host name, a program, a folder) is passed through ApprovalSummary.Clean so that control characters never reach a client.
 
-/// <summary>The public status: running, locked or not, the unlock mode and the versions. Nothing here is sensitive.</summary>
-public sealed record StatusDto(bool Running, bool Locked, string UnlockMode, string ApiVersion, string Version, int ProtocolVersion, StatusCapabilitiesDto Capabilities, bool ReviewOpen);
+/// <summary>The public status: running, locked or not, and the versions. Nothing here is sensitive.</summary>
+public sealed record StatusDto(bool Running, bool Locked, bool Remote, string ApiVersion, string Version, int ProtocolVersion, StatusCapabilitiesDto Capabilities, bool ReviewOpen);
 
 public sealed record StatusCapabilitiesDto(bool Providers);
 
@@ -30,11 +30,11 @@ public sealed record GrantReviewDto(string State, string? Text, bool Verified);
 
 public sealed record AuditEventDto(string EventId, long Sequence, DateTimeOffset Time, DateTimeOffset Received, string Machine, string Type, string Outcome, string Reason, string RequestId, string Folder, string Program, IReadOnlyList<string> Arguments, string GrantId, int? ExitCode, IReadOnlyDictionary<string, string> Metadata);
 
-public sealed record AuditChangeDto(long Id, DateTimeOffset Time, string Event, string? Machine, string Actor, string Detail);
+public sealed record AuditChangeDto(long Id, DateTimeOffset Time, string Event, string? Machine, string Actor, string Detail, IReadOnlyDictionary<string, string> Metadata);
 
 public sealed record AuditGapDto(long Id, string Machine, string Kind, long From, long To, DateTimeOffset Detected, DateTimeOffset? Resolved, string Epoch);
 
-public sealed record SettingsDto(string UnlockMode, string UnlockModeDescription, int AuditRetentionDays, int SessionIdleMinutes, int SessionAbsoluteMinutes, string AuthorityKey, int MaxAuditRetentionDays, int MaxSessionIdleMinutes, int MaxSessionAbsoluteMinutes);
+public sealed record SettingsDto(int AuditRetentionDays, int SessionIdleMinutes, int SessionAbsoluteMinutes, string AuthorityKey, int MaxAuditRetentionDays, int MaxSessionIdleMinutes, int MaxSessionAbsoluteMinutes);
 
 public sealed record PasskeyDto(string Name, string Detail, DateTimeOffset Created, bool Admin);
 
@@ -58,7 +58,7 @@ public sealed partial class AdminService
     {
         AuthorityStatus status = Status();
 
-        return new StatusDto(true, status.Locked, UnlockPolicies.Name(status.Policy), "v1", Version, LaunchProtocol.Version, new StatusCapabilitiesDto(Providers is not null), status.ReviewOpen);
+        return new StatusDto(true, status.Locked, IsRemote, "v1", Version, LaunchProtocol.Version, new StatusCapabilitiesDto(Providers is not null), status.ReviewOpen);
     }
 
     /// <summary>When a session ends: the idle end (renewed by each use) and the absolute end.</summary>
@@ -209,6 +209,14 @@ public sealed partial class AdminService
     internal IReadOnlyList<AuditEventDto> AuditEventsView(AuditQuery query) => [.. _p.Store.AuditHistory(query).Select(record => new AuditEventDto(record.Event.EventId, record.Event.Sequence, record.Event.Time, record.Received, record.Event.MachineFingerprint, record.Event.Type,
         C(record.Event.Outcome), C(record.Event.Reason), C(record.Event.RequestId), C(record.Event.Folder), C(record.Event.Program), [.. record.Event.Arguments.Select(C)], C(record.Event.GrantId), record.Event.ExitCode, record.Event.Meta.ToDictionary(item => C(item.Key), item => C(item.Value), StringComparer.Ordinal)))];
 
+    private static IReadOnlyDictionary<string, string> AuditChangeMetadata(AuditEntry entry)
+    {
+        Dictionary<string, string> metadata = new(entry.Metadata ?? AuditMetadata.None, StringComparer.Ordinal);
+        entry.Key?.AddTo(metadata, "key");
+
+        return metadata;
+    }
+
     internal IReadOnlyList<AuditChangeDto> AuditChangesView(AuditQuery query)
     {
         string? needle = query.Text;
@@ -217,7 +225,7 @@ public sealed partial class AdminService
             .Where(entry => (needle is null || (entry.Event + " " + entry.Actor + " " + entry.Detail).Contains(needle, StringComparison.OrdinalIgnoreCase)) && (query.From is null || entry.Time >= query.From) && (query.To is null || entry.Time <= query.To)
                 && (query.MachinePrefix is null || (entry.Fingerprint ?? "").StartsWith(query.MachinePrefix, StringComparison.OrdinalIgnoreCase)))
             .Take(query.Limit)
-            .Select(entry => new AuditChangeDto(entry.Id, entry.Time, C(entry.Event), entry.Fingerprint, C(entry.Actor), C(entry.Detail)))];
+            .Select(entry => new AuditChangeDto(entry.Id, entry.Time, C(entry.Event), entry.Fingerprint, C(entry.Actor), C(entry.Detail), AuditChangeMetadata(entry)))];
     }
 
     internal IReadOnlyList<AuditGapDto> AuditGapsView(string? machinePrefix) => [.. _p.Store.AuditGaps(machinePrefix, openOnly: true).Select(gap => new AuditGapDto(gap.Id, gap.Fingerprint, C(gap.Kind), gap.From, gap.To, gap.Detected, gap.Resolved, C(gap.Epoch)))];
@@ -227,7 +235,7 @@ public sealed partial class AdminService
         AuthorityStatus status = Status();
         (int idle, int absolute) = _p.Store.SessionTimeouts();
 
-        return new SettingsDto(UnlockPolicies.Name(status.Policy), UnlockPolicies.Describe(status.Policy), _p.Store.AuditRetentionDays(), idle, absolute, CurrentKey(), AuthorityStore.MaxAuditRetentionDays, AuthorityStore.MaxSessionIdleMinutes, AuthorityStore.MaxSessionAbsoluteMinutes);
+        return new SettingsDto(_p.Store.AuditRetentionDays(), idle, absolute, CurrentKey(), AuthorityStore.MaxAuditRetentionDays, AuthorityStore.MaxSessionIdleMinutes, AuthorityStore.MaxSessionAbsoluteMinutes);
     }
 
     internal PasskeysDto PasskeysView()

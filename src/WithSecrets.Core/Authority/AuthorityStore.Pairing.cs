@@ -94,7 +94,7 @@ public sealed partial class AuthorityStore
     }
 
     /// <summary>Stores a new invitation and audits it. Refused (with the reason) when too many are open.</summary>
-    public string? CreateInvitation(string id, DateTimeOffset expires, string actor, int maxOpen)
+    public string? CreateInvitation(string id, DateTimeOffset expires, string actor, int maxOpen, VerifiedCredential? key = null)
     {
         return Write((connection, transaction) =>
         {
@@ -107,7 +107,7 @@ public sealed partial class AuthorityStore
 
             WithSecretsDatabase.Execute(connection, transaction, "INSERT INTO pairing_invitations (id, created, expires, status, failed) VALUES ($id, $now, $expires, 'pending', 0)",
                 ("$id", id), ("$now", now), ("$expires", Time(expires)));
-            Audit(connection, transaction, "pairing-invitation-created", null, null, actor, "invitation " + Short(id) + ", expires " + Time(expires));
+            Audit(connection, transaction, "pairing-invitation-created", null, null, actor, "invitation " + Short(id) + ", expires " + Time(expires), key);
 
             return null;
         });
@@ -150,7 +150,7 @@ public sealed partial class AuthorityStore
     }
 
     /// <summary>Withdraws a pending invitation (an administrator's revoke). False when it is not pending.</summary>
-    public bool RevokeInvitation(string id, string actor)
+    public bool RevokeInvitation(string id, string actor, VerifiedCredential? key = null)
     {
         return Write((connection, transaction) =>
         {
@@ -160,7 +160,7 @@ public sealed partial class AuthorityStore
                 return false;
             }
 
-            Audit(connection, transaction, "pairing-invitation-revoked", null, null, actor, "invitation " + Short(id) + " revoked");
+            Audit(connection, transaction, "pairing-invitation-revoked", null, null, actor, "invitation " + Short(id) + " revoked", key);
 
             return true;
         });

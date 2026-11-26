@@ -63,6 +63,20 @@ describe('the primary views have no automated accessibility violations', () => {
 })
 
 describe('the shell', () => {
+  it('directs remote hosts to the authority without asking for sign-in or unlock', async () => {
+    const fake = installFakeApi({
+      'GET /api/v1/status': { body: status({ remote: true }) },
+      'GET /api/v1/session': { body: signedOut() },
+    })
+    renderApp('/')
+
+    expect(await screen.findByText('Open the administration app on the authority to manage access and secrets.')).toBeInTheDocument()
+    expect(screen.getByText('Remote host')).toBeInTheDocument()
+    expect(screen.queryByText(/Authority (locked|unlocked)/)).toBeNull()
+    expect(screen.queryByRole('button', { name: /sign in|unlock|lock the authority/i })).toBeNull()
+    expect(fake.count('POST /api/v1/session/inline')).toBe(0)
+  })
+
   it('has landmarks, a skip link and marks the current view with aria-current', async () => {
     signedIn()
     renderApp('/machines')
@@ -491,10 +505,9 @@ describe('settings and passkey context', () => {
     signedIn()
     renderApp('/settings')
 
-    for (const name of ['Unlock mode', 'Audit retention', 'Administrator sessions', 'Authority signing key']) {
+    for (const name of ['Review access', 'Audit retention', 'Administrator sessions', 'Authority signing key']) {
       expect(await screen.findByRole('heading', { level: 2, name })).toBeInTheDocument()
     }
-    expect(screen.getByText(/^Manual./)).toBeInTheDocument()
     expect(screen.getByText('15 minutes')).toBeInTheDocument()
     expect(screen.getByText('480 minutes, however busy')).toBeInTheDocument()
   })
@@ -517,17 +530,6 @@ describe('settings and passkey context', () => {
     const dialog = await screen.findByRole('dialog')
     expect(within(dialog).getByRole('textbox', { name: /Days to keep audit events/ })).toHaveValue('0')
     expect(within(dialog).getByText('0 keeps everything.')).toBeInTheDocument()
-  })
-
-  it('keeps the unattended-unlock warning at the decision point', async () => {
-    const user = userEvent.setup()
-    signedIn()
-    renderApp('/settings')
-
-    await user.click(await screen.findByRole('button', { name: 'Allow unattended unlock...' }))
-    const dialog = await screen.findByRole('dialog')
-    expect(within(dialog).getByText(/Unlock mode: unattended/)).toBeInTheDocument()
-    expect(within(dialog).getByText('Weaker: anyone who can start this service as you gets an unlocked authority.')).toBeInTheDocument()
   })
 
   it('copies the complete public authority fingerprint and announces the result', async () => {
@@ -566,7 +568,7 @@ describe('settings and passkey context', () => {
     signedIn()
     renderApp('/passkeys')
 
-    expect(await screen.findByText(/Admin passkeys can also change settings, secrets and passkeys/)).toBeInTheDocument()
+    expect(await screen.findByText(/Admin passkeys can also lock or unlock the authority and change settings, secrets and passkeys/)).toBeInTheDocument()
   })
 
   it('keeps each passkey name, role, kind and creation time readable', async () => {
@@ -592,7 +594,7 @@ describe('settings and passkey context', () => {
     expect(admin.querySelector('time')).toHaveAttribute('datetime', created)
 
     const approval = (await screen.findByRole('heading', { level: 3, name: 'deploy approval' })).closest('li') as HTMLElement
-    expect(within(approval).getByText('approval only')).toBeInTheDocument()
+    expect(within(approval).getByText('convenience')).toBeInTheDocument()
     expect(within(approval).getByText('platform passkey')).toBeInTheDocument()
   })
 
@@ -703,6 +705,46 @@ describe('grant and audit navigation', () => {
     expect(occurred.querySelector('time')).toHaveAttribute('datetime', '2026-11-09T10:00:00Z')
     expect(received.querySelector('time')).toHaveAttribute('datetime', '2026-11-09T10:00:03Z')
     expect(screen.queryByText('Received by authority')).toBeNull()
+  })
+
+  it('shows the grant approval, last change and unlock passkeys on a host event', async () => {
+    signedIn({
+      'GET /api/v1/audit/events': {
+        body: { items: [{
+          eventId: 'e1', sequence: 1, time: '2026-11-09T10:00:00Z', received: '2026-11-09T10:00:01Z', machine: 'ab12',
+          type: 'launch', outcome: 'started', reason: '', requestId: 'r1', folder: '', program: '', arguments: [], grantId: 'grant-0001', exitCode: null,
+          metadata: {
+            grantApprovedId: 'phone001long', grantApprovedName: 'phone', grantApprovedAdmin: 'false',
+            grantChangedId: 'phone002long', grantChangedName: 'phone', grantChangedAdmin: 'false',
+            unlockId: 'laptop01long', unlockName: 'laptop', unlockAdmin: 'true',
+          },
+        }] },
+      },
+    })
+    renderApp('/audit')
+
+    const approved = await screen.findByText('Grant approved by')
+    expect(approved.parentElement).toHaveTextContent('phone (convenience, phone001)')
+    expect(screen.getByText('Grant changed by').parentElement).toHaveTextContent('phone (convenience, phone002)')
+    expect(screen.getByText('Authority unlocked by').parentElement).toHaveTextContent('laptop (admin, laptop01)')
+    expect(screen.getByTitle('phone001long')).toBeInTheDocument()
+    expect(screen.queryByText('Metadata: grantApprovedId')).toBeNull()
+  })
+
+  it('labels the session passkey for a sign-out in authority history', async () => {
+    signedIn({
+      'GET /api/v1/audit/changes': {
+        body: { items: [{
+          id: 1, time: '2026-11-09T10:00:00Z', event: 'admin-session', machine: null, actor: 'phone', detail: 'signed out',
+          metadata: { sessionKeyId: 'phone001long', sessionKeyName: 'phone', sessionKeyAdmin: 'false' },
+        }] },
+      },
+    })
+    renderApp('/audit/changes')
+
+    const role = await screen.findByText('Session passkey')
+    expect(role.parentElement).toHaveTextContent('phone (convenience, phone001)')
+    expect(screen.queryByText('Passkey used')).toBeNull()
   })
 
   it('links an authority change machine to the machine-filtered authority changes view', async () => {

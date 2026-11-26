@@ -270,13 +270,19 @@ internal static class RecoveryTests
         return new World(db, store, folder, laptop, phone, RecoveryCode.Format(TestVault.RecoveryCode(db)));
     }
 
-    /// <summary>The secrets as an approved run by <paramref name="who" /> reads them (null when the store does not open for it).</summary>
+    /// <summary>The secrets as a run reads them after <paramref name="who" /> unlocked the authority (null when the unlock does not open the store for it).</summary>
     internal static Dictionary<string, string>? ReadAll(StateDatabase db, TestAuthenticator who)
     {
         try
         {
             using Unlock? unlock = TestVault.Unlock(db, who);
-            using SecretValues values = new SecretStore(db).GetValues(Names, unlock);
+            using UnlockedKeys keys = new();
+            if (unlock is null || TestState.Current(db) is not { } manifest || !keys.TryOpen(manifest, unlock))
+            {
+                return null;
+            }
+
+            using SecretValues values = new SecretStore(db).Unlocking(keys, AuthorityLock.UnlockedForTests()).GetValues(Names);
 
             return values.Texts();
         }
@@ -592,14 +598,14 @@ internal static class RecoveryTests
             Manifest? after = TestState.Current(w.Db);
             check(after is { Version: 1 } && after.Keys.Count == 1 && after.Keys[0].Id == TestAuthenticator.Encode(fresh.CredentialId) && after.Store != before.Store && after.Recovery is not null && after.Recovery.Wrap != before.Recovery!.Wrap && after.Secrets.Count == 3,
                 "recover: the new state has only the new passkey, a new store key, a new recovery slot and the three secrets");
-            using ReviewKeys review = new();
+            using UnlockedKeys review = new();
             using Unlock newUnlock = TestVault.Unlock(w.Db, fresh)!;
             GrantRecord afterGrant = authority.FindGrant(beforeGrant.Id)!;
             check(after?.Review?.PublicKey == before.Review!.PublicKey && after.Review.Vault != before.Review.Vault
                 && GrantAuthorityTests.SameGrant(afterGrant, beforeGrant) && review.TryOpen(after, newUnlock)
-                && review.TryDecrypt(afterGrant.Evidence!.Ciphertext, afterGrant.ReviewKey!)?.Contains(reviewCanary, StringComparison.Ordinal) == true,
+                && review.TryDecryptReview(afterGrant.Evidence!.Ciphertext, afterGrant.ReviewKey!)?.Contains(reviewCanary, StringComparison.Ordinal) == true,
                 "recover: the new passkey opens the original review key and its unchanged grant evidence");
-            check(authority.Sealer!.Problem(afterGrant) == "the approving passkey is not enrolled", "recover: preserved evidence does not restore the old approval's authority");
+            check(authority.Sealer!.Problem(afterGrant) == "a passkey that approved or changed the grant is no longer enrolled", "recover: preserved evidence does not restore the old approval's authority");
             Dictionary<string, string>? read = ReadAll(w.Db, fresh);
             check(read is not null && Values.All(item => read.TryGetValue(item.Key, out string? value) && value == item.Value), "recover: all three values are read through the normal approved path with the new passkey");
             check(ReadAll(w.Db, laptop) is null && ReadAll(w.Db, phone) is null, "recover: the old admin keys are gone from the new state (they open nothing)");
@@ -811,7 +817,7 @@ internal static class RecoveryTests
             string oldMaster = Convert.ToHexStringLower(KeyVault.OpenMaster(before, oldUnlock));
             string oldPrf = Convert.ToHexStringLower(oldUnlock.Output);
             Dictionary<string, string> oldRows = new SecretStore(w.Db).Snapshot().Rows;
-            check(service.Review!.TryOpen(before, oldUnlock), "rotate: review is open before the store keys rotate");
+            check(service.Keys!.TryOpen(before, oldUnlock), "rotate: review is open before the store keys rotate");
             ProviderAuthority providers = service.Providers!;
             string[] tokens = [OnePasswordTests.FakeToken, OnePasswordTests.SlowToken];
             ProviderInstance[] beforeProviders = tokens.Select((token, index) => providers.Store.AddInstance(
@@ -851,12 +857,12 @@ internal static class RecoveryTests
             check(after is not null && after.Version == before.Version + 1 && after.Keys.Count == 1 && after.Keys[0].Id == TestAuthenticator.Encode(laptop.CredentialId) && after.Store != before.Store && after.Vault != before.Vault && after.Recovery!.Wrap != before.Recovery!.Wrap && after.Recovery.Salt != before.Recovery.Salt,
                 "rotate: manifest v+1 has only the tapped key, a new store key, vault and recovery slot");
             GrantRecord rekeyed = authority.FindGrant(beforeGrant.Id)!;
-            check(!service.Review!.IsOpen && after!.Review!.PublicKey != before.Review!.PublicKey
+            check(!service.Keys!.IsOpen && after!.Review!.PublicKey != before.Review!.PublicKey
                 && rekeyed.ReviewKey == after.Review.PublicKey && rekeyed.Evidence!.Ciphertext != beforeGrant.Evidence!.Ciphertext
                 && authority.Sealer!.Problem(rekeyed) is null, "rotate: the same commit re-encrypts and reseals evidence and closes the previous review key");
             using Unlock currentUnlock = TestVault.Unlock(w.Db, laptop)!;
-            check(service.Review.TryOpen(after!, currentUnlock)
-                && service.Review.TryDecrypt(rekeyed.Evidence!.Ciphertext, rekeyed.ReviewKey!)?.Contains(reviewCanary, StringComparison.Ordinal) == true,
+            check(service.Keys.TryOpen(after!, currentUnlock)
+                && service.Keys.TryDecryptReview(rekeyed.Evidence!.Ciphertext, rekeyed.ReviewKey!)?.Contains(reviewCanary, StringComparison.Ordinal) == true,
                 "rotate: the review key opened by the kept passkey decrypts the re-encrypted approval");
             ProviderInstance[] afterProviders = beforeProviders.Select(instance => providers.Store.Instance(instance.Id)!).ToArray();
             for (int index = 0; index < afterProviders.Length; index++)
@@ -864,7 +870,7 @@ internal static class RecoveryTests
                 ProviderInstance updated = afterProviders[index];
                 using JsonDocument envelope = JsonDocument.Parse(updated.Configuration);
                 string ciphertext = envelope.RootElement.GetProperty("encryptedConfiguration").GetString()!;
-                using JsonDocument opened = JsonDocument.Parse(service.Review.TryDecryptCurrent(ciphertext)!);
+                using JsonDocument opened = JsonDocument.Parse(service.Keys.TryDecryptCurrentReview(ciphertext)!);
                 check(updated.Revision == beforeProviders[index].Revision + 1
                     && updated.Configuration != beforeProviders[index].Configuration
                     && opened.RootElement.GetProperty("serviceAccountToken").GetString() == tokens[index],
@@ -905,7 +911,7 @@ internal static class RecoveryTests
                 TestState.Approve(client, final.Url, final.Origin, "localhost", laptop);
             }
             check(!failed.Result().Done && TestState.Current(w.Db)!.Canonical() == after!.Canonical()
-                && GrantAuthorityTests.SameGrant(authority.FindGrant(rekeyed.Id), rekeyed) && service.Review.IsOpen
+                && GrantAuthorityTests.SameGrant(authority.FindGrant(rekeyed.Id), rekeyed) && service.Keys.IsOpen
                 && afterProviders.All(instance => providers.Store.Instance(instance.Id) == instance),
                 "rotate: rolling back a failed evidence rekey preserves the manifest, evidence, provider configurations and open review key");
             service.Dispose();

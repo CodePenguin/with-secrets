@@ -17,16 +17,11 @@ internal static class HostServiceTests
     private const string Other = "Canary-Other-9001337";
 
     /// <summary>A secret source in memory that counts decryptions.</summary>
-    internal sealed class CountingStore(Dictionary<string, string> values, bool needsUnlock = false) : ISecretSource
+    internal sealed class CountingStore(Dictionary<string, string> values) : ISecretSource
     {
         private int _reads;
 
-        public bool NeedsUnlock => needsUnlock;
-
         public int Reads => Volatile.Read(ref _reads);
-
-        /// <summary>Reads that were given usable key material (not null, not zeroed).</summary>
-        public int KeyedReads { get; private set; }
 
         /// <summary>Makes the next reads fail, as a store that cannot open its key would.</summary>
         public bool Fail { get; set; }
@@ -38,15 +33,10 @@ internal static class HostServiceTests
         /// <summary>For tests: called as a decryption begins, before anything is read.</summary>
         public Action? OnRead { get; set; }
 
-        public SecretValues GetValues(IReadOnlyCollection<string> names, Unlock? unlock)
+        public SecretValues GetValues(IReadOnlyCollection<string> names)
         {
             OnRead?.Invoke();
             Interlocked.Increment(ref _reads);
-            if (unlock is not null && unlock.Output.Any(b => b != 0))
-            {
-                KeyedReads++;
-            }
-
             if (Fail)
             {
                 throw new SecretStoreException("the key could not be opened (test)");
@@ -111,7 +101,7 @@ internal static class HostServiceTests
         private readonly string _dir;
         private int _ids;
 
-        public Rig(string parent, Dictionary<string, string>? values = null, Func<IApprover>? approver = null, TimeSpan? bodyTimeout = null, Action<PreparedChild>? afterPrepare = null, Action? afterCommit = null, bool trusted = true, TestMachine? machine = null, bool needsUnlock = false, Func<IApprover, IStoreKeyProvider>? keyProvider = null, IMonotonicClock? monotonic = null, TestAuthenticator? enrolled = null, TimeSpan? auditInterval = null, bool startLocked = false, IUnlockProtection? protection = null, Func<Action<string>, IAdminAsker>? adminAskers = null)
+        public Rig(string parent, Dictionary<string, string>? values = null, Func<IApprover>? approver = null, TimeSpan? bodyTimeout = null, Action<PreparedChild>? afterPrepare = null, Action? afterCommit = null, bool trusted = true, TestMachine? machine = null, IMonotonicClock? monotonic = null, TestAuthenticator? enrolled = null, TimeSpan? auditInterval = null, bool startLocked = false, Func<Action<string>, IAdminAsker>? adminAskers = null)
         {
             _dir = Path.Combine(parent, "svc-" + Guid.NewGuid().ToString("N")[..8]);
             Work = Path.Combine(_dir, "work");
@@ -125,13 +115,12 @@ internal static class HostServiceTests
                 TestState.Add(State, enrolled.Record("localhost", "grant-test") with { Created = DateTimeOffset.UtcNow }, withStore: true);
             }
 
-            Store = new CountingStore(values ?? new Dictionary<string, string> { ["TOKEN"] = Value, ["OTHER_KEY"] = Other }, needsUnlock);
+            Store = new CountingStore(values ?? new Dictionary<string, string> { ["TOKEN"] = Value, ["OTHER_KEY"] = Other });
             Approvers = [];
             Service = HostService.Start(new HostServiceOptions
             {
                 CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(),
                 Lock = startLocked ? null : AuthorityLock.UnlockedForTests(),
-                UnlockProtection = protection,
                 AdminAskerFactory = adminAskers,
                 State = State,
                 Store = Store,
@@ -150,7 +139,6 @@ internal static class HostServiceTests
                 },
                 AfterPrepare = child => afterPrepare?.Invoke(child),
                 AfterCommit = () => afterCommit?.Invoke(),
-                KeyProviderFactory = keyProvider,
                 Monotonic = monotonic,
                 AuditUploadInterval = auditInterval ?? TimeSpan.FromSeconds(2),
                 AuditMaxBackoff = auditInterval is { } interval ? interval * 4 : TimeSpan.FromSeconds(60),
@@ -631,7 +619,7 @@ internal static class HostServiceTests
         check((await rig.Http.GetAsync(rig.Url("/v1/secrets"))).StatusCode == HttpStatusCode.NotFound && (await rig.Http.GetAsync(rig.Url("/"))).StatusCode == HttpStatusCode.NotFound, "service: there is no route that lists or returns secrets");
 
         string status = await rig.Http.GetStringAsync(rig.Url("/v1/status"));
-        check(status == "{\"protocolVersion\":1,\"running\":true,\"locked\":false,\"adminPort\":" + rig.Service.Port + "}", "service: /v1/status returns the version, running, the lock state and the admin web app's port only (" + status + ")");
+        check(status == "{\"protocolVersion\":1,\"running\":true,\"locked\":false,\"remote\":false,\"adminPort\":" + rig.Service.Port + "}", "service: /v1/status returns the version, running state, lock state, remote mode and the admin web app's port only (" + status + ")");
         if (Socket.OSSupportsIPv6)
         {
             try
@@ -682,7 +670,12 @@ internal static class HostServiceTests
             }
 
             string argsFile = envFile.Replace(".env.txt", ".args.txt", StringComparison.Ordinal);
-            LaunchRequest request = Req(rig, show, ["one", "two"], [("TOKEN", "TOKEN")], Env(("CANARY_INHERITED", "inherited-ok"), ("NODE_OPTIONS", "--require evil"), ("DOTENV_PRIVATE_KEY", "dotenv-private"), ("CANARY_SHADOW", "from-request")), new Dictionary<string, string> { ["LOG_LEVEL"] = "Verbose7" });
+            Raw refused = await Post(rig, Req(rig, show, environment: Env(("DOTENV_PRIVATE_KEY", "dotenv-private"))));
+            check(refused.Status == HttpStatusCode.BadRequest && refused.Body.Contains("dotenvx credential", StringComparison.Ordinal)
+                && !refused.Body.Contains("dotenv-private", StringComparison.Ordinal) && rig.Store.Reads == 0,
+                "child environment: a launch request with a dotenvx credential is refused before any secret is read");
+
+            LaunchRequest request = Req(rig, show, ["one", "two"], [("TOKEN", "TOKEN")], Env(("CANARY_INHERITED", "inherited-ok"), ("NODE_OPTIONS", "--require evil"), ("CANARY_SHADOW", "from-request")), new Dictionary<string, string> { ["LOG_LEVEL"] = "Verbose7" });
             Raw run = await Post(rig, request);
             string env = File.Exists(envFile) ? File.ReadAllText(envFile) : "";
             string args = File.Exists(argsFile) ? File.ReadAllText(argsFile) : "";
@@ -691,7 +684,7 @@ internal static class HostServiceTests
             check(!env.Contains(Other, StringComparison.Ordinal), "child environment: a secret that was not named is not in the environment");
             check(env.Contains("CANARY_INHERITED=inherited-ok", StringComparison.Ordinal) && env.Contains("CANARY_SHADOW=from-request", StringComparison.Ordinal), "child environment: the child inherits the environment block of the request");
             check(!env.Contains("only-in-the-service", StringComparison.Ordinal), "child environment: the service's own environment does not leak into the child");
-            check(!env.Contains("NODE_OPTIONS", StringComparison.Ordinal) && !env.Contains("DOTENV_PRIVATE_KEY", StringComparison.Ordinal), "child environment: code-loading variables and the dotenvx key are dropped from the request's block");
+            check(!env.Contains("NODE_OPTIONS", StringComparison.Ordinal) && !env.Contains("DOTENV_PRIVATE_KEY", StringComparison.Ordinal), "child environment: the code-loading variable and dotenvx key never reach the child");
             check(env.Contains("LOG_LEVEL=Verbose7", StringComparison.Ordinal), "child environment: ordinary .env values are in the environment");
             check(args.Contains("one two", StringComparison.Ordinal) && !args.Contains(Value, StringComparison.Ordinal), "child environment: the arguments are the typed ones and carry no value");
             check(run.Stdout.Contains("t=[REDACTED]", StringComparison.Ordinal) && !string.Join("\n", run.Lines).Contains(Value, StringComparison.Ordinal), "child environment: the value never appears in an API event");
@@ -1032,6 +1025,7 @@ internal static class HostServiceTests
             }
 
             using HostService service = HostService.Start(new HostServiceOptions { CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), Lock = AuthorityLock.UnlockedForTests(), State = db, Store = store, Deployment = machine.Deployment, Port = 0, TimeLimit = TimeSpan.FromSeconds(30), ApproverFactory = (settings, announce) => CommandWiring.RunApprover(db, settings, announce) });
+            SecretStoreTests.OpenKeys(service, db);
             using HttpClient client = new(service.Endpoint.CreateHandler()) { Timeout = TimeSpan.FromSeconds(60) };
             DateTimeOffset now = DateTimeOffset.UtcNow;
             LaunchRequest request = new(LaunchProtocol.Version, "http-" + Guid.NewGuid().ToString("N")[..8], now, now.AddMinutes(5), "bm9uY2UtMDAwMDAwMDEx" + Guid.NewGuid().ToString("N")[..6], ["TOKEN"], [new LaunchMapping("TOKEN", "TOKEN")], "approval over http", "./" + program, [], work, [], [], new Dictionary<string, string>(), Env(), []);

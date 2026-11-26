@@ -114,7 +114,7 @@ internal sealed class ProviderAdmin(ProviderAuthority providers, AdminAudit audi
     /// Refreshes one mount's namespace entries from its provider (no tap: it only syncs with provider truth) and audits it with counts. A mount that does not exist, or whose
     /// instance is not running, is refused with a constant message and nothing is audited. A provider failure propagates as the reconciler throws it.
     /// </summary>
-    public async Task<ReconcileResult> RefreshAsync(Guid mountId, string actor, CancellationToken cancellationToken)
+    public async Task<ReconcileResult> RefreshAsync(Guid mountId, string actor, CancellationToken cancellationToken, VerifiedCredential? credential = null, bool fromSession = false)
     {
         Mount mount = providers.Store.Mounts().FirstOrDefault(item => item.Id == mountId) ?? throw new ProviderConfigurationException("The mount does not exist.");
         try
@@ -147,7 +147,8 @@ internal sealed class ProviderAdmin(ProviderAuthority providers, AdminAudit audi
         string detail = result.Complete ? $"added {result.Added}, removed {result.Removed}, changed {result.Changed}" : "the provider listing was incomplete; nothing changed";
 
         // Best effort, like the refresh itself: the entries already follow the provider.
-        audit.TryRecord(AdminEvent.Provider("namespace-refreshed", [mount.LogicalPath], detail, actor));
+        AdminEvent refreshed = AdminEvent.Provider("namespace-refreshed", [mount.LogicalPath], detail, actor, fromSession ? null : credential);
+        audit.TryRecord(refreshed with { SessionKey = fromSession ? credential : null });
 
         return result;
     }
@@ -168,52 +169,52 @@ internal sealed class ProviderAdmin(ProviderAuthority providers, AdminAudit audi
     internal const string GrantsChanged = "the active grants this change ends are not the ones shown (one was approved or ended since); nothing was changed, ask again";
 
     /// <summary>Adds an instance; its provider-added event commits in the same transaction (a failed audit write rolls the change back).</summary>
-    internal ProviderInstance AddInstance(string name, string type, string configuration, TimeSpan maxStale, string key)
+    internal ProviderInstance AddInstance(string name, string type, string configuration, TimeSpan maxStale, VerifiedCredential key)
     {
         return providers.Store.AddInstance(name, type, configuration, maxStale,
-            (connection, transaction) => audit.Append(connection, transaction, AdminEvent.Provider("provider-added", [name], $"type {type}; fields {Fields(configuration)}; max stale {Seconds(maxStale)} s", key)));
+            (connection, transaction) => audit.Append(connection, transaction, AdminEvent.Provider("provider-added", [name], $"type {type}; fields {Fields(configuration)}; max stale {Seconds(maxStale)} s", key.Name, key)));
     }
 
-    internal ProviderInstance Reconfigure(ProviderInstance current, string configuration, string key)
+    internal ProviderInstance Reconfigure(ProviderInstance current, string configuration, VerifiedCredential key)
     {
         return providers.Store.UpdateConfiguration(current.Id, configuration,
-            (connection, transaction) => audit.Append(connection, transaction, AdminEvent.Provider("provider-config-changed", [current.Name], $"revision {current.Revision} -> {current.Revision + 1}; fields {Fields(configuration)}", key)));
+            (connection, transaction) => audit.Append(connection, transaction, AdminEvent.Provider("provider-config-changed", [current.Name], $"revision {current.Revision} -> {current.Revision + 1}; fields {Fields(configuration)}", key.Name, key)));
     }
 
     /// <summary>Policy only: the revision stays (<see cref="ProviderStore.SetMaxStale" />).</summary>
-    internal ProviderInstance SetMaxStale(ProviderInstance current, TimeSpan maxStale, string key)
+    internal ProviderInstance SetMaxStale(ProviderInstance current, TimeSpan maxStale, VerifiedCredential key)
     {
         return providers.Store.SetMaxStale(current.Id, maxStale,
-            (connection, transaction) => audit.Append(connection, transaction, AdminEvent.Provider("provider-max-stale-changed", [current.Name], $"max stale {Seconds(current.MaxStale)} s -> {Seconds(maxStale)} s", key)));
+            (connection, transaction) => audit.Append(connection, transaction, AdminEvent.Provider("provider-max-stale-changed", [current.Name], $"max stale {Seconds(current.MaxStale)} s -> {Seconds(maxStale)} s", key.Name, key)));
     }
 
     /// <summary>Removes an instance that has no mounts and its cache rows; returns how many rows were deleted.</summary>
-    internal int RemoveInstance(ProviderInstance current, string key)
+    internal int RemoveInstance(ProviderInstance current, VerifiedCredential key)
     {
         return providers.Store.RemoveInstance(current.Id,
-            (connection, transaction, rows) => audit.Append(connection, transaction, AdminEvent.Provider("provider-removed", [current.Name], $"type {current.ProviderType}; {rows} cache rows deleted", key)));
+            (connection, transaction, rows) => audit.Append(connection, transaction, AdminEvent.Provider("provider-removed", [current.Name], $"type {current.ProviderType}; {rows} cache rows deleted", key.Name, key)));
     }
 
     /// <summary>
     /// Adds a mount. <paramref name="expectedEnded" /> is the number of active grants the signed sentence said would end: inside the transaction, when the change would end
     /// another number, it is rolled back (<see cref="GrantsChanged" />), so no grant ends that the administrator was not shown.
     /// </summary>
-    internal Mount AddMount(ProviderInstance instance, MountKind kind, string logicalPath, string basePath, int expectedEnded, string key)
+    internal Mount AddMount(ProviderInstance instance, MountKind kind, string logicalPath, string basePath, int expectedEnded, VerifiedCredential key)
     {
         return providers.Store.AddMount(instance.Id, kind, logicalPath, basePath, (connection, transaction, ended) =>
         {
             RequireEnded(ended, expectedEnded);
-            audit.Append(connection, transaction, AdminEvent.Provider("mount-added", [logicalPath], $"{KindName(kind)} mount of {instance.Name}; {ended} active grants ended", key));
+            audit.Append(connection, transaction, AdminEvent.Provider("mount-added", [logicalPath], $"{KindName(kind)} mount of {instance.Name}; {ended} active grants ended", key.Name, key));
         });
     }
 
     /// <summary>Removes a mount; as <see cref="AddMount" />, rolled back when it would end another number of grants than <paramref name="expectedEnded" />.</summary>
-    internal void RemoveMount(Mount mount, string instanceName, int expectedEnded, string key)
+    internal void RemoveMount(Mount mount, string instanceName, int expectedEnded, VerifiedCredential key)
     {
         providers.Store.RemoveMount(mount.Id, (connection, transaction, ended) =>
         {
             RequireEnded(ended, expectedEnded);
-            audit.Append(connection, transaction, AdminEvent.Provider("mount-removed", [mount.LogicalPath], $"{KindName(mount.Kind)} mount of {instanceName}; {ended} active grants ended", key));
+            audit.Append(connection, transaction, AdminEvent.Provider("mount-removed", [mount.LogicalPath], $"{KindName(mount.Kind)} mount of {instanceName}; {ended} active grants ended", key.Name, key));
         });
     }
 
@@ -247,7 +248,7 @@ internal sealed class ProviderAdmin(ProviderAuthority providers, AdminAudit audi
     /// After a mount or configuration change was committed: refreshes the namespaces of <paramref name="mounts" /> within one deadline.
     /// Returns null when all were listed, or a summary of how many still need refreshing.
     /// </summary>
-    internal async Task<string?> RefreshAfterChangeAsync(IReadOnlyList<Mount> mounts, string key)
+    internal async Task<string?> RefreshAfterChangeAsync(IReadOnlyList<Mount> mounts, VerifiedCredential key)
     {
         int failed = 0;
         using CancellationTokenSource deadline = new(RefreshDeadline);
@@ -261,7 +262,7 @@ internal sealed class ProviderAdmin(ProviderAuthority providers, AdminAudit audi
 
             try
             {
-                if (!(await RefreshAsync(mount.Id, key, deadline.Token).ConfigureAwait(false)).Complete)
+                if (!(await RefreshAsync(mount.Id, key.Name, deadline.Token, key).ConfigureAwait(false)).Complete)
                 {
                     failed++;
                 }

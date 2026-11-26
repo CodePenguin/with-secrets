@@ -64,17 +64,27 @@ internal static class KeyVaultTests
         {
             CryptographicOperations.ZeroMemory(reviewPrivate);
         }
-        Manifest more = withStore.WithKey(phone.Record("localhost", "phone", mk));
-        check(more.Vault == vault && more.Keys.Count == 2 && more.Keys.All(key => key.Slot is not null) && more.WithSettings(ToolSettings.Defaults).Vault == vault && more.WithoutKey(more.Keys[0].Id).Vault == vault && more.WithSecrets(publicKey, new Dictionary<string, string>()).Vault == vault,
+        PasskeyRecord phoneRecord = phone.Record("localhost", "phone", mk);
+        Manifest more = withStore.WithKey(phoneRecord);
+        ManifestKey convenience = more.Keys.Single(key => !key.Admin);
+        check(more.Vault == vault && more.Keys.Count == 2 && more.Admins.Single().Slot == slot && convenience.Slot is null
+            && more.WithSettings(ToolSettings.Defaults).Vault == vault && more.WithoutKey(convenience.Id).Vault == vault && more.WithSecrets(publicKey, new Dictionary<string, string>()).Vault == vault,
             "slot manifest: key, settings and secret changes keep the vault and the slots");
         check(more.Review == review && more.WithSettings(ToolSettings.Defaults).Review == review
             && more.WithoutKey(more.Keys[0].Id).Review == review && more.WithSecrets(publicKey, new Dictionary<string, string>()).Review == review,
             "review key: ordinary manifest changes carry the review key");
 
-        // A manifest is not valid when a key has no slot, a slot is not the right shape, or the vault does not go with the store key.
+        KeySlot phoneSlot = phoneRecord.Slot!;
+        Manifest forged = more with { Keys = [.. more.Keys.Select(key => key.Admin ? key : key with { Slot = phoneSlot })] };
+        using Unlock phoneUnlock = new(phoneRecord.Id, phone.Prf(Base64Url.DecodeFromChars(phoneSlot.Salt))!);
+        check(Fails(() => KeyVault.OpenMaster(more, phoneUnlock)) && Fails(() => KeyVault.OpenMaster(forged, phoneUnlock)),
+            "slot manifest: OpenMaster refuses a convenience key, even when it is given a working slot");
+
+        // A valid admin slot has the expected shape, and the vault must go with the store key.
         (string Name, Manifest Value)[] invalid =
         [
-            ("a key without a slot", Manifest.First(record with { Slot = null }, ToolSettings.Defaults)),
+            ("an admin key without a slot", Manifest.First(record with { Slot = null }, ToolSettings.Defaults)),
+            ("a convenience key with a slot", forged),
             ("a salt of 16 bytes", Manifest.First(record with { Slot = slot with { Salt = Base64Url.EncodeToString(new byte[16]) } }, ToolSettings.Defaults)),
             ("a salt that is not base64url", Manifest.First(record with { Slot = slot with { Salt = "%%%" } }, ToolSettings.Defaults)),
             ("a wrap of 59 bytes", Manifest.First(record with { Slot = slot with { Wrap = Base64Url.EncodeToString(new byte[59]) } }, ToolSettings.Defaults)),

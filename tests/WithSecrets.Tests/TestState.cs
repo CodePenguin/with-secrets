@@ -281,8 +281,10 @@ internal static class TestState
             return false;
         }
 
-        // Every key of one test state wraps the same master key, so a vault made for the state opens with any of them.
-        record = TestVault.Reslot(db, record);
+        if (current is null || admin)
+        {
+            record = TestVault.Reslot(db, record);
+        }
 
         Manifest first = Manifest.First(record, settings ?? ToolSettings.Defaults);
         if (withStore && current is null)
@@ -293,6 +295,14 @@ internal static class TestState
         }
 
         return Write(db, current is null ? first : current.WithKey(record, admin));
+    }
+
+    /// <summary>Adds <paramref name="who" /> as a convenience key to a state that has an admin.</summary>
+    public static bool AddConvenience(StateDatabase db, TestAuthenticator who, string name)
+    {
+        PasskeyRecord record = who.Record("localhost", name) with { Created = DateTimeOffset.UtcNow };
+
+        return Current(db) is { } current && Write(db, current.WithKey(record, false));
     }
 
     /// <summary>A state at <paramref name="path" /> with one admin key (localhost) and these settings, for tests that need a manifest.</summary>
@@ -340,7 +350,7 @@ internal static class TestState
 }
 
 /// <summary>
-/// The master key of a test state and what opens it. <see cref="TestState.Add" /> gives every key of a state a slot of the same
+/// The master key of a test state and what opens it. <see cref="TestState.Add" /> gives every admin key a slot of the same
 /// master key; a test that needs the secret store's vault makes it with <see cref="Master" />, and plays a passkey's PRF
 /// release with <see cref="Unlock" />.
 /// </summary>
@@ -375,7 +385,7 @@ internal static class TestVault
     /// <summary>The recovery slot of this state's master key and recovery code, for the store with this public key.</summary>
     public static KeySlot RecoverySlot(StateDatabase db, string storePublicKey) => KeyVault.NewRecoverySlot(Master(db), RecoveryCode(db), storePublicKey);
 
-    /// <summary>The one slot salt of the state at this database: every key's slot shares it.</summary>
+    /// <summary>The one slot salt of the state at this database: every admin key's slot shares it.</summary>
     public static byte[] Salt(StateDatabase db) => Salts.GetOrAdd(Path.GetFullPath(db.FilePath), _ => KeyVault.NewSalt());
 
     /// <summary>The record with a slot of this state's master key, when its authenticator is known and has PRF.</summary>

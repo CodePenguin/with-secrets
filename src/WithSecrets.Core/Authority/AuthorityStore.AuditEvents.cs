@@ -55,7 +55,7 @@ public sealed partial class AuthorityStore
             int before = ReadRetention(connection, transaction);
             WithSecretsDatabase.Execute(connection, transaction, "INSERT INTO authority_settings (name, value) VALUES ($name, $value) ON CONFLICT(name) DO UPDATE SET value = $value",
                 ("$name", RetentionSetting), ("$value", days.ToString(CultureInfo.InvariantCulture)));
-            Audit(connection, transaction, "audit-retention-changed", null, null, actor, $"audit retention {before} to {days} days");
+            Audit(connection, transaction, "audit-retention-changed", null, null, actor, $"audit retention {before} to {days} days", admin.Key);
 
             return 0;
         });

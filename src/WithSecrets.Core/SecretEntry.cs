@@ -113,6 +113,8 @@ public static class SecretEntry
         private const int Kept = 16;
 
         private readonly Lock _gate = new();
+        internal VerifiedCredential? VerifiedFailure { get; private set; }
+
         private readonly TaskCompletionSource<SecretChange> _decision = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         // By base64url SHA-256 of the page's ct: the next manifest and the store rows made from it. No value is kept.
@@ -333,9 +335,10 @@ public static class SecretEntry
             }
 
             SignedManifest signed = new(prepared.Manifest, manifestBind, assertion);
-            string? problemWriting = store.TryApply(manifest.Version, signed, prepared.Rows, [], AdminEvent.Secrets("secrets-set", names, result.Detail, AdminAudit.KeyName(result.Detail)));
+            string? problemWriting = store.TryApply(manifest.Version, signed, prepared.Rows, [], AdminEvent.Secrets("secrets-set", names, result.Detail, result.Credential?.Name ?? AdminAudit.KeyName(result.Detail), result.Credential));
             if (problemWriting is not null)
             {
+                VerifiedFailure = result.Credential;
                 _decision.TrySetResult(new SecretChange(RunCommand.StoreError, problemWriting));
 
                 return Failed;

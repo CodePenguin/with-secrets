@@ -68,7 +68,7 @@ public sealed class PairingService(AuthorityStore store, byte[] identityCertific
     /// <summary>The address the invitation carries (the machine endpoint), or null when there is none.</summary>
     public string? AuthorityUrl => authorityUrl();
 
-    public (CreatedInvitation? Created, string? Problem) Create(string actor)
+    public (CreatedInvitation? Created, string? Problem) Create(string actor, VerifiedCredential? approver = null)
     {
         if (authorityUrl() is not { } url)
         {
@@ -81,7 +81,7 @@ public sealed class PairingService(AuthorityStore store, byte[] identityCertific
         try
         {
             DateTimeOffset expires = _clock.GetUtcNow() + PairingProtocol.InvitationLifetime;
-            if (store.CreateInvitation(id, expires, actor, PairingProtocol.MaxOpenInvitations) is { } problem)
+            if (store.CreateInvitation(id, expires, actor, PairingProtocol.MaxOpenInvitations, approver) is { } problem)
             {
                 return (null, problem);
             }
@@ -97,9 +97,9 @@ public sealed class PairingService(AuthorityStore store, byte[] identityCertific
         }
     }
 
-    public bool Revoke(string id, string actor)
+    public bool Revoke(string id, string actor, VerifiedCredential? approver = null)
     {
-        bool revoked = store.RevokeInvitation(id, actor);
+        bool revoked = store.RevokeInvitation(id, actor, approver);
         Forget(id);
 
         return revoked;

@@ -31,7 +31,7 @@ public sealed class Unlock(string credentialId, byte[] output) : IDisposable
 }
 
 /// <summary>
-/// The crypto of the key slots, in two layers. Each PRF-capable passkey has a slot that wraps a stable master key MK; one vault
+/// The crypto of the key slots, in two layers. Each admin passkey has a slot that wraps a stable master key MK; one vault
 /// wraps the secret store's private key K (PKCS#8 encoded as base64url text) under MK.
 /// <list type="bullet">
 /// <item>Slot: <c>KEK = HKDF-SHA256(ikm: PRF output, salt: slot salt, info: "with-secrets/v1 slot")</c>, then AES-256-GCM of MK under
@@ -224,11 +224,11 @@ internal static class KeyVault
     /// <summary>
     /// The master key, opened with what a passkey released at an approval: the slot of the key with that credential id in
     /// <paramref name="manifest" />. The caller zeroes the result. Throws <see cref="CryptographicException" /> when the key has
-    /// no slot or the output does not open it.
+    /// no admin slot or the output does not open it.
     /// </summary>
     public static byte[] OpenMaster(Manifest manifest, Unlock unlock)
     {
-        if (manifest.Keys.FirstOrDefault(key => key.Id == unlock.CredentialId)?.Slot is not { } slot)
+        if (manifest.Keys.FirstOrDefault(key => key.Id == unlock.CredentialId) is not { Admin: true, Slot: { } slot })
         {
             throw Failed();
         }

@@ -24,7 +24,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Whether the service is running, locked or unlocked, the unlock mode and the versions (public). */
+        /** Whether the service is running, whether it uses a remote authority, the local authority's lock state and the versions (public). */
         get: operations["getStatus"];
         put?: never;
         post?: never;
@@ -478,7 +478,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** The signed approval text of a grant, available while review is open (state open, locked or none); an approval-only session gets 403 admin-required. */
+        /** The signed approval text of a grant, available while the authority is unlocked, which opens review (state open, locked or none). */
         get: operations["getGrantReview"];
         put?: never;
         post?: never;
@@ -546,7 +546,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Audit retention, the unlock mode, the session timeouts and the authority key in use (read-only session). */
+        /** Audit retention, the session timeouts and the authority key in use (read-only session). */
         get: operations["getSettings"];
         put?: never;
         post?: never;
@@ -568,7 +568,7 @@ export interface paths {
         put?: never;
         /**
          * Create a one-time pairing invitation for a new machine. The answer carries the invitation bundle (address, identifier and pairing code) ONCE; it is never stored in readable form, never logged and cannot be read again.
-         * @description Create a one-time pairing invitation for a new machine. The answer carries the invitation bundle (address, identifier and pairing code) ONCE; it is never stored in readable form, never logged and cannot be read again. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Create a one-time pairing invitation for a new machine. The answer carries the invitation bundle (address, identifier and pairing code) ONCE; it is never stored in readable form, never logged and cannot be read again. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         post: operations["createPairingInvitation"];
         delete?: never;
@@ -589,7 +589,7 @@ export interface paths {
         put?: never;
         /**
          * Add a passkey: after its authorization the enrollment pages (their own passkey taps) are started; the answer is the link of the first.
-         * @description Add a passkey: after its authorization the enrollment pages (their own passkey taps) are started; the answer is the link of the first. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Add a passkey: after its authorization the enrollment pages (their own passkey taps) are started; the answer is the link of the first. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         post: operations["addPasskey"];
         delete?: never;
@@ -610,7 +610,7 @@ export interface paths {
         put?: never;
         /**
          * Add a provider instance.
-         * @description Add a provider instance. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Add a provider instance. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         post: operations["addProvider"];
         delete?: never;
@@ -632,7 +632,7 @@ export interface paths {
         post?: never;
         /**
          * Remove a provider instance with no mounts.
-         * @description Remove a provider instance with no mounts. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Remove a provider instance with no mounts. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         delete: operations["removeProvider"];
         options?: never;
@@ -686,7 +686,7 @@ export interface paths {
         put?: never;
         /**
          * Add a provider mount and end grants whose source changes.
-         * @description Add a provider mount and end grants whose source changes. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Add a provider mount and end grants whose source changes. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         post: operations["addMount"];
         delete?: never;
@@ -825,7 +825,7 @@ export interface paths {
         get?: never;
         /**
          * Change a provider instance configuration.
-         * @description Change a provider instance configuration. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Change a provider instance configuration. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         put: operations["changeProviderConfig"];
         post?: never;
@@ -845,7 +845,7 @@ export interface paths {
         get?: never;
         /**
          * Change the provider instance cache policy.
-         * @description Change the provider instance cache policy. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Change the provider instance cache policy. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         put: operations["changeProviderMaxStale"];
         post?: never;
@@ -867,7 +867,7 @@ export interface paths {
         post?: never;
         /**
          * Remove a provider mount and end grants whose source changes.
-         * @description Remove a provider mount and end grants whose source changes. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Remove a provider mount and end grants whose source changes. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         delete: operations["removeMount"];
         options?: never;
@@ -954,30 +954,10 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Unlock the authority (needs no session, but its own authorization).
-         * @description Unlock the authority (needs no session, but its own authorization). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * Unlock the local authority (needs no session, but its own authorization). Remote hosts refuse this operation.
+         * @description Unlock the local authority (needs no session, but its own authorization). Remote hosts refuse this operation. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         post: operations["unlockAuthority"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/review/unlock": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Open approved command text for review with an administrator passkey's key release.
-         * @description Open approved command text for review with an administrator passkey's key release. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
-         */
-        post: operations["unlockReview"];
         delete?: never;
         options?: never;
         head?: never;
@@ -994,30 +974,10 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Lock the authority now: secret requests stop, held keys are discarded and every session and authorization ends.
-         * @description Lock the authority now: secret requests stop, held keys are discarded and every session and authorization ends. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * Lock the local authority: secret requests stop, held keys are discarded and every session and authorization ends. Remote hosts refuse this operation.
+         * @description Lock the local authority: secret requests stop, held keys are discarded and every session and authorization ends. Remote hosts refuse this operation. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         post: operations["lockAuthority"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/settings/unlock-policy": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        /**
-         * Set the unlock mode (manual, or the weaker unattended mode).
-         * @description Set the unlock mode (manual, or the weaker unattended mode). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
-         */
-        put: operations["setUnlockPolicy"];
-        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1034,7 +994,7 @@ export interface paths {
         get?: never;
         /**
          * Set how many days audit events are kept (0 keeps everything).
-         * @description Set how many days audit events are kept (0 keeps everything). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Set how many days audit events are kept (0 keeps everything). Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         put: operations["setAuditRetention"];
         post?: never;
@@ -1054,7 +1014,7 @@ export interface paths {
         get?: never;
         /**
          * Set the idle and absolute timeouts of administrator sessions.
-         * @description Set the idle and absolute timeouts of administrator sessions. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Set the idle and absolute timeouts of administrator sessions. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         put: operations["setSessionTimeouts"];
         post?: never;
@@ -1075,7 +1035,7 @@ export interface paths {
         put?: never;
         /**
          * Rotate the authority signing key (a transition the current key signs).
-         * @description Rotate the authority signing key (a transition the current key signs). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Rotate the authority signing key (a transition the current key signs). Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         post: operations["rotateAuthorityKey"];
         delete?: never;
@@ -1095,7 +1055,7 @@ export interface paths {
         put?: never;
         /**
          * Recover the authority signing key (no transition; other hosts must enroll again).
-         * @description Recover the authority signing key (no transition; other hosts must enroll again). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Recover the authority signing key (no transition; other hosts must enroll again). Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         post: operations["recoverAuthorityKey"];
         delete?: never;
@@ -1115,7 +1075,7 @@ export interface paths {
         put?: never;
         /**
          * Approve a pending machine with a friendly name (or re-pin the authority key for this machine).
-         * @description Approve a pending machine with a friendly name (or re-pin the authority key for this machine). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Approve a pending machine with a friendly name (or re-pin the authority key for this machine). Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         post: operations["approveMachine"];
         delete?: never;
@@ -1135,7 +1095,7 @@ export interface paths {
         put?: never;
         /**
          * Disable a machine (it is denied until enabled; its grants end).
-         * @description Disable a machine (it is denied until enabled; its grants end). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Disable a machine (it is denied until enabled; its grants end). Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         post: operations["disableMachine"];
         delete?: never;
@@ -1155,7 +1115,7 @@ export interface paths {
         put?: never;
         /**
          * Enable a disabled machine (it starts clean).
-         * @description Enable a disabled machine (it starts clean). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Enable a disabled machine (it starts clean). Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         post: operations["enableMachine"];
         delete?: never;
@@ -1175,7 +1135,7 @@ export interface paths {
         put?: never;
         /**
          * Withdraw trust from a machine.
-         * @description Withdraw trust from a machine. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Withdraw trust from a machine. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         post: operations["untrustMachine"];
         delete?: never;
@@ -1195,7 +1155,7 @@ export interface paths {
         put?: never;
         /**
          * Trust an untrusted machine again, confirmed by typing its full fingerprint.
-         * @description Trust an untrusted machine again, confirmed by typing its full fingerprint. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Trust an untrusted machine again, confirmed by typing its full fingerprint. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         post: operations["trustMachine"];
         delete?: never;
@@ -1215,7 +1175,7 @@ export interface paths {
         put?: never;
         /**
          * Rename a machine (display only).
-         * @description Rename a machine (display only). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Rename a machine (display only). Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         post: operations["renameMachine"];
         delete?: never;
@@ -1235,7 +1195,7 @@ export interface paths {
         put?: never;
         /**
          * Accept the new host name a machine reported.
-         * @description Accept the new host name a machine reported. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Accept the new host name a machine reported. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         post: operations["approveMachineHostChange"];
         delete?: never;
@@ -1255,7 +1215,7 @@ export interface paths {
         put?: never;
         /**
          * Extend a grant by minutes, or to no end.
-         * @description Extend a grant by minutes, or to no end. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Extend a grant by minutes, or to no end. Needs a session with grants.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         post: operations["extendGrant"];
         delete?: never;
@@ -1275,7 +1235,7 @@ export interface paths {
         put?: never;
         /**
          * Renew an ended grant for minutes from now, or to no end.
-         * @description Renew an ended grant for minutes from now, or to no end. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Renew an ended grant for minutes from now, or to no end. Needs a session with grants.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         post: operations["renewGrant"];
         delete?: never;
@@ -1295,7 +1255,7 @@ export interface paths {
         put?: never;
         /**
          * Make a new grant with the same scope as a used once-only grant.
-         * @description Make a new grant with the same scope as a used once-only grant. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Make a new grant with the same scope as a used once-only grant. Needs a session with grants.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         post: operations["replaceGrant"];
         delete?: never;
@@ -1315,7 +1275,7 @@ export interface paths {
         put?: never;
         /**
          * Revoke a grant (it ends now and its machine is told).
-         * @description Revoke a grant (it ends now and its machine is told). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Revoke a grant (it ends now and its machine is told). Needs a session with grants.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         post: operations["revokeGrant"];
         delete?: never;
@@ -1335,7 +1295,7 @@ export interface paths {
         put?: never;
         /**
          * Revoke a pending pairing invitation (it can no longer be used).
-         * @description Revoke a pending pairing invitation (it can no longer be used). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Revoke a pending pairing invitation (it can no longer be used). Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         post: operations["revokePairingInvitation"];
         delete?: never;
@@ -1355,7 +1315,7 @@ export interface paths {
         put?: never;
         /**
          * Rotate the secret store key and the master key: after its authorization the rotation pages (two admin passkey taps) are started; the answer is the link of the first. Only the tapped passkey stays and a new code for recovery is shown once.
-         * @description Rotate the secret store key and the master key: after its authorization the rotation pages (two admin passkey taps) are started; the answer is the link of the first. Only the tapped passkey stays and a new code for recovery is shown once. Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Rotate the secret store key and the master key: after its authorization the rotation pages (two admin passkey taps) are started; the answer is the link of the first. Only the tapped passkey stays and a new code for recovery is shown once. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         post: operations["rotateStoreKey"];
         delete?: never;
@@ -1375,7 +1335,7 @@ export interface paths {
         put?: never;
         /**
          * Remove a passkey (any key but the last admin key).
-         * @description Remove a passkey (any key but the last admin key). Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * @description Remove a passkey (any key but the last admin key). Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         post: operations["removePasskey"];
         delete?: never;
@@ -1458,8 +1418,7 @@ export interface components {
         Status: {
             running: boolean;
             locked: boolean;
-            /** @enum {string} */
-            unlockMode: "manual" | "unattended";
+            remote: boolean;
             apiVersion: string;
             version: string;
             protocolVersion: number;
@@ -1575,7 +1534,7 @@ export interface components {
             identity: string | null;
             /** @enum {string|null} */
             scope: "admin" | "approval" | null;
-            capabilities: ("approvals.read" | "approvals.decide" | "admin.read" | "admin.decide")[];
+            capabilities: ("approvals.read" | "approvals.decide" | "admin.read" | "admin.decide" | "grants.decide")[];
             /** Format: date-time */
             started: string | null;
             /** Format: date-time */
@@ -1677,7 +1636,6 @@ export interface components {
             inheritedEnvironmentLine: string | null;
             extraLines: string[];
             canonicalText: string;
-            requiresUnlock: boolean;
             heading: string | null;
             times: number[] | null;
             allowOnce: boolean;
@@ -1709,7 +1667,6 @@ export interface components {
             };
             /** Format: date-time */
             expiresAt: string;
-            prfKey: string | null;
         };
         /** @description A warning (never a decision) that this machine's identity may have been copied: its connection was repeatedly superseded by a connection from a different address. */
         CopyWarning: {
@@ -1821,6 +1778,10 @@ export interface components {
             machine: string | null;
             actor: string;
             detail: string;
+            /** @description Credential roles and identities recorded with the change. */
+            metadata: {
+                [key: string]: string;
+            };
         };
         AuditChangeList: {
             items: components["schemas"]["AuditChange"][];
@@ -1841,9 +1802,6 @@ export interface components {
             items: components["schemas"]["AuditGap"][];
         };
         Settings: {
-            /** @enum {string} */
-            unlockMode: "manual" | "unattended";
-            unlockModeDescription: string;
             auditRetentionDays: number;
             sessionIdleMinutes: number;
             sessionAbsoluteMinutes: number;
@@ -1873,7 +1831,7 @@ export interface components {
             /** @description Carry this in the `authorization` member of the one mutation it was made for. */
             id: string;
             /** @enum {string} */
-            operation: "unlock" | "review-unlock" | "lock" | "policy-manual" | "policy-unattended" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
+            operation: "unlock" | "lock" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
             /** @enum {string} */
             state: "pending" | "verified" | "refused" | "consumed" | "expired";
             detail: string | null;
@@ -1901,7 +1859,7 @@ export interface components {
         InlineAuthorization: {
             id: string;
             /** @enum {string} */
-            operation: "unlock" | "review-unlock" | "lock" | "policy-manual" | "policy-unattended" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
+            operation: "unlock" | "lock" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
             /** @enum {string} */
             state: "pending";
             detail: string | null;
@@ -1936,7 +1894,7 @@ export interface components {
              * @description The operation to authorize.
              * @enum {string}
              */
-            operation: "unlock" | "review-unlock" | "lock" | "policy-manual" | "policy-unattended" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
+            operation: "unlock" | "lock" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
             parameters?: {
                 config?: string;
             } & {
@@ -2935,11 +2893,6 @@ export interface operations {
                         authenticatorData: string;
                         clientDataJSON: string;
                         signature: string;
-                    };
-                    prf?: {
-                        epk: string;
-                        iv: string;
-                        ct: string;
                     };
                     minutes?: number;
                 };
@@ -8131,123 +8084,6 @@ export interface operations {
             };
         };
     };
-    unlockReview: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": {
-                    /** @description The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap. */
-                    authorization: string;
-                };
-            };
-        };
-        responses: {
-            /** @description Success. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["MutationResponse"];
-                };
-            };
-            /** @description The request is not valid (invalid-request, invalid-json). */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description No browser session (session-required). */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description The operation does not apply, or the change failed (operation-refused, operation-failed). */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description The body is too large (payload-too-large). */
-            413: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description The body is not application/json (unsupported-media-type). */
-            415: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description The Host is not a loopback name (host-not-allowed). */
-            421: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description The authority is locked (authority-locked). */
-            423: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too many requests (too-many-requests). */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description The request failed (internal-error). Nothing the response does not say was changed. */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
     lockAuthority: {
         parameters: {
             query?: never;
@@ -8260,128 +8096,6 @@ export interface operations {
                 "application/json": {
                     /** @description The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap. */
                     authorization: string;
-                };
-            };
-        };
-        responses: {
-            /** @description Success. */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["MutationResponse"];
-                };
-            };
-            /** @description The request is not valid (invalid-request, invalid-json). */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description No browser session (session-required). */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description The operation does not apply, or the change failed (operation-refused, operation-failed). */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description The body is too large (payload-too-large). */
-            413: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description The body is not application/json (unsupported-media-type). */
-            415: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description The Host is not a loopback name (host-not-allowed). */
-            421: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description The authority is locked (authority-locked). */
-            423: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description Too many requests (too-many-requests). */
-            429: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description The request failed (internal-error). Nothing the response does not say was changed. */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-        };
-    };
-    setUnlockPolicy: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": {
-                    /** @description The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap. */
-                    authorization: string;
-                    /**
-                     * @description The unlock mode.
-                     * @enum {string}
-                     */
-                    policy: "manual" | "unattended";
                 };
             };
         };

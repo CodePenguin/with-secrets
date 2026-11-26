@@ -77,6 +77,12 @@ with-secrets --reason "apply migrations" -- pwsh -NoProfile -File .\scripts\migr
 
 The whole command line, the inline code, every file read as code with its hash and contents (only those files: what a script sources, imports or reads from beside itself is not approved, and the page says so), the secret names and `.env` pairs, and warnings for what looks like a credential written in the command, a script or a plaintext `.env` value. A value that looks like a credential in an ordinary `.env` variable is shown as `[hidden]`; the approval still covers the real value.
 
+## Choosing passkeys
+
+Use an approval credential that requires an action the agent cannot perform. An unlocked software passkey manager in a browser the agent controls is risky. Consider a Windows Hello PIN or biometric, a hardware security key that requires your interaction, or a passkey on a separate phone. An authenticator's physical touch does not show what it is approving. Read the operation and command on the trusted page before providing the touch.
+
+Once an admin unlocks the authority, a convenience key can approve any command the service accepts, including a grant with no end. Choose a credential whose approval requires something the agent cannot do or obtain. An unlocked software passkey manager is risky if the agent can drive it. Windows Hello with a PIN or biometric, a physical security key, or a phone you control can require your participation. Read the approval page before tapping. A touch confirms presence but does not tell you what you approved.
+
 ## Limits
 
 The tool cannot stop a script from sending a secret somewhere. It limits what the program is given, shows the person what will run, and redacts the output, so the person's reading of the command is the control. Write commands that are easy to read.

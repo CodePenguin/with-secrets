@@ -243,7 +243,7 @@ internal static class OnePasswordTests
         }
         Manifest manifest = TestState.Current(state)!;
         using Unlock unlock = SecretStoreTests.AdminUnlock(state)!;
-        using var review = new ReviewKeys();
+        using var review = new UnlockedKeys();
         var authorityLock = new AuthorityLock();
         CancellationToken lockedToken = authorityLock.UnlockSessionToken;
         var registry = new ProviderRegistry();

@@ -7,20 +7,20 @@ public static class OnePasswordProvider
 {
     public const string ExecutableVariable = "WITH_SECRETS_ONEPASSWORD_EXECUTABLE";
 
-    public static void Register(ProviderRegistry registry, AuthorityLock authorityLock, ReviewKeys review, string executablePath)
+    public static void Register(ProviderRegistry registry, AuthorityLock authorityLock, UnlockedKeys keys, string executablePath)
     {
         registry.RegisterType(OnePasswordAdapter.ProviderType, OnePasswordAdapter.AdapterVersion,
             () => new OnePasswordAdapter(executablePath, () => authorityLock.UnlockSessionToken, (ciphertext, cancellationToken) =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 authorityLock.EnsureUnlocked();
-                if (!review.IsOpen)
+                if (!keys.IsOpen)
                 {
                     throw new ProviderAdapterException(ProviderErrorKind.InteractionRequired,
-                        "Open the authority review key with an administrator passkey to use 1Password.");
+                        "Unlock the authority with an administrator passkey to use 1Password.");
                 }
 
-                return ValueTask.FromResult(review.TryDecryptCurrent(ciphertext));
+                return ValueTask.FromResult(keys.TryDecryptCurrentReview(ciphertext));
             }),
             () => new OnePasswordConfiguration());
     }

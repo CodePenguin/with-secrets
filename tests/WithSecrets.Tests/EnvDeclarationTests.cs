@@ -12,7 +12,7 @@ internal sealed class RecordingSource(Dictionary<string, string> values, bool fa
 
     public IReadOnlyList<string> ListNames() => failList ? throw new SecretStoreException("the secret store failed verification (test)") : [.. values.Keys];
 
-    public SecretValues GetValues(IReadOnlyCollection<string> names, Unlock? unlock)
+    public SecretValues GetValues(IReadOnlyCollection<string> names)
     {
         Requests.Add([.. names]);
 

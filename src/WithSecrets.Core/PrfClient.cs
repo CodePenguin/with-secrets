@@ -71,9 +71,9 @@ internal static class PrfClient
     /// <summary>What a page that creates a passkey says: only a passkey that can do PRF can be used.</summary>
     public const string RequiredText = "Use a phone or a security key. The passkey must support PRF, or it is refused.";
 
-    /// <summary>What an approval page that releases the secret store key says.</summary>
-    public const string ApprovalHint = "Your passkey must support PRF: tapping it also releases the secret store key for this approval's run. "
-        + "The key is not stored; it is rebuilt from your passkey each time.";
+    /// <summary>What an admin page that releases the secret store key says (an unlock, an enrollment, a rotation; never a run or a grant).</summary>
+    public const string ApprovalHint = "Your passkey must support PRF: tapping it also releases the secret store key, which this step needs. "
+        + "The key is never written down; it is rebuilt from your passkey.";
 
     /// <summary>What a page says when the browser returned no PRF output for a passkey that was asked for it.</summary>
     public const string NoPrfOutput = "Your passkey did not release its PRF key, which this approval needs to open the secrets. Nothing was approved. Use a passkey from your phone or a security key.";

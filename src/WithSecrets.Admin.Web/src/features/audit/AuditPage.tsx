@@ -1,4 +1,4 @@
-import type { FormEvent } from 'react'
+import type { FormEvent, ReactNode } from 'react'
 import { Link, NavLink, useSearchParams } from 'react-router-dom'
 import { useAuditChanges, useAuditEvents, useAuditGaps, type AuditFilters } from '../../api/queries'
 import { Badge, Card, Empty, Facts, PageHeader } from '../../components/Card'
@@ -120,6 +120,41 @@ function Count({ n, singular, plural }: { n: number; singular: string; plural: s
   )
 }
 
+const passkeyRoles = [
+  ['key', 'Passkey used'],
+  ['sessionKey', 'Session passkey'],
+  ['grantApproved', 'Grant approved by'],
+  ['grantChanged', 'Grant changed by'],
+  ['unlock', 'Authority unlocked by'],
+] as const
+
+function auditMetadata(metadata: Record<string, string> = {}): Array<readonly [string, ReactNode]> {
+  const fields = new Set<string>()
+  const items: Array<readonly [string, ReactNode]> = []
+  for (const [prefix, role] of passkeyRoles) {
+    const [idField, nameField, adminField] = [prefix + 'Id', prefix + 'Name', prefix + 'Admin'] as const
+    const id = metadata[idField]
+    const name = metadata[nameField]
+    const admin = metadata[adminField]
+    if (!id || !name || (admin !== 'true' && admin !== 'false')) continue
+
+    items.push([role, <span title={id}>{name} ({admin === 'true' ? 'admin' : 'convenience'}, <code>{id.slice(0, 8)}</code>)</span>])
+    fields.add(idField)
+    fields.add(nameField)
+    fields.add(adminField)
+  }
+
+  if (items.length === 0) items.push(['Passkey used', 'None recorded'])
+
+  return [
+    ...items,
+    ...Object.entries(metadata)
+      .filter(([name]) => !fields.has(name))
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .map(([name, value]): [string, string] => ['Metadata: ' + name, value]),
+  ]
+}
+
 function Events({ filters }: { filters: AuditFilters }) {
   const events = useAuditEvents(filters, true)
   if (events.isPending) return <Loading what="events" />
@@ -148,10 +183,7 @@ function Events({ filters }: { filters: AuditFilters }) {
                 ...(event.grantId ? ([['Grant', <Link key="grant" to={`/audit?${new URLSearchParams({ grant: event.grantId }).toString()}`}>{event.grantId}</Link>]] as const) : []),
                 ...(event.exitCode !== null ? ([['Exit code', String(event.exitCode)]] as const) : []),
                 ['Sequence', String(event.sequence)],
-                // The metadata is data the host signed (names and fingerprints): shown as plain text, never as markup.
-                ...Object.entries(event.metadata)
-                  .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-                  .map(([name, value]): [string, string] => ['Metadata: ' + name, value]),
+                ...auditMetadata(event.metadata),
               ]}
             />
           </li>
@@ -181,6 +213,7 @@ function Changes({ filters }: { filters: AuditFilters }) {
                 ['By', change.actor],
                 ['Machine', change.machine ? <Link key="machine" to={`/audit/changes?${new URLSearchParams({ machine: change.machine }).toString()}`}>{change.machine}</Link> : 'none'],
                 ['Detail', change.detail],
+                ...auditMetadata(change.metadata),
               ]}
             />
           </li>

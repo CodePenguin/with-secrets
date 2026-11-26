@@ -45,7 +45,6 @@ public sealed record ApprovalReviewProjection(
     string? InheritedEnvironmentLine,
     IReadOnlyList<string> ExtraLines,
     string CanonicalText,
-    bool RequiresUnlock,
     string? Heading = null,
     IReadOnlyList<int>? Times = null,
     bool AllowOnce = true);
@@ -77,7 +76,7 @@ public sealed record ApprovalDetailDto(
     IReadOnlyList<string> Actions);
 
 /// <summary>Prepared SPA challenge material.</summary>
-public sealed record ApprovalChallengeDto(string FlowId, string Mode, JsonElement Payload, DateTimeOffset ExpiresAt, string? PrfKey = null);
+public sealed record ApprovalChallengeDto(string FlowId, string Mode, JsonElement Payload, DateTimeOffset ExpiresAt);
 
 /// <summary>API statuses for Approvals decision state (not execution).</summary>
 public enum ApprovalQueueRegistration
@@ -156,8 +155,6 @@ public sealed class ApprovalQueue : IDisposable
         public required DateTimeOffset ExpiresAt { get; init; }
         public required byte[] ReviewBind { get; init; }
         public required string Nonce { get; init; }
-        public byte[]? PrfState { get; init; }
-        public string? PrfKey { get; init; }
         public int Consumed;
     }
 
@@ -232,7 +229,6 @@ public sealed class ApprovalQueue : IDisposable
             shown.InheritedEnvironment is { } inherited ? EnvironmentBinding.Line(inherited) : null,
             [.. (shown.ExtraLines ?? []).Select(ApprovalSummary.Clean), .. new[] { ApprovalSummary.DotenvxLine(shown) }.OfType<string>()],
             canonical,
-            shown.Unlock,
             grant ? ApprovalSummary.Clean(shown.Heading!) : null,
             timed ? shown.Reuse!.WithAlways : null,
             !grant);
@@ -503,17 +499,14 @@ public sealed class ApprovalQueue : IDisposable
         // Leave the expiry callback armed while the authority commits. It retries while DecisionInProgress is true;
         // MarkCommitted changes Status before disposing the timer, so a racing expiry callback cannot be mistaken for a new timeout.
         DropFlowsUnlocked(entry.Review.RequestId);
-        if (!entry.Decision.TrySetResult(decision))
-        {
-            decision.Unlock?.Dispose();
-        }
+        entry.Decision.TrySetResult(decision);
     }
 
     private void DropFlowsUnlocked(string requestId)
     {
         foreach (string flowId in _flows.Where(item => item.Value.RequestId == requestId).Select(item => item.Key).ToList())
         {
-            if (_flows.Remove(flowId, out ProofFlow? flow) && flow.PrfState is not null) CryptographicOperations.ZeroMemory(flow.PrfState);
+            _flows.Remove(flowId);
         }
     }
 
@@ -642,14 +635,6 @@ public sealed class ApprovalQueue : IDisposable
             // Bind also covers digest, machine and fixed decision already present in CanonicalText; ReuseBinding minutes 0 = approve once.
             // Pass the base request bind to Start; the SPA derives the fixed reuse=0 challenge just as the one-shot page does.
             ProofContext context = new(bind, origin);
-            byte[]? prfState = null;
-            string? prfKey = null;
-            if (entry.Review.RequiresUnlock)
-            {
-                if (method is not PasskeyMethod) return (null, "internal-error", "the selected proof method cannot release the secret-store key");
-                (prfState, prfKey) = SecretCrypto.NewServerKey();
-            }
-
             ProofStart start;
             try
             {
@@ -657,18 +642,15 @@ public sealed class ApprovalQueue : IDisposable
             }
             catch (ProofUnavailableException)
             {
-                if (prfState is not null) CryptographicOperations.ZeroMemory(prfState);
                 return (null, "internal-error", "the passkey challenge could not be prepared");
             }
             catch (Exception error) when (error is not OutOfMemoryException)
             {
-                if (prfState is not null) CryptographicOperations.ZeroMemory(prfState);
                 return (null, "internal-error", "the passkey challenge could not be prepared");
             }
 
             if (start.Mode != "webauthn")
             {
-                if (prfState is not null) CryptographicOperations.ZeroMemory(prfState);
                 return (null, "internal-error", "this proof method cannot be used inside the administration page");
             }
 
@@ -687,8 +669,6 @@ public sealed class ApprovalQueue : IDisposable
                 ExpiresAt = expires,
                 ReviewBind = bind,
                 Nonce = nonce,
-                PrfState = prfState,
-                PrfKey = prfKey,
             };
             _flows[flow.FlowId] = flow;
 
@@ -700,7 +680,7 @@ public sealed class ApprovalQueue : IDisposable
     {
         using JsonDocument document = JsonDocument.Parse(flow.Start.Payload);
 
-        return new ApprovalChallengeDto(flow.FlowId, flow.Start.Mode, document.RootElement.Clone(), flow.ExpiresAt, flow.PrfKey);
+        return new ApprovalChallengeDto(flow.FlowId, flow.Start.Mode, document.RootElement.Clone(), flow.ExpiresAt);
     }
 
     public (ApprovalDetailDto? Detail, string? ProblemCode, string? DetailText) Approve(
@@ -710,7 +690,6 @@ public sealed class ApprovalQueue : IDisposable
         string proof,
         IProofMethod method,
         Func<string, ProcessedRequest?> processed,
-        string? prfJson = null,
         int minutes = 0)
     {
         ProofFlow? flow;
@@ -731,7 +710,6 @@ public sealed class ApprovalQueue : IDisposable
             if (flow.ExpiresAt <= clock.GetUtcNow() || Volatile.Read(ref flow.Consumed) != 0)
             {
                 _flows.Remove(flowId);
-                if (flow.PrfState is not null) CryptographicOperations.ZeroMemory(flow.PrfState);
 
                 return (null, "request-not-pending", "this proof is no longer valid");
             }
@@ -760,16 +738,6 @@ public sealed class ApprovalQueue : IDisposable
             }
 
             entry.DecisionInProgress = true;
-        }
-
-        if (flow.PrfState is null && prfJson is not null)
-        {
-            lock (_gate)
-            {
-                if (_entries.TryGetValue(requestId, out Entry? current) && ReferenceEquals(current, entry) && current.Status == ApprovalStatuses.Pending)
-                    current.DecisionInProgress = false;
-            }
-            return (null, "invalid-request", "unexpected secret-store key release data");
         }
 
         ProofResult verified;
@@ -805,30 +773,13 @@ public sealed class ApprovalQueue : IDisposable
             return ReconcileConflict(requestId, processed, expected: ApprovalStatuses.Approved);
         }
 
-        Unlock? unlock = null;
-        if (flow.PrfState is not null)
-        {
-            if (!SealedPrf.TryOpen(prfJson, flow.PrfState, flow.ReviewBind, proof, out unlock))
-            {
-                lock (_gate)
-                {
-                    _flows.Remove(flowId);
-                    CryptographicOperations.ZeroMemory(flow.PrfState);
-                    if (_entries.TryGetValue(requestId, out Entry? current) && ReferenceEquals(current, entry) && current.Status == ApprovalStatuses.Pending)
-                        ReleaseUnlocked(current, ApprovalDecision.Deny("the passkey did not release the secret-store key, so nothing was approved"));
-                }
-                return (GetDetail(requestId, processed), null, null);
-            }
-        }
-        // Every approval is a grant (once: a consumed once-only grant), so what was signed is kept for each of them, the time (0: once) included.
-        ApprovalDecision decision = ApprovalDecision.Allow(verified.Detail, reuseMinutes: minutes, evidence: new ApprovalEvidence(flow.Nonce, flow.CanonicalText, proof), unlock: unlock, actor: verified.Credential.Name, credential: verified.Credential);
+        // Every approval is a grant (once: a consumed once-only grant), so what was signed is kept for each of them, the time (0: once) included. The tap releases no key.
+        ApprovalDecision decision = ApprovalDecision.Allow(verified.Detail, reuseMinutes: minutes, evidence: new ApprovalEvidence(flow.Nonce, flow.CanonicalText, proof), actor: verified.Credential.Name, credential: verified.Credential);
         lock (_gate)
         {
             _flows.Remove(flowId);
-            if (flow.PrfState is not null) CryptographicOperations.ZeroMemory(flow.PrfState);
             if (!_entries.TryGetValue(requestId, out Entry? current) || !ReferenceEquals(current, entry) || current.Status != ApprovalStatuses.Pending)
             {
-                unlock?.Dispose();
                 return ReconcileConflict(requestId, processed, expected: ApprovalStatuses.Approved);
             }
 
@@ -841,7 +792,8 @@ public sealed class ApprovalQueue : IDisposable
     public (ApprovalDetailDto? Detail, string? ProblemCode, string? DetailText) Deny(
         string requestId,
         string sessionIdentity,
-        Func<string, ProcessedRequest?> processed)
+        Func<string, ProcessedRequest?> processed,
+        VerifiedCredential? sessionKey = null)
     {
         lock (_gate)
         {
@@ -863,7 +815,7 @@ public sealed class ApprovalQueue : IDisposable
                 return (null, "decision-already-made", "a different decision is already being committed for this request");
             }
 
-            ReleaseUnlocked(entry, ApprovalDecision.Deny("denied on the approvals page", sessionIdentity));
+            ReleaseUnlocked(entry, ApprovalDecision.Deny("denied on the approvals page", sessionIdentity) with { SessionKey = sessionKey });
         }
 
         return (GetDetail(requestId, processed), null, null);
@@ -948,7 +900,6 @@ public sealed class ApprovalQueue : IDisposable
         lock (_gate)
         {
             Entry[] entries = [.. _entries.Values];
-            ProofFlow[] flows = [.. _flows.Values];
             _entries.Clear();
             _flows.Clear();
 
@@ -958,11 +909,6 @@ public sealed class ApprovalQueue : IDisposable
                 entry.DecisionInProgress = false;
                                 entry.Expiry?.Dispose();
                 entry.Decision.TrySetResult(ApprovalDecision.Deny("the authority service stopped", reasonCode: ReasonCodes.Cancelled));
-            }
-
-            foreach (ProofFlow flow in flows)
-            {
-                if (flow.PrfState is not null) CryptographicOperations.ZeroMemory(flow.PrfState);
             }
         }
     }
@@ -986,7 +932,7 @@ public sealed class ApprovalQueue : IDisposable
 
         foreach (string flowId in _flows.Where(item => item.Value.ExpiresAt <= now || Volatile.Read(ref item.Value.Consumed) != 0).Select(item => item.Key).ToList())
         {
-            if (_flows.Remove(flowId, out ProofFlow? flow) && flow.PrfState is not null) CryptographicOperations.ZeroMemory(flow.PrfState);
+            _flows.Remove(flowId);
         }
     }
 

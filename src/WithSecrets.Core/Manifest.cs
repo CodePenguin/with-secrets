@@ -8,7 +8,7 @@ namespace WithSecrets;
 /// <summary>One key in the manifest. <see cref="Id" /> and <see cref="PublicKey" /> are base64url, as <see cref="PasskeyRecord" /> keeps them.</summary>
 public sealed record ManifestKey(string Id, string Name, string PublicKey, int Alg, string RpId, DateTimeOffset Created, bool Admin, KeySlot? Slot = null)
 {
-    public static ManifestKey From(PasskeyRecord record, bool admin) => new(record.Id, record.Name, record.PublicKey, record.Alg, record.RpId, record.Created, admin, record.Slot);
+    public static ManifestKey From(PasskeyRecord record, bool admin) => new(record.Id, record.Name, record.PublicKey, record.Alg, record.RpId, record.Created, admin, admin ? record.Slot : null);
 
     public PasskeyRecord Record(uint signCount) => new(Id, PublicKey, Alg, RpId, Name, Created, signCount, Admin, Slot);
 }
@@ -20,13 +20,13 @@ public sealed record ManifestKey(string Id, string Name, string PublicKey, int A
 /// <see cref="SignedManifest" />), and keys, the store key, the secret hashes and settings are read only from it.
 /// <para>
 /// The canonical text is exactly
-/// <c>{"v":N,"keys":[{"id":S,"name":S,"pub":S,"alg":N,"rp":S,"created":S,"admin":true|false,"slot":{"salt":S,"wrap":S}},...],"store":S,"vault":S[,"recovery":{"salt":S,"wrap":S}],"secrets":{NAME:HASH,...},"settings":SETTINGS}</c>:
+/// <c>{"v":N,"keys":[{"id":S,"name":S,"pub":S,"alg":N,"rp":S,"created":S,"admin":true|false[,"slot":{"salt":S,"wrap":S}]},...],"store":S,"vault":S[,"recovery":{"salt":S,"wrap":S}],"secrets":{NAME:HASH,...},"settings":SETTINGS}</c>:
 /// this member order, no white space, keys sorted by id (ordinal), secrets sorted by name (ordinal), numbers as plain invariant
 /// integers, strings written as <see cref="ToolSettings.Canonical" /> writes them (only <c>"</c> and <c>\</c> escaped, U+007F
 /// and up as <c>\uXXXX</c>), <c>created</c> in the round-trip ("O") format and SETTINGS the canonical settings JSON. Sign counts
 /// are not in it. <see cref="Store" /> is the store's public key (P-256 SubjectPublicKeyInfo encoded as base64url) or empty before the first
 /// secret, and <see cref="Vault" /> is then the store's private key wrapped under the master key (empty exactly when the store key is); the
-/// slot of a key is its entry of the master key (see <see cref="KeyVault" />), and every key has one; each HASH is <see cref="SecretStore.Hash" />
+/// slot of an admin key is its entry of the master key (see <see cref="KeyVault" />); each HASH is <see cref="SecretStore.Hash" />
 /// of that secret's stored ciphertext (64 lower-case hex digits). Anyone
 /// with the public key can make a valid ciphertext, so a row is trusted only when it matches its signed hash.
 /// </para>
@@ -104,11 +104,16 @@ public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, Too
             ToolSettings.Quote(text, key.RpId);
             text.Append(",\"created\":");
             ToolSettings.Quote(text, key.Created.ToString("O", CultureInfo.InvariantCulture));
-            text.Append(",\"admin\":").Append(key.Admin ? "true" : "false").Append(",\"slot\":{\"salt\":");
-            ToolSettings.Quote(text, key.Slot?.Salt ?? "");
-            text.Append(",\"wrap\":");
-            ToolSettings.Quote(text, key.Slot?.Wrap ?? "");
-            text.Append("}}");
+            text.Append(",\"admin\":").Append(key.Admin ? "true" : "false");
+            if (key.Slot is { } slot)
+            {
+                text.Append(",\"slot\":{\"salt\":");
+                ToolSettings.Quote(text, slot.Salt);
+                text.Append(",\"wrap\":");
+                ToolSettings.Quote(text, slot.Wrap);
+                text.Append('}');
+            }
+            text.Append('}');
         }
 
         text.Append("],\"store\":");
@@ -182,10 +187,14 @@ public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, Too
                 return "a key is not valid";
             }
 
-            // Every enrolled key is PRF-capable and has a slot of the right shape (this opens nothing).
-            if (key.Slot is null || !KeyVault.IsSalt(key.Slot.Salt) || !KeyVault.IsSlotWrap(key.Slot.Wrap))
+            if (key.Admin && (key.Slot is null || !KeyVault.IsSalt(key.Slot.Salt) || !KeyVault.IsSlotWrap(key.Slot.Wrap)))
             {
-                return "a key has no valid key slot";
+                return "an admin key has no valid key slot";
+            }
+
+            if (!key.Admin && key.Slot is not null)
+            {
+                return "a key that is not an admin has a key slot";
             }
         }
 
@@ -297,16 +306,28 @@ public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, Too
                     || !item.TryGetProperty("alg", out JsonElement alg) || !alg.TryGetInt32(out int algorithm)
                     || Text(item, "rp") is not { } rp || Text(item, "created") is not { } created
                     || !DateTimeOffset.TryParseExact(created, "O", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTimeOffset when)
-                    || !item.TryGetProperty("admin", out JsonElement admin) || admin.ValueKind is not (JsonValueKind.True or JsonValueKind.False)
-                    || !item.TryGetProperty("slot", out JsonElement slot) || slot.ValueKind != JsonValueKind.Object
-                    || Text(slot, "salt") is not { } salt || Text(slot, "wrap") is not { } wrap)
+                    || !item.TryGetProperty("admin", out JsonElement admin) || admin.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
                 {
                     error = "a key in the manifest is not valid";
 
                     return null;
                 }
 
-                list.Add(new ManifestKey(id, name, pub, algorithm, rp, when, admin.ValueKind == JsonValueKind.True, new KeySlot(salt, wrap)));
+                KeySlot? slot = null;
+                if (item.TryGetProperty("slot", out JsonElement slotJson))
+                {
+                    if (slotJson.ValueKind != JsonValueKind.Object || Text(slotJson, "salt") is not { } salt
+                        || Text(slotJson, "wrap") is not { } wrap)
+                    {
+                        error = "a key slot in the manifest is not valid";
+
+                        return null;
+                    }
+
+                    slot = new KeySlot(salt, wrap);
+                }
+
+                list.Add(new ManifestKey(id, name, pub, algorithm, rp, when, admin.ValueKind == JsonValueKind.True, slot));
             }
 
             ToolSettings? settings = ToolSettings.FromCanonical(settingsJson.GetRawText(), out string? settingsError);

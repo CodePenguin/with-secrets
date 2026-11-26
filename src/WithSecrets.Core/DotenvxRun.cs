@@ -144,7 +144,8 @@ public static partial class DotenvxRun
             start.ArgumentList.Add(entryPoint);
             if (string.Equals(Path.GetFileNameWithoutExtension(entryPoint), "dotnet", StringComparison.OrdinalIgnoreCase))
             {
-                start.ArgumentList.Add(System.Reflection.Assembly.GetEntryAssembly()!.Location);
+                // Under the dotnet host, argv[0] names the managed entry point. A bundled app uses its executable directly.
+                start.ArgumentList.Add(Path.GetFullPath(Environment.GetCommandLineArgs()[0]));
             }
 
             start.ArgumentList.Add(CaptureArgument);

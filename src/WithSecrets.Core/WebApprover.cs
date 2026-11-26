@@ -48,8 +48,8 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
 
     public ApprovalDecision Request(ApprovalRequest request, CancellationToken cancel)
     {
-        // A run on a store with a key vault is approved by a passkey that also releases the secret store key (WebAuthn PRF).
-        return Serve(new ApprovalPrompt(request.Heading ?? RequestHeading, ApprovalSummary.BuildMessage(request)), null, null, request.Unlock, cancel: cancel).Decision;
+        // A run or a grant releases no key (the authority decrypts with the keys an administrator's unlock opened), so the page asks for no PRF output.
+        return Serve(new ApprovalPrompt(request.Heading ?? RequestHeading, ApprovalSummary.BuildMessage(request)), null, null, false, cancel: cancel).Decision;
     }
 
     /// <summary>
@@ -58,8 +58,8 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
     /// </summary>
     /// <remarks>
     /// With <paramref name="unlock" /> the page also asks the passkey for its PRF output (the key slot's salt) and the
-    /// approval carries what it released (<see cref="ApprovalDecision.Unlock" />, for the caller to use once and dispose): the
-    /// approval that precedes an enrollment needs the master key. A method without key slots (not a
+    /// approval carries what it released (<see cref="ApprovalDecision.Unlock" />, for the caller to use once and dispose): an admin
+    /// tap (the unlock, the approval that precedes an enrollment) needs the master key. A method without key slots (not a
     /// passkey) releases nothing.
     /// </remarks>
     public ApprovalDecision Ask(ApprovalPrompt prompt, bool unlock = false)
@@ -70,7 +70,13 @@ public sealed class WebApprover(IProofMethod method, ApprovalSettings settings, 
     /// <summary>As <see cref="Ask(ApprovalPrompt, bool)" />, and the page is closed and the request denied when <paramref name="cancel" /> is set.</summary>
     public ApprovalDecision Ask(ApprovalPrompt prompt, CancellationToken cancel)
     {
-        return Serve(prompt, null, null, false, cancel: cancel).Decision;
+        return Ask(prompt, false, cancel);
+    }
+
+    /// <summary>As <see cref="Ask(ApprovalPrompt, bool)" />, and the page is closed and the request denied when <paramref name="cancel" /> is set.</summary>
+    public ApprovalDecision Ask(ApprovalPrompt prompt, bool unlock, CancellationToken cancel)
+    {
+        return Serve(prompt, null, null, unlock, cancel: cancel).Decision;
     }
 
     /// <summary>Asks to approve a new state: the proof signs <paramref name="manifest" /> (see <see cref="Manifest.Challenge" />).</summary>

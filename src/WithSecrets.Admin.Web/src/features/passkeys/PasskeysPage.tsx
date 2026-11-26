@@ -1,4 +1,4 @@
-import { usePasskeys } from '../../api/queries'
+import { usePasskeys, useSession } from '../../api/queries'
 import { Badge, Empty, Facts, PageHeader } from '../../components/Card'
 import { Button } from '../../components/Button'
 import { Loading, Notice, ProblemAlert } from '../../components/Feedback'
@@ -12,17 +12,19 @@ export function PasskeysPage() {
   usePageTitle('Passkeys')
   const passkeys = usePasskeys(true)
   const start = useStartOperation()
+  const session = useSession()
+  const canChange = session.data?.capabilities.includes('admin.decide') === true
 
   return (
     <>
       <PageHeader title="Passkeys" />
 
-      <p>Admin passkeys can also change settings, secrets and passkeys. The others can only approve requests.</p>
-      <p>
-        <Button variant="primary" onClick={() => start(addPasskey())}>
-          Add a passkey...
-        </Button>
-      </p>
+      <p>Any enrolled passkey can view, approve and manage grants. Admin passkeys can also lock or unlock the authority and change settings, secrets and passkeys.</p>
+      {canChange ? (
+        <p>
+          <Button variant="primary" onClick={() => start(addPasskey())}>Add a passkey...</Button>
+        </p>
+      ) : null}
 
       <h2 id="enrolled-passkeys">Enrolled passkeys</h2>
       {passkeys.isPending ? <Loading what="passkeys" /> : null}
@@ -40,7 +42,7 @@ export function PasskeysPage() {
               <li key={passkey.name} className={list.item}>
                 <div className={list.itemHeader}>
                   <h3>{passkey.name}</h3>
-                  <Badge tone={passkey.admin ? 'ok' : 'neutral'}>{passkey.admin ? 'admin' : 'approval only'}</Badge>
+                  <Badge tone={passkey.admin ? 'ok' : 'neutral'}>{passkey.admin ? 'admin' : 'convenience'}</Badge>
                 </div>
                 <Facts
                   items={[
@@ -48,12 +50,14 @@ export function PasskeysPage() {
                     ['Created', <Time key="c" value={passkey.created} />],
                   ]}
                 />
-                <div className={list.actions}>
-                  <Button variant="danger" onClick={() => start(removePasskey(passkey))}>
-                    Remove{' '}
-                    <span className="visually-hidden">passkey {passkey.name}</span>
-                  </Button>
-                </div>
+                {canChange ? (
+                  <div className={list.actions}>
+                    <Button variant="danger" onClick={() => start(removePasskey(passkey))}>
+                      Remove{' '}
+                      <span className="visually-hidden">passkey {passkey.name}</span>
+                    </Button>
+                  </div>
+                ) : null}
               </li>
             ))}
           </ul>

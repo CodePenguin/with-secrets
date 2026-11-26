@@ -97,12 +97,41 @@ internal static class SecretStoreTests
         return TestVault.Unlock(db, TestAuthenticator.ById(admin.Id)!);
     }
 
-    /// <summary>Reads the values with what the admin passkey releases.</summary>
+    /// <summary>
+    /// Reads the values as a run does after an unlock with what the admin passkey (or <paramref name="with" />) releases: the keys are opened with it when the state verifies
+    /// and it opens them, else they stay closed.
+    /// </summary>
     public static SecretValues Read(SecretStore store, IReadOnlyCollection<string> names, Unlock? with = null)
     {
-        using Unlock? unlock = with is null ? AdminUnlock(store.Database) : null;
+        using UnlockedKeys keys = new();
+        if (store.Database.TryManifest(out Manifest? manifest, out _) && manifest is not null)
+        {
+            using Unlock? unlock = with is null ? AdminUnlock(store.Database) : null;
+            if ((with ?? unlock) is { } release)
+            {
+                keys.TryOpen(manifest, release);
+            }
+        }
 
-        return store.GetValues(names, with ?? unlock);
+        return store.Unlocking(keys, AuthorityLock.UnlockedForTests()).GetValues(names);
+    }
+
+    /// <summary>What an admin's unlock of <paramref name="service" /> does to its keys: the state's admin passkey opens them. True when they opened.</summary>
+    public static bool OpenKeys(HostService service, StateDatabase db)
+    {
+        using Unlock release = AdminUnlock(db)!;
+
+        return service.Keys!.TryOpen(TestState.Current(db)!, release);
+    }
+
+    /// <summary>The store as a run uses it once the admin unlocked: over <paramref name="lockState" />, with the keys the admin passkey opened.</summary>
+    public static SecretStore Unlocked(SecretStore store, AuthorityLock? lockState = null)
+    {
+        UnlockedKeys keys = new();
+        using Unlock release = AdminUnlock(store.Database)!;
+        keys.TryOpen(TestState.Current(store.Database)!, release);
+
+        return store.Unlocking(keys, lockState ?? AuthorityLock.UnlockedForTests());
     }
 
     /// <summary>A seeded with-secrets.db with a store over it.</summary>
@@ -239,17 +268,43 @@ internal static class SecretStoreTests
         Manifest removed = TestState.Current(db)!;
         check(removed.Version == 4 && !removed.Secrets.ContainsKey("C_NAME") && Row(db, "C_NAME") == "" && store.ListNames().SequenceEqual(["A_NAME", "B_NAME", "D_NAME"]), "store: --remove signs a manifest without the hash and deletes the row");
 
-        // No unlock, or an unlock of a credential without a slot, is a store error, not a crash.
-        check(Fails(() => store.GetValues(["A_NAME"], null), out string noKey) && !noKey.Contains(ValueA, StringComparison.Ordinal), "store: no unlock is a store error (" + noKey + ")");
+        // A store without the unlocked keys, or keys an unlock of a credential without a slot did not open, is a store error, not a crash.
+        int decrypts = cipher.Decrypts;
+        check(Fails(() => store.GetValues(["A_NAME"]), out string noKey) && !noKey.Contains(ValueA, StringComparison.Ordinal) && cipher.Decrypts == decrypts, "store: a store with no unlocked keys decrypts nothing: a store error (" + noKey + ")");
         using (Unlock stranger = new("c3RyYW5nZXI", new byte[32]))
         {
-            check(Fails(() => store.GetValues(["A_NAME"], stranger), out string strangerWhy) && !strangerWhy.Contains(ValueA, StringComparison.Ordinal), "store: an unlock without a slot is a store error (" + strangerWhy + ")");
+            check(Fails(() => Read(store, ["A_NAME"], stranger), out string strangerWhy) && !strangerWhy.Contains(ValueA, StringComparison.Ordinal), "store: an unlock without a slot opens nothing: a store error (" + strangerWhy + ")");
         }
 
-        int decrypts = cipher.Decrypts;
         using (Unlock wrong = new(TestAuthenticator.Encode(TestAuthenticator.ById(TestState.Current(db)!.Admins[0].Id)!.CredentialId), RandomNumberGenerator.GetBytes(32)))
         {
-            check(Fails(() => store.GetValues(["A_NAME"], wrong), out string wrongWhy) && !wrongWhy.Contains(ValueA, StringComparison.Ordinal) && cipher.Decrypts == decrypts, "store: a wrong PRF output opens nothing (" + wrongWhy + ")");
+            check(Fails(() => Read(store, ["A_NAME"], wrong), out string wrongWhy) && !wrongWhy.Contains(ValueA, StringComparison.Ordinal) && cipher.Decrypts == decrypts, "store: a wrong PRF output opens nothing (" + wrongWhy + ")");
+        }
+
+        // Decryption runs inside the authority's lock: once a lock has begun nothing is decrypted, even while its discards have not closed the keys yet.
+        AuthorityLock authority = AuthorityLock.UnlockedForTests();
+        SecretStore unlocked = Unlocked(store, authority);
+        using (SecretValues open = unlocked.GetValues(["A_NAME"]))
+        {
+            check(open.Text("A_NAME") == ValueA && cipher.Decrypts == decrypts + 1, "store: with the keys open and the authority unlocked the value decrypts");
+        }
+
+        authority.Lock("test: the keys are not closed by this lock");
+        bool lockedOut = false;
+        try
+        {
+            unlocked.GetValues(["A_NAME"]).Dispose();
+        }
+        catch (AuthorityLockedException)
+        {
+            lockedOut = true;
+        }
+
+        check(lockedOut && cipher.Decrypts == decrypts + 1, "store: a lock that has begun decrypts nothing although the keys are still open (no window between the lock and the keys closing)");
+        authority.Unlock(UnlockMethod.Seam);
+        using (SecretValues again = unlocked.GetValues(["A_NAME"]))
+        {
+            check(again.Text("A_NAME") == ValueA, "store: once unlocked again (the keys were never closed here) it decrypts");
         }
 
         check(store.ListNames().Count == 3, "store: listing needs no private key");
@@ -310,10 +365,10 @@ internal static class SecretStoreTests
         (StateDatabase db, SecretStore store, CountingCipher cipher) = NewStore(root, "runs-db");
         Put(store, new Dictionary<string, string> { ["A_NAME"] = ValueA, ["B_NAME"] = ValueB, ["C_NAME"] = ValueC });
         RunArgs args = CliArgs.ParseRun(["--secrets", "A_NAME", "--reason", "store test", "--", "./" + program], out _)!;
-        FakeApprover approver = new(true, unlock: () => AdminUnlock(db));
+        FakeApprover approver = new(true);
         StringWriter stdout = new();
         StringWriter stderr = new();
-        int code = await new RunCommand(store, approver, stdout, stderr).ExecuteAsync(args, folder, TestAudit.Sink(db));
+        int code = await new RunCommand(Unlocked(store), approver, stdout, stderr).ExecuteAsync(args, folder, TestAudit.Sink(db));
         check(code == 0 && stdout.ToString().Contains("a=[REDACTED]", StringComparison.Ordinal) && !stdout.ToString().Contains(ValueA, StringComparison.Ordinal), "store run: the requested secret reaches the program, redacted (" + code + " " + stderr + ")");
         check(cipher.Decrypts == 1, "store run: only the requested secret is decrypted; the other two never are (" + cipher.Decrypts + ")");
         check(approver.Requests.Single().Sources is { } sources && sources["A_NAME"] == "global" && ApprovalSummary.BuildMessage(approver.Requests[0]).Contains("Secrets: A_NAME (global)", StringComparison.Ordinal), "store run: the approval text names each secret's source");
@@ -327,22 +382,22 @@ internal static class SecretStoreTests
 
         // A swapped row: the run stops before it asks, with exit 4.
         Sql(db, "UPDATE secrets SET ciphertext = $c WHERE name = 'A_NAME'", ("$c", JweCipher.Instance.Encrypt("Attacker-Value-1", TestState.Current(db)!.Store)));
-        FakeApprover never = new(true, unlock: () => AdminUnlock(db));
+        FakeApprover never = new(true);
         stderr = new StringWriter();
-        code = await new RunCommand(new SecretStore(new StateDatabase(db.FilePath), cipher), never, new StringWriter(), stderr).ExecuteAsync(args, folder);
+        code = await new RunCommand(Unlocked(new SecretStore(new StateDatabase(db.FilePath), cipher)), never, new StringWriter(), stderr).ExecuteAsync(args, folder);
         check(code == RunCommand.StoreError && never.Requests.Count == 0 && cipher.Decrypts == 1 && stderr.ToString().Contains("failed verification", StringComparison.Ordinal), "store run: a swapped ciphertext is exit 4, nobody is asked, nothing is decrypted (" + stderr + ")");
 
         // A swap after the approval (between the check and the read): the read checks again.
         (StateDatabase late, SecretStore lateStore, CountingCipher lateCipher) = NewStore(root, "runs-late");
         Put(lateStore, new Dictionary<string, string> { ["A_NAME"] = ValueA });
         SwapApprover swap = new(late, TestState.Current(late)!.Store, false);
-        code = await new RunCommand(lateStore, swap, new StringWriter(), new StringWriter()).ExecuteAsync(args, folder);
+        code = await new RunCommand(Unlocked(lateStore), swap, new StringWriter(), new StringWriter()).ExecuteAsync(args, folder);
         check(code == RunCommand.StoreError && lateCipher.Decrypts == 0, "store run: a row swapped while the approval page was open is exit 4, nothing is decrypted");
 
         // A row added (without a hash) while the approval page was open: the read checks every row, so exit 4 too.
         (StateDatabase extra, SecretStore extraStore, CountingCipher extraCipher) = NewStore(root, "runs-extra");
         Put(extraStore, new Dictionary<string, string> { ["A_NAME"] = ValueA });
-        code = await new RunCommand(extraStore, new SwapApprover(extra, TestState.Current(extra)!.Store, true), new StringWriter(), new StringWriter()).ExecuteAsync(args, folder);
+        code = await new RunCommand(Unlocked(extraStore), new SwapApprover(extra, TestState.Current(extra)!.Store, true), new StringWriter(), new StringWriter()).ExecuteAsync(args, folder);
         check(code == RunCommand.StoreError && extraCipher.Decrypts == 0, "store run: a row added while the approval page was open is exit 4, nothing is decrypted");
     }
 
@@ -351,11 +406,10 @@ internal static class SecretStoreTests
     {
         public ApprovalDecision Request(ApprovalRequest request)
         {
-            Unlock? unlock = AdminUnlock(db);
             string ciphertext = JweCipher.Instance.Encrypt("Attacker-Value-1", publicKey);
             Sql(db, addRow ? "INSERT INTO secrets (name, ciphertext) VALUES ('EXTRA_NAME', $c)" : "UPDATE secrets SET ciphertext = $c WHERE name = 'A_NAME'", ("$c", ciphertext));
 
-            return ApprovalDecision.Allow("approved", 0, null, unlock);
+            return ApprovalDecision.Allow("approved", 0, null);
         }
     }
 
@@ -419,6 +473,6 @@ internal static class SecretStoreTests
         check(store.TryApply(current.Version, signed, rows, [], AdminEvent.Change("secrets-set", "test", admin.Name)) is null && Row(db, "B_NAME") == rows["B_NAME"], "store write: the same write succeeds when nothing fails");
         check(TestAudit.TryRead(db, 100, null, out IReadOnlyList<AuditRow> rowsDone, out _) && rowsDone.Count == before + 1, "store write: the audit row is written with it");
 
-        check(WithSecretsDatabase.SchemaVersion == 3, "store: the schema version is 3");
+        check(WithSecretsDatabase.SchemaVersion == 4, "store: the schema version is 4");
     }
 }

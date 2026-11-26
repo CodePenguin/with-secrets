@@ -94,7 +94,7 @@ internal static class ApprovalQueueTests
         {
             VerifiedBind = [.. context.Bind];
             return response == "\"valid\""
-                ? new ProofResult(true, "passkey approver verified", new VerifiedCredential("approver", false))
+                ? new ProofResult(true, "passkey approver verified", new VerifiedCredential("test-approver", "approver", false))
                 : new ProofResult(false, "invalid proof");
         }
 
@@ -236,7 +236,7 @@ internal static class ApprovalQueueTests
             "approvals: a duplicate in-flight request cannot acquire ownership of the queue entry");
         FakeProofMethod proof = new();
         (ApprovalChallengeDto? challenge, string? challengeCode, _) = queue.CreateOrReuseChallenge("req-proof", "session-one", "http://localhost", proof);
-        check(challenge is not null && challengeCode is null && challenge.PrfKey is null, "approvals: create WebAuthn challenge without an unnecessary PRF release");
+        check(challenge is not null && challengeCode is null && !System.Text.Json.JsonSerializer.Serialize(challenge).Contains("prf", StringComparison.OrdinalIgnoreCase), "approvals: create WebAuthn challenge with no PRF release (a run approval releases no key)");
         (ApprovalDetailDto? wrongSessionDetail, string? wrongSessionCode, _) = queue.Approve("req-proof", "session-two", challenge!.FlowId, "\"valid\"", proof, _ => null);
         check(wrongSessionDetail is null && wrongSessionCode == "approval-in-progress",
             "approvals: a challenge cannot be submitted from a different authenticated session");
@@ -326,8 +326,8 @@ internal static class ApprovalQueueTests
         check(deniedQueue.GetDetail("req-deny", _ => null)?.Status == ApprovalStatuses.Denied,
             "approvals: denial becomes terminal only after authority commit");
 
-        check(SessionCapabilities.For(SessionScope.Approval).SequenceEqual([SessionCapabilities.ApprovalsRead, SessionCapabilities.ApprovalsDecide]),
-            "sessions: approval scope receives only Approvals capabilities");
+        check(SessionCapabilities.For(SessionScope.Approval).SequenceEqual([SessionCapabilities.ApprovalsRead, SessionCapabilities.ApprovalsDecide, SessionCapabilities.AdminRead, SessionCapabilities.GrantsDecide]),
+            "sessions: approval scope receives approvals, read and grant capabilities, never admin.decide");
         check(SessionCapabilities.For(SessionScope.Admin).Contains(SessionCapabilities.AdminDecide)
             && SessionCapabilities.For(SessionScope.Admin).Contains(SessionCapabilities.ApprovalsDecide),
             "sessions: admin scope retains admin and Approvals capabilities");

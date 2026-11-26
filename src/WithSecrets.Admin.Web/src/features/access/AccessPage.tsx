@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../../api/client'
-import { keys, useApprovals, useGrants, useStatus } from '../../api/queries'
+import { keys, useApprovals, useGrants, useSession, useStatus } from '../../api/queries'
 import type { Grant } from '../../api/types'
 import { Badge, Empty, Facts, PageHeader } from '../../components/Card'
 import { Button } from '../../components/Button'
@@ -12,7 +12,7 @@ import { Loading, ProblemAlert } from '../../components/Feedback'
 import list from '../../components/List.module.css'
 import { Time } from '../../lib/format'
 import { usePageTitle } from '../../lib/usePageTitle'
-import { changeGrantEnd, revokeGrant, unlockReview, type OperationDef } from '../authorization/operations'
+import { changeGrantEnd, revokeGrant, type OperationDef } from '../authorization/operations'
 import { useStartOperation } from '../authorization/OperationProvider'
 import { usePollInterval } from '../authorization/poll'
 import { ApprovalDialog } from './ApprovalDialog'
@@ -38,6 +38,8 @@ export function AccessPage() {
   const approvals = useApprovals(true, poll * 3)
   const grants = useGrants(true, poll * 3)
   const status = useStatus()
+  const session = useSession()
+  const canChange = session.data?.capabilities.includes('grants.decide') === true
   const start = useStartOperation()
 
   return (
@@ -116,7 +118,7 @@ export function AccessPage() {
               />
               {!grant.verified && grant.status !== 'revoked' && grant.status !== 'invalidated' ? <p>This grant is not verified and is not used.</p> : null}
               <GrantReview grant={grant} reviewOpen={status.data?.reviewOpen === true} poll={poll * 3} />
-              {grant.actions.length > 0 ? (
+              {canChange && grant.actions.length > 0 ? (
                 <div className={list.actions}>
                   {grant.actions.map((action) => (
                     <Button key={action} variant={action === 'revoke' ? 'danger' : 'secondary'} onClick={() => start(builders[action](grant))}>
@@ -152,7 +154,6 @@ function GrantReview({ grant, reviewOpen, poll }: { grant: Grant; reviewOpen: bo
 }
 
 function ReviewText({ id, reviewOpen, poll }: { id: string; reviewOpen: boolean; poll: number }) {
-  const start = useStartOperation()
   const query = useQuery({
     queryKey: [...keys.grants, id, 'review', reviewOpen],
     queryFn: () => api.get('/api/v1/grants/{id}/review', { path: { id } }),
@@ -164,7 +165,7 @@ function ReviewText({ id, reviewOpen, poll }: { id: string; reviewOpen: boolean;
   if (query.isPending) return <Loading what="review text" />
   if (query.isError) return <ProblemAlert error={query.error} title="Review text could not be read" />
   if (query.data.state === 'none') return <p>No review text is available for this grant.</p>
-  if (query.data.state !== 'open' || !reviewOpen) return <Button onClick={() => start(unlockReview())}>Locked: tap to review</Button>
+  if (query.data.state !== 'open' || !reviewOpen) return <p>Review text opens when an administrator unlocks the authority with an admin passkey.</p>
 
   return <pre className={styles.reviewText}>{query.data.text}</pre>
 }

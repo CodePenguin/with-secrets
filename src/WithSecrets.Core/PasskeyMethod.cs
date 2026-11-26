@@ -52,7 +52,7 @@ public sealed class PasskeyMethod(PasskeyStore store, ApprovalSettings settings,
             rpId,
             timeout = (long)settings.Timeout.TotalMilliseconds,
 
-            // The salt of the store's slots (public; every key's slot has this same one): a page that asks the passkey for its PRF output passes it as `eval`.
+            // All admin slots share this public salt, used as `eval` when the page requests PRF output.
             salt = keys.Select(item => item.Slot?.Salt).FirstOrDefault(item => item is not null),
         });
 
@@ -80,7 +80,7 @@ public sealed class PasskeyMethod(PasskeyStore store, ApprovalSettings settings,
             // The assertion was valid, so the approval stands even if the new count could not be saved.
             store.UpdateSignCount(key.Id, result.NewSignCount);
 
-            return new ProofResult(true, Verified(key), new VerifiedCredential(key.Name, key.Admin));
+            return new ProofResult(true, Verified(key), new VerifiedCredential(key.Id, key.Name, key.Admin));
         }
         catch (Exception)
         {
@@ -115,6 +115,13 @@ public sealed class PasskeyMethod(PasskeyStore store, ApprovalSettings settings,
             : PasskeyRegistration.Run(store, settings, name, announce, readCode, askAdmin, approval);
     }
 
+    internal ApprovalDecision EnrollWithAdminRelease(string name, Action<string> announce, Func<string, ManifestApproval> askAdmin, Func<string, ApprovalDecision> release)
+    {
+        return readCode is null
+            ? ApprovalDecision.Deny("this enrollment has no way to ask for the code from the page")
+            : PasskeyRegistration.Run(store, settings, name, announce, readCode, plan: null, askAdmin, releaseAdmin: release);
+    }
+
     /// <summary>
     /// Removes the one passkey with this name (the exact name, else the only one that matches without regard to case): a new
     /// manifest without it, signed by another admin key through <paramref name="askAdmin" />, stored only if the state has not
@@ -146,17 +153,21 @@ public sealed class PasskeyMethod(PasskeyStore store, ApprovalSettings settings,
             return approval.Decision.Approved ? ApprovalDecision.Deny("nothing was removed") : approval.Decision;
         }
 
+        VerifiedCredential? signer = Signer(current, approval.Signed);
+
         return approval.Signed.Text != next.Canonical()
             ? ApprovalDecision.Deny("the admin approval did not sign the new state; nothing was removed")
             : PasskeyRegistration.Commit(store.Database, approval.Signed, () => ApprovalDecision.Allow($"Removed the passkey named \"{stored}\"."),
                 (connection, transaction) => store.Database.AppendAudit(connection, transaction, AdminEvent.Change("key-removed",
-                    $"passkey \"{stored}\" removed{(matches[0].Admin ? ", it was an admin" : "")}; admin passkey {Signer(current, approval.Signed)} verified", Signer(current, approval.Signed))));
+                    $"passkey \"{stored}\" removed{(matches[0].Admin ? ", it was an admin" : "")}; admin passkey {signer?.Name ?? "?"} verified", signer?.Name ?? "", signer)));
     }
 
-    /// <summary>The name of the admin key that signed <paramref name="signed" />, as <paramref name="current" /> names it.</summary>
-    internal static string Signer(Manifest current, SignedManifest signed)
+    /// <summary>The enrolled admin key that signed <paramref name="signed" />, as <paramref name="current" /> names it.</summary>
+    internal static VerifiedCredential? Signer(Manifest current, SignedManifest signed)
     {
-        return signed.SignerId is { } id ? current.NameOf(id) ?? "?" : "?";
+        return current.Keys.FirstOrDefault(key => key.Id == signed.SignerId && key.Admin) is { } signer
+            ? VerifiedCredential.From(signer)
+            : null;
     }
 
     private IReadOnlyList<PasskeyRecord> Records()

@@ -295,11 +295,6 @@ internal sealed partial class AdminApi
                 : SessionCapabilities.For(session.Scope).Contains(SessionCapabilities.AdminRead, StringComparer.Ordinal);
             if (!hasRequiredScope)
             {
-                if (route.OperationId == "getGrantReview")
-                {
-                    return new ApiProblem(403, "admin-required", "review text requires an administrator session");
-                }
-
                 return new ApiProblem(403, "scope-required", "this session does not have permission to read this resource");
             }
 
@@ -319,7 +314,8 @@ internal sealed partial class AdminApi
             }
         }
         else if ((route.Access is ApiAccess.Authorize or ApiAccess.Mutation) && session is not null
-            && !SessionCapabilities.For(session.Scope).Contains(SessionCapabilities.AdminDecide, StringComparer.Ordinal))
+            && route.OperationId is not ("createAuthorization" or "createInlineAuthorization" or "submitInlineAuthorizationProof")
+            && !CanAuthorize(session, route.Operation))
         {
             return new ApiProblem(403, "scope-required", "this session does not have permission to perform this operation");
         }
@@ -586,7 +582,12 @@ internal sealed partial class AdminApi
                 return new ApiResult(409, new ApiProblem(409, "sign-in-failed", ApprovalSummary.Clean(problem ?? "the passkey was refused")));
         }
 
-        if (admin.Status().Locked)
+        if (admin.IsRemote)
+        {
+            return new ApiResult(409, new ApiProblem(409, "operation-refused", AdminService.RemoteAdminRefusal));
+        }
+
+        if (admin.LocalAuthorityLocked)
         {
             return new ApiResult(423, new ApiProblem(423, "authority-locked", "the authority is locked: unlock it first (no session starts on a locked authority)"));
         }
@@ -752,8 +753,7 @@ internal sealed partial class AdminApi
         JsonElement body = call.Body!.Value;
         string flowId = body.GetProperty("flowId").GetString()!;
         string proof = body.GetProperty("proof").GetRawText();
-        string? prf = body.TryGetProperty("prf", out JsonElement sealedPrf) ? sealedPrf.GetRawText() : null;
-        (ApprovalDetailDto? detail, string? code, string? problem) = queue.Approve(requestId, call.Session!.Id, flowId, proof, method, admin.ProcessedApproval, prf, body.TryGetProperty("minutes", out JsonElement chosen) && chosen.TryGetInt32(out int chosenMinutes) ? chosenMinutes : 0);
+        (ApprovalDetailDto? detail, string? code, string? problem) = queue.Approve(requestId, call.Session!.Id, flowId, proof, method, admin.ProcessedApproval, body.TryGetProperty("minutes", out JsonElement chosen) && chosen.TryGetInt32(out int chosenMinutes) ? chosenMinutes : 0);
         if (detail is not null)
             return Task.FromResult(new ApiResult(200, detail));
         ApiProblem refused = ApprovalProblem(code, problem);
@@ -766,7 +766,7 @@ internal sealed partial class AdminApi
         if (!Regex.IsMatch(requestId, "^[A-Za-z0-9_-]{1,64}$") || admin.Approvals is not { } queue)
             return Task.FromResult(new ApiResult(404, new ApiProblem(404, "request-unavailable", "no request is available for that id")));
 
-        (ApprovalDetailDto? detail, string? code, string? problem) = queue.Deny(requestId, call.Session!.Identity, admin.ProcessedApproval);
+        (ApprovalDetailDto? detail, string? code, string? problem) = queue.Deny(requestId, call.Session!.Identity, admin.ProcessedApproval, call.Session.Key);
         if (detail is not null)
             return Task.FromResult(new ApiResult(200, detail));
         ApiProblem refused = ApprovalProblem(code, problem);
@@ -887,6 +887,11 @@ internal sealed partial class AdminApi
     {
         JsonElement body = call.Body!.Value;
         string op = body.GetProperty("operation").GetString()!;
+        if (call.Session is { } session && !CanAuthorize(session, op))
+        {
+            return new ApiResult(403, new ApiProblem(403, "scope-required", "this session does not have permission to perform this operation"));
+        }
+
         string[] allowed = Operations.First(item => item.Operation == op).Parameters;
         Dictionary<string, string> args = [];
         if (body.TryGetProperty("parameters", out JsonElement parameters))
@@ -918,11 +923,19 @@ internal sealed partial class AdminApi
         return view is not null ? new ApiResult(201, Dto(view)) : new ApiResult(start.Status, FromStart(start));
     }
 
+    private static bool CanAuthorize(AdminSession session, string? operation) =>
+        SessionCapabilities.For(session.Scope).Contains(OperationPolicy.SessionCapability(operation), StringComparer.Ordinal);
+
     private Task<ApiResult> SubmitInlineAuthorizationProofAsync(ApiCall call)
     {
         if (!call.Context.Request.Headers.ContainsKey("Origin")) return Task.FromResult(new ApiResult(403, new ApiProblem(403, "origin-required", "this request must come from the administration page: it carries no Origin")));
         object? owner = OwnerOf(call);
         if (owner is null) return Task.FromResult(new ApiResult(401, new ApiProblem(401, "session-required", "this needs an administrator session")));
+        if (call.Session is { } session && admin.FindAuthorization(owner, call.Path["id"]) is { } authorization && !CanAuthorize(session, authorization.Operation))
+        {
+            return Task.FromResult(new ApiResult(403, new ApiProblem(403, "scope-required", "this session does not have permission to perform this operation")));
+        }
+
         JsonElement body = call.Body!.Value;
         string proof = body.GetProperty("proof").GetString()!;
         string? prf = body.TryGetProperty("prf", out JsonElement sealedPrf) ? sealedPrf.GetRawText() : null;
@@ -978,18 +991,10 @@ internal sealed partial class AdminApi
             args[key] = call.Path[key];
         }
 
-        string op = operation;
         foreach (JsonProperty member in body.EnumerateObject())
         {
             if (member.Name == "authorization")
             {
-                continue;
-            }
-
-            if (member.Name == "policy")
-            {
-                op = "policy-" + member.Value.GetString();
-
                 continue;
             }
 
@@ -1002,17 +1007,24 @@ internal sealed partial class AdminApi
             return new ApiResult(401, new ApiProblem(401, "session-required", "this needs an administrator session"));
         }
 
-        if (call.Session is null && !AdminService.NeedsNoSession(op))
+        if (admin.IsRemote && AdminService.NeedsNoSession(operation))
         {
-            admin.Refused(op, "no administrator session", AdminService.CallerOf(owner));
+            admin.Refused(operation, AdminService.RemoteLockRefusal, AdminService.CallerOf(owner));
+
+            return new ApiResult(409, new ApiProblem(409, "operation-refused", AdminService.RemoteLockRefusal));
+        }
+
+        if (call.Session is null && !AdminService.NeedsNoSession(operation))
+        {
+            admin.Refused(operation, "no administrator session", AdminService.CallerOf(owner));
 
             return new ApiResult(401, new ApiProblem(401, "session-required", "this needs an administrator session"));
         }
 
-        MutationResult result = await admin.MutateAsync(owner, op, args, authorization, call.Context.RequestAborted);
+        MutationResult result = await admin.MutateAsync(owner, operation, args, authorization, call.Context.RequestAborted);
         if (result.Status is 200 or 202)
         {
-            return new ApiResult(result.Status, new MutationResponse(op, (result.Repeat ? "already-" : "") + (result.Status == 200 ? "applied" : "started"), result.Link, result.Invitation));
+            return new ApiResult(result.Status, new MutationResponse(operation, (result.Repeat ? "already-" : "") + (result.Status == 200 ? "applied" : "started"), result.Link, result.Invitation));
         }
 
         return new ApiResult(result.Status, new ApiProblem(result.Status, result.Code ?? "operation-refused", result.Detail ?? "refused"));

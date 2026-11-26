@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { grant, machine } from '../../test/fakeApi'
-import { addPasskey, approveMachine, rotateStoreKey, changeGrantEnd, recoverAuthorityKey, removePasskey, renameMachine, revokeGrant, rotateAuthorityKey, setAuditRetention, setSessionTimeouts, setUnlockPolicy, trustMachine, unlock, type OperationDef, type Prepared } from './operations'
+import { addPasskey, approveMachine, rotateStoreKey, changeGrantEnd, recoverAuthorityKey, removePasskey, renameMachine, revokeGrant, rotateAuthorityKey, setAuditRetention, setSessionTimeouts, trustMachine, unlock, type OperationDef, type Prepared } from './operations'
 
 function prepared(def: OperationDef, values: Record<string, string | boolean> = {}): Prepared {
   const result = def.prepare(values)
@@ -52,10 +52,7 @@ describe('operations: what is authorized is exactly what is performed', () => {
     expect(prepared(revokeGrant(g)).operation).toBe('grant-revoke')
   })
 
-  it('the unlock mode is the operation (policy-manual / policy-unattended), with no parameters', () => {
-    const p = prepared(setUnlockPolicy('unattended'))
-    expect(p.operation).toBe('policy-unattended')
-    expect(p.parameters).toEqual({})
+  it('unlock is its own operation', () => {
     expect(prepared(unlock()).operation).toBe('unlock')
   })
 
@@ -67,8 +64,6 @@ describe('operations: what is authorized is exactly what is performed', () => {
   it('settings reviews state the exact effect before the passkey tap', () => {
     expect(prepared(setAuditRetention(90, 36500), { days: '0' }).summary).toBe('Keep audit events for ever.')
     expect(prepared(setSessionTimeouts(15, 480, 120, 1440), { idle: '15', absolute: '480' }).summary).toBe('End a session after 15 minutes without use, or 480 minutes at most.')
-    expect(prepared(setUnlockPolicy('unattended')).summary).toContain('unlocks itself at start')
-    expect(setUnlockPolicy('unattended').warning).toBe('Weaker: anyone who can start this service as you gets an unlocked authority.')
   })
 
   it('rotation follows a transition while recovery has no transition and enrolls every other host again', () => {

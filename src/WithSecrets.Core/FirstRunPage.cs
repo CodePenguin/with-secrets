@@ -137,12 +137,12 @@ public sealed class FirstRunPage(StateDatabase db, EnrollmentTarget primaryTarge
                                 throw new InvalidOperationException("the carried secrets do not match the new state (" + mismatch + ")");
                             }
 
-                            AdminEvent setup = AdminEvent.Change("setup", $"first passkey \"{key.Name}\" (admin) added for {key.RpId}", key.Name);
+                            AdminEvent setup = AdminEvent.Change("setup", $"first passkey \"{key.Name}\" (admin) added for {key.RpId}", key.Name, new VerifiedCredential(key.Id, key.Name, true));
                             if (Carry is { } carry)
                             {
                                 // Recovery writes these events when it installs the recovered store in the live database.
                                 carry.Pending.Add(setup);
-                                carry.Pending.Add(AdminEvent.Change("recovered", $"recovered {carry.Count} secrets from {carry.OldFileName} (copied to {carry.RecoveredName}); new keys made", key.Name));
+                                carry.Pending.Add(AdminEvent.Change("recovered", $"recovered {carry.Count} secrets from {carry.OldFileName} (copied to {carry.RecoveredName}); new keys made", key.Name, new VerifiedCredential(key.Id, key.Name, true)));
                             }
                             else
                             {

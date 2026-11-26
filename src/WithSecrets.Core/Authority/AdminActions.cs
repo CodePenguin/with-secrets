@@ -11,7 +11,7 @@ public static class AdminActions
     /// status changes, so a failure in between leaves a pin and a Pending machine (denied), never a Trusted machine that no key vouches for.
     /// A machine that is already Trusted is only pinned again (repair).
     /// </summary>
-    public static TransitionResult ApproveMachine(AuthorityStore store, AuthorityKeyRing keys, HostConfigFile host, string? localFingerprint, string fingerprint, string friendlyName, string actor, int? expectedRevision = null)
+    public static TransitionResult ApproveMachine(AuthorityStore store, AuthorityKeyRing keys, HostConfigFile host, string? localFingerprint, string fingerprint, string friendlyName, string actor, int? expectedRevision = null, VerifiedCredential? key = null)
     {
         MachineRecord? machine = store.Find(fingerprint);
         if (machine is null)
@@ -44,7 +44,7 @@ public static class AdminActions
             PinLocal(keys, host, fingerprint);
         }
 
-        return store.Approve(fingerprint, friendlyName, actor, expectedRevision);
+        return store.Approve(fingerprint, friendlyName, actor, expectedRevision, key);
     }
 
     /// <summary>Pins the authority's current public key for this machine.</summary>
@@ -57,9 +57,9 @@ public static class AdminActions
     }
 
     /// <summary>Recovery: a new authority key with no transition, pinned for this machine by this explicit action. Hosts of other machines must be re-enrolled.</summary>
-    public static AuthorityKeyRecord RecoverAuthority(AuthorityKeyRing keys, HostConfigFile host, string? localFingerprint, string actor)
+    public static AuthorityKeyRecord RecoverAuthority(AuthorityKeyRing keys, HostConfigFile host, string? localFingerprint, string actor, VerifiedCredential? key = null)
     {
-        AuthorityKeyRecord recovered = keys.Recover(actor);
+        AuthorityKeyRecord recovered = keys.Recover(actor, key);
         if (localFingerprint is not null)
         {
             host.Pin(localFingerprint, new PinnedAuthorityKey(recovered.Fingerprint, recovered.PublicKey, DateTimeOffset.UtcNow));

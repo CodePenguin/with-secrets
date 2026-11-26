@@ -57,7 +57,7 @@ internal sealed partial class AdminApi
             [
                 ("running", S.Bool()),
                 ("locked", S.Bool()),
-                ("unlockMode", S.Str(values: [UnlockPolicies.Manual, UnlockPolicies.Unattended])),
+                ("remote", S.Bool()),
                 ("apiVersion", S.Str()),
                 ("version", S.Str()),
                 ("protocolVersion", S.Int()),
@@ -118,7 +118,7 @@ internal sealed partial class AdminApi
                 ("admin", S.Str(nullable: true, description: "Deprecated display alias for admin-scope sessions; use identity and scope.")),
                 ("identity", S.Str(nullable: true, description: "The trusted enrolled passkey identity that signed in.")),
                 ("scope", S.Str(values: ["admin", "approval"], nullable: true)),
-                ("capabilities", S.Arr(S.Str(values: [SessionCapabilities.ApprovalsRead, SessionCapabilities.ApprovalsDecide, SessionCapabilities.AdminRead, SessionCapabilities.AdminDecide]))),
+                ("capabilities", S.Arr(S.Str(values: [SessionCapabilities.ApprovalsRead, SessionCapabilities.ApprovalsDecide, SessionCapabilities.AdminRead, SessionCapabilities.AdminDecide, SessionCapabilities.GrantsDecide]))),
                 ("started", S.Time(nullable: true)),
                 ("idleExpires", S.Time(nullable: true)),
                 ("absoluteExpires", S.Time(nullable: true)),
@@ -196,7 +196,6 @@ internal sealed partial class AdminApi
                 ("inheritedEnvironmentLine", S.Str(nullable: true)),
                 ("extraLines", S.Arr(S.Str())),
                 ("canonicalText", S.Str()),
-                ("requiresUnlock", S.Bool()),
                 ("heading", S.Str(nullable: true)),
                 ("times", new JsonObject { ["oneOf"] = new JsonArray(S.Arr(S.Int()), new JsonObject { ["type"] = "null" }) }),
                 ("allowOnce", S.Bool()),
@@ -222,7 +221,6 @@ internal sealed partial class AdminApi
                 ("mode", S.Str(values: ["webauthn"])),
                 ("payload", new JsonObject { ["type"] = "object", ["additionalProperties"] = true }),
                 ("expiresAt", S.Time()),
-                ("prfKey", S.Str(nullable: true)),
             ]),
             ["CopyWarning"] = S.Obj(
             [
@@ -292,14 +290,12 @@ internal sealed partial class AdminApi
                 ("metadata", S.TextMap(AuditMetadata.MaxMembers, AuditMetadata.MaxValue, "Names and fingerprints the host signed with the event (secret names, key name, reuse minutes, variable mapping, .env files, file fingerprints). Read-only data, never values.")),
             ]),
             ["AuditEventList"] = S.Obj([("items", S.Arr(S.Ref("AuditEvent")))]),
-            ["AuditChange"] = S.Obj([("id", S.Int()), ("time", S.Time()), ("event", S.Str()), ("machine", S.Str(nullable: true)), ("actor", S.Str()), ("detail", S.Str())]),
+            ["AuditChange"] = S.Obj([("id", S.Int()), ("time", S.Time()), ("event", S.Str()), ("machine", S.Str(nullable: true)), ("actor", S.Str()), ("detail", S.Str()), ("metadata", S.TextMap(AuditMetadata.MaxMembers, AuditMetadata.MaxValue, "Credential roles and identities recorded with the change."))]),
             ["AuditChangeList"] = S.Obj([("items", S.Arr(S.Ref("AuditChange")))]),
             ["AuditGap"] = S.Obj([("id", S.Int()), ("machine", S.Str()), ("kind", S.Str()), ("from", S.Int()), ("to", S.Int()), ("detected", S.Time()), ("resolved", S.Time(nullable: true)), ("epoch", S.Str())]),
             ["AuditGapList"] = S.Obj([("items", S.Arr(S.Ref("AuditGap")))]),
             ["Settings"] = S.Obj(
             [
-                ("unlockMode", S.Str(values: [UnlockPolicies.Manual, UnlockPolicies.Unattended])),
-                ("unlockModeDescription", S.Str()),
                 ("auditRetentionDays", S.Int()),
                 ("sessionIdleMinutes", S.Int()),
                 ("sessionAbsoluteMinutes", S.Int()),
@@ -437,8 +433,9 @@ internal sealed partial class AdminApi
             }
             if (route.Access == ApiAccess.Mutation)
             {
-                operation["x-operation"] = route.Operation ?? "policy-manual | policy-unattended";
-                operation["description"] = route.Summary + " Needs a session (the unlock needs none), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than " + AdminService.LifetimeText + " seconds. Any other authorization, a repeated one or a session alone is refused with 403.";
+                operation["x-operation"] = route.Operation;
+                string capability = OperationPolicy.SessionCapability(route.Operation);
+                operation["description"] = route.Summary + " Needs a session with " + capability + " (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than " + AdminService.LifetimeText + " seconds. Any other authorization, a repeated one or a session alone is refused with 403.";
             }
 
             JsonObject responses = [];

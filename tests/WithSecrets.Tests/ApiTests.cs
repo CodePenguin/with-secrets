@@ -311,7 +311,7 @@ internal static class ApiTests
         AuthorityStore store = app.Store;
         MachineRecord machine = store.Find(app.Fingerprint)!;
 
-        return string.Join('|', machine.Status, machine.SecurityRevision, machine.FriendlyName, machine.HostName, machine.PendingHostName, store.ActiveKey()?.Fingerprint, store.GetUnlockPolicy(), store.AuditRetentionDays(), store.SessionTimeouts(), store.Grants().Count, app.Service.Lock.IsLocked);
+        return string.Join('|', machine.Status, machine.SecurityRevision, machine.FriendlyName, machine.HostName, machine.PendingHostName, store.ActiveKey()?.Fingerprint, store.AuditRetentionDays(), store.SessionTimeouts(), store.Grants().Count, app.Service.Lock.IsLocked);
     }
 
     private static string AuditText(AuthorityStore store) => string.Join("\n", store.Audit(1000).Select(entry => entry.Event + "|" + entry.Actor + "|" + entry.Detail));
@@ -348,7 +348,7 @@ internal static class ApiTests
         using AdminApp app = new(root);
         AdminBrowser b = app.Browser();
         (int status, string body, HttpResponseMessage response) = await b.GetAsync("/api/v1/status");
-        check(status == 200 && Member(body, "running") == "true" && Member(body, "locked") == "false" && Member(body, "unlockMode") == "manual" && Member(body, "apiVersion") == "v1" && !body.Contains(app.Fingerprint, StringComparison.Ordinal), "api status: public, shows running, the lock state, the unlock mode and the versions, and nothing of any machine");
+        check(status == 200 && Member(body, "running") == "true" && Member(body, "locked") == "false" && Member(body, "apiVersion") == "v1" && !body.Contains(app.Fingerprint, StringComparison.Ordinal), "api status: public, shows running, the lock state and the versions, and nothing of any machine");
         check(ContentType(response) == "application/json" && response.Headers.GetValues("X-Api-Version").Single() == "1" && response.Headers.Contains("X-Frame-Options") && response.Headers.GetValues("Cache-Control").Single().Contains("no-store", StringComparison.Ordinal)
             && response.Headers.GetValues("X-Content-Type-Options").Single() == "nosniff" && response.Headers.GetValues("Content-Security-Policy").Single().Contains("default-src 'none'", StringComparison.Ordinal), "api status: JSON, version header, not frameable, not cached, no sniffing, a locked-down CSP");
 
@@ -395,7 +395,7 @@ internal static class ApiTests
         check(app.Store.Audit(1000).Any(entry => entry.Event == "admin-operation" && entry.Detail.StartsWith("admin-session; started", StringComparison.Ordinal) && entry.Actor == "passkey laptop"), "session: the start is in the authority's audit history with the key that tapped");
         check(!audit.Contains(token, StringComparison.Ordinal) && !audit.Contains("authenticatorData", StringComparison.Ordinal), "session: the audit history holds neither the token nor a proof");
 
-        // A non-admin enrolled passkey receives only the Approvals capability set.
+        // A convenience key can read and manage grants after signing in.
         AdminBrowser approvalOnly = app.Browser();
         check(await approvalOnly.SignInAsync(app.Phone), "session: a non-admin enrolled passkey can sign in");
         string approvalWho = (await approvalOnly.GetAsync("/api/v1/session")).Html;
@@ -403,19 +403,42 @@ internal static class ApiTests
         {
             string[] capabilities = [.. approvalSession.RootElement.GetProperty("capabilities").EnumerateArray().Select(item => item.GetString()!)];
             check(Member(approvalWho, "identity") == "phone" && Member(approvalWho, "scope") == "approval"
-                && capabilities.SequenceEqual([SessionCapabilities.ApprovalsRead, SessionCapabilities.ApprovalsDecide]),
-                "session: the non-admin passkey receives approval scope and no admin capabilities");
+                && capabilities.SequenceEqual([SessionCapabilities.ApprovalsRead, SessionCapabilities.ApprovalsDecide, SessionCapabilities.AdminRead, SessionCapabilities.GrantsDecide]),
+                "session: the non-admin passkey receives read and grant capabilities without admin.decide");
         }
         (int approvalQueueStatus, string approvalQueueBody, _) = await approvalOnly.GetAsync("/api/v1/approvals");
-        (int approvalAdminRead, string approvalAdminBody, _) = await approvalOnly.GetAsync("/api/v1/machines");
+        (int approvalAdminRead, _, _) = await approvalOnly.GetAsync("/api/v1/machines");
         (int approvalAdminWrite, string approvalWriteBody) = await approvalOnly.PostAsync("/api/v1/lock", "{\"authorization\":\"AAAAAAAAAAAA\"}");
         using (JsonDocument approvalQueueDocument = JsonDocument.Parse(approvalQueueBody))
         {
             check(approvalQueueStatus == 200 && approvalQueueDocument.RootElement.GetProperty("items").GetArrayLength() == 0
-                && approvalAdminRead == 403 && Code(approvalAdminBody) == "scope-required"
+                && approvalAdminRead == 200
                 && approvalAdminWrite == 403 && Code(approvalWriteBody) == "scope-required",
-                "session: approval scope can read Approvals but cannot read machines or perform admin changes");
+                "session: approval scope can read approvals and machines, and admin writes require admin.decide");
         }
+        string beforeConvenience = Snapshot(app);
+        foreach (ApiRoute route in reads.Where(item => !item.Template.Contains('{', StringComparison.Ordinal)))
+        {
+            (int readStatus, string readBody, _) = await approvalOnly.GetAsync(route.Template);
+            check(readStatus == 200 && !readBody.Contains(token, StringComparison.Ordinal) && !readBody.Contains("authenticatorData", StringComparison.Ordinal),
+                "convenience read: " + route.Template + " returns metadata without tokens or proofs");
+        }
+        foreach (ApiRoute route in app.Service.Admin.Api.Routes.Where(item => item.Access is ApiAccess.Authorize or ApiAccess.Mutation && item.Tag != "authorizations" && !OperationPolicy.AnyKey(item.Operation)))
+        {
+            (int gate, string rejected) = await approvalOnly.SendAsync(new HttpMethod(route.Method), Fill(route), route.Request is null ? null : "{}");
+            check(gate == 403 && Code(rejected) == "scope-required", "convenience route gate: " + route.Method + " " + route.Template + " requires admin.decide");
+        }
+        foreach ((string op, _) in AdminApi.Operations.Where(item => !OperationPolicy.AnyKey(item.Operation)))
+        {
+            string request = AdminBrowser.AuthorizationBody(op);
+            foreach (string path in new[] { "/api/v1/authorizations", "/api/v1/authorizations/inline" })
+            {
+                (int gate, string rejected) = await approvalOnly.PostAsync(path, request);
+                check(gate == 403 && Code(rejected) == "scope-required", "convenience authorization gate: " + op + " requires admin.decide on " + path);
+            }
+        }
+
+        check(Snapshot(app) == beforeConvenience, "convenience sessions cannot change administrator state");
         (int approvalSignOut, _) = await approvalOnly.SendAsync(HttpMethod.Delete, "/api/v1/session", null);
         check(approvalSignOut == 200, "session: approval-only sessions can sign out");
 
@@ -430,7 +453,7 @@ internal static class ApiTests
         check(detailStatus == 200 && Member(detail, "fingerprint") == app.Fingerprint, "machines: one machine by an unambiguous start of its fingerprint");
         check((await b.GetAsync("/api/v1/machines/" + new string('0', 20))).Status == 404 && (await b.GetAsync("/api/v1/machines/zz")).Status == 400, "machines: an unknown machine is 404 and a malformed fingerprint 400");
         string settings = (await b.GetAsync("/api/v1/settings")).Html;
-        check(Member(settings, "auditRetentionDays") == "365" && Member(settings, "sessionIdleMinutes") == "15" && Member(settings, "sessionAbsoluteMinutes") == "480" && Member(settings, "unlockMode") == "manual", "settings: the audit retention, the session timeouts and the unlock mode");
+        check(Member(settings, "auditRetentionDays") == "365" && Member(settings, "sessionIdleMinutes") == "15" && Member(settings, "sessionAbsoluteMinutes") == "480", "settings: the audit retention and the session timeouts");
         check(Member((await b.GetAsync("/api/v1/passkeys")).Html, "available") == "true" && (await b.GetAsync("/api/v1/passkeys")).Html.Contains("laptop", StringComparison.Ordinal), "passkeys: the enrolled passkeys are listed (names and kinds only)");
     }
 
@@ -493,7 +516,7 @@ internal static class ApiTests
         string keyBefore = app.Store.ActiveKey()?.Fingerprint ?? "";
         int askedLocked = app.Asked;
         List<AdminStart> lockedAnswers = [];
-        foreach (string lockedOp in new[] { "authority-key-rotate", "authority-key-recover", "machine-disable", "set-audit-retention", "policy-unattended" })
+        foreach (string lockedOp in new[] { "authority-key-rotate", "authority-key-recover", "machine-disable", "set-audit-retention" })
         {
             lockedAnswers.Add((await app.Service.Admin.BeginAuthorizationAsync(forged, lockedOp, new Dictionary<string, string> { ["fingerprint"] = app.Fingerprint[..20], ["days"] = "5" }, CancellationToken.None)).Start);
         }
@@ -605,7 +628,7 @@ internal static class ApiTests
 
     private static async Task SensitiveMatrix(Action<bool, string> check, string root)
     {
-        using AdminApp app = new(root, protection: true);
+        using AdminApp app = new(root);
         string fp = app.Fingerprint;
         AdminBrowser b = await app.SignedIn();
         int refusals = 0;
@@ -656,9 +679,7 @@ internal static class ApiTests
         await Operation("recover-authority-key", "authority-key-recover");
         await Operation("audit retention", "set-audit-retention", ("days", "7"));
         await Operation("session timeouts", "set-session-timeouts", ("idle", "20"), ("absolute", "600"));
-        await Operation("unattended unlock", "policy-unattended");
-        await Operation("manual unlock", "policy-manual");
-        check(refusals == 33, "sensitive: eleven operations (the host name change is in the machine functions: the running host keeps reporting its own name), three refusals each (" + refusals + ")");
+        check(refusals == 27, "sensitive: nine operations (the host name change is in the machine functions: the running host keeps reporting its own name), three refusals each (" + refusals + ")");
 
         // A tap for one operation, replayed on the page of another (other operation or other parameters), changes nothing.
         app.Clock.Advance(TimeSpan.FromSeconds(31));
@@ -691,7 +712,7 @@ internal static class ApiTests
 
     private static async Task Binding(Action<bool, string> check, string root)
     {
-        using AdminApp app = new(root, protection: true);
+        using AdminApp app = new(root);
         string fp = app.Fingerprint[..20];
         AdminBrowser b = await app.SignedIn();
 
@@ -781,13 +802,9 @@ internal static class ApiTests
         (int lateTap, _) = TestState.Approve(app.Http, waitingBeforeLock.PageUrl, "http://localhost:" + new Uri(waitingBeforeLock.Link!).Port, "localhost", app.Laptop);
         check(beforeLockState == "consumed" && afterLock == 403 && lateTap != 200 && app.Store.Find(app.Fingerprint)!.FriendlyName == "tapped before lock", "binding: after a lock and an unlock an old authorization is gone (403) and the page that was waiting takes no tap");
 
-        // j. Policy: the unlock mode is one route; the operation follows the body, so a tap for unattended is not a tap for manual.
+        // j. An authorization for one value of a setting does not set another.
         AdminBrowser c = await app.SignedIn();
         app.Clock.Advance(TimeSpan.FromSeconds(31));
-        Tapped unattended = await c.OpAsyncWithoutMutation("policy-unattended", app.Laptop);
-        await c.WaitAuthorizationAsync(unattended.AuthorizationId!);
-        (int wrongPolicy, string wrongPolicyBody) = await c.SendAsync(HttpMethod.Put, "/api/v1/settings/unlock-policy", "{\"authorization\":\"" + unattended.AuthorizationId + "\",\"policy\":\"manual\"}");
-        check(wrongPolicy == 403 && Code(wrongPolicyBody) == "authorization-mismatch" && app.Store.GetUnlockPolicy() == UnlockPolicy.Unattended, "binding: an authorization for the unattended unlock mode does not set another mode (the tap made the mode it named)");
         Tapped retention = await c.OpAsyncWithoutMutation("set-audit-retention", app.Laptop, ("days", "10"));
         await c.WaitAuthorizationAsync(retention.AuthorizationId!);
         (int wrongDays, string wrongDaysBody) = await c.SendAsync(HttpMethod.Put, "/api/v1/settings/audit-retention", "{\"authorization\":\"" + retention.AuthorizationId + "\",\"days\":0}");
@@ -797,7 +814,7 @@ internal static class ApiTests
         check(audit.Contains("authorization mismatch", StringComparison.Ordinal) && audit.Contains("authorization invalid", StringComparison.Ordinal), "binding: every refusal (mismatch, invalid) is in the audit history");
 
         // k. An authorization whose tap never came expires (in its own app: the clock moves far, and a passkey page is only good for the time it was made for).
-        using AdminApp slow = new(root, protection: true);
+        using AdminApp slow = new(root);
         AdminBrowser sb = await slow.SignedIn();
         await sb.LoadAsync();
         (int untappedStatus, string untapped) = await sb.PostAsync("/api/v1/authorizations", AdminBrowser.AuthorizationBody("machine-rename", ("fingerprint", slow.Fingerprint[..20]), ("name", "untapped")));
@@ -890,8 +907,6 @@ internal static class ApiTests
         check((await Ask(null, true, ("id", "g-none"), ("minutes", "60"))).Start.Link is null && (await Ask(null, true, ("id", once.Id), ("minutes", "0"))).Start.Link is null && (await Ask(null, true, ("id", once.Id), ("minutes", "5"), ("indefinite", "true"))).Start.Link is null,
             "grant replace: an unknown grant, a time of 0, or a time and no end together, is refused before any page");
 
-        (AuthorizationView? View, AdminStart Start, int Tap, AuthorizationView? Settled) phone = await Ask(app.Phone, true, ("id", once.Id), ("minutes", "60"));
-        check(phone.Tap == 403 && Snapshot() == before, "grant replace: a key that is not an admin key is refused (403); nothing is made (" + phone.Tap + ")");
         (AuthorizationView? View, AdminStart Start, int Tap, AuthorizationView? Settled) noUv = await Ask(app.Laptop, false, ("id", once.Id), ("minutes", "60"));
         check(noUv.Tap == 403 && Snapshot() == before, "grant replace: the admin key without user verification makes nothing (" + noUv.Tap + ")");
 
@@ -926,7 +941,7 @@ internal static class ApiTests
             && !listed.Contains(reviewCanary, StringComparison.Ordinal), "grant review API: a verified grant has no readable evidence while review is locked");
 
         using Unlock release = TestVault.Unlock(app.State, app.Laptop)!;
-        check(app.Service.Review!.TryOpen(TestState.Current(app.State)!, release), "grant review API: the admin PRF opens the review key");
+        check(app.Service.Keys!.TryOpen(TestState.Current(app.State)!, release), "grant review API: the admin PRF opens the review key");
         string logFolder = Path.Combine(root, "review-logs");
         Directory.CreateDirectory(logFolder);
         Capture capture = new();
@@ -952,8 +967,8 @@ internal static class ApiTests
             "grant review API: only the review response holds the signed command text (no audit row, no log line or file: " + capture.Events.Count + " events)");
         AdminBrowser approvalOnly = app.Browser();
         check(await approvalOnly.SignInAsync(app.Phone), "grant review API: an approval-only browser can sign in");
-        (int forbidden, string forbiddenReview, _) = await approvalOnly.GetAsync(reviewPath);
-        check(forbidden == 403 && Code(forbiddenReview) == "admin-required", "grant review API: an approval-only session cannot read review text");
+        (int convenienceReview, string allowedReview, _) = await approvalOnly.GetAsync(reviewPath);
+        check(convenienceReview == 200 && Member(allowedReview, "state") == "open" && Member(allowedReview, "text")!.Contains(reviewCanary, StringComparison.Ordinal), "grant review API: a convenience session can read signed review text while unlocked");
         using (JsonDocument doc = JsonDocument.Parse(listed))
         {
             JsonElement row = doc.RootElement.GetProperty("items").EnumerateArray().First(item => item.GetProperty("id").GetString() == other.Id);
@@ -969,6 +984,25 @@ internal static class ApiTests
         (HttpMethod method, string path, string json) = b.MutationRequest("grant-replace", null, ("id", other.Id), ("minutes", "30"));
         (int status, string body) = await b.SendAsync(method, path, json);
         check(path == "/api/v1/grants/" + other.Id + "/replace" && status is >= 400 and < 500 && Snapshot() == httpBefore, "grant replace: POST /grants/{id}/replace without an authorization is refused (" + status + ") and makes no row");
+
+        (int inlineStatus, string inlineBody) = await approvalOnly.PostAsync("/api/v1/authorizations/inline",
+            AdminBrowser.AuthorizationBody("grant-replace", ("id", other.Id), ("minutes", "30")));
+        using JsonDocument inline = JsonDocument.Parse(inlineBody);
+        string inlineId = inline.RootElement.GetProperty("id").GetString()!;
+        using JsonDocument payload = JsonDocument.Parse(inline.RootElement.GetProperty("proof").GetProperty("payload").GetString()!);
+        string bind = payload.RootElement.GetProperty("bind").GetString()!;
+        string rpId = payload.RootElement.GetProperty("rpId").GetString()!;
+        byte[] challenge = Convert.FromBase64String(bind.Replace('-', '+').Replace('_', '/') + new string('=', (4 - bind.Length % 4) % 4));
+        string proofPath = "/api/v1/authorizations/" + inlineId + "/proof";
+        string proof = app.Phone.Assert(challenge, approvalOnly.Origin, rpId, TestState.NextCount());
+        string assertion = JsonSerializer.Serialize(new { proof });
+        (int wrongOwner, _) = await b.PostAsync(proofPath, assertion);
+        (int inlineTap, _) = await approvalOnly.PostAsync(proofPath, assertion);
+        (int replay, _) = await approvalOnly.PostAsync(proofPath, assertion);
+        GrantRecord? convenienceReplacement = app.Store.Grants().SingleOrDefault(item => item.Replaces == other.Id);
+        check(inlineStatus == 201 && wrongOwner == 404 && inlineTap == 200 && replay == 409
+            && convenienceReplacement is { Status: "active", Usage: GrantUsage.Reusable } && convenienceReplacement.ScopeKey == other.ScopeKey
+            && admin.GrantView(convenienceReplacement, app.Clock.GetUtcNow()).Verified, "grant replace: an inline convenience tap replaces the grant once, with a verified seal, only for its own session");
 
         // The machine's authorization changed since the approval (disabled, then enabled at a new security revision): replace is not offered, as the authority refuses it (authorization-changed).
         check(app.Store.Disable(app.Fingerprint, "test").Ok && admin.GrantView(other, app.Clock.GetUtcNow()).Actions.Count == 0, "grant replace: a used grant of a machine that is not Trusted is not offered replace");
@@ -1108,8 +1142,6 @@ internal static class ApiTests
         Tapped huge = await b.OpAsync("set-audit-retention", app.Laptop, true, null, true, ("days", "999999"));
         Tapped lateIdle = await b.OpAsync("set-session-timeouts", app.Laptop, true, null, true, ("idle", "50"), ("absolute", "10"));
         check(bad.Link is null && huge.Link is null && lateIdle.Link is null && app.Store.AuditRetentionDays() == 30 && app.Store.SessionTimeouts() == (15, 480), "settings: out of range values (and an idle timeout longer than the absolute one) are refused before any page");
-        Tapped manual = await b.OpAsync("policy-manual", null);
-        check(manual.Link is null && manual.PostStatus == 409, "settings: making unlock manual when it is manual already is refused before any page");
 
         // Passkey administration: its own pages (the existing enrollment ceremony) are the taps after the authorization; the API only starts them, for a session.
         string passkeys = (await b.GetAsync("/api/v1/passkeys")).Html;
@@ -1118,8 +1150,6 @@ internal static class ApiTests
         check(enroll.MutationStatus == 202 && Member(enroll.MutationBody, "outcome") == "started" && Member(enroll.MutationBody, "link") is { Length: > 8 } && await HostServiceTests.WaitFor(() => fake.Calls.Contains("enroll")), "passkeys: adding one needs its authorization, then starts the enrollment pages (their own taps)");
         Tapped remove = await b.OpAsync("passkey-unenroll", app.Laptop, true, null, true, ("name", "phone"));
         check(remove.MutationStatus == 202 && await HostServiceTests.WaitFor(() => fake.Calls.Contains("unenroll phone")), "passkeys: removing one needs its authorization, then starts the removal pages (their own taps)");
-        Tapped rotate = await b.OpAsync("store-key-rotate", app.Laptop);
-        check(rotate.MutationStatus == 202 && Member(rotate.MutationBody, "outcome") == "started" && Member(rotate.MutationBody, "link") is { Length: > 8 } && await HostServiceTests.WaitFor(() => fake.Calls.Contains("rotate-store-key")), "passkeys: rotating the secret store key needs its authorization, then starts the rotation pages (their own taps)");
         int calls = fake.Calls.Count;
         Tapped untapped = await b.OpAsync("passkey-enroll", null);
         (HttpMethod um, string up, string uj) = b.MutationRequest("passkey-enroll", untapped.AuthorizationId);
@@ -1134,6 +1164,14 @@ internal static class ApiTests
         (int s2, _) = await anon.PostAsync("/api/v1/passkeys/phone/remove", "{\"authorization\":\"AAAAAAAAAAAA\"}");
         check(s1 == 401 && s2 == 401 && fake.Calls.Count == calls, "passkeys: with no session neither adding nor removing a passkey is started");
         check(app.Store.Audit(1000).Any(entry => entry.Event == "admin-operation" && entry.Detail.StartsWith("enroll-passkey; requested", StringComparison.Ordinal)), "passkeys: the attempt is audited");
+
+        // Last: the fake rotation is applied at once, which locks the authority and ends every session and authorization, so the mutation's answer may already be gone.
+        calls = fake.Calls.Count;
+        Tapped untappedRotate = await b.OpAsync("store-key-rotate", null);
+        check(untappedRotate.Link is not null && fake.Calls.Count == calls, "passkeys: without the authorization's tap no rotation pages are started");
+        Tapped rotate = await b.OpAsync("store-key-rotate", app.Laptop);
+        check(rotate.ApproveStatus == 200 && await HostServiceTests.WaitFor(() => fake.Calls.Contains("rotate-store-key")), "passkeys: rotating the secret store key needs its authorization, then starts the rotation pages (their own taps)");
+        check(await HostServiceTests.WaitFor(() => app.Service.Lock.IsLocked), "passkeys: an applied rotation locks the authority");
     }
 
     // ---- one page at a time, a limit, lock always proceeds ----
@@ -1207,7 +1245,7 @@ internal static class ApiTests
         (int loginStatus, string loginBody) = await b.PostAsync("/api/v1/session", "{}");
         check(loginStatus == 423 && Code(loginBody) == "authority-locked" && app.Asked == 0, "locked: a sign-in is refused (423) and asks for no passkey");
         (int lockStatus, _) = await b.PostAsync("/api/v1/lock", "{\"authorization\":\"AAAAAAAAAAAA\"}");
-        (int policyStatus, _) = await b.PostAsync("/api/v1/authorizations", AdminBrowser.AuthorizationBody("policy-unattended"));
+        (int policyStatus, _) = await b.PostAsync("/api/v1/authorizations", AdminBrowser.AuthorizationBody("set-audit-retention", ("days", "10")));
         check(lockStatus == 403 && policyStatus == 401 && app.Asked == 0, "locked: nothing but the unlock (and a lock, which needs its own authorization) can be asked for without a session");
         Tapped bad = await b.OpAsync(AdminService.OpUnlock, app.Phone);
         check(bad.ApproveStatus == 403 && app.Service.Lock.IsLocked, "locked: a non-admin key cannot unlock");

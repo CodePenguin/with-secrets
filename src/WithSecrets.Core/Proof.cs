@@ -10,7 +10,17 @@ public sealed record ProofContext(byte[] Bind, string Origin);
 public sealed record ProofStart(string Mode, string Payload);
 
 /// <summary>The enrolled credential that verified a passkey assertion: identity and trusted admin flag from the store record, never from client input.</summary>
-public sealed record VerifiedCredential(string Name, bool Admin);
+public sealed record VerifiedCredential(string Id, string Name, bool Admin)
+{
+    internal static VerifiedCredential From(ManifestKey key) => new(key.Id, key.Name, key.Admin);
+
+    internal void AddTo(IDictionary<string, string> metadata, string prefix)
+    {
+        metadata[prefix + "Id"] = Id;
+        metadata[prefix + "Name"] = Name;
+        metadata[prefix + "Admin"] = Admin ? "true" : "false";
+    }
+}
 
 /// <summary>What a proof check came to. When <see cref="Ok" />, <see cref="Credential" /> is the trusted enrolled record that verified.</summary>
 public sealed record ProofResult(bool Ok, string Detail, VerifiedCredential? Credential = null);

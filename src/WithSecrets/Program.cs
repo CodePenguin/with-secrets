@@ -382,13 +382,13 @@ internal static class Program
                 Port = port.Value,
                 CommandLineEndpoint = LocalEndpoint.ForCommandLine(),
                 Deployment = deployment,
-                ConfigureProviders = (registry, authorityLock, review) =>
+                ConfigureProviders = (registry, authorityLock, keys) =>
                 {
                     LastPassProvider.RegisterInteractive(registry);
                     BitwardenProvider.Register(registry, authorityLock);
-                    OnePasswordProvider.Register(registry, authorityLock, review,
+                    OnePasswordProvider.Register(registry, authorityLock, keys,
                         Environment.GetEnvironmentVariable(OnePasswordProvider.ExecutableVariable) ?? "");
-                    VaultProvider.Register(registry, authorityLock, review,
+                    VaultProvider.Register(registry, authorityLock, keys,
                         Environment.GetEnvironmentVariable(VaultProvider.AddressVariable) ?? "",
                         Environment.GetEnvironmentVariable(VaultProvider.MountVariable) ?? "secret",
                         Environment.GetEnvironmentVariable(VaultProvider.NamespaceVariable));
@@ -423,14 +423,17 @@ internal static class Program
                 stop.Set();
             };
             Console.CancelKeyPress += handler;
-            foreach (string line in ServiceStartup.Lines(deployment.HostName, deployment.Fingerprint, enrolled))
+            foreach (string line in ServiceStartup.Lines(deployment.HostName, deployment.Fingerprint, enrolled, service.Authorization.IsRemote))
             {
                 TerminalPrompt.Line(line);
             }
 
-            foreach (string line in ServiceStartup.LockLines(service.Lock.IsLocked, deployment.Store.GetUnlockPolicy(), service.StartupUnlockNote, service.Admin.PageUrl))
+            if (!service.Authorization.IsRemote)
             {
-                TerminalPrompt.Line(line);
+                foreach (string line in ServiceStartup.LockLines(service.Lock.IsLocked, service.Admin.PageUrl))
+                {
+                    TerminalPrompt.Line(line);
+                }
             }
 
             if (service.MachinePort is { } machinePortNow)
