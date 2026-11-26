@@ -261,6 +261,11 @@ internal static class AuditKeyTests
 
     private static async Task RemoteRuns(Action<bool, string> check, string root)
     {
+        if (PlatformSkip.NoServerTls13("audit attribution for runs through a remote authority"))
+        {
+            return;
+        }
+
         using Authority auth = new(root, machineEndpoint: true);
         AuthorityStore store = auth.Machine.Deployment.Store;
         VerifiedCredential laptop = Of(auth.Admin, "laptop", true);
@@ -326,6 +331,11 @@ internal static class AuditKeyTests
 
     private static async Task RemoteDenial(Action<bool, string> check, string root)
     {
+        if (PlatformSkip.NoServerTls13("audit attribution for a denial from a remote authority"))
+        {
+            return;
+        }
+
         using Authority auth = new(root, queue: true, machineEndpoint: true);
         AuthorityStore store = auth.Machine.Deployment.Store;
         VerifiedCredential phone = Of(auth.Phone, "phone", false);

@@ -553,6 +553,11 @@ internal static class ConvenienceKeyTests
 
     private static async Task RemoteAuthority(Action<bool, string> check, string root)
     {
+        if (PlatformSkip.NoServerTls13("convenience passkey approvals through a remote authority"))
+        {
+            return;
+        }
+
         using Authority auth = new(root, provider: true, machineEndpoint: true);
         auth.OpenKeys();
         using RemoteHost host = await Pair(root, auth, "wsl-convenience");
