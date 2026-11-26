@@ -104,7 +104,7 @@ public static partial class DotenvxRun
         }
 
         string pipeName = PipePrefix + Guid.NewGuid().ToString("N");
-        using var pipe = new NamedPipeServerStream(pipeName, PipeDirection.In, 1, PipeTransmissionMode.Byte,
+        using var pipe = new NamedPipeServerStream(HelperPipe.GetName(pipeName), PipeDirection.In, 1, PipeTransmissionMode.Byte,
             PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(TimeSpan.FromMinutes(2));
@@ -361,7 +361,8 @@ public static partial class DotenvxRun
         }
 
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.Out, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        using var pipe = new NamedPipeClientStream(".", HelperPipe.GetName(pipeName), PipeDirection.Out,
+            PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
         var values = new Dictionary<string, string>(StringComparer.Ordinal);
         try
         {

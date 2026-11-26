@@ -651,7 +651,6 @@ internal static class Program
             $"echo ran > '{marker}'\n" +
             "exit 7\n");
         File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-        Environment.SetEnvironmentVariable("DOTENV_PRIVATE_KEY", "should-not-reach-child");
 
         Dictionary<string, string> values = new() { ["DB_URL"] = Secret, ["OTHER"] = "not-requested-value" };
         string auditPath = Path.Combine(temp, "audit.db");
@@ -661,7 +660,18 @@ internal static class Program
         StringWriter stdout = new();
         StringWriter stderr = new();
         RunArgs approved = CliArgs.ParseRun(["--secrets", "DB_URL", "--reason", "test", "--", "./script.sh"], out _)!;
-        int code = await new RunCommand(new MemoryStore(values), yes, stdout, stderr).ExecuteAsync(approved, temp, TestAudit.Sink(new StateDatabase(auditPath)));
+        const string DotenvKey = "DOTENV_PRIVATE_KEY";
+        string? previousKey = Environment.GetEnvironmentVariable(DotenvKey);
+        int code;
+        try
+        {
+            Environment.SetEnvironmentVariable(DotenvKey, "should-not-reach-child");
+            code = await new RunCommand(new MemoryStore(values), yes, stdout, stderr).ExecuteAsync(approved, temp, TestAudit.Sink(new StateDatabase(auditPath)));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(DotenvKey, previousKey);
+        }
         Check(code == 7, "e2e: exit code of the program passes through");
         Check(stdout.ToString().Contains("plain=[REDACTED]", StringComparison.Ordinal), "e2e: exact value redacted");
         Check(!stdout.ToString().Contains(Secret, StringComparison.Ordinal) && !stdout.ToString().Contains(Convert.ToBase64String(Encoding.UTF8.GetBytes(Secret)), StringComparison.Ordinal), "e2e: base64 form redacted");

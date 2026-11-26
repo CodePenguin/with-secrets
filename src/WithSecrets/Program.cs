@@ -260,7 +260,7 @@ internal static class Program
         Console.CancelKeyPress += OnCancel;
         try
         {
-            using NamedPipeClientStream pipe = new(".", LastPassRefreshLauncher.PipePrefix + channel, PipeDirection.InOut,
+            using NamedPipeClientStream pipe = new(".", HelperPipe.GetName(LastPassRefreshLauncher.PipePrefix + channel), PipeDirection.InOut,
                 PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
             await pipe.ConnectAsync(5000, cancel.Token);
             return await LastPassRefreshTerminal.RunAsync(pipe, authority.Fingerprint, cancel.Token);

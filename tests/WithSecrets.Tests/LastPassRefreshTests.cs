@@ -135,7 +135,7 @@ internal static class LastPassRefreshTests
 
     private static NamedPipeServerStream NewPipe(out string name)
     {
-        name = "with-secrets-lp-" + Guid.NewGuid().ToString("N");
+        name = HelperPipe.GetName("with-secrets-lp-" + Guid.NewGuid().ToString("N"));
         return new(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
     }
 

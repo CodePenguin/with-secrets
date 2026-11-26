@@ -233,7 +233,9 @@ internal static class HostServiceTests
 
     internal static IReadOnlyDictionary<string, string> Env(params (string Name, string Value)[] extra)
     {
-        Dictionary<string, string> map = new(LaunchClient.CurrentEnvironment(), StringComparer.Ordinal);
+        Dictionary<string, string> map = LaunchClient.CurrentEnvironment()
+            .Where(pair => !DotenvxRun.IsCredential(pair.Key))
+            .ToDictionary(StringComparer.Ordinal);
         map.Remove("WS_TEST_SERVICE_ONLY");
         foreach ((string name, string value) in extra)
         {

@@ -38,7 +38,7 @@ internal sealed class LastPassRefreshLauncher : IInteractiveProviderRefresh
         using CancellationTokenSource deadline = CancellationTokenSource.CreateLinkedTokenSource(cancel);
         deadline.CancelAfter(TimeSpan.FromSeconds(15));
         string channel = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
-        NamedPipeServerStream pipe = new(PipePrefix + channel, PipeDirection.InOut, 1, PipeTransmissionMode.Byte,
+        NamedPipeServerStream pipe = new(HelperPipe.GetName(PipePrefix + channel), PipeDirection.InOut, 1, PipeTransmissionMode.Byte,
             PipeOptions.CurrentUserOnly | PipeOptions.Asynchronous);
         try
         {
