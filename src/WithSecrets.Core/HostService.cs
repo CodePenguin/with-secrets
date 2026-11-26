@@ -1413,11 +1413,12 @@ public sealed class HostService : IDisposable
         _stop.Cancel();
         try
         {
-            _auditLoop.Wait(TimeSpan.FromSeconds(3));
+            // Both loops can still be using the database after cancellation.
+            Task.WhenAll(_auditLoop, _pump).Wait(TimeSpan.FromSeconds(3));
         }
         catch (Exception error) when (error is AggregateException or OperationCanceledException)
         {
-            // The loop was cancelled or failed; nothing more to wait for.
+            // Both loops ended, with at least one cancellation or failure.
         }
 
         lock (_machineLock)
