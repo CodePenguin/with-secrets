@@ -77,6 +77,7 @@ A Docker secret appears as `/run/secrets/with-secrets-pairing`, which `with-secr
 - **"too busy".** Fixed limits: 30 refused attempts in 10 minutes in all, 4 registrations at once, 32 machines waiting. Wait ten minutes or approve/remove waiting machines.
 - **The Create button says no address.** The authority service has no machine endpoint: start it with `--machine-port`. (Started before the first approval, it prints that the listener starts by itself when the first approval makes the signing key; no restart is needed.)
 - **Cannot connect.** The address in the bundle must be reachable from the new machine (firewall; with WSL NAT use `--machine-bind` on the vEthernet address).
+- **The authority restarted before the host paired.** Any pending invitation expired at restart. Create and copy a new bundle.
 - **The machine stays Pending after pairing.** That is intended: approve it under Machines.
 
 ## 3. Day to day
@@ -85,6 +86,10 @@ A Docker secret appears as `/run/secrets/with-secrets-pairing`, which `with-secr
 - **Machines:** Approve, Disable/Enable, Untrust/Trust again, Rename, Accept host name (section 7).
 - **Grants:** created with `with-secrets approve ...` on the page; Extend, Renew, Revoke in the app.
 - **Audit:** the **Audit** view searches the signed events (machine, project, time, type, outcome). This is the only audit log: run events (authorization, launch, execution) and administrative events (type `admin`: store changes, key rotation, enrollment, recovery, revocation, settings, passkey changes, refused changes; names only). Each event may carry signed **metadata** (names and fingerprints only: secret names, variable mapping, `.env` files, `decrypts` as `VARIABLE=KEY:FINGERPRINT` for Dotenvx encrypted values (the key secret's name and the first 12 hex characters of the SHA-256 of the ciphertext, never a value, a ciphertext or a key), file fingerprints, approving key, reuse minutes), shown read-only in the event list. There is no hash chain; integrity comes from the machine signature, the unique id, the per-machine sequence and the authority's acknowledgement. The `--audit` command is gone.
+
+### Interactive LastPass refresh
+
+On the authority desktop, open **Providers** and choose **Refresh values**. Finish the terminal and browser steps within four minutes in the initiating browser session. Start a fresh refresh if the provider or its mounts changed, the previous refresh expired, or the authority locked during the flow. See [Providers and mounts](reference.md#providers-and-mounts) for prerequisites and the approval steps.
 
 ### HashiCorp Vault
 

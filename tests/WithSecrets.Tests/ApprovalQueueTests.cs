@@ -288,6 +288,26 @@ internal static class ApprovalQueueTests
             && raceDecision.DecisionPrincipal?.Kind == (approveWon ? "passkey" : "session"),
             "approvals: concurrent approve and deny produce exactly one server-attributed winner");
 
+        ManualTimeProvider challengeClock = new(now);
+        using ApprovalQueue challengeQueue = new(challengeClock, () => TimeSpan.FromMinutes(10));
+        DateTimeOffset shortDeadline = now.AddMinutes(3);
+        check(challengeQueue.TryRegister(Review("req-long-challenge", now), out _)
+            && challengeQueue.TryRegister(Review("req-short-challenge", now) with { ExpiresAt = shortDeadline }, out _),
+            "approvals: register requests with ten-minute and three-minute deadlines");
+        (ApprovalChallengeDto? longChallenge, _, _) = challengeQueue.CreateOrReuseChallenge("req-long-challenge", "session-one", "http://localhost", proof);
+        (ApprovalChallengeDto? shortChallenge, _, _) = challengeQueue.CreateOrReuseChallenge("req-short-challenge", "session-one", "http://localhost", proof);
+        check(longChallenge?.ExpiresAt == now.AddMinutes(5) && shortChallenge?.ExpiresAt == shortDeadline,
+            "approvals: a passkey challenge lasts five minutes, capped by the request deadline");
+
+        challengeClock.Advance(TimeSpan.FromMinutes(4));
+        (ApprovalChallengeDto? stillLive, _, _) = challengeQueue.CreateOrReuseChallenge("req-long-challenge", "session-one", "http://localhost", proof);
+        check(stillLive is not null && stillLive.FlowId == longChallenge?.FlowId,
+            "approvals: the original challenge is still live after four minutes");
+        challengeClock.Advance(TimeSpan.FromMinutes(1));
+        (ApprovalChallengeDto? replacementChallenge, _, _) = challengeQueue.CreateOrReuseChallenge("req-long-challenge", "session-two", "http://localhost", proof);
+        check(replacementChallenge is not null && replacementChallenge.FlowId != longChallenge?.FlowId,
+            "approvals: an expired challenge can be replaced while the run request is still pending");
+
         // Request expiry and terminal-review retention use the injected clock and are deterministic.
         ManualTimeProvider manualClock = new(now);
         using ApprovalQueue expiringQueue = new(manualClock, () => TimeSpan.FromMinutes(5));

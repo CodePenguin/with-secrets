@@ -116,7 +116,7 @@ public sealed class ApprovalQueue : IDisposable
 
     public const int MaxPending = 64;
     public static readonly TimeSpan TerminalRetention = TimeSpan.FromMinutes(10);
-    public static readonly TimeSpan ChallengeLifetime = TimeSpan.FromMinutes(2);
+    public static readonly TimeSpan ChallengeLifetime = TimeSpan.FromMinutes(5);
     public const string ApproveOnceDecision = "approve-once";
     public const string GrantDecision = "create-grant";
     public const string ApproveDecision = "approve";
