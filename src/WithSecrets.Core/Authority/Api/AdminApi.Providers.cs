@@ -25,6 +25,8 @@ internal sealed partial class AdminApi
             ApiAccess.Authorize, 200, "SealedProviderConfiguration", S.Obj([("serviceAccountToken", S.Str(min: 1, max: 2000))]), [], null, SealOnePasswordConfigurationAsync),
         new("POST", Prefix + "/providers/vault/seal", "sealVaultConfiguration", "Seal a write-only HashiCorp Vault token for provider configuration.", "providers",
             ApiAccess.Authorize, 200, "SealedProviderConfiguration", S.Obj([("token", S.Str(min: 1, max: 2000))]), [], null, SealVaultConfigurationAsync),
+        new("POST", Prefix + "/providers/bitwarden/seal", "sealBitwardenConfiguration", "Seal a Bitwarden token bound to its HTTPS server.", "providers",
+            ApiAccess.Authorize, 200, "SealedProviderConfiguration", S.Obj([("token", S.Str(min: 1, max: 1024)), ("serverUrl", S.Str(min: 1, max: 512))]), [], null, SealBitwardenConfigurationAsync),
         new("POST", Prefix + "/providers/validate", "validateProvider", "Validate a proposed provider configuration or mount path.", "providers", ApiAccess.Authorize, 200,
             "ProviderValidation", ProviderValidationBody(), [], null, ValidateProviderAsync, BodyLimit: ConfigurationBodyLimit),
         new("POST", Prefix + "/mounts/{id}/refresh", "refreshMount", "Refresh the namespace entries of a mount from its provider.", "providers", ApiAccess.Authorize, 200,
@@ -36,7 +38,7 @@ internal sealed partial class AdminApi
         new("DELETE", Prefix + "/provider-value-refreshes/{id}", "cancelProviderValueRefresh", "End this session's refresh and discard its staged ciphertext.", "providers",
             ApiAccess.Authorize, 200, "Done", null, [], null, CancelProviderValueRefreshAsync),
         Mutation("POST", "/providers", "provider-add", "addProvider", "Add a provider instance.", "providers", "name", "type", "config", "max-stale-seconds", "confirm-warnings"),
-        Mutation("PUT", "/providers/{id}/config", "provider-config", "changeProviderConfig", "Change a provider instance configuration.", "providers", "revision", "config", "confirm-warnings"),
+        Mutation("PUT", "/providers/{id}/config", "provider-config", "changeProviderConfig", "Change a provider instance configuration and optionally its cache policy.", "providers", "revision", "config", "max-stale-seconds", "confirm-warnings"),
         Mutation("PUT", "/providers/{id}/max-stale", "provider-max-stale", "changeProviderMaxStale", "Change the provider instance cache policy.", "providers", "revision", "max-stale-seconds"),
         Mutation("DELETE", "/providers/{id}", "provider-remove", "removeProvider", "Remove a provider instance with no mounts.", "providers", "revision"),
         Mutation("POST", "/mounts", "mount-add", "addMount", "Add a provider mount and end grants whose source changes.", "providers", "instance", "kind", "path", "base", "confirm-warnings"),
@@ -92,6 +94,10 @@ internal sealed partial class AdminApi
 
     private Task<ApiResult> SealVaultConfigurationAsync(ApiCall call)
         => SealProviderTokenAsync(call, "token", "Vault", (providers, token) => providers.SealVaultConfiguration(token));
+
+    private Task<ApiResult> SealBitwardenConfigurationAsync(ApiCall call)
+        => SealProviderTokenAsync(call, "token", "Bitwarden", (providers, token) =>
+            providers.SealBitwardenConfiguration(token, call.Body!.Value.GetProperty("serverUrl").GetString()!));
 
     private Task<ApiResult> SealProviderTokenAsync(ApiCall call, string field, string providerName, Func<ProviderAdmin, string, string?> seal)
     {

@@ -5,8 +5,8 @@ using System.Text.Json;
 namespace WithSecrets.Bitwarden;
 
 /// <summary>Read-only Bitwarden Secrets Manager integration. Credentials are resolved on the authority.</summary>
-public sealed class BitwardenAdapter(string executablePath, Func<string, Uri, string?> resolveCredential,
-    Func<CancellationToken>? unlockedSession = null)
+public sealed class BitwardenAdapter(string executablePath, Func<string, string?> decryptConfiguration,
+    Func<CancellationToken> unlockedSession)
     : ProviderAdapter<BitwardenConfiguration>
 {
     public const string ProviderType = "bitwarden";
@@ -71,11 +71,7 @@ public sealed class BitwardenAdapter(string executablePath, Func<string, Uri, st
             }
             catch (ProviderAdapterException error) when (error.Kind == ProviderErrorKind.AuthenticationFailed)
             {
-                return [new("The Bitwarden token variable is missing or empty on the authority, or Bitwarden rejected the token.", ValidationSeverity.Error, "tokenEnv")];
-            }
-            catch (ProviderAdapterException error) when (error.ProviderCode == "server-url-mismatch")
-            {
-                return [new("The server URL does not match the authority's server setting for this token variable.", ValidationSeverity.Error, "serverUrl")];
+                return [new("Bitwarden could not use this access token with the selected server.", ValidationSeverity.Error, "bitwardenToken")];
             }
         }
 
@@ -388,9 +384,9 @@ public sealed class BitwardenAdapter(string executablePath, Func<string, Uri, st
             issues.Add(new("Install bws on the authority service's PATH and restart the service.", ValidationSeverity.Error));
         }
 
-        if (!BitwardenConfiguration.IsTokenEnvironmentName(configuration.TokenEnv))
+        if (!JweCipher.IsCiphertext(configuration.EncryptedConfiguration))
         {
-            issues.Add(new("Enter BWS_ACCESS_TOKEN or a name beginning with WITH_SECRETS_BITWARDEN_TOKEN_.", ValidationSeverity.Error, "tokenEnv"));
+            issues.Add(new("Enter a Bitwarden access token.", ValidationSeverity.Error, "bitwardenToken"));
         }
 
         if (BitwardenConfiguration.ParseServerUrl(configuration.ServerUrl) is null)
@@ -410,10 +406,10 @@ public sealed class BitwardenAdapter(string executablePath, Func<string, Uri, st
             throw new ProviderAdapterException(ProviderErrorKind.InvalidConfiguration, "Bitwarden configuration is invalid.");
         }
 
-        CancellationToken session = unlockedSession?.Invoke() ?? CancellationToken.None;
+        CancellationToken session = unlockedSession();
         BitwardenCli.EnsureUnlocked(session);
         Uri server = BitwardenConfiguration.ParseServerUrl(configuration.ServerUrl)!;
-        string? token = resolveCredential(configuration.TokenEnv, server);
+        string? token = BitwardenConfiguration.ReadToken(decryptConfiguration(configuration.EncryptedConfiguration), server);
         if (string.IsNullOrWhiteSpace(token) || token.Contains('\0'))
         {
             throw new ProviderAdapterException(ProviderErrorKind.AuthenticationFailed, "The Bitwarden credential is missing or invalid.");

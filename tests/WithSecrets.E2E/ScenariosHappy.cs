@@ -17,24 +17,16 @@ internal static class ScenariosHappy
             return;
         }
 
-        using Rig rig = new();
+        using Rig rig = new(trusted: false);
         await using Ctx c = await Ctx.NewAsync(host);
         AuthorityStore store = rig.Machine.Deployment.Store;
 
-        // 1. First run: one page, one passkey, and the recovery code. This is the only step that is not in the administration app.
-        await c.DemoCaptionAsync("1. First run: the command line prints a link. The person opens it to create the first passkey and the recovery code.");
-        await Flows.Configure(rig, c, null, keepSetup: true);
         using SpaApp app = new(rig, unlocked: false, machineEndpoint: true, timeLimit: TimeSpan.FromSeconds(20));
-        await c.DemoCaptionAsync("The admin passkey unlocks the authority and opens the store and Review keys.");
-        await Spa.Unlock(c, app, s);
-
-        // 2. Sign in to the administration app with the passkey: one click.
-        await c.DemoCaptionAsync("2. Open the administration app and sign in with the passkey: one click.");
-        await Spa.SignIn(c, app, s);
+        await ScenariosQuickStart.Start(rig, c, app, s);
 
         // 3. Store a secret: name, value, one passkey tap. The value is sealed in the browser and never shown again.
-        await Spa.GoTo(c, "Secrets", "Secrets");
-        await c.DemoCaptionAsync("3. Secrets: type the name and the value. The value is sealed in the browser and is never shown again.");
+        await Spa.Click(c.Page.GetByRole(AriaRole.Link, new() { Name = "Secrets", Exact = true }));
+        await c.DemoCaptionAsync("Open Secrets and enter a name and value for the secret your command will need.");
         await c.Page.GetByLabel("Name").FillAsync("E2E_SECRET");
         await c.Page.GetByLabel("Value").FillAsync(SecretValue);
         await c.DemoCaptionAsync("Save secret asks for one passkey tap.");
@@ -47,9 +39,9 @@ internal static class ScenariosHappy
         rig.WriteScript("check", "script-value");
         using (Cmd<int> run = Cmds.Run(rig, "E2E_SECRET", Rig.ScriptCommand("check"), app: app))
         {
-            await c.DemoCaptionAsync("4. An agent runs a command that needs the secret. The command line prints a link to the request.");
+            await c.DemoCaptionAsync("Run a command that requests the secret. The terminal prints a link to review it.");
             await Spa.OpenRequest(c, run, app, s);
-            await Spa.ShowRequestVariants(c);
+            await Spa.ShowRequestVariants(c, s);
             await c.DemoCaptionAsync("The request shows what would run and which secrets it would get. Approve asks for one tap.");
             await Spa.ApproveOnce(c);
             s.Check(await run.Result.WaitAsync(TimeSpan.FromSeconds(30)) == 0 && run.Out.Text.Contains("script-value=" + StreamRedactor.Mask), "the approved run got the secret and its output was redacted");
@@ -61,7 +53,7 @@ internal static class ScenariosHappy
         CliCommand.Run grantRun = (CliCommand.Run)Cmds.Parse(["--secrets", "E2E_SECRET", "--reason", "e2e run", "--", ..Rig.ScriptCommand("check")]);
         using (Cmd<int> preApprove = new((port, o, e) => LaunchClient.RunAsync(grantRun.Args, rig.Work, app.Service.Endpoint, null, o, e, rig.Machine.Trust, approve: true).GetAwaiter().GetResult()))
         {
-            await c.DemoCaptionAsync("5. A pre-approval lets the same command run again without asking, for a time the person chooses.");
+            await c.DemoCaptionAsync("Create a pre-approval to let the same command run later for a period you choose.");
             await Spa.OpenRequest(c, preApprove, app, s, "Run request from");
             await c.DemoCaptionAsync("The arrow beside Approve chooses how long it lasts, and asks for one tap.");
             await Spa.ApproveFor(c, "Approve for 1 hour");
@@ -97,7 +89,7 @@ internal static class ScenariosHappy
 
         // 6. Add a machine: an invitation, the second machine pairs, the person approves it.
         await Spa.GoTo(c, "Machines", "Machines");
-        await c.DemoCaptionAsync("6. Add a second machine: Add a machine creates a one-time invitation with one tap.");
+        await c.DemoCaptionAsync("To connect a second machine, choose Add a machine and confirm to create a one-time invitation.");
         await Spa.Click(Spa.Button(c, "Add a machine"));
         await dialog.WaitForAsync();
         IPage invitationPage = await Spa.OpenPasskeyPage(c, s, dialog);
@@ -139,13 +131,13 @@ internal static class ScenariosHappy
 
         // 7. The audit history.
         await Spa.GoTo(c, "Audit", "Audit");
-        await c.DemoCaptionAsync("7. Audit: every change and every run is recorded, with who approved it.");
+        await c.DemoCaptionAsync("Audit shows recorded changes and runs, including who approved them.");
 
         // 8. Lock and unlock.
         await Spa.GoTo(c, "Overview", "Overview");
         await Spa.Button(c, "Lock the authority").ClickAsync();
         await dialog.WaitForAsync();
-        await c.DemoCaptionAsync("8. Lock the authority: every session ends and no secret is released until it is unlocked.");
+        await c.DemoCaptionAsync("Lock the authority from Overview. It ends every session and stops secret delivery until you unlock it.");
         c.Ignore("401");
         c.Ignore("404");
         await Spa.Continue(c, s, dialog);

@@ -56,11 +56,15 @@ internal static class PageScriptTests
             check(count == prompts && found.Count == 0, "tap rule: every passkey prompt on the " + name + " page starts in the tap (" + count + " prompts; " + string.Join("; ", found) + ")");
         }
 
-        // No sign-in names credentials: the sheet then lists every passkey for the host, password managers' too (iOS looks only in its own store when ids are given).
-        foreach ((string name, string page) in new[] { ("approval", approval), ("enroll", enroll), ("setup", firstRun) })
+        // Normal prompts let the browser offer all passkeys. Quick Start confirms only the passkey just created.
+        foreach ((string name, string page) in new[] { ("approval", approval), ("enroll", enroll) })
         {
             check(!Script(page).Contains("allowCredentials", StringComparison.Ordinal) && !page.Contains("allowCredentials", StringComparison.Ordinal), "no allowCredentials: the " + name + " page does not name credentials");
         }
+        string setupScript = Script(firstRun);
+        check(Regex.Count(setupScript, @"\ballowCredentials\b") == 1 &&
+            Regex.IsMatch(setupScript, @"if \(start\.quickStart\) \{\s+pending\.extensions = [^\r\n]+\s+pending\.allowCredentials = \[\{ id: fromBase64Url\(step\.credential\)"),
+            "Quick Start restricts the confirmation to the passkey just created");
 
         // Diagnostics: when a prompt is rejected, the status line carries the browser's error name and (cut) message, and
         // every "No passkey was ..." line is built with it; the script never reads that text from a PRF output.
@@ -95,15 +99,23 @@ internal static class PageScriptTests
             check(page.Contains(PrfClient.RequiredText, StringComparison.Ordinal), "prf: the " + name + " page says a PRF passkey is required");
         }
 
-        // A prompt that closes without settling must not strand the page: while it is open the tapped button reads "Cancel" and
-        // stays on; tapping it abandons the attempt (a counter every continuation checks) and starts no prompt; once the proof
-        // is posted the button is off again.
+        // A prompt that closes without settling must not strand the page. Cancel abandons the attempt, and each continuation
+        // checks the attempt number before proceeding.
         foreach ((string name, string page, int prompts) in new[] { ("approval", approval, 1), ("enroll", enroll, 2), ("setup", firstRun, 2) })
         {
             string script = Script(page);
             int cancelAt = script.IndexOf("function cancelAttempt()", StringComparison.Ordinal);
             string cancelBody = cancelAt < 0 ? "" : script[cancelAt..(cancelAt + Regex.Match(script[cancelAt..], "\\n    \\}\\n").Index)];
-            check(script.Contains("= \"Cancel\";", StringComparison.Ordinal) && !script.Contains("Cancel and try again", StringComparison.Ordinal), "cancel: the " + name + " page labels the waiting button Cancel");
+            if (name == "approval")
+            {
+                check(script.Contains("= \"Cancel\";", StringComparison.Ordinal), "cancel: the approval action becomes Cancel while its prompt is open");
+            }
+            else
+            {
+                check(!script.Contains("= \"Cancel\";", StringComparison.Ordinal) && script.Contains("button.disabled = true;", StringComparison.Ordinal)
+                    && Regex.IsMatch(script, @"cancel\.addEventListener\(""click"".*?if \(waiting !== null\)\s*\{\s*cancelAttempt\(\);", RegexOptions.Singleline),
+                    "cancel: the " + name + " page disables the primary action and keeps the existing Cancel button for the prompt");
+            }
             check(cancelBody.Contains("attempt++;", StringComparison.Ordinal) && cancelBody.Contains("Cancelled. Tap again to try.", StringComparison.Ordinal) && cancelBody.Contains("busy = false;", StringComparison.Ordinal) && !cancelBody.Contains("credentials", StringComparison.Ordinal) && !cancelBody.Contains("post(", StringComparison.Ordinal), "cancel: on the " + name + " page the cancel branch resets, says so, and starts no prompt and posts nothing");
             check(Regex.Count(script, @"= \+\+attempt;") >= (name == "enroll" ? 2 : name == "config" ? 2 : 1) && Regex.Count(script, @"!== attempt\)") >= Regex.Count(script, @"= \+\+attempt;") * 2, "cancel: every prompt on the " + name + " page takes an attempt number and its continuations check it");
             check(Regex.IsMatch(script, @"endWait\(\);\s+\w+\.disabled = true;\s+show\(""(Checking|Saving)") || Regex.IsMatch(script, @"endWait\(\);\s+controls\(false\);\s+show\(""Checking"), "cancel: the " + name + " page turns the button off again when the proof is posted");

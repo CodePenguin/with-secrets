@@ -86,7 +86,8 @@ public static class CliArgs
         revoked, goes through the page as before. A store whose key is released by a passkey tap still asks for that tap at each run. A
         person lists and changes grants in the admin web app (with-secrets admin prints its link).
 
-        A grant lasts 10 minutes, 1 hour, 4 hours or 8 hours, up to the reuseMaxMinutes setting (default 480, 10 to 1440). The
+        New approvals offer 1, 2, 4, 8, or 24 hours, 7 or 30 days, or Always. Finite choices respect the signed reuseMaxMinutes
+        ceiling (default 43200 minutes on a new store). The
         chosen time is signed with the passkey.
 
         A project declares what it needs in a .env file in the working directory (not searched upward); -f/--env-file PATH

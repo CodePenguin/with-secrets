@@ -2,10 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { api, setSessionSecret } from '../../api/client'
-import { keys, useSession, useStatus } from '../../api/queries'
+import { keys, useApprovals, useSession, useStatus } from '../../api/queries'
 import { Badge } from '../../components/Card'
 import { Button } from '../../components/Button'
 import { Logo } from '../../components/Logo'
+import { usePollInterval } from '../authorization/poll'
 import { Gate } from '../session/Gate'
 import styles from './Shell.module.css'
 
@@ -58,6 +59,8 @@ export function Shell() {
   })
   const signedIn = session.data?.authenticated === true
   const canRead = session.data?.capabilities.includes('admin.read') === true
+  const approvals = useApprovals(signedIn && status.data?.locked !== true, usePollInterval() * 3)
+  const waiting = approvals.data?.items.length ?? 0
 
   useEffect(() => {
     if (!navigationOpen) return
@@ -80,7 +83,7 @@ export function Shell() {
       </a>
       <header className={styles.header}>
         {/* The sign-in page shows the name itself, large; the header repeats it only once signed in. */}
-        {signedIn ? <p className={styles.brand}><Logo className={styles.logo} /> administration</p> : <span />}
+        {signedIn ? <p className={styles.brand}><Logo className={styles.logo} /></p> : <span />}
         <div className={styles.headerStatus}>
           {status.data?.remote ? <Badge tone="neutral">Remote host</Badge> : null}
           {status.data && !status.data.remote ? status.data.locked ? <Badge tone="warn">Authority locked</Badge> : <Badge tone="ok">Authority unlocked</Badge> : null}
@@ -117,13 +120,14 @@ export function Shell() {
                   className={({ isActive }) => (isActive ? styles.active : undefined)}
                   onClick={() => setOpenNavigationPath(null)}
                 >
-                  {link.label}
+                  {link.label}{link.to === '/access' && waiting > 0 ? <span aria-hidden="true"> <Badge tone="warn">{waiting}</Badge></span> : null}
                 </NavLink>
               </li>
             ))}
           </ul>
         </nav>
       ) : null}
+      {signedIn ? <span className="visually-hidden" role="status">{waiting > 0 ? waiting + (waiting === 1 ? ' pending approval' : ' pending approvals') : ''}</span> : null}
       <main id="main" ref={main} className={styles.main}>
         <Gate>
           <Outlet />

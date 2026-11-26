@@ -956,7 +956,7 @@ internal static class ApprovalPage
         .buttons { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1.25rem; }
         button, select { min-height: 2.75rem; font: inherit; }
         button { padding: 0.5rem 1rem; border: 2px solid var(--border); border-radius: 0.5rem; background: var(--surface); color: var(--text); font-weight: 600; cursor: pointer; }
-        #approve, #save, #confirm, #create { border-color: var(--accent); background: var(--accent); color: var(--accent-text); }
+        #approve, #save, #confirm, #create, #verify-device { border-color: var(--accent); background: var(--accent); color: var(--accent-text); }
         button:hover:not(:disabled) { filter: brightness(0.94); }
         button:focus-visible, select:focus-visible, input:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
         button:disabled, select:disabled { cursor: not-allowed; opacity: 0.65; }
@@ -1082,7 +1082,7 @@ internal static class ApprovalPage
         page.Append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
         page.Append("<meta name=\"referrer\" content=\"no-referrer\">\n");
         page.Append("<title>").Append(WebUtility.HtmlEncode(prompt.Heading)).Append("</title>\n");
-        page.Append("<style>").Append(style).Append("</style>\n</head>\n<body>\n<header class=\"bar\">with-secrets administration</header>\n<main>\n");
+        page.Append("<style>").Append(style).Append("</style>\n</head>\n<body>\n<header class=\"bar\">with-secrets</header>\n<main>\n");
         page.Append("<h1>").Append(WebUtility.HtmlEncode(prompt.Heading)).Append("</h1>\n");
         (string requestText, string? warning) = SplitWarning(prompt.Text);
         if (warning is not null)

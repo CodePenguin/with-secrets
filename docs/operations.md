@@ -14,26 +14,15 @@ Building needs the .NET 10 SDK and **Node.js 22 or newer** on the PATH (the admi
 
 ## 2. First run
 
-**Read this before the first real start.** The first `with-secrets service` on a real profile creates two non-exportable Windows CNG keys under fixed names: `with-secrets machine identity v1` (this machine's identity) and `with-secrets authority signing key v1` (the authority's), in the TPM when there is one. There is no way to export or copy them, and removing them by hand (or a wiped profile) means **Recover** (section 5) and approving the machine again. That sequence on the real profile (start locked, unlock, sign in, approve, run) has been exercised only with test key names and software keys (`--self-check`), never end to end on `%USERPROFILE%\.with-secrets`; a Linux or WSL machine keeps its identity key as an owner-only file instead (weaker, section 8); the WSL path and a real two-machine deployment over mutual TLS (each running service also creates, and deletes at exit, short-lived named CNG keys for its temporary TLS certificate) have not been run at all (section 8). Treat the first run as a test drive and do it in this order:
+Use your own terminal to run `with-secrets admin`. With no passkey enrolled, it starts the local service in the background and opens Quick Start on Windows. Open the printed link if your browser did not open.
 
-1. `with-secrets admin` (creates the passkey and the secret store; no CNG key)
-2. `with-secrets service` (**creates the two CNG keys**; starts locked)
-3. open the link it printed; Unlock (tap); Sign in (tap); Machines, Approve (tap)
-4. store a secret in the admin web app (Secrets); run a command
+1. **Verify device.** Enter the six-digit code in your terminal. Compare the full fingerprint on both screens and select **Fingerprint matches. Continue**.
+2. **Create passkey.** Name and create a PRF-capable admin passkey.
+3. **Finish setup.** Select **Confirm setup and unlock** to trust the local device, pin the authority, and sign in. Save the recovery code shown on this screen. Expand **See how a secret is used** for an example, or select **Open with-secrets** to go straight to Overview.
 
-The numbered steps below explain each.
+The service stays running after Quick Start. After a service restart, use the normal passkey unlock. A second machine still needs an invitation and a separate trust decision. Changes such as saving secrets and revoking grants each require their own passkey.
 
-Do these in your own terminal, not the agent's.
-
-1. **Create the secret store and the first passkey:** `with-secrets admin` (reference.md "First-time setup"). The first passkey must support PRF and becomes the first admin key. The page shows a **recovery code once**; write it down offline (see section 5).
-2. **Start the host service:** `with-secrets service`. It enrolls this machine as **Pending**, starts **locked** and prints its fingerprint and the link of the admin web app. The command line reaches it over a channel only your user can open (a named pipe on Windows, a Unix socket on Linux and macOS); the admin web app is on `127.0.0.1` and `[::1]`, port 8765 (`--port N` or `WITH_SECRETS_PORT`).
-3. **Open the admin web app:** open the link the service printed in its own window. (`with-secrets admin` also prints the link, but until this machine is approved nothing is pinned, so it marks the link as not verified, exits 0 and does not open a browser; after the approval it checks the service's identity first, opens the link in a terminal on Windows, and exits 7 if what answers is not this machine's service.) Unlock (one passkey tap), sign in (a second tap, a read-only session) and open **Machines**.
-4. **Approve this machine:** compare the fingerprint with the one the service printed, check the friendly name (it starts as the host name; change it if you like), press **Approve**, **Continue to passkey** and tap an admin passkey. This also pins the authority signing key in `host.json`. Until then a run exits 7 (no identity pinned) or is refused (Pending).
-5. **Store secrets:** in the admin web app (**Secrets**: name, value, **Save secret**, one tap). Give the agent the run command and the secret names.
-
-Every later change in the app is its own request, its own one-use passkey page and one tap; a session alone changes nothing. Normal use of a valid grant needs no tap.
-
-**How a change goes (one step).** In the change's dialog press **Continue to passkey**: the app asks the service for the authorization and the service's own passkey page opens in a new tab (if your browser blocks that, use the link the dialog offers). Check that the page names the same operation, and tap there. The service makes the change when the tap is verified; the dialog (or, after a reload or when you come back to the tab, the same dialog again) shows the result: done, refused, expired, or not made with the service's reason. The page never makes the change itself, so a tab that was reloaded, backgrounded or closed between the tap and the result loses nothing; closing the dialog or **Cancel the request** before the tap cancels the request (a tap on its passkey page afterwards changes nothing). Limits: after **Lock**, and after an idle session timeout, the result of a request cannot be read back (the sessions are gone); if you tapped, the change was made and is in **Audit, Authority changes**. A new invitation's bundle is shown once and is held by the service for 5 minutes only if the dialog was closed before collecting it.
+New installations allow 15 minutes for a pending approval. Change this in **Settings**, under **Approval pages** (1 to 30 minutes). The number beside **Access** shows waiting requests while the signed-in app is open.
 
 ### More passkeys
 

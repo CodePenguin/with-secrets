@@ -142,7 +142,9 @@ internal static class ProviderAdminTests
         rig.Captured.Fail = true;
         check(Fails(() => rig.Admin.AddInstance("vault-a", "test", """{"label":"a"}""", Hour, Laptop)) && store.Instances().Count == 0, "fail closed: no provider-added event, no instance");
         ProviderInstance instance = store.AddInstance("vault-a", "test", """{"label":"a"}""", Hour);
-        check(Fails(() => rig.Admin.Reconfigure(instance, """{"label":"b"}""", Laptop)) && store.Instance(instance.Id) is { Revision: 1, Configuration: """{"label":"a"}""" }, "fail closed: no provider-config-changed event, no configuration change");
+        check(Fails(() => rig.Admin.Reconfigure(instance, """{"label":"b"}""", Laptop, TimeSpan.FromMinutes(5))) &&
+            store.Instance(instance.Id) is { Revision: 1, Configuration: """{"label":"a"}""" } unchanged && unchanged.MaxStale == Hour,
+            "fail closed: an audit failure rolls back both provider connection and cache policy");
         check(Fails(() => rig.Admin.SetMaxStale(instance, TimeSpan.FromMinutes(5), Laptop)) && store.Instance(instance.Id)!.MaxStale == Hour, "fail closed: no provider-max-stale-changed event, no change");
         rig.Exec("INSERT INTO grants (id, fingerprint, scope_key, program, working_directory, secret_names, created, updated, grant_revision, security_revision, status, approved_by, usage) VALUES ('g1', 'fp', 'scope', 'p', 'd', 'team/A', 't', 't', 1, 1, 'active', 'x', 'reusable')");
         check(Fails(() => rig.Admin.AddMount(instance, MountKind.Tree, "team", "kv", 1, Laptop)) && store.Mounts().Count == 0 && rig.Count("SELECT COUNT(*) FROM grants WHERE status = 'active'") == 1, "fail closed: no mount-added event, no mount, no grant ended");
@@ -173,18 +175,9 @@ internal static class ProviderAdminTests
             check(message.Contains(name, StringComparison.Ordinal) && !message.Contains("hunter2", StringComparison.Ordinal) && !message.Contains("\"url\"", StringComparison.Ordinal), $"screen: '{name}' is refused naming only the field");
         }
 
-        // An environment-variable field names the variable that holds the credential: accepted only with such a name (ruling P3).
-        foreach (string accepted in new[]
-        {
-            """{"tokenEnv":"VAULT_TOKEN"}""", """{"secretEnvVar":"A"}""", """{"api_key_ENV":"MY_KEY_2"}""", """{"x":{"passwordenv":"DB_PASS"}}""", """{"list":[{"clientSecretEnv":"CS"}]}""",
-            "{\"tokenEnv\":\"" + new string('A', 64) + "\"}",
-        })
-        {
-            check(ProviderAdmin.ConfigurationScreen(accepted) is null, "screen: an environment-variable name is accepted: " + accepted[..Math.Min(40, accepted.Length)]);
-        }
-
         foreach (string refused in new[]
         {
+            """{"tokenEnv":"VAULT_TOKEN"}""", """{"secretEnvVar":"A"}""", """{"api_key_ENV":"MY_KEY_2"}""", """{"x":{"passwordenv":"DB_PASS"}}""", """{"list":[{"clientSecretEnv":"CS"}]}""",
             """{"tokenEnv":"hunter2-value"}""", """{"tokenEnv":"lower"}""", """{"tokenEnv":"HAS SPACE"}""", """{"tokenEnv":"1ABC"}""", """{"tokenEnv":""}""", "{\"tokenEnv\":\"A\\n\"}",
             "{\"tokenEnv\":\"" + new string('A', 65) + "\"}", """{"tokenEnv":12345}""", """{"tokenEnv":{"v":"VAULT_TOKEN"}}""", """{"tokenEnv":["VAULT_TOKEN"]}""", """{"tokenEnv":null}""",
             """{"x":{"secretEnvVar":"bad value 77"}}""", """{"l":[{"api_key_ENV":"bad value 77"}]}""", """{"token":"VAULT_TOKEN"}""", """{"Password":"VAULT_TOKEN"}""",

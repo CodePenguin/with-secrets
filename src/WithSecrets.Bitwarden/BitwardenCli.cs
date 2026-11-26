@@ -56,8 +56,7 @@ internal sealed class BitwardenCli(string executablePath, string token, Uri serv
         start.ArgumentList.Add("--output");
         start.ArgumentList.Add("json");
 
-        foreach (string key in start.Environment.Keys.Where(key => key.StartsWith("BWS_", StringComparison.OrdinalIgnoreCase)
-            || key.StartsWith(BitwardenConfiguration.TokenPrefix, StringComparison.OrdinalIgnoreCase)).ToArray())
+        foreach (string key in start.Environment.Keys.Where(key => key.StartsWith("BWS_", StringComparison.OrdinalIgnoreCase)).ToArray())
         {
             start.Environment.Remove(key);
         }

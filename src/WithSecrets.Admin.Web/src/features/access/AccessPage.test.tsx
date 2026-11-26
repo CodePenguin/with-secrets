@@ -35,7 +35,7 @@ afterEach(() => {
 })
 
 async function enabledApprove() {
-  const approve = await screen.findByRole('button', { name: 'Approve' })
+  const approve = await screen.findByRole('button', { name: 'Approve once' })
   await waitFor(() => expect(approve).toBeEnabled(), { timeout: 4000 })
 
   return approve
@@ -88,7 +88,7 @@ describe('approvals', () => {
     renderApp('/access/req-0001')
 
     const warning = await screen.findByText('This changes how the program loads code or where it sends data')
-    const approve = screen.getByRole('button', { name: 'Approve' })
+    const approve = screen.getByRole('button', { name: 'Approve once' })
     expect(warning.compareDocumentPosition(approve) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(screen.getByText('NODE_OPTIONS=--require ./hook.js')).toBeInTheDocument()
   })
@@ -172,7 +172,7 @@ describe('approvals', () => {
 
     const deny = await screen.findByRole('button', { name: 'Deny' })
     expect(deny).toHaveFocus()
-    expect(screen.getByRole('button', { name: 'Approve' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Approve once' })).toBeDisabled()
     await enabledApprove()
   })
 
@@ -291,7 +291,7 @@ describe('approvals', () => {
     renderApp('/access/req-0001')
 
     expect(await screen.findByText('This request expired.')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Approve once' })).toBeNull()
   })
 
   it('shows the service refusal as plain text', async () => {

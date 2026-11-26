@@ -51,19 +51,17 @@ internal sealed class Terminal : TextWriter
 }
 
 /// <summary>One scenario's state: a temp state folder (never the real .with-secrets), the store and a free port per command.</summary>
-internal sealed class Rig : IDisposable
+internal sealed class Rig(bool trusted = true) : IDisposable
 {
     public string Folder { get; } = Path.Combine(Path.GetTempPath(), "ws-e2e-" + Guid.NewGuid().ToString("N"));
-    public string Work { get; } = Path.Combine(Path.GetTempPath(), "ws-e2e-work-" + Guid.NewGuid().ToString("N"));
+    public string Work { get; } = Directory.CreateTempSubdirectory("ws-e2e-work-").FullName;
     public StateDatabase State => StateDatabase.InFolder(Folder);
     public SecretStore Store => new(State);
 
     private E2EMachine? _machine;
 
     /// <summary>The machine of this rig: enrolled and approved once, kept for every run of the rig.</summary>
-    public E2EMachine Machine => _machine ??= new E2EMachine(Folder);
-
-    public Rig() => Directory.CreateDirectory(Work);
+    public E2EMachine Machine => _machine ??= new E2EMachine(Folder, trusted);
 
     /// <summary>The name of a small script that prints a line holding the secret: NAME.cmd on Windows (run by cmd), NAME.sh elsewhere (run by sh).</summary>
 
@@ -516,31 +514,43 @@ internal sealed class Ctx : IAsyncDisposable
     /// <summary>Demo only: another step with a new caption, for a state the page has just reached (the result, the code, the status).</summary>
     public Task DemoSnapAsync(string message) => DemoCaptionAsync(message);
 
+    public async Task StartDemoAsync()
+    {
+        MarkScenarioStart();
+        await DemoIntroAsync(ScenarioIntroduction());
+    }
+
     public string ScenarioIntroduction() => _scenario switch
     {
         "a-first-run-setup" => "First-time setup: create the authority's initial passkey and recovery code.",
+        "a2-first-run-security" => "Setup security checks: see what happens when a passkey prompt is cancelled, refused, or interrupted. For everyday setup, open the Quick Start demo.",
+        "b-spa-secrets" => "Add a secret, approve a run that uses it, then replace and remove the secret.",
         "b-set-remove" => "Secret management: add a secret, verify it can be used, then remove it.",
         "c-run-approval" => "Secret use: review a command's request, approve it, and see that its output is redacted.",
         "c2-run-code-changes" => "Command review: identify environment changes that could load code or redirect network traffic.",
         "d-rotate-key" => "Key rotation: replace the encryption keys while preserving stored secrets.",
         "e-recover" => "Recovery: restore access after every passkey has been lost.",
-        "g-enroll-cross-host" => "Cross-host enrollment: see why a remote passkey page requires HTTPS.",
+        "g-enroll-cross-host" => "Add a passkey for another host name. This demo shows what happens when that address uses HTTP.",
         "h1-refusal-and-cancel" => "Safe failure: refuse or cancel a passkey operation without changing protected state.",
         "h2-resend-after-abort" => "Retry behavior: recover cleanly when a confirmation attempt is abandoned.",
         "h3-lost-reply" => "Lost response: verify that a completed operation is not accidentally repeated.",
         "h4-continue-fallback" => "Fallback behavior: continue safely when the preferred confirmation path is unavailable.",
         "h5-tap-rule" => "Passkey safety: verify that authentication starts only after a deliberate user gesture.",
-        "i1-spa-sign-in-out" => "Administration sign-in: authenticate with a passkey and end the browser session.",
+        "i1-spa-sign-in-out" => "Sign in with a passkey, then sign out to end this browser session.",
         "i1b-spa-sign-in-cancel" => "Sign-in cancel: back out of the passkey prompt, then sign in again.",
         "i2-spa-approve-machine" => "Machine trust: review a newly enrolled machine and explicitly approve it.",
-        "f-enroll-same-host" => "An admin unlocks the authority. A second passkey without PRF approves a run and extends a grant.",
+        "f-enroll-same-host" => "Add a second passkey on this device, then use it to approve a run and extend a grant.",
         "i3-spa-revoke-grant" => "Grant management: revoke previously approved access to a secret.",
         "i4-spa-audit-search" => "Audit history: search recorded administrative and secret-use events.",
         "i5-spa-lock-unlock" => "Authority lock: lock the authority and unlock it again with a passkey.",
         "i6-spa-settings-change" => "Settings: change authority policy through the authenticated administration UI.",
-        "i7-spa-refused-without-authorization" => "Authorization boundary: verify that an unauthenticated browser cannot make changes.",
+        "i7-spa-refused-without-authorization" => "See what happens when you leave an approval without confirming it with a passkey.",
         "i8-spa-accept-host-name" => "Machine identity: review and accept a machine's friendly name.",
-        "i9-spa-reload-between-tap-and-result" => "Passkey continuity: reload during confirmation and verify the operation fails safely.",
+        "i9-spa-reload-between-tap-and-result" => "Reloading before confirmation keeps the request pending. Reloading after an approved change preserves the result.",
+        "i10-spa-providers" => "Set up Bitwarden Secrets Manager, edit its configuration, and manage a mount.",
+        "i11-provider-1password" => "Set up 1Password with a service-account token.",
+        "i12-provider-vault" => "Set up HashiCorp Vault with a token for the authority’s configured Vault server.",
+        "i13-provider-lastpass" => "Set up LastPass with an account email and region.",
         "j1-spa-accessibility" => "Accessibility: check keyboard navigation, focus management, and responsive layout.",
         "k1-spa-pair-machine" => "Machine pairing: create a one-time invitation, pair another host, then review its trust request.",
         _ => "End-to-end scenario: follow the browser workflow and verify its security outcome."

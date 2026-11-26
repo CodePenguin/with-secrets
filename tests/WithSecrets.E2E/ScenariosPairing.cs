@@ -25,6 +25,8 @@ internal static class ScenariosPairing
         await Spa.Unlock(c, app, s);
         AuthorityStore store = rig.Machine.Deployment.Store;
         await Spa.SignIn(c, app, s);
+        await Scenarios3.SeedSecret(rig, c, app);
+        await c.StartDemoAsync();
         (_, long signsAfterSignIn) = await c.AuthOps();
 
         // 1. The administrator creates the invitation: the dialog, the tap, and the bundle once.
@@ -32,6 +34,7 @@ internal static class ScenariosPairing
         s.Check(await c.Page.GetByRole(AriaRole.Navigation, new() { Name = "Main" }).GetByRole(AriaRole.Link, new() { Name = "Pairing" }).CountAsync() == 0, "pairing is part of Machines: the navigation has no Pairing entry");
         await Spa.Axe(c, s, "machines (empty)");
         Spa.Clicks = 0;
+        await c.DemoPressAsync(Spa.Button(c, "Add a machine"), "In Machines, choose Add a machine to create a one-time invitation.");
         await Spa.Click(Spa.Button(c, "Add a machine"));
         ILocator dialog = Spa.Dialog(c);
         await dialog.WaitForAsync();
@@ -42,6 +45,7 @@ internal static class ScenariosPairing
         ILocator box = dialog.Locator("textarea#pairing-bundle");
         await box.WaitForAsync(new() { Timeout = 20000 });
         string bundleText = await box.InputValueAsync();
+        await c.DemoSnapAsync("Copy the invitation. On the second machine, run with-secrets pair and enter the invitation.");
         s.Check(Spa.Clicks == 2, "creating an invitation took two clicks: Add a machine and confirm (" + Spa.Clicks + ")");
         PairingBundle? bundle = PairingBundle.TryParse(bundleText);
         s.Check(bundle is not null && store.Invitation(bundle.InvitationId) is { Status: "pending" }, "the bundle is shown once, after the tap, and the invitation is pending");
@@ -77,6 +81,7 @@ internal static class ScenariosPairing
         s.Check(await c.Page.GetByRole(AriaRole.Region, new() { Name = "A machine paired and is waiting for you" }).CountAsync() == 1, "the machine that paired appears by itself, as a card to check and approve");
         string rowText = await row.TextContentAsync() ?? "";
         s.Check(rowText.Contains("pending", StringComparison.Ordinal) && rowText.Contains("paired-host", StringComparison.Ordinal), "the machines view shows the paired machine Pending with its host name and fingerprint");
+        await c.DemoPressAsync(row.GetByRole(AriaRole.Button, new() { Name = "Approve" }), "The paired machine appears under Machines. Compare its host name and fingerprint with the second machine, then approve it.");
         Spa.Clicks = 0;
         await Spa.Click(row.GetByRole(AriaRole.Button, new() { Name = "Approve" }));
         await dialog.WaitForAsync();
@@ -91,13 +96,10 @@ internal static class ScenariosPairing
         s.Check(Spa.Clicks == 2, "approving the paired machine took two clicks: Approve and confirm (" + Spa.Clicks + ")");
         s.Check(signsAfterApprove == signsAfterSignIn + 2, "creating the invitation and approving the machine were two passkey taps, one each");
         await dialog.GetByRole(AriaRole.Button, new() { Name = "Close" }).ClickAsync();
+        await c.Page.GetByRole(AriaRole.Heading, new() { Name = "paired-host", Exact = true }).WaitForAsync();
+        await c.DemoSnapAsync("The second machine is trusted and can now request access to secrets.");
 
         // 4. The host pins the authority key (M1) and asks the authority to run a command.
-        // Seeding the secret used the shared page's one-shot link, whose command has since stopped. The Approvals queue
-        // belongs to the live authority SPA and to the session this tab kept there, so return to it before the launch.
-        await Scenarios3.SeedSecret(rig, c, app);
-        await Spa.Open(c, app);
-        await Spa.Heading(c, "Overview").WaitForAsync(new() { Timeout = 20000 });
         RemoteAuthorityConfig config = hostDeployment.HostConfig.Load().Config!.Remote!;
         using RemoteAuthority remote = new(config, hostDeployment.Tls, hostDeployment.HostConfig);
         hostDeployment.UseRemote(remote);
@@ -193,6 +195,7 @@ internal static class ScenariosPairing
         // This request, by its reason: the list is polled, so a request that was decided a moment ago can still be listed, and Review for that one opens a request that is already over.
         ILocator review = c.Page.GetByRole(AriaRole.Listitem).Filter(new() { HasText = reason }).GetByRole(AriaRole.Link, new() { Name = "Review" }).First;
         await review.WaitForAsync(new() { Timeout = 60000 });
+        await c.DemoPressAsync(review, "A request from the paired machine appears in Access. Choose Review.");
         await Spa.Shot(c, "approvals-list");
         await Spa.Axe(c, s, "approvals (a request is waiting)");
         await Spa.Click(review);
@@ -205,16 +208,18 @@ internal static class ScenariosPairing
         {
             await Spa.Click(c.Page.GetByRole(AriaRole.Button, new() { Name = "Deny", Exact = true }));
             await c.Page.GetByText("Denied.").First.WaitForAsync(new() { Timeout = 20000 });
+            await c.DemoSnapAsync("The first request was denied. The paired machine’s command did not run.");
 
             return;
         }
 
-        ILocator approveButton = c.Page.GetByRole(AriaRole.Button, new() { Name = "Approve", Exact = true });
+        ILocator approveButton = c.Page.GetByRole(AriaRole.Button, new() { Name = "Approve once", Exact = true });
         await approveButton.WaitForAsync(new() { Timeout = 20000 });
-        await c.Page.WaitForFunctionAsync("() => { const b = [...document.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Approve'); return !!b && !b.disabled; }", null, new() { Timeout = 20000 });
+        await c.Page.WaitForFunctionAsync("() => { const b = [...document.querySelectorAll('button')].find((x) => x.textContent.trim() === 'Approve once'); return !!b && !b.disabled; }", null, new() { Timeout = 20000 });
         int before = await c.PasskeyCalls();
         await Spa.Click(approveButton);
         await c.Page.GetByText("Approved.").First.WaitForAsync(new() { Timeout = 30000 });
+        await c.DemoSnapAsync("The second request was approved. The paired machine ran the command with the requested secret.");
         s.Check(await c.PasskeyCalls() == before + 1, "Approve used the passkey exactly once");
     }
 }

@@ -7,7 +7,7 @@ Give an AI agent (or any script) the secrets a command needs, without giving it 
 The agent runs a command and names the secrets it wants. A person reads the exact request on a web page and approves it with a passkey. Only then does `with-secrets` decrypt those secrets, put them in the program's environment and start it. The agent sees the program's output with the values redacted, and never sees a value, a key or a password.
 
 ```
-with-secrets --secrets DB_URL --reason "list tables in the staging database" -- psql "$DB_URL" -c "\dt"
+with-secrets --secrets PGDATABASE --reason "list tables in the staging database" -- psql -c '\dt'
 ```
 
 > **Status: early (0.1.0), pre-release software.** Hand-tested on Windows. The unit suite and the single-file build run on Linux (including WSL); macOS builds in CI and runs the unit suite, but it has not been tried by hand and it takes no part in machine transport: it cannot be an authority or pair with one (a .NET 10 TLS 1.3 limit on macOS; see the reference). Local use works. Read [What it does not protect against](#what-it-does-not-protect-against) before you rely on it.
@@ -51,11 +51,11 @@ It is not on NuGet yet.
 
 Do these in your own terminal, never in the agent's.
 
-1. **Create the store and the first passkey.** Run `with-secrets admin`, open the link, create a passkey, confirm it, and type the code the page shows into the terminal. Write down the admin key fingerprints it prints; every page shows them again, so you can notice if they change. Add a second passkey later, so a lost phone does not lock you out.
-2. **Start the host service.** Run `with-secrets service` in a terminal of its own and leave it running. It starts locked and prints the admin app's link and this machine's fingerprint. Runs reach it over a channel only your user can open (a named pipe on Windows, a Unix socket on Linux and macOS), not over a network port; the admin app is the only thing on a loopback port.
-3. **Unlock and approve this machine.** Open that link, unlock with one tap, then in **Machines** compare the fingerprint, name the machine and press **Approve**.
-4. **Store a secret.** In **Secrets**, type a name (`DB_URL`) and a value and save. The terminal never sees the value.
-5. **Tell the agent which names it may use** and how to run commands: see [Using with-secrets safely from an agent](docs/agent-usage.md).
+1. **Open Quick Start.** Run `with-secrets admin`. It starts the local service in the background and prints the setup link and this device’s fingerprint.
+2. **Verify device.** Type the code from the page in your terminal, compare the full fingerprint on both screens, then choose **Fingerprint matches. Continue**.
+3. **Create passkey and finish setup.** Name and create the passkey. Choose **Confirm setup and unlock** to trust the device and sign in. Save the recovery code from the **Finish setup** screen.
+
+Finish setup includes an optional example of how a command requests a secret. Select **Open with-secrets** to go to Overview. To start using with-secrets from an agent, see [Using with-secrets safely from an agent](docs/agent-usage.md).
 
 The full walk-through, with backup, recovery, Docker, WSL and every exit code, is in the [operations guide](docs/operations.md).
 

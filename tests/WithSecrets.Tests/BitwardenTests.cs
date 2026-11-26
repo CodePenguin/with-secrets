@@ -87,36 +87,42 @@ internal static class BitwardenTests
     {
         string? previousServer = Environment.GetEnvironmentVariable("BWS_SERVER_URL");
         string? previousToken = Environment.GetEnvironmentVariable("BWS_ACCESS_TOKEN");
-        string? previousTokenServer = Environment.GetEnvironmentVariable("BWS_ACCESS_TOKEN_SERVER_URL");
         var authorityLock = AuthorityLock.UnlockedForTests();
-        int credentialReads = 0;
+        int decryptions = 0;
+        var (reviewPublic, reviewPrivate) = JweCipher.Instance.NewKeyPair();
+        string Decrypt(string ciphertext)
+        {
+            decryptions++;
+            return JweCipher.Instance.Decrypt(reviewPrivate, ciphertext);
+        }
         var reporter = new Reporter();
         string executablePath = Path.Combine(AppContext.BaseDirectory,
             OperatingSystem.IsWindows() ? "WithSecrets.Tests.exe" : "WithSecrets.Tests");
-        IProviderAdapter adapter = new BitwardenAdapter(executablePath, (reference, _) =>
-        {
-            credentialReads++;
-            return reference == "BWS_ACCESS_TOKEN" ? Token : null;
-        }, () => authorityLock.UnlockSessionToken);
+        IProviderAdapter adapter = new BitwardenAdapter(executablePath, Decrypt, () => authorityLock.UnlockSessionToken);
         try
         {
             Environment.SetEnvironmentVariable("BWS_SERVER_URL", "https://example.invalid");
-            Environment.SetEnvironmentVariable("BWS_ACCESS_TOKEN", Token);
-            Environment.SetEnvironmentVariable("BWS_ACCESS_TOKEN_SERVER_URL", null);
-            const string json = """{"tokenEnv":"BWS_ACCESS_TOKEN","serverUrl":"https://vault.bitwarden.com"}""";
+            Environment.SetEnvironmentVariable("BWS_ACCESS_TOKEN", "inherited-token-must-not-be-used");
+            string json = BitwardenProvider.SealConfiguration(Token, DefaultServer, reviewPublic);
             var registry = new ProviderRegistry();
-            BitwardenProvider.Register(registry, authorityLock, executablePath);
-            check(registry.Types().Single().Type == BitwardenAdapter.ProviderType && ProviderAdmin.ConfigurationScreen(json) is null
+            BitwardenProvider.Register(registry, authorityLock, executablePath, Decrypt);
+            check(registry.Types().Single().Type == BitwardenAdapter.ProviderType && !json.Contains(Token, StringComparison.Ordinal)
+                && ProviderAdmin.ConfigurationScreen(json) is null
                 && (await registry.ValidateProposedAsync(BitwardenAdapter.ProviderType, json, Project, NullLogger.Instance, default)).Count == 0,
-                "Bitwarden is advertised and validates the SPA configuration and mount through the production registry factory");
-            const string customJson = """{"tokenEnv":"BWS_ACCESS_TOKEN","serverUrl":"https://vault.bitwarden.eu"}""";
-            check((await registry.ValidateProposedAsync(BitwardenAdapter.ProviderType, customJson, null, NullLogger.Instance, default)).Single().Target == "serverUrl"
-                && ProviderAdmin.ConfigurationScreen("""{"tokenEnv":"0.raw-token:secret"}""") is not null
-                && ProviderAdmin.ConfigurationScreen("""{"accessToken":"canary"}""") is not null,
-                "Bitwarden refuses unbound endpoints and the admin screen rejects raw credentials");
-            Environment.SetEnvironmentVariable("BWS_ACCESS_TOKEN_SERVER_URL", CustomServer);
+                "Bitwarden validates an encrypted token and ignores inherited token and server variables");
+            string customJson = BitwardenProvider.SealConfiguration(Token, CustomServer, reviewPublic);
             check((await registry.ValidateProposedAsync(BitwardenAdapter.ProviderType, customJson, OtherProject, NullLogger.Instance, default)).Count == 0,
-                "Bitwarden validates a custom endpoint bound by the authority environment");
+                "Bitwarden validates a custom HTTPS server bound to the encrypted token");
+            const string variableConfiguration = """{"tokenEnv":"BWS_ACCESS_TOKEN","serverUrl":"https://vault.bitwarden.com"}""";
+            check(ProviderAdmin.ConfigurationScreen(variableConfiguration) is not null &&
+                (await registry.ValidateProposedAsync(BitwardenAdapter.ProviderType, variableConfiguration, null, NullLogger.Instance, default)).Count == 1 &&
+                (await registry.ValidateProposedAsync(BitwardenAdapter.ProviderType, """{"serverUrl":"https://vault.bitwarden.com"}""", null, NullLogger.Instance, default)).Count == 1,
+                "Bitwarden requires a sealed token");
+            using JsonDocument redirected = JsonDocument.Parse(json.Replace(DefaultServer, CustomServer, StringComparison.Ordinal));
+            BitwardenConfiguration stored = new();
+            stored.Load(redirected);
+            check((await adapter.ValidateConfigurationAsync(stored, default)).Count == 1,
+                "changing only the stored server URL cannot send the encrypted Bitwarden credential to a different server");
             var config = new BitwardenConfiguration();
             using JsonDocument document = JsonDocument.Parse(json);
             config.Load(document);
@@ -130,8 +136,7 @@ internal static class BitwardenTests
                 "Bitwarden validates credentials, project mounts and individual secret mounts");
 
             var custom = new BitwardenConfiguration();
-            using JsonDocument customDocument = JsonDocument.Parse(JsonSerializer.Serialize(
-                new { tokenEnv = "BWS_ACCESS_TOKEN", serverUrl = CustomServer + "/" }));
+            using JsonDocument customDocument = JsonDocument.Parse(customJson);
             custom.Load(customDocument);
             check((await adapter.ValidateMountAsync(custom, OtherProject, default)).Count == 0,
                 "Bitwarden passes the configured server URL explicitly and ignores the inherited override");
@@ -139,7 +144,7 @@ internal static class BitwardenTests
             foreach (string serverUrl in new[] { "http://example.invalid", "https://user:pass@example.invalid", "https://example.invalid?query", "https://example.invalid#fragment" })
             {
                 using JsonDocument invalid = JsonDocument.Parse(JsonSerializer.Serialize(
-                    new { tokenEnv = "BWS_ACCESS_TOKEN", serverUrl }));
+                    new { encryptedConfiguration = config.EncryptedConfiguration, serverUrl }));
                 custom.Load(invalid);
                 check((await adapter.ValidateConfigurationAsync(custom, default)).Single().Target == "serverUrl",
                     "Bitwarden rejects invalid server URLs before starting the CLI");
@@ -153,12 +158,12 @@ internal static class BitwardenTests
                 && (await adapter.ListSecretsAsync(new(OtherProject, MovedLeaf, null), default)).Secrets.Single().Path == MovedLeaf,
                 "Bitwarden lists stable relative paths and resolves single-secret mounts without a project listing");
 
-            int before = credentialReads;
+            int before = decryptions;
             ProviderSecretRequest[] requests = [new(Guid.NewGuid(), Project + "/" + Leaf), new(Guid.NewGuid(), Project + "/" + Leaf),
                 new(Guid.NewGuid(), Project + "/" + MovedLeaf), new(Guid.NewGuid(), OtherProject + "/" + MovedLeaf),
                 new(Guid.NewGuid(), Project + "/" + WrongLeaf), new(Guid.NewGuid(), "../bad")];
             IReadOnlyList<ProviderSecretResult> results = await adapter.RetrieveSecretsAsync(requests, default);
-            check(credentialReads == before + 1 && results.Select(result => result.RequestId).SequenceEqual(requests.Select(request => request.RequestId))
+            check(decryptions == before + 1 && results.Select(result => result.RequestId).SequenceEqual(requests.Select(request => request.RequestId))
                 && results[0].Secret?.Value.SequenceEqual(Encoding.UTF8.GetBytes(Value)) == true
                 && results[1].Secret?.Value.SequenceEqual(Encoding.UTF8.GetBytes(Value)) == true
                 && !ReferenceEquals(results[0].Secret?.Value, results[1].Secret?.Value)
@@ -201,8 +206,7 @@ internal static class BitwardenTests
             }
 
             var updated = new BitwardenConfiguration();
-            using JsonDocument updatedDocument = JsonDocument.Parse("""{"tokenEnv":"WITH_SECRETS_BITWARDEN_TOKEN_OTHER"}""");
-            updated.Load(updatedDocument);
+            updated.Load(redirected);
             await adapter.UpdateConfigurationAsync(updated, default);
             check(reporter.Events.Last() is InvalidateProviderDataEvent { InvalidateEntireProviderInstance: true },
                 "Bitwarden invalidates provider data when the connection configuration changes");
@@ -213,7 +217,6 @@ internal static class BitwardenTests
             await adapter.ShutdownAsync(default);
             Environment.SetEnvironmentVariable("BWS_SERVER_URL", previousServer);
             Environment.SetEnvironmentVariable("BWS_ACCESS_TOKEN", previousToken);
-            Environment.SetEnvironmentVariable("BWS_ACCESS_TOKEN_SERVER_URL", previousTokenServer);
         }
     }
 

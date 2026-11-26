@@ -357,7 +357,7 @@ public static class ApprovalSummary
     /// What an approval of a script covers, said on every page that shows one: the files shown (and so the fingerprint), nothing they load. A file a script
     /// sources, imports or dot-sourced, or reads from beside itself, is not shown, hashed or held; it is read as it is when the script runs, on every system.
     /// </summary>
-    internal const string ScriptBoundary = "Approved: the file above only. Not approved: any file it loads or runs (source, import, dot-sourcing, files beside it). They are read as they are when it runs.";
+    internal const string ScriptBoundary = "The review covers the listed files. The command can load or run other files as they exist at run time.";
 
     internal static string ScriptBlock(ScriptView script)
     {

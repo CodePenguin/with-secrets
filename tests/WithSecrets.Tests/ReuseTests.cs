@@ -50,14 +50,14 @@ internal static class ReuseTests
 
     private static void Offers(Action<bool, string> check)
     {
-        check(ReuseOffer.Steps.SequenceEqual([10, 60, 240, 480]), "grant times: the steps are 10 min, 1 h, 4 h, 8 h");
-        check(new ReuseOffer(480).Choices.SequenceEqual([10, 60, 240, 480]), "grant times: a ceiling of 480 offers every step");
-        check(new ReuseOffer(1440).Choices.SequenceEqual([10, 60, 240, 480]), "grant times: a ceiling of 1440 offers every step");
-        check(new ReuseOffer(100).Choices.SequenceEqual([10, 60]), "grant times: a ceiling of 100 offers only the steps up to it");
-        check(new ReuseOffer(10).Choices.SequenceEqual([10]), "grant times: a ceiling of 10 offers only 10 minutes");
+        check(ReuseOffer.Steps.SequenceEqual([60, 120, 240, 480, 1440, 10080, 43200]), "grant times: hour and day options through 30 days");
+        check(new ReuseOffer(480).Choices.SequenceEqual([60, 120, 240, 480]), "grant times: the existing ceiling still applies");
+        check(new ReuseOffer(1440).Choices.SequenceEqual([60, 120, 240, 480, 1440]), "grant times: the 24-hour option fits a one-day ceiling");
+        check(new ReuseOffer(100).Choices.SequenceEqual([60]), "grant times: a ceiling of 100 offers only the steps up to it");
+        check(new ReuseOffer(10).WithAlways.SequenceEqual([ReuseOffer.Always]), "grant times: legacy minimum offers only Always");
         check(!ReuseOffer.Off.IsOn && ReuseOffer.Off.Choices.Count == 0 && new ReuseOffer(480).IsOn, "grant times: off offers nothing");
         ReuseOffer offer = new(100);
-        check(offer.Allows(10) && offer.Allows(60), "grant times: every offered step is allowed");
+        check(!offer.Allows(10) && offer.Allows(60) && offer.Allows(ReuseOffer.Always), "grant times: only offered steps and Always are authorized");
         check(!offer.Allows(0) && !offer.Allows(7) && !offer.Allows(-1) && !offer.Allows(99999) && !offer.Allows(240) && !offer.Allows(480), "grant times: a time not offered, above the ceiling, or once (a grant needs a time) is not allowed");
         check(!ReuseOffer.Off.Allows(0) && !ReuseOffer.Off.Allows(10), "grant times: with none offered nothing is allowed");
     }

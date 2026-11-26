@@ -6,9 +6,10 @@ namespace WithSecrets.E2E;
 /// <summary>The host service of a scenario, serving the embedded administration web application and the API on one loopback origin (a free port).</summary>
 internal sealed class SpaApp : IDisposable
 {
-    public SpaApp(Rig rig, bool unlocked = true, bool machineEndpoint = false, TimeSpan? timeLimit = null, ProviderRegistry? providers = null, bool directApproval = false)
+    public SpaApp(Rig rig, bool unlocked = true, bool machineEndpoint = false, TimeSpan? timeLimit = null, ProviderRegistry? providers = null, bool directApproval = false,
+        Func<string, string, string?>? sealBitwarden = null, Func<string, string?>? sealOnePassword = null, Func<string, string?>? sealVault = null)
     {
-        Service = HostService.Start(new HostServiceOptions { CommandLineEndpoint = E2EEndpoint.Make(), Lock = unlocked ? AuthorityLock.UnlockedForTests() : null, State = rig.State, Store = rig.Store, Deployment = rig.Machine.Deployment, Port = 0, MachineEndpoint = machineEndpoint ? new MachineListenerOptions { Port = 0 } : null, TimeLimit = timeLimit ?? TimeSpan.FromSeconds(60), ProviderRegistry = providers, ApproverFactory = directApproval ? (settings, announce) => CommandWiring.RunApprover(rig.State, settings, announce) : null });
+        Service = HostService.Start(new HostServiceOptions { CommandLineEndpoint = E2EEndpoint.Make(), Lock = unlocked ? AuthorityLock.UnlockedForTests() : null, State = rig.State, Store = rig.Store, Deployment = rig.Machine.Deployment, Port = 0, MachineEndpoint = machineEndpoint ? new MachineListenerOptions { Port = 0 } : null, TimeLimit = timeLimit ?? TimeSpan.FromSeconds(60), ProviderRegistry = providers, SealBitwardenConfiguration = sealBitwarden, SealOnePasswordConfiguration = sealOnePassword, SealVaultConfiguration = sealVault, ApproverFactory = directApproval ? (settings, announce) => CommandWiring.RunApprover(rig.State, settings, announce) : null });
     }
 
     public HostService Service { get; }
@@ -40,11 +41,11 @@ internal static class Spa
         // The picture is taken once the app has drawn its first screen, not while the previous page is still showing.
         try { await c.Page.WaitForFunctionAsync("() => !!document.querySelector('h1')", null, new() { Timeout = 5000 }); }
         catch (TimeoutException) { /* A screen without a heading is pictured as it is. */ }
-        await c.DemoCaptionAsync("The administration app opens.");
+        await c.DemoCaptionAsync("Open with-secrets.");
     }
 
     /// <summary>Follows a link of the main navigation and waits for the view's heading.</summary>
-    public static async Task GoTo(Ctx c, string navName, string heading)
+    public static async Task GoTo(Ctx c, string navName, string heading, bool capture = true)
     {
         ILocator nav = c.Page.GetByRole(AriaRole.Navigation, new() { Name = "Main" });
         ILocator link = nav.GetByRole(AriaRole.Link, new() { Name = navName, Exact = true });
@@ -54,7 +55,7 @@ internal static class Spa
             await link.WaitForAsync();
         }
 
-        await c.DemoPressAsync(link, $"The administrator opens {navName}.");
+        if (capture) await c.DemoPressAsync(link, $"Open {navName}.");
         await link.ClickAsync();
         await Heading(c, heading).WaitForAsync();
     }
@@ -66,7 +67,7 @@ internal static class Spa
         if (beforeTap is not null) await beforeTap(c.Page, "starts a read-only administrator session");
         ILocator button = c.Page.GetByRole(AriaRole.Button, new() { Name = linkName, Exact = true });
         await button.WaitForAsync(new() { Timeout = 20000 });
-        await c.DemoPressAsync(button, "The user clicks to use the passkey.");
+        await c.DemoPressAsync(button, $"Select {linkName}, then use your passkey.");
         await button.ClickAsync(new() { Timeout = 20000 });
         Clicks++;
         await Heading(c, "Overview").WaitForAsync(new() { Timeout = 20000 });
@@ -83,7 +84,7 @@ internal static class Spa
         ILocator next = dialog.GetByRole(AriaRole.Button, new() { Name = "Continue", Exact = true });
         if (await next.CountAsync() > 0 && await next.IsEnabledAsync())
         {
-            await c.DemoPressAsync(next, "Continue asks the authority for a passkey challenge bound to this exact change. No approval happens yet.");
+            await c.DemoPressAsync(next, "Select Continue to review the change before confirming with your passkey.");
             await next.ClickAsync();
             Clicks++;
         }
@@ -121,7 +122,7 @@ internal static class Spa
     }
 
     /// <summary>Approve once, as soon as the button is usable. One click, one passkey tap.</summary>
-    public static async Task ApproveOnce(Ctx c, string label = "Approve")
+    public static async Task ApproveOnce(Ctx c, string label = "Approve once")
     {
         await c.Page.WaitForFunctionAsync("(label) => { const b = [...document.querySelectorAll('button')].find((x) => x.textContent.trim() === label); return !!b && !b.disabled; }", label, new() { Timeout = 20000 });
         await Click(Button(c, label, exact: true));
@@ -131,20 +132,34 @@ internal static class Spa
     /// <summary>Approve for longer than once: the arrow beside Approve, then the named choice (for example "Approve for 1 hour"). One passkey tap.</summary>
     public static async Task ApproveFor(Ctx c, string choice)
     {
-        await c.Page.WaitForFunctionAsync("() => { const b = document.querySelector('button[aria-label=\"Approve for longer\"]'); return !!b && !b.disabled; }", null, new() { Timeout = 20000 });
-        await Click(c.Page.GetByRole(AriaRole.Button, new() { Name = "Approve for longer" }));
-        await Click(c.Page.GetByRole(AriaRole.Menuitem, new() { Name = choice, Exact = true }));
+        ILocator primary = Button(c, choice, exact: true);
+        if (await primary.CountAsync() != 0)
+        {
+            await Click(primary);
+        }
+        else
+        {
+            await c.Page.WaitForFunctionAsync("() => { const b = document.querySelector('button[aria-label=\"Approve for longer\"]'); return !!b && !b.disabled; }", null, new() { Timeout = 20000 });
+            await Click(c.Page.GetByRole(AriaRole.Button, new() { Name = "Approve for longer" }));
+            await Click(c.Page.GetByRole(AriaRole.Menuitem, new() { Name = choice, Exact = true }));
+        }
         await c.DemoSnapAsync("The passkey was used. The page shows the outcome.");
     }
 
     /// <summary>For the recording: the open request in the dark scheme, then with the arrow beside Approve opened, and back to the light scheme. Nothing is approved.</summary>
-    public static async Task ShowRequestVariants(Ctx c)
+    public static async Task ShowRequestVariants(Ctx c, S? checks = null)
     {
-        if (!c.IsDemo) return;
+        if (!c.IsDemo && checks is null) return;
         await c.Page.WaitForFunctionAsync("() => { const b = document.querySelector('button[aria-label=\"Approve for longer\"]'); return !!b && !b.disabled; }", null, new() { Timeout = 20000 });
         await c.Page.EmulateMediaAsync(new() { ColorScheme = ColorScheme.Dark });
         await c.DemoSnapAsync("The same request in the dark scheme.");
         await Click(c.Page.GetByRole(AriaRole.Button, new() { Name = "Approve for longer" }));
+        if (checks is not null)
+        {
+            string[] options = [.. await c.Page.GetByRole(AriaRole.Menuitem).AllTextContentsAsync()];
+            checks.Check(options.SequenceEqual(["Approve for 1 hour", "Approve for 2 hours", "Approve for 4 hours", "Approve for 8 hours",
+                "Approve for 24 hours", "Approve for 7 days", "Approve for 30 days", "Approve always"]), "the duration menu offers exactly the approved set");
+        }
         await c.DemoSnapAsync("The arrow beside Approve offers a time or Always. Approve itself approves once.");
         await c.Page.Keyboard.PressAsync("Escape");
         await c.Page.EmulateMediaAsync(new() { ColorScheme = ColorScheme.Light });

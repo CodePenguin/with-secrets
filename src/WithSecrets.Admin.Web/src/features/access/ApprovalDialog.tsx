@@ -46,6 +46,7 @@ export const ALWAYS = 1_000_000
 export function timeLabel(minutes: number): string {
   if (minutes === 0) return 'Once'
   if (minutes === ALWAYS) return 'Always'
+  if (minutes > 1440 && minutes % 1440 === 0) return minutes / 1440 + ' days'
   if (minutes % 60 === 0) return minutes === 60 ? '1 hour' : `${minutes / 60} hours`
 
   return `${minutes} minutes`
@@ -82,7 +83,6 @@ function Script({ title, script }: { title: string; script: NonNullable<Approval
   return (
     <Section title={title}>
       {script.binary ? <p>This file is binary; its contents are not shown.</p> : script.text !== null ? <CodeBlock>{script.text}</CodeBlock> : <p>The contents could not be read.</p>}
-      <p>Approved: this file only. Not approved: any file it loads or runs (source, import, dot-sourcing, files beside it). They are read as they are when it runs.</p>
     </Section>
   )
 }
@@ -258,7 +258,7 @@ export function ApprovalDialog({ requestId, onClose }: { requestId: string; onCl
               Deny
             </Button>
             <SplitButton
-              label={phase === 'sending' ? 'Approving...' : allowOnce ? 'Approve' : 'Approve for ' + timeLabel(choices[0]!)}
+              label={phase === 'sending' ? 'Approving...' : allowOnce ? 'Approve once' : choices[0] === ALWAYS ? 'Approve always' : 'Approve for ' + timeLabel(choices[0]!)}
               onPress={() => void approve(choices[0]!)}
               items={choices.slice(1).map((time) => ({ label: time === ALWAYS ? 'Approve always' : 'Approve for ' + timeLabel(time), onSelect: () => void approve(time) }))}
               menuLabel="Approve for longer"
@@ -316,6 +316,9 @@ export function ApprovalDialog({ requestId, onClose }: { requestId: string; onCl
       ) : null}
       {review.script ? <Script title="Script" script={review.script} /> : null}
       {review.programFile && review.programFile.text !== null ? <Script title="Program file" script={review.programFile} /> : null}
+      {review.script || (review.programFile && review.programFile.text !== null) ? (
+        <p>The review covers the listed files. The command can load or run other files as they exist at run time.</p>
+      ) : null}
       <details className={styles.details}>
         <summary>More details</summary>
         <Facts

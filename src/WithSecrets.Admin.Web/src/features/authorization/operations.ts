@@ -40,6 +40,7 @@ export type OperationDef = {
   warning?: string
   danger?: boolean
   fields?: FieldDef[]
+  fieldGroup?: { label: string; hint: string; fields: FieldDef[]; visible?: (values: FormValues) => boolean }
   initial?: FormValues
   /** Ask for the passkey challenge as soon as the dialog opens, with the initial values (the person may still change them). */
   autoPrepare?: boolean

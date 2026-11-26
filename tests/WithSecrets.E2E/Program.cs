@@ -8,7 +8,7 @@ internal static class Program
 {
     private static readonly (string Name, Func<Host, S, Task> Run)[] All =
     [
-        ("a-first-run-setup", Scenarios.FirstRunSetup),
+        ("a-first-run-setup", ScenariosQuickStart.FirstRun),
         ("a2-first-run-security", Scenarios.FirstRunSecurity),
         ("b-spa-secrets", ScenariosSpa.Secrets),
         ("c-run-approval", Scenarios3.RunApproval),
@@ -33,6 +33,9 @@ internal static class Program
         ("i8-spa-accept-host-name", ScenariosSpa.AcceptHostName),
         ("i9-spa-reload-between-tap-and-result", ScenariosSpa.ReloadBetweenTapAndResult),
         ("i10-spa-providers", ScenariosSpa.Providers),
+        ("i11-provider-1password", ScenariosSpa.OnePasswordSetup),
+        ("i12-provider-vault", ScenariosSpa.VaultSetup),
+        ("i13-provider-lastpass", ScenariosSpa.LastPassSetup),
         ("j1-spa-accessibility", ScenariosSpa.Accessibility),
         ("k1-spa-pair-machine", ScenariosPairing.PairMachine),
         ("z-happy-path", ScenariosHappy.HappyPath),
@@ -45,35 +48,21 @@ internal static class Program
         bool demo = args.Length > 0 && args[0].Equals("--demo", StringComparison.OrdinalIgnoreCase);
         string? only = demo ? (args.Length > 2 ? args[2] : null) : args.FirstOrDefault();
         string? demoDirectory = null;
-        if (demo)
+        DemoOutput? output;
+        try
         {
-            string demoRoot = Path.GetFullPath(Path.Combine(Spa.RepoRoot(), "artifacts", "demo"));
-            string requested = args.Length > 1
-                ? args[1]
-                : Path.Combine(demoRoot, "latest");
-            demoDirectory = Path.GetFullPath(requested);
-            if (args.Length <= 1 && Directory.Exists(demoDirectory))
-            {
-                // Only the last demo is kept.
-                Directory.Delete(demoDirectory, true);
-            }
-
-            string relative = Path.GetRelativePath(demoRoot, demoDirectory);
-            if (relative == "." || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal) || Path.IsPathRooted(relative))
-            {
-                Console.Error.WriteLine("The UX demo output must be a new directory under " + demoRoot + ".");
-                return 2;
-            }
-
-            if (Directory.Exists(demoDirectory) && Directory.EnumerateFileSystemEntries(demoDirectory).Any())
-            {
-                Console.Error.WriteLine("The UX demo output directory is not empty: " + demoDirectory);
-                Console.Error.WriteLine("Previous step viewers are never overwritten. Choose a new directory.");
-                return 2;
-            }
-
-            Directory.CreateDirectory(demoDirectory);
-            Console.WriteLine("UX demo output: " + demoDirectory);
+            output = demo ? DemoOutput.Open(Spa.RepoRoot(), args.Length > 1 ? args[1] : null) : null;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException)
+        {
+            Console.Error.WriteLine("UX demo output: " + error.Message);
+            return 2;
+        }
+        using DemoOutput? runOutput = output;
+        if (runOutput is not null)
+        {
+            demoDirectory = runOutput.WorkingDirectory;
+            Console.WriteLine("UX demo output: " + runOutput.Destination);
         }
 
         Stopwatch total = Stopwatch.StartNew();
@@ -126,7 +115,8 @@ internal static class Program
         if (demoDirectory is not null)
         {
             await WriteDemoIndex(demoDirectory, results, total.Elapsed.TotalSeconds);
-            Console.WriteLine("Demo index: " + Path.Combine(demoDirectory, "index.html"));
+            runOutput!.Publish();
+            Console.WriteLine("Demo index: " + Path.Combine(runOutput.Destination, "index.html"));
         }
 
         return failed == 0 ? 0 : 1;
@@ -139,12 +129,11 @@ internal static class Program
         string rows = string.Join(Environment.NewLine, results.Select(result =>
         {
             string status = result.Passed ? "Passed" : "Failed";
+            string title = esc(DemoViewer.Title(result.Name));
             string videos = result.Videos.Length == 0
                 ? "<span class=\"muted\">No steps captured</span>"
                 : string.Join(" ", result.Videos.Select((path, index) =>
-                    $"<a class=\"recording-link\" href=\"{esc(relative(path))}\" title=\"Step through {esc(result.Name)}\">{esc(result.Name)}{(index == 0 ? "" : $" ({index + 1})")}</a>"));
-            string logs = string.Join(" ", result.ConsoleLogs.Select(path => "<a href=\"" + esc(relative(path)) + "\">Console log</a>"));
-            if (logs.Length > 0) videos += " " + logs;
+                    $"<a class=\"recording-link\" href=\"{esc(relative(path))}\" title=\"Step through {title}\">{title}{(index == 0 ? "" : $" ({index + 1})")}</a>"));
             List<string> evidence = [];
             evidence.AddRange(result.Screenshots.Select((path, index) => $"<a href=\"{esc(relative(path))}\">Screenshot {index + 1}</a>"));
             if (result.Diagnostics is not null)
@@ -174,7 +163,7 @@ internal static class Program
               <h1>with-secrets UX demo</h1>
               <p class="muted">Generated {{DateTimeOffset.Now:yyyy-MM-dd HH:mm zzz}} · {{results.Count}} scenarios · {{results.Sum(result => result.Videos.Length)}} step viewers · {{seconds:F1}} seconds</p>
               <p>Open a scenario to step through its screenshots: Back and Next, or the arrow keys. The left side is the command line, the caption says what happens, and the right side is the browser. Screenshots come from the real Playwright browser used by the end-to-end scenario; captions are added only in demo mode.</p>
-              <p class="muted">Step viewers show the real interaction, including one-time codes, so they can be reviewed as the person sees them. They use throwaway test state and must stay local; CLI stdout and stderr appear as one live transcript in the full-height left terminal pane; narration appears at its bottom. The browser occupies the right pane without terminal overlap. Complete separate-stream console logs remain linked for download. See the E2E README.</p>
+              <p class="muted">Step viewers show the real interaction, including one-time codes, so they can be reviewed as the person sees them. They use throwaway test state and must stay local; CLI stdout and stderr appear as one live transcript in the full-height left terminal pane; narration appears at its bottom. The browser occupies the right pane without terminal overlap. See the E2E README.</p>
               <table>
                 <thead><tr><th>Test / recording</th><th>Result</th><th>Checks</th><th>Duration</th><th>Failure evidence</th></tr></thead>
                 <tbody>{{rows}}</tbody>

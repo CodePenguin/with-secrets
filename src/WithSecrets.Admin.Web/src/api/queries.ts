@@ -15,6 +15,7 @@ export const keys = {
   providers: ['providers'] as const,
   providerTypes: ['provider-types'] as const,
   providerMounts: (id: string) => ['providers', id, 'mounts'] as const,
+  mounts: ['mounts'] as const,
   mountEntries: (id: string) => ['mounts', id, 'entries'] as const,
   auditEvents: (filters: AuditFilters) => ['audit', 'events', filters] as const,
   auditChanges: (filters: AuditFilters) => ['audit', 'changes', filters] as const,
@@ -109,6 +110,10 @@ export function useMounts(id: string, enabled: boolean) {
 
 export function useEntries(id: string) {
   return useQuery({ queryKey: keys.mountEntries(id), queryFn: () => api.get('/api/v1/mounts/{id}/entries', { path: { id } }), refetchInterval: 10_000 })
+}
+
+export function useAllMounts(enabled: boolean) {
+  return useQuery({ queryKey: keys.mounts, queryFn: () => api.get('/api/v1/mounts'), enabled, refetchInterval: 10_000 })
 }
 
 export function useAuditEvents(filters: AuditFilters, enabled: boolean) {

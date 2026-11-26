@@ -5,7 +5,16 @@ namespace WithSecrets.E2E;
 /// <summary>The demo of one scenario as a page of screenshots to step through: Back and Next (or the arrow keys), the caption of each step under it, and the list of steps.</summary>
 internal static class DemoViewer
 {
-    public static string Page(string scenario, string stepsJson) => Template.Replace("{{TITLE}}", WebUtility.HtmlEncode(scenario), StringComparison.Ordinal).Replace("{{STEPS}}", stepsJson, StringComparison.Ordinal);
+    public static string Title(string scenario) => scenario switch
+    {
+        "i10-spa-providers" => "Set up Bitwarden Secrets Manager",
+        "i11-provider-1password" => "Set up 1Password",
+        "i12-provider-vault" => "Set up HashiCorp Vault",
+        "i13-provider-lastpass" => "Set up LastPass",
+        _ => scenario,
+    };
+
+    public static string Page(string scenario, string stepsJson) => Template.Replace("{{TITLE}}", WebUtility.HtmlEncode(Title(scenario)), StringComparison.Ordinal).Replace("{{STEPS}}", stepsJson, StringComparison.Ordinal);
 
     private const string Template = """
         <!doctype html>

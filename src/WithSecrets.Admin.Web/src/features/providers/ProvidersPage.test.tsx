@@ -5,7 +5,10 @@ import { entry, mount, provider, session, signedIn, status, violations } from '.
 import { renderApp } from '../../test/render'
 import { fromBase64Url, toBase64Url } from '../../lib/passkey'
 
-const instance = provider()
+const bitwardenConfig = '{"serverUrl":"https://vault.bitwarden.com","encryptedConfiguration":"sealed-current"}'
+const replacementBitwardenConfig = '{"serverUrl":"https://vault.bitwarden.com","encryptedConfiguration":"sealed-replacement"}'
+const bitwardenSeal = 'POST /api/v1/providers/bitwarden/seal'
+const instance = provider({ type: 'bitwarden', configuration: bitwardenConfig })
 const mounted = mount()
 const validate = 'POST /api/v1/providers/validate'
 const authorize = 'POST /api/v1/authorizations/inline'
@@ -15,7 +18,8 @@ function providerApi() {
     'GET /api/v1/status': { body: status({ capabilities: { providers: true } }) },
     'GET /api/v1/session': { body: session({ capabilities: ['admin.read', 'admin.decide'] }) },
     'GET /api/v1/providers': { body: [instance] },
-    'GET /api/v1/providers/types': { body: [{ type: 'test', adapterVersion: '1.0' }] },
+    'GET /api/v1/providers/types': { body: [{ type: 'bitwarden', adapterVersion: '1.0' }] },
+    [bitwardenSeal]: { body: { config: replacementBitwardenConfig } },
     [`GET /api/v1/providers/${instance.id}/mounts`]: { body: [mounted] },
     [`GET /api/v1/mounts/${mounted.id}/entries`]: { body: [entry()] },
     [`POST /api/v1/mounts/${mounted.id}/refresh`]: { body: { complete: true, added: 1, removed: 0, changed: 0 } },
@@ -55,8 +59,9 @@ describe('Providers page', () => {
     await user.click(await screen.findByRole('button', { name: /^Add provider$/ }))
     const dialog = screen.getByRole('dialog')
     const form = within(dialog)
-    expect(form.getByText(/Do not put passwords or tokens/)).toBeVisible()
     await user.type(form.getByLabelText(/Provider name/), 'New vault')
+    await user.selectOptions(form.getByLabelText(/Provider type/), 'bitwarden')
+    await user.type(form.getByLabelText(/Bitwarden access token/), 'secret-token')
     await user.click(form.getByRole('button', { name: 'Continue' }))
     expect(await form.findByText('Vault is missing.')).toBeVisible()
     // Validation errors are shown as errors (not warnings), and announced as an alert.
@@ -75,7 +80,7 @@ describe('Providers page', () => {
     await waitFor(() => expect(api.count(authorize)).toBe(1))
     expect(api.calls.find((call) => call.method + ' ' + call.path === authorize)?.body).toEqual({
       operation: 'provider-add',
-      parameters: { name: 'New vault 2', type: 'test', config: '{}', 'max-stale-seconds': '0', 'confirm-warnings': 'yes' },
+      parameters: { name: 'New vault 2', type: 'bitwarden', config: replacementBitwardenConfig, 'max-stale-seconds': '0', 'confirm-warnings': 'yes' },
     })
   })
 
@@ -115,7 +120,7 @@ describe('Providers page', () => {
     expect(api.calls.find((call) => call.method + ' ' + call.path === launch)?.body).toEqual({ browserKey: expect.any(String) })
   })
 
-  it('configures LastPass with an email, region and cache lifetime', async () => {
+  it('configures LastPass with an email and region and hides cache freshness', async () => {
     const api = providerApi()
     const config = '{"username":"Vault@example.test","european":true}'
     api.on('GET /api/v1/providers/types', { body: [{ type: 'lastpass-refresh', adapterVersion: '1' }] })
@@ -125,15 +130,18 @@ describe('Providers page', () => {
     await user.click(await screen.findByRole('button', { name: /^Add provider$/ }))
     const form = within(screen.getByRole('dialog'))
     await user.type(form.getByLabelText(/Provider name/), 'Team vault')
+    await user.selectOptions(form.getByLabelText(/Provider type/), 'lastpass-refresh')
     await user.type(form.getByLabelText(/LastPass account email/), 'Vault@example.test')
     await user.selectOptions(form.getByLabelText(/LastPass region/), 'eu')
+    expect(form.queryByRole('group', { name: 'Cache freshness' })).not.toBeInTheDocument()
     expect(form.queryByLabelText(/master password/)).not.toBeInTheDocument()
     await user.click(form.getByRole('button', { name: 'Continue' }))
     await waitFor(() => expect(api.count(authorize)).toBe(1))
     expect(api.calls.find((call) => call.method + ' ' + call.path === authorize)?.body).toMatchObject({
       operation: 'provider-add',
-      parameters: { config, type: 'lastpass-refresh', 'max-stale-seconds': '3600' },
+      parameters: { config, type: 'lastpass-refresh' },
     })
+    expect(api.calls.find((call) => call.method + ' ' + call.path === authorize)?.body?.parameters).not.toHaveProperty('max-stale-seconds')
   })
 
   it.each([
@@ -146,7 +154,7 @@ describe('Providers page', () => {
     const seal = `POST /api/v1/providers/${type}/seal`
     const config = '{"encryptedConfiguration":"encrypted:fixture"}'
     const token = 'ops_test_token'
-    const existing = { ...instance, type, configuration: config, actions: ['config'] }
+    const existing = { ...instance, type, configuration: '{"encryptedConfiguration":"encrypted:current-fixture"}', actions: ['config'] }
     api.on('GET /api/v1/providers', { body: [existing] })
     api.on('GET /api/v1/providers/types', { body: [{ type: 'test', adapterVersion: '1.0' }, { type, adapterVersion: '1.0' }] })
     api.on(seal, { body: { config } })
@@ -197,21 +205,25 @@ describe('Providers page', () => {
 
   it('sets up Bitwarden through the provider validation and passkey approval flow', async () => {
     const api = providerApi()
-    api.on('GET /api/v1/providers/types', { body: [{ type: 'test', adapterVersion: '1.0' }, { type: 'bitwarden', adapterVersion: '1.0' }] })
+    api.on('GET /api/v1/providers/types', { body: [{ type: 'onepassword', adapterVersion: '1.0' }, { type: 'bitwarden', adapterVersion: '1.0' }] })
     api.on(validate, { body: { ok: true, issues: [] } })
     const user = userEvent.setup()
     renderApp('/providers')
     await user.click(await screen.findByRole('button', { name: /^Add provider$/ }))
     const form = within(screen.getByRole('dialog'))
-    expect(form.getByLabelText(/Configuration JSON/)).toBeVisible()
-    await user.selectOptions(form.getByLabelText(/Provider type/), 'bitwarden')
     expect(form.queryByLabelText(/Configuration JSON/)).not.toBeInTheDocument()
-    expect(form.getByLabelText(/Access token variable/)).toHaveValue('BWS_ACCESS_TOKEN')
+    await user.selectOptions(form.getByLabelText(/Provider type/), 'onepassword')
+    expect(form.getByLabelText(/service-account token/)).toBeVisible()
+    await user.selectOptions(form.getByLabelText(/Provider type/), 'bitwarden')
+    expect(form.queryByLabelText(/service-account token/)).not.toBeInTheDocument()
+    expect(form.getByLabelText(/Bitwarden access token/)).toHaveAttribute('type', 'password')
     expect(form.getByLabelText(/Server URL/)).toHaveValue('https://vault.bitwarden.com')
     await user.type(form.getByLabelText(/Provider name/), 'Team Bitwarden')
+    await user.type(form.getByLabelText(/Bitwarden access token/), 'secret-token')
     await user.click(form.getByRole('button', { name: 'Continue' }))
     await waitFor(() => expect(api.count(authorize)).toBe(1))
-    const config = '{"tokenEnv":"BWS_ACCESS_TOKEN","serverUrl":"https://vault.bitwarden.com"}'
+    const config = replacementBitwardenConfig
+    expect(api.calls.filter(call => JSON.stringify(call.body)?.includes('secret-token')).map(call => call.method + ' ' + call.path)).toEqual([bitwardenSeal])
     expect(api.calls.find((call) => call.method + ' ' + call.path === validate)?.body).toEqual({ type: 'bitwarden', config })
     expect(api.calls.find((call) => call.method + ' ' + call.path === authorize)?.body).toEqual({
       operation: 'provider-add',
@@ -234,7 +246,7 @@ describe('Providers page', () => {
   })
 
   describe('signs exactly the parameters each dialog shows', () => {
-    const full = provider({ actions: ['config', 'max-stale', 'remove', 'add-mount'] })
+    const full = { ...instance, actions: ['config', 'max-stale', 'remove', 'add-mount'] }
 
     async function signed(open: string, fill: (form: ReturnType<typeof within>, user: ReturnType<typeof userEvent.setup>) => Promise<void>, page = `/providers/${full.id}`) {
       const api = providerApi()
@@ -256,20 +268,25 @@ describe('Providers page', () => {
 
     it('change configuration', async () => {
       const body = await signed(`Change configuration ${full.name}`, async (form, user) => {
-        const config = form.getByLabelText(/Configuration JSON/)
-        await user.clear(config)
-        await user.type(config, '{{ "label": "new build" }')
+        expect(form.queryByLabelText(/Provider type/)).not.toBeInTheDocument()
+        expect(form.getByText('Bitwarden Secrets Manager')).toBeVisible()
+        await user.type(form.getByLabelText(/Bitwarden access token/), 'new-credential')
+        const freshness = within(form.getByRole('group', { name: 'Cache freshness' }))
+        expect(freshness.queryByLabelText(/Seconds/)).not.toBeInTheDocument()
+        const minutes = freshness.getByLabelText(/Minutes/)
+        await user.clear(minutes)
+        await user.type(minutes, '30')
       })
-      expect(body).toEqual({ operation: 'provider-config', parameters: { id: full.id, revision: '2', config: '{"label":"new build"}' } })
+      expect(body).toEqual({ operation: 'provider-config', parameters: { id: full.id, revision: '2', config: replacementBitwardenConfig, 'max-stale-seconds': '5400' } })
     })
 
-    it('change maximum staleness', async () => {
-      const body = await signed(`Change maximum staleness ${full.name}`, async (form, user) => {
-        const seconds = form.getByLabelText(/Seconds/)
-        await user.clear(seconds)
-        await user.type(seconds, '30')
+    it('changes only cache freshness without replacing the credential', async () => {
+      const body = await signed(`Change configuration ${full.name}`, async (form, user) => {
+        const minutes = form.getByLabelText(/Minutes/)
+        await user.clear(minutes)
+        await user.type(minutes, '15')
       })
-      expect(body).toEqual({ operation: 'provider-max-stale', parameters: { id: full.id, revision: '2', 'max-stale-seconds': '3630' } })
+      expect(body).toEqual({ operation: 'provider-config', parameters: { id: full.id, revision: '2', config: bitwardenConfig, 'max-stale-seconds': '4500' } })
     })
 
     it('remove provider', async () => {

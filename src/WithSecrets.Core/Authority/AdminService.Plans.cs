@@ -657,9 +657,9 @@ public sealed partial class AdminService
         int? minutes = null;
         if (timed)
         {
-            if (indefinite == (Arg(args, "minutes") is { Length: > 0 }) || (!indefinite && !TryNumber(Arg(args, "minutes"), 1, ReuseSettings.MaxMinutes, out int parsedMinutes)))
+            if (indefinite == (Arg(args, "minutes") is { Length: > 0 }) || (!indefinite && !TryNumber(Arg(args, "minutes"), 1, ReuseSettings.MaxAdminMinutes, out int parsedMinutes)))
             {
-                refusal = $"give a time (1 to {ReuseSettings.MaxMinutes} minutes) or no end, not both";
+                refusal = $"give a time (1 to {ReuseSettings.MaxAdminMinutes} minutes) or no end, not both";
                 status = 400;
 
                 return null;

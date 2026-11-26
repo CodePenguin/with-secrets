@@ -36,6 +36,9 @@ public sealed class FirstRunPage(StateDatabase db, EnrollmentTarget primaryTarge
     /// <summary>Only for <c>--recover</c>: the old rows and settings carried into this first setup.</summary>
     internal RecoveryCarry? Carry { get; set; }
 
+    /// <summary>The local service already running for a fresh interactive setup.</summary>
+    public HostService? Service { get; init; }
+
     /// <summary>The challenge the passkey signs for these settings: SHA-256(seed || SHA-256(UTF-8 of the canonical JSON)).</summary>
     internal static byte[] Challenge(byte[] seed, string canonical)
     {
@@ -83,6 +86,13 @@ public sealed class FirstRunPage(StateDatabase db, EnrollmentTarget primaryTarge
         string? sent = null;
         int failure = RunCommand.Denied;
         IReadOnlyDictionary<string, string> carried = new Dictionary<string, string>();
+        QuickStartRegistration? quickStart = Service is { } service && Carry is null ? new(service) : null;
+        if (quickStart is not null)
+        {
+            announce("Quick Start · local service running");
+            announce("Device: " + ApprovalSummary.Clean(quickStart.DeviceName));
+            announce("Device fingerprint: " + quickStart.Fingerprint);
+        }
 
         RegistrationPlan plan = new(
             PathPrefix,
@@ -91,7 +101,8 @@ public sealed class FirstRunPage(StateDatabase db, EnrollmentTarget primaryTarge
             {
                 ["options"] = Parse(options),
                 ["settings"] = current.Canonical(),
-            }), Carry?.PageNote),
+                ["quickStart"] = quickStart is not null,
+            }), Carry?.PageNote, quickStart),
             (challenge, body) =>
             {
                 Dictionary<string, string>? members = StringMembers(body);
@@ -160,7 +171,8 @@ public sealed class FirstRunPage(StateDatabase db, EnrollmentTarget primaryTarge
                 }
             },
             Carry is { } recovery ? publicKey => carried = recovery.Reencrypt(publicKey) : null,
-            Carry is { } carryReview ? carryReview.WrapReview : null);
+            Carry is { } carryReview ? carryReview.WrapReview : null,
+            quickStart);
 
         ApprovalDecision decision = PasskeyRegistration.Run(passkeys, target.Approver.Settings, Enrollment.DefaultName, announce, readCode, plan);
 
@@ -242,12 +254,13 @@ internal static class ConfigPageHtml
             var busy = false;
             var attempt = 0;
             var waiting = null;
-            var waitingLabel = "";
             var finished = false;
             var ready = null;
             var pending = null;
             var keyName = document.getElementById("f-key-name");
             var noPrf = false;
+            var deviceVerified = !start.quickStart;
+            var verifyDevice = document.getElementById("verify-device");
 
             function show(text) {
                 status.textContent = text + (diagLine ? " " + diagLine : "");
@@ -265,6 +278,7 @@ internal static class ConfigPageHtml
                 save.disabled = true;
                 second.disabled = true;
                 cancel.disabled = true;
+                if (verifyDevice) verifyDevice.disabled = true;
                 inputs(false);
                 show(text);
             }
@@ -349,7 +363,7 @@ internal static class ConfigPageHtml
                         body: body,
                         cache: "no-store",
                         keepalive: false,
-                        credentials: "omit",
+                        credentials: start.quickStart && what === "sign" ? "same-origin" : "omit",
                         redirect: "error",
                         signal: controller.signal
                     }).then(function (reply) {
@@ -466,17 +480,42 @@ internal static class ConfigPageHtml
                         timeout: step.timeout,
                         userVerification: "required"
                     };
+                    if (start.quickStart) {
+                        pending.extensions = { prf: { eval: { first: fromBase64Url(start.options.prf.salt) } } };
+                        pending.allowCredentials = [{ id: fromBase64Url(step.credential), type: "public-key" }];
+                        pending.bind = fromBase64Url(step.bind);
+                    }
                     inputs(false);
-                    second.textContent = "Confirm with your new passkey";
+                    second.textContent = start.quickStart ? "Confirm setup and unlock" : "Confirm with your new passkey";
                     second.hidden = false;
-                    progress(2);
+                    progress(start.quickStart ? 3 : 2);
+                    if (start.quickStart) {
+                        document.getElementById("quick-passkey-name").hidden = true;
+                        document.getElementById("quick-finish").hidden = false;
+                        document.getElementById("form").hidden = false;
+                    }
                     second.disabled = false;
-                    show("Passkey \"" + step.name + "\" created. Now confirm it.");
+                    show(start.quickStart ? "Confirm to trust this device, unlock the service, and sign in on this browser." :
+                        "Passkey \"" + step.name + "\" created. Now confirm it.");
                     second.focus();
                 });
             }
 
             function coded(data) {
+                if (start.quickStart && data.quickStart) {
+                    var signedIn = typeof data.antiForgery === "string";
+                    if (signedIn) {
+                        try { sessionStorage.setItem("ws.session-secret", data.antiForgery); }
+                        catch (error) { signedIn = false; }
+                    }
+                    finish(signedIn ? "This device is trusted and the service is unlocked." : "Setup was saved. Open the app to finish.");
+                    progress(3);
+                    showRecovery(data);
+                    document.getElementById("quick-device").hidden = true;
+                    document.getElementById("form").hidden = true;
+                    document.getElementById("quick-done").hidden = false;
+                    return;
+                }
                 if (typeof data.code !== "string") {
                     throw new Error("no code");
                 }
@@ -498,20 +537,15 @@ internal static class ConfigPageHtml
                 return " (" + text + ")";
             }
 
-            // While a passkey prompt is open the tapped button stays on and reads "Cancel": a prompt that closes without ever
-            // settling must not leave the page stuck. The cancel starts no prompt; it only abandons the attempt.
+            // Keep the page's Cancel button available if the passkey prompt stalls.
+            // During the prompt it abandons the attempt and leaves the page ready to retry.
             function startWait(button) {
                 waiting = button;
-                waitingLabel = button.textContent;
-                button.textContent = "Cancel";
-                button.disabled = false;
+                button.disabled = true;
             }
 
             function endWait() {
-                if (waiting !== null) {
-                    waiting.textContent = waitingLabel;
-                    waiting = null;
-                }
+                waiting = null;
             }
 
             function cancelAttempt() {
@@ -519,6 +553,7 @@ internal static class ConfigPageHtml
                 var button = waiting;
                 endWait();
                 busy = false;
+                button.disabled = false;
                 if (button === save) {
                     inputs(true);
                 }
@@ -554,10 +589,6 @@ internal static class ConfigPageHtml
                 if (finished) {
                     return;
                 }
-                if (waiting === second) {
-                    cancelAttempt();
-                    return;
-                }
                 if (busy || pending === null) {
                     return;
                 }
@@ -565,7 +596,9 @@ internal static class ConfigPageHtml
                 busy = true;
                 startWait(second);
                 show("Waiting for your passkey...");
-                navigator.credentials.get({ publicKey: pending }).then(function (credential) {
+                var proofOptions = Object.assign({}, pending);
+                delete proofOptions.bind;
+                navigator.credentials.get({ publicKey: proofOptions }).then(function (credential) {
                     if (mine !== attempt) {
                         return;
                     }
@@ -577,12 +610,27 @@ internal static class ConfigPageHtml
                     endWait();
                     second.disabled = true;
                     show("Checking...");
-                    return post("sign", JSON.stringify({
+                    var proof = {
                         id: toBase64Url(credential.rawId),
                         authenticatorData: toBase64Url(response.authenticatorData),
                         clientDataJSON: toBase64Url(response.clientDataJSON),
                         signature: toBase64Url(response.signature)
-                    })).then(function (reply) {
+                    };
+                    var payload = Promise.resolve(proof);
+                    if (start.quickStart) {
+                        var output = prfOutput(credential);
+                        if (output === null) {
+                            failed(new Error("the passkey did not release an unlock key"));
+                            return;
+                        }
+                        payload = sealPrf(output, pending.bind, fromBase64Url(start.options.prf.serverKey)).then(function (sealed) {
+                            proof.prf = JSON.stringify(sealed);
+                            return proof;
+                        });
+                    }
+                    return payload.then(function (value) {
+                        return post("sign", JSON.stringify(value));
+                    }).then(function (reply) {
                         if (!reply.ok) {
                             throw new Error("refused");
                         }
@@ -608,6 +656,10 @@ internal static class ConfigPageHtml
                 if (finished) {
                     return;
                 }
+                if (waiting !== null) {
+                    cancelAttempt();
+                    return;
+                }
                 finish("Sending cancel...");
                 post("deny", "").then(function (reply) {
                     show(reply.ok ? "Cancelled. Nothing was saved. You can close this page." : "This page had already ended.");
@@ -617,11 +669,7 @@ internal static class ConfigPageHtml
             });
 
             save.addEventListener("click", function () {
-                if (finished) {
-                    return;
-                }
-                if (waiting === save) {
-                    cancelAttempt();
+                if (finished || !deviceVerified) {
                     return;
                 }
                 if (busy) {
@@ -736,7 +784,57 @@ internal static class ConfigPageHtml
                 });
             });
 
+            function checkTerminal() {
+                if (finished) return;
+                fetch(base + "/verified", { cache: "no-store" }).then(function (reply) {
+                    if (!reply.ok) {
+                        finish("This setup has ended. Check the terminal.");
+                        return;
+                    }
+                    return reply.json().then(function (session) {
+                        if (finished) return;
+                        if (!session.verified) {
+                            setTimeout(checkTerminal, 350);
+                            return;
+                        }
+                        document.getElementById("quick-terminal").textContent = "Code accepted. Compare the fingerprint with the one in your terminal.";
+                        document.getElementById("quick-code").hidden = true;
+                        verifyDevice.disabled = false;
+                    });
+                }).catch(function () {
+                    if (!finished) setTimeout(checkTerminal, 750);
+                });
+            }
             prepare();
+            if (start.quickStart) {
+                inputs(false);
+                checkTerminal();
+                verifyDevice.addEventListener("click", function () {
+                    verifyDevice.disabled = true;
+                    post("verify-device", "").then(function (reply) {
+                        if (finished) return;
+                        if (!reply.ok) {
+                            finish("This setup has ended. Check the terminal.");
+                            return;
+                        }
+                        deviceVerified = true;
+                        document.getElementById("quick-device").hidden = true;
+                        verifyDevice.hidden = true;
+                        progress(2);
+                        document.getElementById("intro").hidden = false;
+                        document.getElementById("quick-passkey-name").hidden = false;
+                        save.hidden = false;
+                        inputs(true);
+                        show("");
+                        keyName.focus();
+                    }).catch(function () {
+                        if (!finished) {
+                            verifyDevice.disabled = false;
+                            show("Could not confirm the fingerprint. Try again.");
+                        }
+                    });
+                });
+            }
             cancel.focus();
         })();
         """;
@@ -746,10 +844,19 @@ internal static class ConfigPageHtml
     /// served. <paramref name="start" /> is the JSON for the data block, made with the default encoder (which escapes &lt;,
     /// &gt; and &amp;, so it cannot end the block).
     /// </summary>
-    public static OneShotResponse Build(string start, string? note)
+    public static OneShotResponse Build(string start, string? note, QuickStartRegistration? quickStart = null)
     {
         string script = PrfClient.Fill(Script.Replace("//@SHOW_RECOVERY@", PasskeyRegistration.RecoveryScript, StringComparison.Ordinal).Replace("//@PROGRESS@", PasskeyRegistration.ProgressScript, StringComparison.Ordinal).ReplaceLineEndings("\n"));
-        string style = (ApprovalPage.Style + PasskeyRegistration.CodeStyle + PasskeyRegistration.FieldStyle).ReplaceLineEndings("\n");
+        string quickStyle = quickStart is null ? "" : """
+
+            #quick-code code { font-size: 2rem; letter-spacing: .22em; font-weight: 700; }
+            #quick-done { margin-top: 1.25rem; }
+            #quick-done summary { min-height: 2.75rem; padding: 0.5rem 0; color: var(--accent); font-weight: 600; cursor: pointer; }
+            #quick-done summary:focus-visible, #quick-done a:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+            #quick-done a { display: inline-flex; align-items: center; min-height: 2.75rem; padding: 0.5rem 1rem; border-radius: 0.5rem; background: var(--accent); color: var(--accent-text); font-weight: 600; text-decoration: none; }
+            #quick-done a:hover { filter: brightness(0.94); }
+            """;
+        string style = (ApprovalPage.Style + PasskeyRegistration.CodeStyle + PasskeyRegistration.FieldStyle + quickStyle).ReplaceLineEndings("\n");
         string policy = ApprovalPage.Policy(script, style);
 
         StringBuilder page = new();
@@ -757,10 +864,23 @@ internal static class ConfigPageHtml
         page.Append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
         page.Append("<meta name=\"referrer\" content=\"no-referrer\">\n");
         page.Append("<title>Set up with-secrets</title>\n");
-        page.Append("<style>").Append(style).Append("</style>\n</head>\n<body>\n<header class=\"bar\">with-secrets administration</header>\n<main class=\"setup\">\n");
+        page.Append("<style>").Append(style).Append("</style>\n</head>\n<body>\n<header class=\"bar\">with-secrets</header>\n<main class=\"setup\">\n");
         page.Append("<h1>Set up with-secrets</h1>\n");
-        page.Append(PasskeyRegistration.Steps);
-        page.Append("<div id=\"intro\">\n<p>Create the first passkey. It becomes your admin key: the one that can change settings, secrets and passkeys.</p>\n");
+        if (quickStart is null)
+        {
+            page.Append(PasskeyRegistration.Steps);
+        }
+        else
+        {
+            page.Append("<p><strong>Quick Start</strong></p>\n<ol class=\"steps\" aria-label=\"Steps\"><li id=\"s1\" aria-current=\"step\">Verify device</li><li id=\"s2\">Create passkey</li><li id=\"s3\">Finish setup</li></ol>\n");
+            page.Append("<section id=\"quick-device\"><h2>Verify this device</h2><p id=\"quick-terminal\">Enter this six-digit code in the terminal that opened Quick Start.</p><div id=\"quick-code\" class=\"code-copy-row\"><div class=\"code-copy-actions\"><code id=\"terminal-code\">")
+                .Append(quickStart.Code).Append("</code>").Append(PasskeyRegistration.CopyCodeButton("terminal-code", "Copy terminal code"))
+                .Append("</div>").Append(PasskeyRegistration.CopyFeedback).Append("</div><p>Device fingerprint for ").Append(Encode(quickStart.DeviceName))
+                .Append("</p><p><code id=\"device-fingerprint\">").Append(Encode(quickStart.Fingerprint)).Append("</code></p></section>\n");
+            page.Append("<h2 id=\"quick-finish\" hidden>Finish setup</h2>\n");
+        }
+        page.Append(quickStart is null ? "<div id=\"intro\">\n" : "<div id=\"intro\" hidden><h2>Create your passkey</h2>\n");
+        page.Append("<p>Create the first passkey. It becomes your admin key: the one that can change settings, secrets and passkeys.</p>\n");
         page.Append("<p>" + WebUtility.HtmlEncode(PrfClient.RequiredText) + "</p>\n");
         if (note is not null)
         {
@@ -768,13 +888,31 @@ internal static class ConfigPageHtml
         }
 
         page.Append("</div>\n<div id=\"form\">\n");
+        if (quickStart is not null) page.Append("<div id=\"quick-passkey-name\" hidden>");
         page.Append(PasskeyRegistration.NameField(Enrollment.DefaultName, []));
+        if (quickStart is not null) page.Append("</div>\n");
         page.Append("<div class=\"buttons\">");
-        page.Append("<button id=\"save\" type=\"button\">Create passkey</button>");
+        if (quickStart is not null) page.Append("<button id=\"verify-device\" type=\"button\" disabled>Fingerprint matches. Continue</button>");
+        page.Append(quickStart is null ? "<button id=\"save\" type=\"button\">Create passkey</button>"
+            : "<button id=\"save\" type=\"button\" hidden>Create passkey</button>");
         page.Append(PasskeyRegistration.StepTwoButton);
         page.Append("<button id=\"deny\" type=\"button\" autofocus>Cancel</button>");
         page.Append("</div>\n</div>\n<p id=\"status\" role=\"status\"></p>\n<p id=\"code\"></p>\n");
         page.Append(PasskeyRegistration.RecoveryBox);
+        if (quickStart is not null)
+        {
+            page.Append("""
+                <div id="quick-done" hidden>
+                  <details>
+                    <summary>See how a secret is used</summary>
+                    <p>Say you store a secret named <code>REPORT_TOKEN</code>. A reporting script can request it with this command.</p>
+                    <pre><code>with-secrets --secrets REPORT_TOKEN --reason "Generate report" -- node report.js</code></pre>
+                    <p>When you approve the request, the script receives <code>REPORT_TOKEN</code> as an environment variable.</p>
+                  </details>
+                  <a href="/admin/">Open with-secrets</a>
+                </div>
+                """);
+        }
         page.Append("</main>\n");
         page.Append("<script type=\"application/json\" id=\"start\">").Append(start).Append("</script>\n");
         page.Append("<script>").Append(script).Append("</script>\n</body>\n</html>\n");

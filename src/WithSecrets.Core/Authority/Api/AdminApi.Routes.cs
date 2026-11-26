@@ -86,7 +86,7 @@ internal sealed partial class AdminApi
         ("pairing-create", []),
         ("pairing-revoke", ["id"]),
         ("provider-add", ["name", "type", "config", "max-stale-seconds", "confirm-warnings"]),
-        ("provider-config", ["id", "revision", "config", "confirm-warnings"]),
+        ("provider-config", ["id", "revision", "config", "max-stale-seconds", "confirm-warnings"]),
         ("provider-max-stale", ["id", "revision", "max-stale-seconds"]),
         ("provider-refresh-values", ["id"]),
         ("provider-remove", ["id", "revision"]),
@@ -107,7 +107,7 @@ internal sealed partial class AdminApi
         "id" => S.Str(max: 80, min: 4, description: "The id of what the operation changes: a grant's id (or an unambiguous start of it), a pairing invitation's, or a provider instance's or mount's (its full id)."),
         "name" => S.Str(max: 64, min: 1, description: "A name: a passkey's or a machine's friendly name (at most 40 characters), or a provider instance's (at most 64; leading and trailing spaces are dropped)."),
         "type" => S.Str(max: 64, min: 1, description: "The provider type of the instance (one the service offers)."),
-        "config" => S.Str(max: ProviderAdmin.MaxConfigurationLength, min: 2, description: "The instance's configuration: a JSON object on one line. It is stored unencrypted and shown in the signed text, so it must hold no credential (a field such as tokenEnv may name the environment variable that holds one)."),
+        "config" => S.Str(max: ProviderAdmin.MaxConfigurationLength, min: 2, description: "The instance's configuration as a JSON object on one line. Use the provider's sealing endpoint for credentials."),
         "max-stale-seconds" => S.Str(max: 5, min: 1, description: "Whole seconds as text, 0 to 86400. Zero fetches live values without a cache. A positive value enables the encrypted authority cache and sets the maximum age for outage fallback."),
         "revision" => S.Str(max: 10, min: 1, description: "The revision of the provider instance as it was shown (whole number as text); the change is refused when it has moved."),
         "instance" => S.Str(max: 36, min: 36, description: "The id of the provider instance the mount reads from."),
@@ -119,7 +119,7 @@ internal sealed partial class AdminApi
         "days" => S.Int(0, AuthorityStore.MaxAuditRetentionDays, description: "How many days audit events are kept; 0 keeps everything."),
         "idle" => S.Int(1, AuthorityStore.MaxSessionIdleMinutes, description: "Minutes without use that end a session."),
         "absolute" => S.Int(1, AuthorityStore.MaxSessionAbsoluteMinutes, description: "Minutes after which a session ends however busy."),
-        "minutes" => S.Int(1, ReuseSettings.MaxMinutes, description: "Minutes to add to (extend) or to grant from now (renew)."),
+        "minutes" => S.Int(1, ReuseSettings.MaxAdminMinutes, description: "Minutes to add to (extend) or to grant from now (renew)."),
         "indefinite" => S.Bool("True for a grant with no end (instead of minutes)."),
         _ => throw new InvalidOperationException("unknown parameter " + name),
     };
@@ -130,7 +130,8 @@ internal sealed partial class AdminApi
     private ApiRoute Mutation(string method, string template, string operation, string id, string summary, string tag, params string[] body)
     {
         string[] pathParams = [.. template.Split('/').Where(part => part.StartsWith('{')).Select(part => part.Trim('{', '}'))];
-        string[] required = [.. body.Where(name => RequiredParameters.Contains(name) || (operation is "machine-rename" or "provider-add" && name == "name"))];
+        string[] required = [.. body.Where(name => !((operation is "provider-add" or "provider-config") && name == "max-stale-seconds") &&
+            (RequiredParameters.Contains(name) || (operation is "machine-rename" or "provider-add" && name == "name")))];
         List<(string, JsonObject)> members = [("authorization", S.Str(max: 64, min: 8, description: "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."))];
         members.AddRange(body.Select(name => (name, ParameterSchema(name))));
         JsonObject request = S.Obj(members, members.Select(item => item.Item1).Where(name => name != "authorization" && !required.Contains(name)));

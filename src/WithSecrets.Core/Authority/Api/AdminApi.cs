@@ -60,6 +60,8 @@ internal sealed partial class AdminApi
 
     private void SetCookie(HttpResponse response, string name, string value) => response.Cookies.Append(name, _port.ToString(CultureInfo.InvariantCulture) + "." + value, Options());
 
+    internal void SetQuickStartSession(HttpResponse response, AdminSession session) => SetCookie(response, AdminSessions.SessionCookie, session.Token);
+
     private static void DropCookie(HttpResponse response, string name) => response.Cookies.Delete(name, Options(expire: true));
 
     private static string Title(int status) => status switch
@@ -262,7 +264,8 @@ internal sealed partial class AdminApi
         // presented alone (another program on another localhost port is sent it too) finds no session, renews nothing and gets no answer a session would get.
         string? token = Cookie(request, AdminSessions.SessionCookie);
         string? presented = request.Headers.TryGetValue(TokenHeader, out Microsoft.Extensions.Primitives.StringValues presentedValues) && presentedValues.Count == 1 ? presentedValues[0] : null;
-        AdminSession? session = route.OperationId is "getStatus" or "getOpenApi" or "startBrowser" ? null : admin.Sessions.Validate(token, presented);
+        AdminSession? session = route.OperationId is "getStatus" or "getOpenApi" or "startBrowser" ? null
+            : admin.Sessions.Validate(token, presented, renew: route.OperationId is not ("listApprovals" or "getSession"));
         admin.RecordEndedSessions();
         string? browserCookie = Cookie(request, AdminSessions.BrowserCookie);
 

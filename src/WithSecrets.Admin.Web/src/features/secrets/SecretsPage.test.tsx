@@ -1,7 +1,7 @@
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { signedIn } from '../../test/fakeApi'
+import { entry, mount, signedIn, status } from '../../test/fakeApi'
 import { renderApp } from '../../test/render'
 
 afterEach(() => {
@@ -21,6 +21,28 @@ describe('Secrets page', () => {
     signedIn({ 'GET /api/v1/secrets': { body: { items: [] } } })
     renderApp('/secrets')
     expect(await screen.findByText('No secret is stored.')).toBeTruthy()
+  })
+
+  it('browses local and mounted secrets by path without offering to remove provider entries', async () => {
+    const mounted = mount({ logicalPath: 'team' })
+    const api = signedIn({
+      'GET /api/v1/status': { body: status({ capabilities: { providers: true } }) },
+      'GET /api/v1/secrets': { body: { items: ['apps/API_KEY', 'team/ops/TOKEN'] } },
+      'GET /api/v1/mounts': { body: [mounted] },
+      [`GET /api/v1/mounts/${mounted.id}/entries`]: { body: [entry({ logicalPath: 'team/ops/TOKEN' })] },
+    })
+    renderApp('/secrets')
+    expect(await screen.findByText('Local')).toBeVisible()
+    await userEvent.click(screen.getByText('apps', { exact: true }))
+    expect(screen.getByRole('heading', { name: 'API_KEY' })).toBeVisible()
+    expect(screen.getByText('apps/API_KEY', { exact: true })).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Remove secret apps/API_KEY' })).toBeVisible()
+    expect(api.count(`GET /api/v1/mounts/${mounted.id}/entries`)).toBe(0)
+    const providers = within(await screen.findByRole('list', { name: 'Provider mounts' }))
+    await userEvent.click(providers.getByText('team/', { exact: true }))
+    await userEvent.click(await providers.findByText('ops', { exact: true }))
+    expect(providers.getByRole('heading', { name: 'TOKEN' })).toBeVisible()
+    expect(providers.queryByRole('button', { name: /^Remove/ })).not.toBeInTheDocument()
   })
 
   it('prefills the name from the link and offers Replace for a stored name', async () => {

@@ -24,7 +24,7 @@ From the repository root:
 .\scripts\demo.ps1
 ```
 
-The script builds the E2E project, runs all scenarios with Playwright video recording enabled, and writes the result to `artifacts\demo\latest\`. Each run replaces the previous one: only the last demo is kept.
+The script builds and runs the E2E project in the current checkout. Default recordings go in the primary checkout's shared `artifacts/demo` library. The `main` branch uses `latest`. A linked worktree uses its worktree name, and another branch in the primary checkout uses its branch name with path separators replaced by hyphens. A completed run replaces that slot, so the same URL works for subsequent runs.
 
 You can choose an explicit output directory:
 
@@ -32,7 +32,7 @@ You can choose an explicit output directory:
 .\scripts\demo.ps1 -OutputDirectory artifacts\demo\review
 ```
 
-An explicit directory must be under `artifacts\demo\` and must not already contain files. This never overwrites a recording and keeps demo output out of the rest of the repository; use a new directory name for each comparison run. The script exits nonzero if the build fails, a scenario fails, or the output directory cannot be used.
+Use an explicit directory for an intentional snapshot. It must be empty and under `artifacts/demo` in the current or primary checkout. The script exits nonzero if the build fails, a scenario fails, or the output directory cannot be used.
 
 Alternatively, invoke the runner directly (it applies the same output-directory checks, but does not build first):
 
@@ -40,11 +40,11 @@ Alternatively, invoke the runner directly (it applies the same output-directory 
 dotnet run --project tests\WithSecrets.E2E -- --demo artifacts\demo\review
 ```
 
-Without an explicit directory, the direct runner also writes to `artifacts\demo\latest\`, replacing the last demo. `scripts\demo.ps1` remains the recommended entry point because it builds before running.
+Without an explicit directory, the direct runner uses the same shared branch slot as `scripts/demo.ps1`. The previous recording remains available while the new one records.
 
 ## Output
 
-Open `index.html` in the output directory. Each scenario's test name is also its recording link (additional browser contexts are suffixed `(2)`, `(3)`, etc.); the separate Browser 1/2 recording column is omitted. Rows also show pass/fail status, check counts, durations and failure evidence. Recordings use a split-screen composition: the full-height terminal occupies the left 38% and the real browser occupies the right 62%, with no terminal overlay covering the application. CLI stdout and stderr appear as one transcript in write order; the step caption sits at the top of the left pane, above the transcript. Complete separate-stream console logs remain downloadable beside the video.
+Open `index.html` in the output directory. Each scenario's test name is also its recording link (additional browser contexts are suffixed `(2)`, `(3)`, etc.); the separate Browser 1/2 recording column is omitted. Rows also show pass/fail status, check counts, durations and failure evidence. Recordings use a split-screen composition: the full-height terminal occupies the left 38% and the real browser occupies the right 62%, with no terminal overlay covering the application. CLI stdout and stderr appear as one transcript in write order; the step caption sits at the top of the left pane, above the transcript.
 
 Demo recordings include readable lower-third narration: a scenario introduction followed by short captions as the person advances through browser actions. Captions are injected only in demo mode, are not part of the application UI, and do not affect normal E2E runs. For convenient review and reliable video seeking, serve all runs through the local demo library:
 
@@ -90,4 +90,4 @@ The server is a single .NET 10 file-based app at `scripts\serve-demo.cs`; it doe
 
 In demo mode, the browser recording is composed as a split screen: the terminal fills the left 38% and the real application fills the right 62%. The terminal polls the same in-memory terminal writers used by the scenario, so stdout and stderr appear in one transcript as the command writes them. The step caption appears at the top of the terminal pane, separate from the scrolling transcript. The composition is injected only into the recorded browser context; it is not part of the application and does not affect normal E2E tests.
 
-Each recorded browser context also writes its complete stdout and stderr to `videos/<scenario>/console-browser-N.txt`, linked from that scenario's row in `index.html`. Output is intentionally unredacted: all scenario values, secrets, approval codes and pairing material are disposable test data. Keep generated demo artifacts local and do not use this capture mechanism with real credentials.
+Each recorded browser context also writes its complete stdout and stderr to `videos/<scenario>/console-browser-N.txt` for local diagnostics. Output is intentionally unredacted: all scenario values, secrets, approval codes and pairing material are disposable test data. Keep generated demo artifacts local and do not use this capture mechanism with real credentials.

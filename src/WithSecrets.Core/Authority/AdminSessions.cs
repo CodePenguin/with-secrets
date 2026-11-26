@@ -154,7 +154,7 @@ public sealed class AdminSessions(TimeProvider clock, Func<(TimeSpan Idle, TimeS
     /// The live session of a cookie value, renewed for the idle timeout; null for none, an expired one, a made-up value, or a cookie presented without the session's own secret
     /// (<paramref name="presented" />, from the header the page sends). A cookie replayed alone renews nothing and finds nothing.
     /// </summary>
-    public AdminSession? Validate(string? token, string? presented)
+    public AdminSession? Validate(string? token, string? presented, bool renew = true)
     {
         if (string.IsNullOrEmpty(token) || token.Length > 128 || string.IsNullOrEmpty(presented) || presented.Length > 128)
         {
@@ -169,7 +169,7 @@ public sealed class AdminSessions(TimeProvider clock, Func<(TimeSpan Idle, TimeS
                 return null;
             }
 
-            session.LastSeen = clock.GetUtcNow();
+            if (renew) session.LastSeen = clock.GetUtcNow();
 
             return session;
         }

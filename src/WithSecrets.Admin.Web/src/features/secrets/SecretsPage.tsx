@@ -2,14 +2,14 @@ import { useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { api } from '../../api/client'
-import { useSession } from '../../api/queries'
+import { useAllMounts, useSession, useStatus } from '../../api/queries'
 import { Button } from '../../components/Button'
-import { Empty, PageHeader } from '../../components/Card'
+import { PageHeader } from '../../components/Card'
 import { Loading, Notice, ProblemAlert, useAnnounce } from '../../components/Feedback'
-import list from '../../components/List.module.css'
 import { fromBase64Url, removeChallenge, sealSecrets, storeChallenge } from '../../lib/passkey'
 import { assert, failure, promptCancelled } from '../../lib/manifestProof'
 import { usePageTitle } from '../../lib/usePageTitle'
+import { LocalSecretFolder, MountedSecretFolders } from './SecretFolders'
 
 const secretsKey = ['secrets'] as const
 
@@ -19,7 +19,10 @@ export function SecretsPage() {
   const announce = useAnnounce()
   const queryClient = useQueryClient()
   const session = useSession()
+  const status = useStatus()
   const canChange = session.data?.capabilities.includes('admin.decide') === true
+  const showMounts = status.data?.capabilities?.providers === true && session.data?.capabilities.includes('admin.read') === true
+  const mounts = useAllMounts(showMounts)
   const secrets = useQuery({ queryKey: secretsKey, queryFn: () => api.get('/api/v1/secrets') })
   const [search] = useSearchParams()
   const [name, setName] = useState(search.get('name') ?? '')
@@ -102,7 +105,9 @@ export function SecretsPage() {
         <p>
           <label htmlFor="secret-name">Name</label>
           <br />
-          <input id="secret-name" value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" spellCheck={false} maxLength={80} />
+          <input id="secret-name" value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" spellCheck={false} maxLength={200} aria-describedby="secret-name-hint" />
+          <br />
+          <small id="secret-name-hint">Use / to add folders, for example apps/API_KEY.</small>
         </p>
         <p>
           <label htmlFor="secret-value">Value</label>
@@ -119,26 +124,13 @@ export function SecretsPage() {
       {problem ? <ProblemAlert error={problem} title="Nothing was changed" /> : null}
       {cancelled ? <p role="status">Passkey prompt cancelled. Nothing was changed.</p> : null}
 
-      <h2 id="stored-secrets">Stored secrets</h2>
+      <h2>Mount points</h2>
       {secrets.isPending ? <Loading what="secrets" /> : null}
       {secrets.isError ? <ProblemAlert error={secrets.error} title="The secrets could not be listed" /> : null}
-      {secrets.data && names.length === 0 ? <Empty>No secret is stored.</Empty> : null}
-      {names.length > 0 ? (
-        <ul className={list.list} aria-labelledby="stored-secrets">
-          {names.map((stored) => (
-            <li key={stored} className={list.item}>
-              <div className={list.itemHeader}>
-                <h3>{stored}</h3>
-              </div>
-              {canChange ? <div className={list.actions}>
-                <Button variant="danger" disabled={busy} onClick={() => void remove(stored)}>
-                  Remove <span className="visually-hidden">secret {stored}</span>
-                </Button>
-              </div> : null}
-            </li>
-          ))}
-        </ul>
-      ) : null}
+      {secrets.data ? <LocalSecretFolder names={names} mounts={mounts.data ?? []} remove={canChange ? path => void remove(path) : undefined} busy={busy} /> : null}
+      {showMounts && mounts.isPending ? <Loading what="provider mounts" /> : null}
+      {mounts.isError ? <ProblemAlert error={mounts.error} title="The provider mounts could not be listed" /> : null}
+      {mounts.data ? <MountedSecretFolders mounts={mounts.data} /> : null}
     </>
   )
 }

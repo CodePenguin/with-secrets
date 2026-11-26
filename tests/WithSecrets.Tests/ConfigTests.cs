@@ -40,12 +40,12 @@ internal static class ConfigTests
     private static void Validation(Action<bool, string> check)
     {
         ToolSettings defaults = ToolSettings.Defaults;
-        check(defaults == new ToolSettings(480, null, 0, 5), "settings: the defaults");
-        check(defaults.Canonical() == "{\"reuseMaxMinutes\":480,\"baseUrl\":null,\"port\":0,\"timeoutMinutes\":5}", "settings: canonical JSON has a fixed key order (" + defaults.Canonical() + ")");
+        check(defaults == new ToolSettings(43200, null, 0, 15), "settings: the defaults");
+        check(defaults.Canonical() == "{\"reuseMaxMinutes\":43200,\"baseUrl\":null,\"port\":0,\"timeoutMinutes\":15}", "settings: canonical JSON has a fixed key order (" + defaults.Canonical() + ")");
         check(new ToolSettings(480, "https://ws.example.com/a\"b\\c", 8765, 30).Canonical()
             == "{\"reuseMaxMinutes\":480,\"baseUrl\":\"https://ws.example.com/a\\\"b\\\\c\",\"port\":8765,\"timeoutMinutes\":30}", "settings: canonical JSON escapes quote and backslash");
         check(new ToolSettings(480, "https://b\u00fccher.example/\u00e9", 0, 5).Canonical().Contains("b\\u00fccher.example/\\u00e9", StringComparison.Ordinal), "settings: canonical JSON writes non-ASCII as lower-case \\u escapes");
-        check(defaults.Approval == new ApprovalSettings(null, 0, TimeSpan.FromMinutes(5)) && defaults.Reuse == new ReuseOffer(480), "settings: the approval and grant time views");
+        check(defaults.Approval == new ApprovalSettings(null, 0, TimeSpan.FromMinutes(15)) && defaults.Reuse == new ReuseOffer(43200), "settings: the approval and grant time views");
 
         (ToolSettings Value, bool Good, string Key)[] cases =
         [
@@ -56,7 +56,8 @@ internal static class ConfigTests
             (defaults with { ReuseMaxMinutes = 9 }, false, "reuseMaxMinutes"),
             (defaults with { ReuseMaxMinutes = 10 }, true, ""),
             (defaults with { ReuseMaxMinutes = 1440 }, true, ""),
-            (defaults with { ReuseMaxMinutes = 1441 }, false, "reuseMaxMinutes"),
+            (defaults with { ReuseMaxMinutes = 43200 }, true, ""),
+            (defaults with { ReuseMaxMinutes = 43201 }, false, "reuseMaxMinutes"),
             (defaults with { Port = -1 }, false, "port"),
             (defaults with { Port = 65535 }, true, ""),
             (defaults with { Port = 65536 }, false, "port"),
@@ -93,7 +94,7 @@ internal static class ConfigTests
             "{ \"reuseMaxMinutes\":480,\"baseUrl\":null,\"port\":0,\"timeoutMinutes\":5}",
             Canonical(null, 0, 31),
             Canonical("https://u:p@ws.example.com", 0, 5),
-            Canonical(null, 0, 5, 1441),
+            Canonical(null, 0, 5, 43201),
         ];
         foreach (string text in refused)
         {
@@ -122,7 +123,7 @@ internal static class ConfigTests
         StateDatabase db = StateDatabase.InFolder(Path.Combine(root, "round"));
         check(ToolSettings.Load(db, out string? error) == ToolSettings.Defaults && error is null && !File.Exists(db.FilePath), "db settings: a missing database gives the defaults and creates nothing");
         check(ApprovalSettings.Load(db, out error) == ToolSettings.Defaults.Approval && error is null, "db settings: approval settings from a missing database are the defaults");
-        check(ReuseSettings.Load(db) == new ReuseOffer(480), "db settings: grant times from a missing database are the default");
+        check(ReuseSettings.Load(db) == new ReuseOffer(43200), "db settings: grant times from a missing database are the default");
 
         TestState.Seeded(db.FilePath);
         check(ToolSettings.Load(db, out error) == ToolSettings.Defaults && error is null, "db settings: the first manifest holds the defaults");

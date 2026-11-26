@@ -30,7 +30,8 @@ internal sealed record RegistrationPlan(
     Func<PasskeyRecord, bool, Manifest> Next,
     Func<SignedManifest, PasskeyRecord, ApprovalDecision> Commit,
     Func<string, IReadOnlyDictionary<string, string>>? Reencrypt = null,
-    Func<byte[], ReviewKey>? WrapReview = null);
+    Func<byte[], ReviewKey>? WrapReview = null,
+    QuickStartRegistration? QuickStart = null);
 
 /// <summary>An approval of a new manifest: the decision and, when approved, the manifest with the admin assertion over it.</summary>
 public sealed record ManifestApproval(ApprovalDecision Decision, SignedManifest? Signed);
@@ -68,7 +69,6 @@ internal static class PasskeyRegistration
             var busy = false;
             var attempt = 0;
             var waiting = null;
-            var waitingLabel = "";
             var finished = false;
             var pending = null;
             var chosen = null;
@@ -322,20 +322,15 @@ internal static class PasskeyRegistration
                 return key;
             }
 
-            // While a passkey prompt is open the tapped button stays on and reads "Cancel": a prompt that closes without ever
-            // settling must not leave the page stuck. The cancel starts no prompt; it only abandons the attempt.
+            // Keep the page's Cancel button available if the passkey prompt stalls.
+            // During the prompt it abandons the attempt and leaves the page ready to retry.
             function startWait(button) {
                 waiting = button;
-                waitingLabel = button.textContent;
-                button.textContent = "Cancel";
-                button.disabled = false;
+                button.disabled = true;
             }
 
             function endWait() {
-                if (waiting !== null) {
-                    waiting.textContent = waitingLabel;
-                    waiting = null;
-                }
+                waiting = null;
             }
 
             function cancelAttempt() {
@@ -343,6 +338,7 @@ internal static class PasskeyRegistration
                 var button = waiting;
                 endWait();
                 busy = false;
+                button.disabled = false;
                 if (button === create) {
                     inputs(true);
                 }
@@ -351,6 +347,10 @@ internal static class PasskeyRegistration
 
             cancel.addEventListener("click", function () {
                 if (finished) {
+                    return;
+                }
+                if (waiting !== null) {
+                    cancelAttempt();
                     return;
                 }
                 finish("Sending cancel...");
@@ -363,10 +363,6 @@ internal static class PasskeyRegistration
 
             create.addEventListener("click", function () {
                 if (finished) {
-                    return;
-                }
-                if (waiting === create) {
-                    cancelAttempt();
                     return;
                 }
                 if (busy) {
@@ -492,10 +488,6 @@ internal static class PasskeyRegistration
             // Step 2 runs in its own tap: the prompt starts at once, with the challenge made before.
             second.addEventListener("click", function () {
                 if (finished) {
-                    return;
-                }
-                if (waiting === second) {
-                    cancelAttempt();
                     return;
                 }
                 if (busy || pending === null) {
@@ -659,13 +651,7 @@ internal static class PasskeyRegistration
             PageFlow? flow = PageFlow.Current;
             Session session = new(store, name, challenge, [.. snapshot.Select(item => item.Id)], plan, settings, askAdmin, current,
                 new PrfContext(serverKey.Value.State, slotSalt, master, firstStore), approval, releaseAdmin, flow is null ? null : flow.TakeNext);
-            using PageSlot server = PageFlow.Open(plan.Prefix, settings.Port, session.Handle).Keep();
             PageFlow.OnEnd(session.Forget);
-            string origin = settings.PageOrigin(server.Port);
-            if (PasskeyMethod.RpIdOf(origin) != rpId)
-            {
-                return ApprovalDecision.Deny("the enrollment page address changed");
-            }
 
             string label = PasskeyLabel.NewId();
             string options = JsonSerializer.Serialize(new
@@ -683,6 +669,21 @@ internal static class PasskeyRegistration
                 // The slot of the new key: the salt its PRF is asked with at create, and the key the page seals the PRF output to.
                 prf = new { salt = Base64Url.EncodeToString(slotSalt), serverKey = serverKey.Value.PublicKey },
             });
+
+            if (plan.QuickStart is { } quickStart)
+            {
+                session.Open(quickStart.Origin, rpId, plan.Page(rpId, options));
+                using IDisposable route = quickStart.Open(session.Handle);
+                announce(plan.AnnouncePrefix + quickStart.Url);
+                return session.Wait(PageFlow.Left(settings.Timeout), readCode);
+            }
+
+            using PageSlot server = PageFlow.Open(plan.Prefix, settings.Port, session.Handle).Keep();
+            string origin = settings.PageOrigin(server.Port);
+            if (PasskeyMethod.RpIdOf(origin) != rpId)
+            {
+                return ApprovalDecision.Deny("the enrollment page address changed");
+            }
 
             session.Open(origin, rpId, plan.Page(rpId, options));
             server.Ready();
@@ -779,16 +780,34 @@ internal static class PasskeyRegistration
 
     internal const string CodeStyle = """
         #code { margin: 1rem 0; font-size: 2.5rem; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; letter-spacing: 0.3em; }
-        #recovery { margin: 0 0 1rem; font-size: 1.3rem; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; letter-spacing: 0.1em; overflow-wrap: anywhere; background: var(--surface-2); border: 2px solid var(--border); border-radius: 0.5rem; padding: 1rem; }
+        #recovery { min-width: 0; margin: 0; font-size: 1.3rem; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; letter-spacing: 0.1em; overflow-wrap: anywhere; }
+        .code-copy-row { margin-bottom: 1rem; }
+        .code-copy-actions { display: flex; align-items: center; gap: 0.75rem; }
+        #recovery-box .code-copy-actions { justify-content: space-between; padding: 0.75rem 1rem; background: var(--surface-2); border: 2px solid var(--border); border-radius: 0.5rem; }
+        .code-copy-button { display: inline-grid; place-items: center; flex-shrink: 0; width: 2.75rem; padding: 0; color: var(--accent); }
+        .code-copy-icon { position: relative; width: 1.15rem; height: 1.15rem; }
+        .code-copy-icon::before, .code-copy-icon::after { content: ""; position: absolute; width: 0.7rem; height: 0.7rem; border: 1.5px solid currentColor; border-radius: 2px; }
+        .code-copy-icon::before { top: 0; left: 0; }
+        .code-copy-icon::after { bottom: 0; right: 0; background: var(--surface); }
+        .code-copy-status { margin: 0; color: var(--muted); font-size: 0.9rem; }
+        .code-copy-status:not(:empty) { margin-top: 0.35rem; }
         """;
 
     /// <summary>
     /// The box of the last page that shows the recovery code (hidden until the code arrives). The code is put in with
     /// <c>textContent</c>, never as HTML.
     /// </summary>
-    internal const string RecoveryBox = "<div id=\"recovery-box\" hidden><h2>Recovery code</h2>"
+    internal static readonly string RecoveryBox = "<div id=\"recovery-box\" hidden><h2>Recovery code</h2>"
         + "<p>Write it down and keep it offline. It is shown once. If every passkey is lost, it is the only way back to your secrets (with-secrets --recover).</p>"
-        + "<p id=\"recovery\"></p></div>\n";
+        + "<div class=\"code-copy-row\"><div class=\"code-copy-actions\"><p id=\"recovery\"></p>"
+        + CopyCodeButton("recovery", "Copy recovery code") + "</div>" + CopyFeedback + "</div></div>\n";
+
+    internal const string CopyFeedback = "<p class=\"code-copy-status\" role=\"status\"></p>";
+
+    internal static string CopyCodeButton(string target, string label) =>
+        "<button class=\"code-copy-button\" type=\"button\" data-copy-code=\"" + WebUtility.HtmlEncode(target)
+        + "\" aria-label=\"" + WebUtility.HtmlEncode(label) + "\" title=\"" + WebUtility.HtmlEncode(label)
+        + "\"><span class=\"code-copy-icon\" aria-hidden=\"true\"></span></button>";
 
     /// <summary>
     /// The script that shows a recovery code from a reply (<c>data.recovery</c>) in the <see cref="RecoveryBox" />: the page's
@@ -803,6 +822,22 @@ internal static class PasskeyRegistration
                     box.hidden = false;
                 }
             }
+        document.querySelectorAll("[data-copy-code]").forEach(function (button) {
+                button.addEventListener("click", function () {
+                    var target = document.getElementById(button.dataset.copyCode);
+                    var feedback = button.closest(".code-copy-row").querySelector(".code-copy-status");
+                    function unavailable() {
+                        feedback.textContent = "Copy unavailable. Select and copy the code.";
+                    }
+                    try {
+                        navigator.clipboard.writeText(target.textContent.trim()).then(function () {
+                            feedback.textContent = "Copied.";
+                        }, unavailable);
+                    } catch (error) {
+                        unavailable();
+                    }
+                });
+            });
         """;
 
     /// <summary>The style of the name field and the admin box on the enrollment page.</summary>
@@ -844,7 +879,7 @@ internal static class PasskeyRegistration
         page.Append("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
         page.Append("<meta name=\"referrer\" content=\"no-referrer\">\n");
         page.Append("<title>Add a passkey</title>\n");
-        page.Append("<style>").Append(style).Append("</style>\n</head>\n<body>\n<header class=\"bar\">with-secrets administration</header>\n<main class=\"setup\">\n");
+        page.Append("<style>").Append(style).Append("</style>\n</head>\n<body>\n<header class=\"bar\">with-secrets</header>\n<main class=\"setup\">\n");
         page.Append("<h1>Add a passkey</h1>\n");
         page.Append(Steps);
         page.Append("<div id=\"intro\">\n<pre id=\"request\">").Append(WebUtility.HtmlEncode(text)).Append("</pre>\n");
@@ -903,6 +938,8 @@ internal static class PasskeyRegistration
         private byte[]? _bind;
         private SignedManifest? _signed;
         private PrfBody? _adminPrf;
+        private bool _terminalVerified;
+        private bool _deviceVerified;
 
         public void Open(string origin, string rpId, OneShotResponse page)
         {
@@ -919,6 +956,21 @@ internal static class PasskeyRegistration
         {
             Stopwatch clock = Stopwatch.StartNew();
             TimeSpan Left() => timeout > clock.Elapsed ? timeout - clock.Elapsed : TimeSpan.Zero;
+
+            if (plan.QuickStart is { } quickStart)
+            {
+                if (!ReadCode(quickStart.Code, Left, readCode))
+                {
+                    return _decision.Task.Result;
+                }
+
+                lock (_gate)
+                {
+                    _terminalVerified = !_decision.Task.IsCompleted;
+                }
+                _decision.Task.Wait(Left());
+                return End(ApprovalDecision.Deny("no passkey confirmation before the time limit"));
+            }
 
             if (Task.WaitAny([_decision.Task, _verified.Task], Left()) != 1 || _decision.Task.IsCompleted)
             {
@@ -942,27 +994,35 @@ internal static class PasskeyRegistration
                 return ended;
             }
 
+            return ReadCode(_code, Left, readCode) ? Store(key) : _decision.Task.Result;
+        }
+
+        private bool ReadCode(string code, Func<TimeSpan> left, Func<string?> readCode)
+        {
             for (int attempt = 0; attempt < CodeTries; attempt++)
             {
                 Task<string?> read = Task.Run(readCode);
-                if (Task.WaitAny([read, _decision.Task], Left()) != 0)
+                if (Task.WaitAny([read, _decision.Task], left()) != 0)
                 {
                     // The time limit, or Cancel on the page (End keeps a decision already made).
-                    return End(ApprovalDecision.Deny("no answer before the time limit"));
+                    End(ApprovalDecision.Deny("no answer before the time limit"));
+                    return false;
                 }
 
                 if (read.IsFaulted || read.Result is not string typed)
                 {
-                    return End(ApprovalDecision.Deny("no code was typed; nothing was added"));
+                    End(ApprovalDecision.Deny("no code was typed; nothing was added"));
+                    return false;
                 }
 
-                if (CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(typed.Trim()), Encoding.UTF8.GetBytes(_code)))
+                if (CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(typed.Trim()), Encoding.UTF8.GetBytes(code)))
                 {
-                    return Store(key);
+                    return true;
                 }
             }
 
-            return End(ApprovalDecision.Deny("the code was wrong three times; nothing was added"));
+            End(ApprovalDecision.Deny("the code was wrong three times; nothing was added"));
+            return false;
         }
 
         private ApprovalDecision? FinishAdmin(PasskeyRecord key, PrfBody pending)
@@ -1077,6 +1137,25 @@ internal static class PasskeyRegistration
                 if (verb == "POST" && suffix == "deny")
                 {
                     return _decision.TrySetResult(ApprovalDecision.Deny("cancelled on the page")) ? Ok : NotFound;
+                }
+
+                if (plan.QuickStart is not null)
+                {
+                    if ((verb, suffix) == ("GET", "verified"))
+                    {
+                        return new OneShotResponse(200, "application/json", JsonSerializer.Serialize(new { verified = _terminalVerified }));
+                    }
+                    if ((verb, suffix) == ("POST", "verify-device"))
+                    {
+                        if (!_terminalVerified || _key is not null || body.Length != 0) return Refused;
+
+                        _deviceVerified = true;
+                        return Ok;
+                    }
+                    if (!_deviceVerified && (verb, suffix) != ("GET", ""))
+                    {
+                        return Refused;
+                    }
                 }
 
                 // After the first accepted registration, only its sign step and Cancel are answered: no second code, no page.
@@ -1302,7 +1381,7 @@ internal static class PasskeyRegistration
                     return Code(true);
                 }
 
-                _bind = RandomNumberGenerator.GetBytes(32);
+                _bind = plan.QuickStart?.Bind() ?? RandomNumberGenerator.GetBytes(32);
 
                 return new OneShotResponse(200, "application/json", JsonSerializer.Serialize(new
                 {
@@ -1316,6 +1395,7 @@ internal static class PasskeyRegistration
                         first,
                         name = _name,
                         makeAdmin = next.IsAdmin(result.Key.Id),
+                        credential = plan.QuickStart is null ? null : result.Key.Id,
                     },
                 }));
             }
@@ -1412,6 +1492,8 @@ internal static class PasskeyRegistration
             try
             {
                 Dictionary<string, string>? members = FirstRunPage.StringMembers(body);
+                string? sealedPrf = null;
+                if (plan.QuickStart is not null) members?.Remove("prf", out sealedPrf);
                 if (members is null || members.Count != 4 || new[] { "id", "authenticatorData", "clientDataJSON", "signature" }.Any(field => !members.ContainsKey(field)))
                 {
                     _decision.TrySetResult(ApprovalDecision.Deny("the page sent a request that is not valid"));
@@ -1444,6 +1526,37 @@ internal static class PasskeyRegistration
                 }
 
                 _signed = new SignedManifest(text, _bind!, proof);
+
+                if (plan.QuickStart is { } quickStart)
+                {
+                    if (!SealedPrf.TryOpen(sealedPrf, prf.ServerState, _bind!, proof, out Unlock? released) || released is null)
+                    {
+                        _decision.TrySetResult(ApprovalDecision.Deny("the passkey did not release the key needed to finish Quick Start"));
+                        return Refused;
+                    }
+                    using (released)
+                    {
+                        if (!QuickStartRegistration.Opens(_next!, released))
+                        {
+                            _decision.TrySetResult(ApprovalDecision.Deny("the passkey could not open the new store"));
+                            return Refused;
+                        }
+                        ApprovalDecision outcome = CommitChecked(_key!);
+                        if (!outcome.Approved)
+                        {
+                            _decision.TrySetResult(outcome);
+                            return Refused;
+                        }
+
+                        AdminSession? session = quickStart.Complete(signer, released);
+                        _decision.TrySetResult(session is not null ? outcome : outcome with { Detail = outcome.Detail + "\nOpen the admin page to finish unlocking or signing in." });
+                        return new OneShotResponse(200, "application/json", JsonSerializer.Serialize(new
+                        {
+                            ok = true, admin = AdminKey.Line(_next), recovery = RecoveryCode.Format(prf.FirstStore!.RecoveryCode),
+                            quickStart = true, antiForgery = session?.Csrf,
+                        }), Session: session);
+                    }
+                }
 
                 return Code(false);
             }
@@ -1496,24 +1609,25 @@ internal static class PasskeyRegistration
             {
                 if (!_decision.Task.IsCompleted)
                 {
-                    string? problem = Problem(key);
-                    ApprovalDecision outcome;
-                    try
-                    {
-                        outcome = problem is not null ? ApprovalDecision.Deny(problem)
-                            : _signed is null ? ApprovalDecision.Deny("the new state was not signed; nothing was added")
-                            : plan.Commit(_signed, key);
-                    }
-                    catch (Exception)
-                    {
-                        outcome = ApprovalDecision.Deny("the passkey could not be saved");
-                    }
-
-                    _decision.TrySetResult(outcome);
+                    _decision.TrySetResult(CommitChecked(key));
                 }
             }
 
             return _decision.Task.Result;
+        }
+
+        private ApprovalDecision CommitChecked(PasskeyRecord key)
+        {
+            try
+            {
+                return Problem(key) is { } problem ? ApprovalDecision.Deny(problem)
+                    : _signed is null ? ApprovalDecision.Deny("the new state was not signed; nothing was added")
+                    : plan.Commit(_signed, key);
+            }
+            catch (Exception)
+            {
+                return ApprovalDecision.Deny("the passkey could not be saved");
+            }
         }
 
         /// <summary>Reads the store again, strictly: null when the key may be added, else why not.</summary>

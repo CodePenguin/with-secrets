@@ -709,7 +709,7 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
             return Refuse(GrantReasons.BadOperation);
         }
 
-        if (command.Operation != GrantOps.Revoke && !command.Indefinite && command.Minutes is null or < 1 or > ReuseSettings.MaxMinutes)
+        if (command.Operation != GrantOps.Revoke && !command.Indefinite && command.Minutes is null or < 1 or > ReuseSettings.MaxAdminMinutes)
         {
             return Refuse(GrantReasons.NoTime);
         }

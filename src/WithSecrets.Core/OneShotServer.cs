@@ -17,7 +17,7 @@ using Microsoft.Extensions.Logging;
 namespace WithSecrets;
 
 /// <summary>What the handler of a <see cref="OneShotServer" /> sends back. A null policy means the strict default.</summary>
-internal sealed record OneShotResponse(int Status, string ContentType, string Body, string? ContentSecurityPolicy = null, string? Outcome = null);
+internal sealed record OneShotResponse(int Status, string ContentType, string Body, string? ContentSecurityPolicy = null, string? Outcome = null, AdminSession? Session = null);
 
 /// <summary>
 /// Words for the network diagnostics (Debug events, seen with --debug): a line when a connection is opened and when a request line

@@ -746,6 +746,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/providers/bitwarden/seal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Seal a Bitwarden token bound to its HTTPS server. */
+        post: operations["sealBitwardenConfiguration"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/providers/validate": {
         parameters: {
             query?: never;
@@ -824,8 +841,8 @@ export interface paths {
         };
         get?: never;
         /**
-         * Change a provider instance configuration.
-         * @description Change a provider instance configuration. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * Change a provider instance configuration and optionally its cache policy.
+         * @description Change a provider instance configuration and optionally its cache policy. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
         put: operations["changeProviderConfig"];
         post?: never;
@@ -1488,7 +1505,7 @@ export interface components {
             providerCode: string | null;
         };
         SealedProviderConfiguration: {
-            /** @description The instance's configuration: a JSON object on one line. It is stored unencrypted and shown in the signed text, so it must hold no credential (a field such as tokenEnv may name the environment variable that holds one). */
+            /** @description The instance's configuration as a JSON object on one line. Use the provider's sealing endpoint for credentials. */
             config: string;
         };
         ProviderValidation: {
@@ -5415,10 +5432,10 @@ export interface operations {
                     name: string;
                     /** @description The provider type of the instance (one the service offers). */
                     type: string;
-                    /** @description The instance's configuration: a JSON object on one line. It is stored unencrypted and shown in the signed text, so it must hold no credential (a field such as tokenEnv may name the environment variable that holds one). */
+                    /** @description The instance's configuration as a JSON object on one line. Use the provider's sealing endpoint for credentials. */
                     config: string;
                     /** @description Whole seconds as text, 0 to 86400. Zero fetches live values without a cache. A positive value enables the encrypted authority cache and sets the maximum age for outage fallback. */
-                    "max-stale-seconds": string;
+                    "max-stale-seconds"?: string;
                     /**
                      * @description Go on although the provider's validation reported warnings (it is signed).
                      * @enum {string}
@@ -6436,6 +6453,141 @@ export interface operations {
             };
         };
     };
+    sealBitwardenConfiguration: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    token: string;
+                    serverUrl: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Success. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SealedProviderConfiguration"];
+                };
+            };
+            /** @description The request is not valid (invalid-request, invalid-json). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No browser session (session-required). */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such resource (not-found). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The operation does not apply, or the change failed (operation-refused, operation-failed). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is too large (payload-too-large). */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is not application/json (unsupported-media-type). */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The Host is not a loopback name (host-not-allowed). */
+            421: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The authority is locked (authority-locked). */
+            423: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests (too-many-requests). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request failed (internal-error). Nothing the response does not say was changed. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Provider administration is unavailable on this service (internal-error). */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     validateProvider: {
         parameters: {
             query?: never;
@@ -6448,7 +6600,7 @@ export interface operations {
                 "application/json": {
                     /** @description The provider type of the instance (one the service offers). */
                     type: string;
-                    /** @description The instance's configuration: a JSON object on one line. It is stored unencrypted and shown in the signed text, so it must hold no credential (a field such as tokenEnv may name the environment variable that holds one). */
+                    /** @description The instance's configuration as a JSON object on one line. Use the provider's sealing endpoint for credentials. */
                     config: string;
                     /** @description The provider path the mount reads (for a tree mount it may be empty: the provider's root). */
                     mountBase?: string;
@@ -6460,7 +6612,7 @@ export interface operations {
                 } | {
                     /** @description The id of the provider instance the mount reads from. */
                     instance: string;
-                    /** @description The instance's configuration: a JSON object on one line. It is stored unencrypted and shown in the signed text, so it must hold no credential (a field such as tokenEnv may name the environment variable that holds one). */
+                    /** @description The instance's configuration as a JSON object on one line. Use the provider's sealing endpoint for credentials. */
                     config?: string;
                     /** @description The provider path the mount reads (for a tree mount it may be empty: the provider's root). */
                     mountBase: string;
@@ -7044,8 +7196,10 @@ export interface operations {
                     authorization: string;
                     /** @description The revision of the provider instance as it was shown (whole number as text); the change is refused when it has moved. */
                     revision: string;
-                    /** @description The instance's configuration: a JSON object on one line. It is stored unencrypted and shown in the signed text, so it must hold no credential (a field such as tokenEnv may name the environment variable that holds one). */
+                    /** @description The instance's configuration as a JSON object on one line. Use the provider's sealing endpoint for credentials. */
                     config: string;
+                    /** @description Whole seconds as text, 0 to 86400. Zero fetches live values without a cache. A positive value enables the encrypted authority cache and sets the maximum age for outage fallback. */
+                    "max-stale-seconds"?: string;
                     /**
                      * @description Go on although the provider's validation reported warnings (it is signed).
                      * @enum {string}

@@ -16,7 +16,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$demoRoot = [System.IO.Path]::GetFullPath((Join-Path $repo 'artifacts\demo'))
+$primary = git -C $repo worktree list --porcelain | Select-Object -First 1
+$libraryCheckout = if ($primary -like 'worktree *') { $primary.Substring('worktree '.Length) } else { $repo }
+$demoRoot = [System.IO.Path]::GetFullPath((Join-Path $libraryCheckout 'artifacts\demo'))
 
 if (-not (Test-Path -LiteralPath $demoRoot -PathType Container)) {
     throw "No demo runs folder found. Run .\scripts\demo.ps1 first."

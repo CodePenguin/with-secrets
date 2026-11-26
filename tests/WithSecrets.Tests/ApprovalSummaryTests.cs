@@ -916,13 +916,13 @@ internal static class ApprovalSummaryTests
                 check(changedCode == 0 && Line(changedOutput, "CODE") == "dep-v2", "dependency: a sourced sibling changed after approval is the code that runs, as it is when used, and is not stopped (" + changedOutput.Trim().Replace('\n', ' ') + ")");
                 check(Line(changedOutput, "DATA") == "data-changed", "dependency: a data sibling changed after approval is read as it is when used");
                 check(changedApprover.Requests[0].Script!.Sha256 == approvedHash && !changedMessage.Contains("dep-v1", StringComparison.Ordinal) && !changedMessage.Contains("dep-v2", StringComparison.Ordinal), "dependency: the shown hash and text are the script's alone, whatever its siblings hold");
-                check(Lines(changedMessage).Contains(ApprovalSummary.ScriptBoundary) && ApprovalSummary.ScriptBoundary.Contains("Not approved", StringComparison.Ordinal), "dependency: the approval says that what the script loads is not approved");
+                check(Lines(changedMessage).Contains(ApprovalSummary.ScriptBoundary) && ApprovalSummary.ScriptBoundary.Contains("can load or run other files as they exist at run time", StringComparison.Ordinal), "dependency: the approval explains that it can run other files as they exist at run time");
             }
 
             if (!windows)
             {
                 (_, _, _, FakeApprover plainApprover) = await Execute(["echo", "hi"]);
-                check(plainApprover.Requests[0].Script is null && plainApprover.Requests[0].ProgramFile is null && !ApprovalSummary.BuildMessage(plainApprover.Requests[0]).Contains("Not approved", StringComparison.Ordinal), "dependency: a command with no script file makes no claim about one");
+                check(plainApprover.Requests[0].Script is null && plainApprover.Requests[0].ProgramFile is null && !ApprovalSummary.BuildMessage(plainApprover.Requests[0]).Contains(ApprovalSummary.ScriptBoundary, StringComparison.Ordinal), "dependency: a command with no script file makes no claim about one");
             }
 
             // The copy is protected until the program starts: a loosened permission, a folder swapped for a link or another folder with the same bytes, and a file

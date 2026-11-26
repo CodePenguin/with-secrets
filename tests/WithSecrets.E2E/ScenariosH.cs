@@ -16,6 +16,7 @@ internal static class ScenariosH
 
         SpaApp app = new(rig, unlocked: false, directApproval: true);
         await Spa.Unlock(c, app, s);
+        await c.StartDemoAsync();
 
         return (rig, c, app);
     }
@@ -64,6 +65,7 @@ internal static class ScenariosH
         s.Check(!second.Result.IsCompleted && !(await c.Text("#status")).Contains("Approved"), "the abandoned attempt, once it ended, sent nothing to the program");
         await c.Click("#deny");
         s.Check(await second.Result.WaitAsync(TimeSpan.FromSeconds(30)) == RunCommand.Denied && second.Out.Text.Length == 0, "Deny after a Cancel ends the run with nothing run");
+        await c.DemoSnapAsync("Deny ended the request. The command did not run.");
         s.NoProblems(c);
     }
 
@@ -92,12 +94,14 @@ internal static class ScenariosH
         });
         await c.Page.GotoAsync(await run.LinkAsync());
         await c.TextAppears("#request");
+        await c.DemoSnapAsync("Approve this request once. In this example a network interruption drops the first send.");
         await c.Click("#approve");
         int exit = await run.Result.WaitAsync(TimeSpan.FromSeconds(40));
         s.Check(exit == 0 && run.Out.Text.Contains("got=" + StreamRedactor.Mask), "the run was approved by the resent POST and ran");
         s.Check(posts == 2, "the page sent the proof twice (the first was aborted): " + posts);
         s.Check(statusAtResend.Contains("retry 2 of 3") && statusAtResend.Contains("Diagnostics:") && statusAtResend.Contains("attempt 1"), "after the failed post the status shows the retry and the Diagnostics line");
         await c.StatusContains("Approved");
+        await c.DemoSnapAsync("The page retried automatically. One approval went through, and the command ran once.");
         s.Check(!(await c.Text("#status")).Contains("Diagnostics:", StringComparison.Ordinal), "the Diagnostics line is gone after success");
         s.Check(run.Out.Text.Split("got=").Length == 2, "the program ran exactly once");
         s.NoProblems(c);
@@ -127,6 +131,8 @@ internal static class ScenariosH
         });
         using Cmd<int> cmd = new((port, o, e) => CommandWiring.Setup(rig.State, port));
         await c.Page.GotoAsync(await cmd.LinkAsync());
+        await c.DemoIntroAsync(c.ScenarioIntroduction());
+        await c.DemoSnapAsync("Create and confirm an admin passkey. The first reply with the terminal code is lost in this example.");
         await c.Click("#save");
         await c.Click("#confirm");
         string code = await c.TextAppears("#code");
@@ -134,6 +140,7 @@ internal static class ScenariosH
         s.Check(code == droppedCode, "the identical resend returned the same code");
         s.Check((await c.TextAppears("#recovery")).Length > 10, "and the recovery code");
         s.Check(await c.TypeCodeAsync(cmd, code) == 0, "the code typed in the terminal finished the command");
+        await c.DemoSnapAsync("The retry recovered the original code. Entering it finished setup once.");
         s.Check(rig.State.TryManifest(out Manifest? m, out _) && m!.Keys.Count == 1, "state has the key");
         s.NoProblems(c);
     }
@@ -165,6 +172,7 @@ internal static class ScenariosH
         };
         await c.Page.GotoAsync(link);
         await c.TextAppears("#request");
+        await c.DemoSnapAsync("Start key rotation from Settings. This example blocks the browser from opening the next confirmation page automatically.");
         // The tap starts a navigation that hangs; Playwright would wait for it, so do not wait for the click to return.
         await c.Click("#approve");
         await c.StatusContains("did not open by itself", 15000);
@@ -178,6 +186,7 @@ internal static class ScenariosH
         await c.Click("#approve");
         await c.TextAppears("#recovery", 20000);
         s.Check(await cmd.Result.WaitAsync(TimeSpan.FromSeconds(30)) == 0, "Continue led to the next step and the command finished");
+        await c.DemoSnapAsync("Continue opened the confirmation page. Rotation finished and the new recovery code is available.");
         s.NoProblems(c);
     }
 
@@ -194,6 +203,7 @@ internal static class ScenariosH
             await c.Page.Locator("#deny").WaitForAsync();
             await c.QuietAsync();
             s.Check(await c.PasskeyCalls() == 0 && await c.AuthOps() == baseline, "no passkey operation on load of the " + what + " page");
+            await c.DemoSnapAsync($"The {what} page is open. The passkey prompt waits for an explicit approval.");
             await c.Click("#deny");
             await cmd.Result.WaitAsync(TimeSpan.FromSeconds(30));
         }

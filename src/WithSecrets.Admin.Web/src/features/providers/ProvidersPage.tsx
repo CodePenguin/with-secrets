@@ -7,12 +7,13 @@ import type { Mount, Provider } from '../../api/types'
 import { Button } from '../../components/Button'
 import { Badge, Empty, Facts, PageHeader } from '../../components/Card'
 import { Loading, Notice, ProblemAlert, useAnnounce } from '../../components/Feedback'
+import { Flash } from '../../components/Flash'
 import list from '../../components/List.module.css'
 import { Time } from '../../lib/format'
 import { usePageTitle } from '../../lib/usePageTitle'
 import { useStartOperation } from '../authorization/OperationProvider'
 import type { OperationDef } from '../authorization/operations'
-import { addMount, addProvider, changeMaxStale, changeProviderConfig, lastPassRefresh, removeMount, removeProvider } from './providerOperations'
+import { addMount, addProvider, changeMaxStale, changeProviderConfig, hasProviderForm, lastPassRefresh, providerTypeLabel, removeMount, removeProvider } from './providerOperations'
 import { ProviderValueRefresh } from './ProviderValueRefresh'
 import styles from './ProvidersPage.module.css'
 
@@ -21,7 +22,7 @@ const actions: Record<Exclude<Provider['actions'][number], 'refresh-values'>, (p
 }
 
 function Duration({ seconds }: { seconds: number }) {
-  if (!seconds) return <>Live only</>
+  if (!seconds) return <>Fetch fresh every time</>
   const parts = [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60]
     .map((value, index) => value ? `${value} ${['h', 'min', 's'][index]}` : '')
     .filter(Boolean)
@@ -34,10 +35,10 @@ function ProviderFacts({ provider }: { provider: Provider }) {
   const health = status?.health
   return (
     <Facts items={[
-      ['Type', provider.type === lastPassRefresh ? 'LastPass' : provider.type],
+      ['Type', providerTypeLabel(provider.type)],
       ['Lifecycle', status ? <><span className={styles.state}>{status.lifecycle === 'shuttingdown' ? 'shutting down' : status.lifecycle}</span> · <Time value={status.lifecycleAt} />{status.lifecycleMessage ? <div>{status.lifecycleMessage}</div> : null}</> : 'Not running'],
       ['Health', status ? <><Badge tone={health === 'healthy' ? 'ok' : health === 'unavailable' || health === 'misconfigured' ? 'bad' : 'warn'}><span className={styles.state}>{health}</span></Badge> · <Time value={status.healthAt} />{status.healthMessage ? <div>{status.healthMessage}</div> : null}</> : 'Unknown'],
-      ['Maximum staleness', <Duration seconds={provider.maxStaleSeconds} />],
+      ...(provider.type === lastPassRefresh ? [] : [['Cache freshness', <Duration seconds={provider.maxStaleSeconds} />] as const]),
       ['Mounts', provider.mounts],
     ]} />
   )
@@ -51,6 +52,8 @@ function ProviderActions({ provider, canChange }: { provider: Provider; canChang
     <div className={list.actions}>
       {provider.actions.map((action) => {
         if (action === 'refresh-values') return <ProviderValueRefresh key={action} provider={provider} />
+        if (action === 'config' && !hasProviderForm(provider.type)) return null
+        if (action === 'max-stale' && (provider.type === lastPassRefresh || (hasProviderForm(provider.type) && provider.actions.includes('config')))) return null
         const operation = actions[action](provider)
         return <Button key={action} aria-label={`${operation.title} ${provider.name}`} variant={operation.danger ? 'danger' : 'secondary'} onClick={() => start(operation)}>{operation.title}</Button>
       })}
@@ -147,10 +150,12 @@ export function ProvidersPage() {
       <>
         <p><Link to="/providers">All providers</Link></p>
         <PageHeader title={provider?.name ?? 'Provider'} />
+        <Flash key={id} />
         {provider ? (
           <>
             <ProviderFacts provider={provider} />
             <ProviderActions provider={provider} canChange={canChange} />
+            {canChange && provider.actions.includes('config') && !hasProviderForm(provider.type) ? <p>Configure this provider through the API.</p> : null}
             <h2>Mounts</h2>
             {mounts.isPending ? <Loading what="mounts" /> : mounts.isError ? <ProblemAlert error={mounts.error} />
               : mounts.data.length ? <ul className={list.list}>{mounts.data.map((mount) => <MountItem key={mount.id} mount={mount} canChange={canChange} />)}</ul>
@@ -164,10 +169,12 @@ export function ProvidersPage() {
   return (
     <>
       <PageHeader title="Providers">
-        {canChange && types.data?.length ? <Button variant="primary" onClick={() => start(addProvider(types.data))}>Add provider</Button> : null}
+        {canChange && types.data?.some(({ type }) => hasProviderForm(type)) ? <Button variant="primary" onClick={() => start(addProvider(types.data))}>Add provider</Button> : null}
       </PageHeader>
+      <Flash key="provider-list" />
       {types.isError ? <ProblemAlert error={types.error} title="Could not load provider types" /> : null}
       {types.data?.length === 0 ? <Notice>No provider adapter types are registered.</Notice> : null}
+      {types.data?.some(({ type }) => !hasProviderForm(type)) ? <p>Provider types without a configuration form can be configured through the API.</p> : null}
       {providers.data.length ? (
         <ul className={list.list}>
           {providers.data.map((item) => (

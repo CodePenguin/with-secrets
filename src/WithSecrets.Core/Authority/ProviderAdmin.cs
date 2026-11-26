@@ -1,5 +1,4 @@
 using System.Text.Json;
-using System.Text.RegularExpressions;
 
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -13,21 +12,18 @@ namespace WithSecrets;
 /// </summary>
 internal sealed class ProviderAdmin(ProviderAuthority providers, AdminAudit audit, Func<string, string?>? sealOnePasswordConfiguration = null,
     Func<string, string?>? sealVaultConfiguration = null,
-    bool interactiveRefreshEnabled = false)
+    bool interactiveRefreshEnabled = false, Func<string, string, string?>? sealBitwardenConfiguration = null)
 {
     /// <summary>The longest configuration text accepted (it is signed into the page text, so it is bounded).</summary>
     internal const int MaxConfigurationLength = 2000;
-
-    /// <summary>The names an environment-variable field may hold: the NAME of a variable that holds the credential, never the credential.</summary>
-    private static readonly Regex EnvironmentName = new(@"^[A-Z][A-Z0-9_]{0,63}\z", RegexOptions.CultureInvariant | RegexOptions.Compiled);
-
-    private static readonly string[] EnvironmentSuffixes = ["env", "envvar"];
 
     private static readonly string[] CredentialMarks = ["token", "password", "secret", "apikey", "api_key", "credential", "privatekey"];
 
     public string? SealOnePasswordConfiguration(string token) => sealOnePasswordConfiguration?.Invoke(token);
 
     public string? SealVaultConfiguration(string token) => sealVaultConfiguration?.Invoke(token);
+
+    public string? SealBitwardenConfiguration(string token, string serverUrl) => sealBitwardenConfiguration?.Invoke(token, serverUrl);
 
     public IReadOnlyList<ProviderTypeDto> Types() => [.. providers.Registry.Types().Select(item => new ProviderTypeDto(item.Type, item.AdapterVersion))];
 
@@ -81,9 +77,8 @@ internal sealed class ProviderAdmin(ProviderAuthority providers, AdminAudit audi
     /// <summary>
     /// Null when the configuration may be stored; else a refusal naming only the offending field NAME (or a constant message). The configuration is stored
     /// unencrypted in with-secrets.db and shown in the signed page text, so it must be a JSON object of at most <see cref="MaxConfigurationLength" /> characters in which
-    /// no property name, at any depth, contains (case-insensitively) token, password, secret, apikey, api_key, credential or privatekey. Values are not examined,
-    /// with one exception: a property of such a name that ends in Env or EnvVar (case-insensitive, so also _ENV) holds the NAME of an environment variable and is accepted
-    /// only when its value is a JSON string matching <c>^[A-Z][A-Z0-9_]{0,63}$</c>; any other value is refused (naming only the property).
+    /// no property name, at any depth, contains (case-insensitively) token, password, secret, apikey, api_key, credential or privatekey.
+    /// The provider-specific sealing endpoints produce the encrypted configuration.
     /// </summary>
     public static string? ConfigurationScreen(string configurationJson)
     {
@@ -175,10 +170,15 @@ internal sealed class ProviderAdmin(ProviderAuthority providers, AdminAudit audi
             (connection, transaction) => audit.Append(connection, transaction, AdminEvent.Provider("provider-added", [name], $"type {type}; fields {Fields(configuration)}; max stale {Seconds(maxStale)} s", key.Name, key)));
     }
 
-    internal ProviderInstance Reconfigure(ProviderInstance current, string configuration, VerifiedCredential key)
+    internal ProviderInstance Reconfigure(ProviderInstance current, string configuration, VerifiedCredential key, TimeSpan? maxStale = null)
     {
         return providers.Store.UpdateConfiguration(current.Id, configuration,
-            (connection, transaction) => audit.Append(connection, transaction, AdminEvent.Provider("provider-config-changed", [current.Name], $"revision {current.Revision} -> {current.Revision + 1}; fields {Fields(configuration)}", key.Name, key)));
+            (connection, transaction) =>
+            {
+                audit.Append(connection, transaction, AdminEvent.Provider("provider-config-changed", [current.Name], $"revision {current.Revision} -> {current.Revision + 1}; fields {Fields(configuration)}", key.Name, key));
+                if (maxStale is { } duration && duration != current.MaxStale)
+                    audit.Append(connection, transaction, AdminEvent.Provider("provider-max-stale-changed", [current.Name], $"max stale {Seconds(current.MaxStale)} s -> {Seconds(duration)} s", key.Name, key));
+            }, maxStale);
     }
 
     /// <summary>Policy only: the revision stays (<see cref="ProviderStore.SetMaxStale" />).</summary>
@@ -371,12 +371,6 @@ internal sealed class ProviderAdmin(ProviderAuthority providers, AdminAudit audi
                 {
                     if (CredentialMarks.Any(mark => property.Name.Contains(mark, StringComparison.OrdinalIgnoreCase)))
                     {
-                        if (EnvironmentSuffixes.Any(suffix => property.Name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
-                            && property.Value.ValueKind == JsonValueKind.String && EnvironmentName.IsMatch(property.Value.GetString()!))
-                        {
-                            continue;
-                        }
-
                         return property.Name;
                     }
 

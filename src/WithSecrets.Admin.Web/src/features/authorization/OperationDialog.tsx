@@ -1,4 +1,4 @@
-import { useEffect, useId, useReducer, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useEffectEvent, useId, useReducer, useRef, useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { ApiError, api, setPendingAuthorization, type PendingAuthorization } from '../../api/client'
 import type { Authorization, AuthorizationResult, ProviderValidation } from '../../api/types'
@@ -113,17 +113,17 @@ function beforeProofFailure(error: unknown): unknown {
   return new ApiError(0, 'passkey-failed', 'Passkey not completed', 'The passkey prompt could not be completed. Nothing was changed.')
 }
 
-type Props = { def?: OperationDef; resume?: PendingAuthorization; onClose: () => void }
+type Props = { def?: OperationDef; resume?: PendingAuthorization; onClose: () => void; onApplied: (operation: string, message: string) => boolean }
 
 /**
  * One administrative change from start to finish in one modal dialog. First the SPA asks the service to prepare a one-use challenge bound to the reviewed operation. The final confirmation button directly invokes WebAuthn, then submits the assertion. The service verifies it and applies its retained operation; the SPA displays the service's result. Reloading can recover the pending authorization by id.
  */
-export function OperationDialog({ def, resume, onClose }: Props) {
+export function OperationDialog({ def, resume, onClose, onApplied }: Props) {
   const queryClient = useQueryClient()
   const announce = useAnnounce()
   const pollMs = usePollInterval()
   const formId = useId()
-  const hasFields = (def?.fields?.length ?? 0) > 0
+  const hasFields = (def?.fields?.length ?? 0) > 0 || def?.fieldGroup !== undefined
   // What the dialog asks for as it opens, when nothing needs typing (or the initial values are already valid): it starts in 'asking', never showing a button that is about to be pressed for the person.
   const [auto] = useState<Prepared | null>(() => {
     if (resume || !def || def.validate || (hasFields && !def.autoPrepare)) return null
@@ -182,6 +182,7 @@ export function OperationDialog({ def, resume, onClose }: Props) {
   const waitingDone = waiting?.done ?? ''
   const waitingOperation = waiting?.operation
   const title = def?.title ?? resume?.title ?? ''
+  const showApplied = useEffectEvent(onApplied)
 
   // A different authorization (or none) starts a fresh attempt: no guard or retained proof may leak across it.
   useEffect(() => {
@@ -216,8 +217,10 @@ export function OperationDialog({ def, resume, onClose }: Props) {
       retainedProof.current = null
       setProgress('idle')
       setPendingAuthorization(null)
-      dispatch(action)
       void queryClient.invalidateQueries()
+      if (action.type === 'done' && action.result.outcome === 'applied' && waitingOperation &&
+          showApplied(waitingOperation, action.result.detail ?? action.summary)) return
+      dispatch(action)
     }
     const outcomeUnknown = async () => {
       // A lock ends every session and authorization, this one included. The public status then says whether the authority is locked: that is the answer the person wanted.
@@ -526,12 +529,8 @@ export function OperationDialog({ def, resume, onClose }: Props) {
   let body
   let footer
   if (state.phase === 'form' && def) {
-    body = (
-      <form id={formId} onSubmit={(event) => void submitForm(event)} noValidate className={styles.form}>
-        {def.intro ? <p>{def.intro}</p> : null}
-        {def.about ? <Facts items={def.about} /> : null}
-        {def.warning ? <Notice kind="warning">{def.warning}</Notice> : null}
-        {def.fields?.filter((field) => field.visible?.(draft) ?? true).map((field, index) => (
+    const fields = (definitions: NonNullable<OperationDef['fields']>, autofocus = false) =>
+      definitions.filter((field) => field.visible?.(draft) ?? true).map((field, index) => (
           <Field key={field.name} label={field.label} hint={field.hint} error={state.errors[field.name]} required={field.required}>
             {(control) => {
               if (field.kind === 'checkbox') {
@@ -552,10 +551,23 @@ export function OperationDialog({ def, resume, onClose }: Props) {
                 return <textarea {...input} rows={5} maxLength={field.maxLength} autoComplete="off" spellCheck={false} />
               }
               // eslint-disable-next-line jsx-a11y/no-autofocus -- the first field of a modal form
-              return <input {...input} type={field.kind === 'password' ? 'password' : 'text'} inputMode={field.kind === 'number' ? 'numeric' : undefined} maxLength={field.maxLength} autoComplete="off" spellCheck={false} autoFocus={index === 0} />
+              return <input {...input} type={field.kind === 'password' ? 'password' : 'text'} inputMode={field.kind === 'number' ? 'numeric' : undefined} maxLength={field.maxLength} autoComplete="off" spellCheck={false} autoFocus={autofocus && index === 0} />
             }}
           </Field>
-        ))}
+      ))
+    body = (
+      <form id={formId} onSubmit={(event) => void submitForm(event)} noValidate className={styles.form}>
+        {def.intro ? <p>{def.intro}</p> : null}
+        {def.about ? <Facts items={def.about} /> : null}
+        {def.warning ? <Notice kind="warning">{def.warning}</Notice> : null}
+        {fields(def.fields ?? [], true)}
+        {def.fieldGroup && (def.fieldGroup.visible?.(draft) ?? true) ? (
+          <fieldset className={styles.fieldGroup}>
+            <legend>{def.fieldGroup.label}</legend>
+            <p>{def.fieldGroup.hint}</p>
+            <div className={styles.fieldGroupRow}>{fields(def.fieldGroup.fields, !def.fields?.length)}</div>
+          </fieldset>
+        ) : null}
         {validationError ? <ProblemAlert error={validationError} title="Validation could not finish" /> : null}
         {validation ? (
           <>

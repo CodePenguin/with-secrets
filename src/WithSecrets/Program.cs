@@ -8,7 +8,7 @@ using WithSecrets.Vault;
 
 namespace WithSecrets;
 
-internal static class Program
+internal static partial class Program
 {
     // Everything lives in the user profile: %USERPROFILE%\.with-secrets\with-secrets.db (passkeys, settings, approvals and the
     // secrets as JWE ciphertext). The store key is wrapped under keys that only the passkeys (WebAuthn PRF) can produce.
@@ -87,7 +87,12 @@ internal static class Program
             return await RunLastPassRefreshHelper(channel);
         }
 
-        CliCommand? command = CliArgs.Parse(args, out string error);
+        bool quickStart = args is ["--quick-start-worker", ..];
+        if (quickStart && (!Console.IsInputRedirected || !Console.IsOutputRedirected || !Console.IsErrorRedirected))
+        {
+            return RunCommand.Denied;
+        }
+        CliCommand? command = CliArgs.Parse(quickStart ? ["service", .. args[1..]] : args, out string error);
         if (command is null)
         {
             TerminalPrompt.Final("with-secrets: " + error);
@@ -129,11 +134,7 @@ internal static class Program
                     return RunCommand.Denied;
                 }
 
-                int setup = CommandWiring.Setup(first, null);
-                if (setup != 0)
-                {
-                    return setup;
-                }
+                return await StartQuickStart(app);
             }
 
             return await AdminAppCommand.RunAsync(app.AdminPort, Console.Out, Console.Error, ServiceTrust.From(HostConfigFile.InFolder(StorePath())), OpenInBrowser(app));
@@ -181,7 +182,7 @@ internal static class Program
                 return CommandWiring.Recover(state, command.Port);
 
             case CliCommand.Service:
-                return RunService(command, state, store, folder);
+                return RunService(command, state, store, folder, quickStart);
         }
 
         return RunCommand.Usage;
@@ -296,8 +297,16 @@ internal static class Program
         });
     }
 
-    private static int RunService(CliCommand command, StateDatabase state, SecretStore store, string folder)
+    private static int RunService(CliCommand command, StateDatabase state, SecretStore store, string folder, bool quickStart = false)
     {
+        if (quickStart && (command is CliCommand.Service { MachinePort: not null }
+            || !state.TryManifest(out Manifest? manifest, out _) || manifest is not null
+            || HostConfigFile.InFolder(folder).Load() is not { Config: null, Problem: null }))
+        {
+            TerminalPrompt.Final("with-secrets: Quick Start is only for an unconfigured local installation.");
+            return RunCommand.Denied;
+        }
+
         int? port = AdminPort.Resolve(command.AdminPort, Environment.GetEnvironmentVariable, out string? portError);
         if (port is null)
         {
@@ -385,7 +394,7 @@ internal static class Program
                 ConfigureProviders = (registry, authorityLock, keys) =>
                 {
                     LastPassProvider.RegisterInteractive(registry);
-                    BitwardenProvider.Register(registry, authorityLock);
+                    BitwardenProvider.Register(registry, authorityLock, keys);
                     OnePasswordProvider.Register(registry, authorityLock, keys,
                         Environment.GetEnvironmentVariable(OnePasswordProvider.ExecutableVariable) ?? "");
                     VaultProvider.Register(registry, authorityLock, keys,
@@ -398,6 +407,8 @@ internal static class Program
                     ? OnePasswordProvider.SealConfiguration(token, reviewKey.PublicKey) : null,
                 SealVaultConfiguration = token => state.TryManifest(out Manifest? manifest, out _) && manifest?.Review is { } reviewKey
                     ? VaultProvider.SealConfiguration(token, reviewKey.PublicKey) : null,
+                SealBitwardenConfiguration = (token, serverUrl) => state.TryManifest(out Manifest? manifest, out _) && manifest?.Review is { } reviewKey
+                    ? BitwardenProvider.SealConfiguration(token, serverUrl, reviewKey.PublicKey) : null,
                 MachineEndpoint = machineEndpoint,
                 MachineListenerStarted = port => TerminalPrompt.Line($"with-secrets service: machine listener now on {machineEndpoint!.Bind}:{port} (the authority signing key was made by the first approval; no restart was needed)."),
             });
@@ -416,6 +427,13 @@ internal static class Program
 
         using (service)
         {
+            if (quickStart)
+            {
+                int setup = CommandWiring.Setup(state, null, service, Console.Out.WriteLine, ReadQuickStartCode);
+                Console.Out.WriteLine(QuickStartResult + setup.ToString(CultureInfo.InvariantCulture));
+                if (setup != 0) return setup;
+            }
+
             using ManualResetEventSlim stop = new(false);
             ConsoleCancelEventHandler handler = (_, e) =>
             {
@@ -423,12 +441,12 @@ internal static class Program
                 stop.Set();
             };
             Console.CancelKeyPress += handler;
-            foreach (string line in ServiceStartup.Lines(deployment.HostName, deployment.Fingerprint, enrolled, service.Authorization.IsRemote))
+            foreach (string line in quickStart ? [] : ServiceStartup.Lines(deployment.HostName, deployment.Fingerprint, enrolled, service.Authorization.IsRemote))
             {
                 TerminalPrompt.Line(line);
             }
 
-            if (!service.Authorization.IsRemote)
+            if (!quickStart && !service.Authorization.IsRemote)
             {
                 foreach (string line in ServiceStartup.LockLines(service.Lock.IsLocked, service.Admin.PageUrl))
                 {
@@ -446,7 +464,10 @@ internal static class Program
                 TerminalPrompt.Line("with-secrets service: the machine listener starts as soon as the first approval makes the authority signing key (no restart needed); until then no machine can connect.");
             }
 
-            TerminalPrompt.Line($"with-secrets service: the admin web app is on 127.0.0.1 and [::1], port {service.Port} (this machine only). The command line reaches this service over {service.Endpoint.Describe()}, which only this user can open. Press Ctrl+C to stop.");
+            if (!quickStart)
+            {
+                TerminalPrompt.Line($"with-secrets service: the admin web app is on 127.0.0.1 and [::1], port {service.Port} (this machine only). The command line reaches this service over {service.Endpoint.Describe()}, which only this user can open. Press Ctrl+C to stop.");
+            }
             stop.Wait();
             Console.CancelKeyPress -= handler;
         }

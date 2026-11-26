@@ -258,9 +258,10 @@ internal static class ProviderAdminOperationsTests
         // Mount + entries: the change refreshes the namespace afterwards.
         Mount mount = rig.Store.AddMount(instance.Id, MountKind.Tree, "team", "kv");
         rig.List = (_, _) => Task.FromResult(new ListSecretsResult([new ProviderSecretInfo("A", "ext-a", null)], null, true));
-        Asked changed = await rig.Ask("provider-config", true, ("id", id), ("revision", "1"), ("config", """{"label":"two"}"""));
-        check(changed.Applied && rig.Store.Instance(instance.Id) is { Revision: 2, Configuration: """{"label":"two"}""" } && rig.Running(instance.Id).CurrentLabel == "two" && rig.Running(instance.Id).Calls.Contains("update"),
-            "provider-config: the tap bumps the revision and updates the live adapter (" + changed.Detail + ")");
+        Asked changed = await rig.Ask("provider-config", true, ("id", id), ("revision", "1"), ("config", """{"label":"two"}"""), ("max-stale-seconds", "1200"));
+        check(changed.Applied && rig.Store.Instance(instance.Id) is { Revision: 2, Configuration: """{"label":"two"}""" } updated
+            && updated.MaxStale == TimeSpan.FromMinutes(20) && rig.Running(instance.Id).CurrentLabel == "two" && rig.Running(instance.Id).Calls.Contains("update"),
+            "provider-config: one tap updates the live adapter and cache policy (" + changed.Detail + ")");
         check(changed.View is { } page && page.Sentence.Contains("""{"label":"two"}""", StringComparison.Ordinal) && page.Parameters.Any(item => item.Name == "revision" && item.Value == "1"), "provider-config: the page signs the revision and the new configuration");
         check(await HostServiceTests.WaitFor(() => rig.Store.Entries(mount.Id).Count == 1), "provider-config: the namespace of the instance's mounts is refreshed after the change");
         check(rig.Events().Any(item => item.Outcome == "provider-config-changed" && item.Arguments.Contains("vault-one") && !Rig.Text(item).Contains("two", StringComparison.Ordinal)), "provider-config: a provider-config-changed event without configuration values");

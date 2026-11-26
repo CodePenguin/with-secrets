@@ -91,7 +91,7 @@ internal static class ManifestTests
             ("white space", text.Replace(",\"keys\"", ", \"keys\"", StringComparison.Ordinal)),
             ("zero admins", text.Replace("\"admin\":true", "\"admin\":false", StringComparison.Ordinal)),
             ("version 0", text.Replace("{\"v\":2,", "{\"v\":0,", StringComparison.Ordinal)),
-            ("a settings value out of range", text.Replace("\"timeoutMinutes\":5", "\"timeoutMinutes\":99", StringComparison.Ordinal)),
+            ("a settings value out of range", text.Replace($"\"timeoutMinutes\":{ApprovalSettings.DefaultTimeoutMinutes}", "\"timeoutMinutes\":99", StringComparison.Ordinal)),
             ("an unknown algorithm", text.Replace("\"alg\":-7", "\"alg\":-8", StringComparison.Ordinal)),
             ("an extra member", text.Replace("{\"v\":2,", "{\"v\":2,\"x\":1,", StringComparison.Ordinal)),
             ("keys out of order", "{\"v\":2,\"keys\":[" + string.Join(",", Keys(text).Reverse()) + "]" + text[text.IndexOf(",\"store\"", StringComparison.Ordinal)..]),

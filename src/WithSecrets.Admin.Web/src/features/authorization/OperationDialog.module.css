@@ -67,3 +67,24 @@
     margin-top: var(--space-2);
   }
 }
+.fieldGroup {
+  border: 1px solid var(--border);
+  border-radius: .5rem;
+  min-inline-size: 0;
+  padding: .5rem .75rem .75rem;
+}
+
+.fieldGroup legend {
+  font-weight: 600;
+  padding-inline: .25rem;
+}
+
+.fieldGroup p {
+  margin: 0 0 .5rem;
+}
+
+.fieldGroupRow {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 6rem));
+  gap: .75rem;
+}

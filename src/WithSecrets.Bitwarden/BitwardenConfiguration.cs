@@ -1,18 +1,11 @@
 using System.Text.Json;
-using System.Text.RegularExpressions;
 
 namespace WithSecrets.Bitwarden;
 
 public sealed class BitwardenConfiguration : IAdapterConfiguration
 {
-    internal const string DefaultServerUrl = "https://vault.bitwarden.com";
-    internal const string DefaultTokenEnv = "BWS_ACCESS_TOKEN";
-    internal const string TokenPrefix = "WITH_SECRETS_BITWARDEN_TOKEN_";
-    internal const string ServerSuffix = "_SERVER_URL";
-    private static readonly Regex AccountName = new(@"^[A-Z][A-Z0-9_]{0,63}\z", RegexOptions.CultureInvariant);
-
-    public string TokenEnv { get; private set; } = DefaultTokenEnv;
-    public string ServerUrl { get; private set; } = DefaultServerUrl;
+    public string ServerUrl { get; private set; } = "";
+    public string EncryptedConfiguration { get; private set; } = "";
 
     public void Load(JsonDocument document)
     {
@@ -24,7 +17,7 @@ public sealed class BitwardenConfiguration : IAdapterConfiguration
         var fields = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (JsonProperty property in document.RootElement.EnumerateObject())
         {
-            if (property.Name is not ("tokenEnv" or "serverUrl")
+            if (property.Name is not ("serverUrl" or "encryptedConfiguration")
                 || property.Value.ValueKind != JsonValueKind.String
                 || !fields.TryAdd(property.Name, property.Value.GetString()!))
             {
@@ -32,16 +25,34 @@ public sealed class BitwardenConfiguration : IAdapterConfiguration
             }
         }
 
-        TokenEnv = fields.GetValueOrDefault("tokenEnv", DefaultTokenEnv);
-        ServerUrl = fields.GetValueOrDefault("serverUrl", DefaultServerUrl);
+        if (!fields.TryGetValue("encryptedConfiguration", out string? encrypted) || !JweCipher.IsCiphertext(encrypted)
+            || !fields.TryGetValue("serverUrl", out string? serverUrl))
+            throw Invalid();
+        EncryptedConfiguration = encrypted;
+        ServerUrl = serverUrl;
     }
 
     private static ProviderAdapterException Invalid()
-        => new(ProviderErrorKind.InvalidConfiguration, "Bitwarden configuration accepts a token environment variable name and a server URL.");
+        => new(ProviderErrorKind.InvalidConfiguration, "Bitwarden configuration requires a sealed access token and a server URL.");
 
-    internal static bool IsTokenEnvironmentName(string name)
-        => name == DefaultTokenEnv || (name.Length > TokenPrefix.Length && name.StartsWith(TokenPrefix, StringComparison.Ordinal)
-            && !name.EndsWith(ServerSuffix, StringComparison.Ordinal) && AccountName.IsMatch(name));
+    internal static string? ReadToken(string? plaintext, Uri server)
+    {
+        if (plaintext is null) return null;
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(plaintext);
+            JsonElement root = document.RootElement;
+            return root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty("serverUrl", out JsonElement origin) && origin.ValueKind == JsonValueKind.String
+                && string.Equals(origin.GetString(), ServerArgument(server), StringComparison.Ordinal)
+                && root.TryGetProperty("bitwardenAccessToken", out JsonElement token) && token.ValueKind == JsonValueKind.String
+                ? token.GetString() : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
 
     internal static Uri? ParseServerUrl(string value)
         => Uri.TryCreate(value, UriKind.Absolute, out Uri? uri) && uri.Scheme == Uri.UriSchemeHttps && uri.Host.Length != 0

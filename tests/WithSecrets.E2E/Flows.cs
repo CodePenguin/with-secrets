@@ -26,11 +26,7 @@ internal static class Flows
 
         // The shared first-run setup is identical in every scenario, so demo recordings are trimmed to start at the
         // scenario's own steps instead of replaying it.
-        if (c.IsDemo && !keepSetup)
-        {
-            c.MarkScenarioStart();
-            await c.DemoIntroAsync(c.ScenarioIntroduction());
-        }
+        if (!keepSetup) await c.StartDemoAsync();
 
         return new Configured(recovery, exit);
     }

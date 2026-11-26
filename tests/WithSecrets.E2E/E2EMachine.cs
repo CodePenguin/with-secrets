@@ -11,12 +11,13 @@ internal sealed class E2EMachine : IDisposable
     private readonly SoftwareSigningKey _machineKey;
     private readonly Lock _lock = new();
 
-    public E2EMachine(string folder)
+    public E2EMachine(string folder, bool trusted = true)
     {
         // The same key signs the events the commands write (see E2EAudit) and the ones the service writes: one machine, one key.
         _machineKey = E2EAudit.KeyFor(folder);
         Deployment = LocalDeployment.Create(folder, _machineKey, AuthorityKey, "e2e-host");
         Deployment.EnrollAsync().GetAwaiter().GetResult();
+        if (!trusted) return;
         TransitionResult result = AdminActions.ApproveMachine(Deployment.Store, Deployment.Keys, Deployment.HostConfig, Deployment.Fingerprint, Deployment.Fingerprint, "e2e machine", "e2e admin");
         if (!result.Ok)
         {

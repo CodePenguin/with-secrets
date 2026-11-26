@@ -63,12 +63,15 @@ public sealed partial class AdminService
             return Refuse(problem, 400);
         }
 
-        if (!TryNumber(Arg(args, "max-stale-seconds"), 0, MaxStaleSeconds, out int seconds))
+        bool interactive = providers.IsInteractiveType(type);
+        string? cachePolicy = Arg(args, "max-stale-seconds");
+        int seconds = 3600;
+        if ((cachePolicy is not null || !interactive) && !TryNumber(cachePolicy, 0, MaxStaleSeconds, out seconds))
         {
             return Refuse($"the maximum staleness is 0 to {MaxStaleSeconds} seconds (24 hours)", 400);
         }
 
-        if (seconds == 0 && providers.IsInteractiveType(type))
+        if (seconds == 0 && interactive)
             return Refuse("Set a positive cache duration for a provider that refreshes through a terminal.", 400);
 
         if (!TryConfirm(args, out bool confirmed))
@@ -88,9 +91,14 @@ public sealed partial class AdminService
         }
 
         string config = configuration!;
-        string sentence = $"add the provider instance \"{name}\" of type {type}, with the configuration in the config parameter below. It is stored unencrypted and holds no credential; "
-            + $"mounted secrets of this instance are served only while it runs\n{CachePolicySummary(seconds, providers.IsInteractiveType(type))}\n{ValidationLine(validation)}";
-        List<(string Name, string Value)> parameters = [("name", name), ("type", type), ("config", config), ("max-stale-seconds", seconds.ToString(CultureInfo.InvariantCulture))];
+        string sentence = $"add the provider instance \"{name}\" of type {type}, with the settings listed below; mounted secrets of this instance are served only while it runs";
+        List<(string Name, string Value)> parameters = [("name", name), ("type", type), ("config", config)];
+        if (cachePolicy is not null)
+        {
+            sentence += "\n" + CachePolicySummary(seconds, interactive);
+            parameters.Add(("max-stale-seconds", seconds.ToString(CultureInfo.InvariantCulture)));
+        }
+        sentence += "\n" + ValidationLine(validation);
         AddConfirmation(parameters, confirmed);
         StrongBox<string?> remark = new();
 
@@ -126,7 +134,19 @@ public sealed partial class AdminService
             return Refuse(problem, 400);
         }
 
-        if (configuration == current.Configuration)
+        bool configChanged = configuration != current.Configuration;
+        int before = (int)current.MaxStale.TotalSeconds;
+        int? seconds = null;
+        if (Arg(args, "max-stale-seconds") is { } requested)
+        {
+            if (!TryNumber(requested, 0, MaxStaleSeconds, out int value))
+                return Refuse($"the maximum staleness is 0 to {MaxStaleSeconds} seconds (24 hours)", 400);
+            if (value == 0 && providers.IsInteractiveType(current.ProviderType))
+                return Refuse("Set a positive cache duration for a provider that refreshes through a terminal.", 400);
+            seconds = value;
+        }
+
+        if (!configChanged && (seconds is null || seconds == before))
         {
             return Refuse("the configuration is unchanged");
         }
@@ -136,8 +156,8 @@ public sealed partial class AdminService
             return Refuse("confirm-warnings takes only yes", 400);
         }
 
-        ValidationDto validation = await providers.ValidateConfigurationAsync(current.ProviderType, configuration!, cancel);
-        if (ValidationProblem(validation, confirmed, "configuration") is { } refused)
+        ValidationDto? validation = configChanged ? await providers.ValidateConfigurationAsync(current.ProviderType, configuration!, cancel) : null;
+        if (validation is not null && ValidationProblem(validation, confirmed, "configuration") is { } refused)
         {
             return Refuse(refused);
         }
@@ -146,10 +166,13 @@ public sealed partial class AdminService
         Guid id = current.Id;
         int revision = current.Revision;
         int mounts = providers.Store.Mounts().Count(mount => mount.InstanceId == id);
-        string sentence = $"change the configuration of the provider instance \"{ApprovalSummary.Clean(current.Name)}\" (type {ApprovalSummary.Clean(current.ProviderType)}) to the config parameter below. "
-            + "It is stored unencrypted and holds no credential; the running provider takes it at once" + (mounts > 0 ? $" and the namespaces of its {Plural(mounts, "mount")} are listed again" : "")
-            + $"\nInstance: {id:D}, revision {revision.ToString(CultureInfo.InvariantCulture)}\nCurrent configuration: {ApprovalSummary.Clean(current.Configuration)}\n{ValidationLine(validation)}";
+        string sentence = $"Update provider \"{ApprovalSummary.Clean(current.Name)}\".\nInstance: {id:D}, revision {revision.ToString(CultureInfo.InvariantCulture)}";
+        if (validation is not null)
+            sentence += "\nApply the connection settings" + (mounts > 0 ? $" and refresh {Plural(mounts, "mount")}" : "") + ".\n" + ValidationLine(validation);
+        if (seconds is { } duration)
+            sentence += "\n" + CachePolicySummary(duration, providers.IsInteractiveType(current.ProviderType));
         List<(string Name, string Value)> parameters = [("id", id.ToString("D")), ("revision", revision.ToString(CultureInfo.InvariantCulture)), ("config", config)];
+        if (seconds is { } proposed) parameters.Add(("max-stale-seconds", proposed.ToString(CultureInfo.InvariantCulture)));
         AddConfirmation(parameters, confirmed);
         StrongBox<string?> remark = new();
 
@@ -161,12 +184,21 @@ public sealed partial class AdminService
             }
 
             ProviderInstance now = providers.Store.Instance(id)!;
+            if (seconds is not null && (int)now.MaxStale.TotalSeconds != before)
+                return "the cache freshness changed after this was authorized; nothing was changed";
+
+            if (validation is null)
+            {
+                providers.SetMaxStale(now, TimeSpan.FromSeconds(seconds!.Value), a.Admin!.Key);
+                return null;
+            }
+
             if (AppliedValidationProblem(Wait(providers.ValidateConfigurationAsync(now.ProviderType, config, CancellationToken.None)), confirmed, Warnings(validation), "configuration") is { } late)
             {
                 return "nothing was changed: " + late;
             }
 
-            ProviderInstance changed = providers.Reconfigure(now, config, a.Admin!.Key);
+            ProviderInstance changed = providers.Reconfigure(now, config, a.Admin!.Key, seconds is { } value ? TimeSpan.FromSeconds(value) : null);
             string? applied = Wait(providers.ApplyAsync(changed));
             remark.Value = applied ?? Wait(providers.RefreshAfterChangeAsync([.. providers.Store.Mounts().Where(mount => mount.InstanceId == id)], a.Admin.Key));
 

@@ -139,8 +139,8 @@ public static class RequestFingerprint
 /// </summary>
 public sealed record ReuseOffer(int MaxMinutes)
 {
-    /// <summary>10 minutes, 1 hour, 4 hours, 8 hours.</summary>
-    public static IReadOnlyList<int> Steps { get; } = [10, 60, 240, 480];
+    /// <summary>1, 2, 4, 8 and 24 hours, then 7 and 30 days.</summary>
+    public static IReadOnlyList<int> Steps { get; } = [60, 120, 240, 480, 1440, 10080, 43200];
 
     /// <summary>No time is offered (no grant can be made).</summary>
     public static ReuseOffer Off { get; } = new(0);
@@ -149,16 +149,16 @@ public sealed record ReuseOffer(int MaxMinutes)
     public IReadOnlyList<int> Choices => [.. Steps.Where(step => step <= MaxMinutes)];
 
     /// <summary>True when at least one time is offered.</summary>
-    public bool IsOn => Choices.Count > 0;
+    public bool IsOn => MaxMinutes >= ReuseSettings.MinMaxMinutes;
 
     /// <summary>The value that stands for a grant with no end (the passkey signs it like a time: "reuse=1000000").</summary>
     public const int Always = 1_000_000;
 
     /// <summary>The times, then Always: what a request that makes a grant offers.</summary>
-    public IReadOnlyList<int> WithAlways => [.. Choices, Always];
+    public IReadOnlyList<int> WithAlways => IsOn ? [.. Choices, Always] : [];
 
     /// <summary>True for every offered time and for Always. Anything else is refused.</summary>
-    public bool Allows(int minutes) => minutes == Always || Choices.Contains(minutes);
+    public bool Allows(int minutes) => IsOn && (minutes == Always || Choices.Contains(minutes));
 }
 
 /// <summary>
@@ -168,13 +168,16 @@ public sealed record ReuseOffer(int MaxMinutes)
 public static class ReuseSettings
 {
     /// <summary>The default ceiling (reuseMaxMinutes).</summary>
-    public const int DefaultMaxMinutes = 480;
+    public const int DefaultMaxMinutes = MaxMinutes;
 
-    /// <summary>The lowest ceiling: the first step.</summary>
+    /// <summary>The lowest ceiling accepted by existing signed settings.</summary>
     public const int MinMaxMinutes = 10;
 
-    /// <summary>The highest ceiling, and the longest grant ever honoured: 24 hours.</summary>
-    public const int MaxMinutes = 1440;
+    /// <summary>The longest finite duration offered for a new approval.</summary>
+    public const int MaxMinutes = 30 * 24 * 60;
+
+    /// <summary>The existing limit for a manual grant extension, renewal, or replacement.</summary>
+    public const int MaxAdminMinutes = 24 * 60;
 
     /// <summary>From with-secrets.db: the stored ceiling, the default when none is stored, and no time when the settings cannot be used.</summary>
     public static ReuseOffer Load(StateDatabase db)

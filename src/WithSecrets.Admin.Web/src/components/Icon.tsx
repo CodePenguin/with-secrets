@@ -1,8 +1,9 @@
-import { ArrowRight, Check, KeyRound, Link2, Lock, LockOpen, Plus } from 'lucide-react'
+import { ArrowRight, Check, Folder, KeyRound, Link2, Lock, LockOpen, Plus } from 'lucide-react'
 import styles from './Icon.module.css'
 
 const icons = {
   key: KeyRound,
+  folder: Folder,
   lock: Lock,
   unlock: LockOpen,
   check: Check,

@@ -64,18 +64,30 @@ public sealed class ProviderStore(AuthorityStore store)
         });
     }
 
-    public ProviderInstance UpdateConfiguration(Guid id, string configurationJson, Action<SqliteConnection, SqliteTransaction>? beforeCommit = null)
+    public ProviderInstance UpdateConfiguration(Guid id, string configurationJson, Action<SqliteConnection, SqliteTransaction>? beforeCommit = null,
+        TimeSpan? maxStale = null)
     {
         RequireConfiguration(configurationJson);
 
-        return store.WriteTransaction((connection, transaction) =>
+        long? seconds = maxStale is { } duration ? Seconds(duration) : null;
+        ProviderInstance changed = store.WriteTransaction((connection, transaction) =>
         {
-            Require(connection, transaction, id);
-            WithSecretsDatabase.Execute(connection, transaction, "UPDATE provider_instances SET configuration = $config, revision = revision + 1 WHERE id = $id", ("$config", configurationJson), ("$id", Id(id)));
+            ProviderInstance current = Require(connection, transaction, id);
+            bool policyChanged = maxStale is { } policy && policy != current.MaxStale;
+            if (policyChanged) BumpGeneration(id);
+            WithSecretsDatabase.Execute(connection, transaction, "UPDATE provider_instances SET configuration = $config, revision = revision + 1, max_stale_seconds = $stale WHERE id = $id",
+                ("$config", configurationJson), ("$stale", seconds ?? Seconds(current.MaxStale)), ("$id", Id(id)));
+            if (policyChanged && seconds == 0)
+            {
+                WithSecretsDatabase.Execute(connection, transaction, "PRAGMA secure_delete = ON");
+                DeleteCacheCore(connection, transaction, id, null);
+            }
             beforeCommit?.Invoke(connection, transaction);
 
             return Require(connection, transaction, id);
         });
+        if (maxStale is not null) BumpGeneration(id);
+        return changed;
     }
 
     internal static bool HasEncryptedConfigurations(SqliteConnection connection, SqliteTransaction transaction)

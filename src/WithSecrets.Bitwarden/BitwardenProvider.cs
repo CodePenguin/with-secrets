@@ -1,38 +1,32 @@
+using System.Text.Json;
+
 namespace WithSecrets.Bitwarden;
 
-/// <summary>Registers Bitwarden on the local authority using the service account's environment.</summary>
+/// <summary>Registers Bitwarden on the local authority.</summary>
 public static class BitwardenProvider
 {
-    public static void Register(ProviderRegistry registry, AuthorityLock authorityLock)
+    public static void Register(ProviderRegistry registry, AuthorityLock authorityLock, UnlockedKeys keys)
     {
         string executableName = OperatingSystem.IsWindows() ? "bws.exe" : "bws";
         string executablePath = ProgramResolver.Resolve(executableName, AppContext.BaseDirectory, pathExt: ".EXE") ?? "";
-        Register(registry, authorityLock, executablePath);
+        Register(registry, authorityLock, executablePath, keys.TryDecryptCurrentReview);
     }
 
-    internal static void Register(ProviderRegistry registry, AuthorityLock authorityLock, string executablePath)
+    internal static void Register(ProviderRegistry registry, AuthorityLock authorityLock, string executablePath, Func<string, string?> decryptConfiguration)
     {
         registry.RegisterType(BitwardenAdapter.ProviderType, BitwardenAdapter.AdapterVersion,
-            () => new BitwardenAdapter(executablePath, ResolveCredential, () => authorityLock.UnlockSessionToken),
+            () => new BitwardenAdapter(executablePath, decryptConfiguration, () => authorityLock.UnlockSessionToken),
             () => new BitwardenConfiguration());
     }
 
-    internal static string? ResolveCredential(string tokenEnv, Uri server)
+    public static string SealConfiguration(string token, string serverUrl, string reviewPublicKey)
     {
-        if (!BitwardenConfiguration.IsTokenEnvironmentName(tokenEnv))
-        {
-            throw new ProviderAdapterException(ProviderErrorKind.InvalidConfiguration, "Use a Bitwarden token environment variable name.");
-        }
+        if (token.Length == 0 || token.Any(ch => ch is <= ' ' or > '~')
+            || BitwardenConfiguration.ParseServerUrl(serverUrl) is not { } server)
+            throw new ProviderAdapterException(ProviderErrorKind.InvalidConfiguration, "Enter a Bitwarden access token and HTTPS server URL.");
 
-        // Provider rows are not sealed. Bind each credential to a service-controlled endpoint before reading it.
-        string allowed = Environment.GetEnvironmentVariable(tokenEnv + BitwardenConfiguration.ServerSuffix) ?? BitwardenConfiguration.DefaultServerUrl;
-        if (BitwardenConfiguration.ParseServerUrl(allowed) is not { } trusted
-            || !string.Equals(BitwardenConfiguration.ServerArgument(trusted), BitwardenConfiguration.ServerArgument(server), StringComparison.Ordinal))
-        {
-            throw new ProviderAdapterException(ProviderErrorKind.InvalidConfiguration,
-                "The server URL does not match the Bitwarden endpoint configured for this token variable.", "server-url-mismatch");
-        }
-
-        return Environment.GetEnvironmentVariable(tokenEnv);
+        string boundServer = BitwardenConfiguration.ServerArgument(server);
+        string ciphertext = JweCipher.Instance.Encrypt(JsonSerializer.Serialize(new { bitwardenAccessToken = token, serverUrl = boundServer }), reviewPublicKey);
+        return JsonSerializer.Serialize(new { serverUrl = boundServer, encryptedConfiguration = ciphertext });
     }
 }

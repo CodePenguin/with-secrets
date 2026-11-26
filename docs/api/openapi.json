@@ -2777,7 +2777,7 @@
                   "reuseMaxMinutes": {
                     "type": "integer",
                     "minimum": 10,
-                    "maximum": 1440,
+                    "maximum": 43200,
                     "description": "The longest time a grant may be made for."
                   },
                   "baseUrl": {
@@ -4784,7 +4784,7 @@
                     "type": "string",
                     "minLength": 2,
                     "maxLength": 2000,
-                    "description": "The instance\u0027s configuration: a JSON object on one line. It is stored unencrypted and shown in the signed text, so it must hold no credential (a field such as tokenEnv may name the environment variable that holds one)."
+                    "description": "The instance\u0027s configuration as a JSON object on one line. Use the provider\u0027s sealing endpoint for credentials."
                   },
                   "max-stale-seconds": {
                     "type": "string",
@@ -4805,8 +4805,7 @@
                   "authorization",
                   "name",
                   "type",
-                  "config",
-                  "max-stale-seconds"
+                  "config"
                 ]
               }
             }
@@ -6110,6 +6109,181 @@
         ]
       }
     },
+    "/api/v1/providers/bitwarden/seal": {
+      "post": {
+        "operationId": "sealBitwardenConfiguration",
+        "summary": "Seal a Bitwarden token bound to its HTTPS server.",
+        "tags": [
+          "providers"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "token": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  },
+                  "serverUrl": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "token",
+                  "serverUrl"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SealedProviderConfiguration"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider administration is unavailable on this service (internal-error).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
     "/api/v1/providers/validate": {
       "post": {
         "operationId": "validateProvider",
@@ -6136,7 +6310,7 @@
                         "type": "string",
                         "minLength": 2,
                         "maxLength": 2000,
-                        "description": "The instance\u0027s configuration: a JSON object on one line. It is stored unencrypted and shown in the signed text, so it must hold no credential (a field such as tokenEnv may name the environment variable that holds one)."
+                        "description": "The instance\u0027s configuration as a JSON object on one line. Use the provider\u0027s sealing endpoint for credentials."
                       },
                       "mountBase": {
                         "type": "string",
@@ -6171,7 +6345,7 @@
                         "type": "string",
                         "minLength": 2,
                         "maxLength": 2000,
-                        "description": "The instance\u0027s configuration: a JSON object on one line. It is stored unencrypted and shown in the signed text, so it must hold no credential (a field such as tokenEnv may name the environment variable that holds one)."
+                        "description": "The instance\u0027s configuration as a JSON object on one line. Use the provider\u0027s sealing endpoint for credentials."
                       },
                       "mountBase": {
                         "type": "string",
@@ -6897,7 +7071,7 @@
     "/api/v1/providers/{id}/config": {
       "put": {
         "operationId": "changeProviderConfig",
-        "summary": "Change a provider instance configuration.",
+        "summary": "Change a provider instance configuration and optionally its cache policy.",
         "tags": [
           "providers"
         ],
@@ -6935,7 +7109,13 @@
                     "type": "string",
                     "minLength": 2,
                     "maxLength": 2000,
-                    "description": "The instance\u0027s configuration: a JSON object on one line. It is stored unencrypted and shown in the signed text, so it must hold no credential (a field such as tokenEnv may name the environment variable that holds one)."
+                    "description": "The instance\u0027s configuration as a JSON object on one line. Use the provider\u0027s sealing endpoint for credentials."
+                  },
+                  "max-stale-seconds": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 5,
+                    "description": "Whole seconds as text, 0 to 86400. Zero fetches live values without a cache. A positive value enables the encrypted authority cache and sets the maximum age for outage fallback."
                   },
                   "confirm-warnings": {
                     "type": "string",
@@ -6957,7 +7137,7 @@
         },
         "x-access": "authorization",
         "x-operation": "provider-config",
-        "description": "Change a provider instance configuration. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "description": "Change a provider instance configuration and optionally its cache policy. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -11862,7 +12042,7 @@
           "reuseMaxMinutes": {
             "type": "integer",
             "minimum": 10,
-            "maximum": 1440,
+            "maximum": 43200,
             "description": "The longest time a grant may be made for."
           },
           "baseUrl": {
@@ -12262,7 +12442,7 @@
             "type": "string",
             "minLength": 2,
             "maxLength": 2000,
-            "description": "The instance\u0027s configuration: a JSON object on one line. It is stored unencrypted and shown in the signed text, so it must hold no credential (a field such as tokenEnv may name the environment variable that holds one)."
+            "description": "The instance\u0027s configuration as a JSON object on one line. Use the provider\u0027s sealing endpoint for credentials."
           }
         },
         "additionalProperties": false,

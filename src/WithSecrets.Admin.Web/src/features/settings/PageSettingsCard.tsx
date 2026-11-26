@@ -89,9 +89,9 @@ export function PageSettingsCard({ canChange }: { canChange: boolean }) {
         }}
       >
         <p>
-          <label htmlFor="ps-reuse">Longest grant time (minutes, 10 to 1440)</label>
+          <label htmlFor="ps-reuse">Longest grant time (minutes, 10 to 43200)</label>
           <br />
-          <input id="ps-reuse" type="number" min={10} max={1440} value={reuseMax} onChange={(event) => setReuseMax(event.target.value)} />
+          <input id="ps-reuse" type="number" min={10} max={43200} value={reuseMax} onChange={(event) => setReuseMax(event.target.value)} />
         </p>
         <p>
           <label htmlFor="ps-url">Address of the pages (empty for http://localhost)</label>

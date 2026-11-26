@@ -12,14 +12,15 @@ export function Flash() {
   const location = useLocation()
   const navigate = useNavigate()
   const announce = useAnnounce()
-  const [message] = useState(() => (location.state as { flash?: unknown } | null)?.flash)
-  const text = typeof message === 'string' ? message : null
+  const incoming = (location.state as { flash?: unknown } | null)?.flash
+  const [text, setText] = useState<string | null>(() => typeof incoming === 'string' ? incoming : null)
 
   useEffect(() => {
-    if (text === null) return
-    announce(text)
-    navigate(location.pathname, { replace: true, state: null })
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps -- once, when the page opens
+    if (typeof incoming !== 'string') return
+    setText(incoming)
+    announce(incoming)
+    navigate(location.pathname + location.search + location.hash, { replace: true, state: null })
+  }, [incoming, location.key]) // eslint-disable-line react-hooks/exhaustive-deps -- once per incoming history entry
 
   return text === null ? null : <Notice kind="ok">{text}</Notice>
 }

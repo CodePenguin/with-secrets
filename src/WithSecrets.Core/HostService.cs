@@ -130,6 +130,7 @@ public sealed class HostServiceOptions
 
     /// <summary>Seals a write-only token into the bundled Vault provider configuration.</summary>
     public Func<string, string?>? SealVaultConfiguration { get; init; }
+    public Func<string, string, string?>? SealBitwardenConfiguration { get; init; }
 
 
     /// <summary>For tests: the provider registry, with the adapter types a test registers. Default: a registry of the adapter types bundled with this release (none yet).</summary>
@@ -150,7 +151,7 @@ public sealed class HostServiceOptions
 /// content, when its version is not this build's, when it is expired, and when its id was used before.
 /// </para>
 /// </summary>
-public sealed class HostService : IDisposable
+public sealed partial class HostService : IDisposable
 {
     public const int MaxBodyBytes = 1024 * 1024;
     public const string DigestHeader = "X-Request-Digest";
@@ -260,7 +261,7 @@ public sealed class HostService : IDisposable
                 options.ConfigureProviders?.Invoke(registry, Lock, unlocked);
                 Providers = new ProviderAuthority(unlocking, options.Deployment.Store, options.Deployment.Keys, registry, Audit, authorityClock);
                 Admin.Providers = new ProviderAdmin(Providers, options.State.Audit, options.SealOnePasswordConfiguration,
-                    options.SealVaultConfiguration, options.LaunchInteractiveRefresh is not null);
+                    options.SealVaultConfiguration, options.LaunchInteractiveRefresh is not null, options.SealBitwardenConfiguration);
                 if (options.LaunchInteractiveRefresh is { } launch)
                     Admin.InteractiveRefreshes = new(Providers, options.State.Audit, options.Deployment.Keys, authorityClock,
                         () => secretStore.Current().Manifest?.Store, launch);
@@ -658,6 +659,10 @@ public sealed class HostService : IDisposable
 
         if (browserRoute)
         {
+            if (await HandleQuickStartAsync(context, path))
+            {
+                return;
+            }
             await HandleBrowser(context, path);
 
             return;
