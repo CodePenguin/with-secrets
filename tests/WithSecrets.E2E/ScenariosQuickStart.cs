@@ -4,9 +4,11 @@ namespace WithSecrets.E2E;
 
 internal static class ScenariosQuickStart
 {
-    public static async Task Start(Rig rig, Ctx browser, SpaApp app, S checks, bool showExample = false)
+    public static async Task Start(Rig rig, Ctx browser, SpaApp app, S checks, bool showExample = false, bool desktop = false)
     {
-        using Cmd<int> command = new((_, _, _) => CommandWiring.Setup(rig.State, null, app.Service));
+        string? desktopCode = null;
+        using Cmd<int> command = new((_, _, _) => CommandWiring.Setup(rig.State, null, app.Service,
+            desktopCode: desktop ? code => desktopCode = code : null));
         string link = await command.LinkAsync();
         // Check each button's exact clipboard payload without writing to the desktop clipboard.
         await browser.Context.AddInitScriptAsync("""
@@ -42,7 +44,15 @@ internal static class ScenariosQuickStart
         await browser.DemoSnapAsync("Quick Start shows the device fingerprint and a code for the terminal.");
 
         string code = (await browser.Text("#quick-code code")).Trim();
-        await CheckCopy(browser, checks, "#quick-code", "Copy terminal code", code);
+        if (desktop)
+        {
+            checks.Check(desktopCode == code && (await browser.Text("#quick-terminal")).Contains("With Secrets tray menu", StringComparison.Ordinal),
+                "desktop setup shows the same code to the tray and directs the user to verify it there");
+        }
+        else
+        {
+            await CheckCopy(browser, checks, "#quick-code", "Copy terminal code", code);
+        }
         await command.WaitPromptAsync();
         if (browser.IsDemo) await browser.DemoSnapAsync("Enter the six-digit code in the terminal.");
         command.Type(code);
@@ -128,6 +138,15 @@ internal static class ScenariosQuickStart
         checks.Check(rig.Store.ListNames().Count == 0 && await browser.PasskeyCalls() == 0, "opening the app saves no secret and makes no passkey prompt");
         checks.NoProblems(browser);
         await RefuseWrongCode(host, checks);
+    }
+
+    public static async Task DesktopFirstRun(Host host, S checks)
+    {
+        using Rig rig = new(trusted: false);
+        await using Ctx browser = await Ctx.NewAsync(host);
+        using SpaApp app = new(rig, unlocked: false);
+        await Start(rig, browser, app, checks, desktop: true);
+        checks.NoProblems(browser);
     }
 
     private static async Task RefuseWrongCode(Host host, S checks)

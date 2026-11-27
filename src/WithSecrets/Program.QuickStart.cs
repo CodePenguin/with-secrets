@@ -14,6 +14,20 @@ internal static partial class Program
         return Console.ReadLine();
     }
 
+    private static async Task<int> WatchDesktop(TextWriter output)
+    {
+        string folder = StorePath();
+        HostConfigFile configFile = HostConfigFile.InFolder(folder);
+        if (configFile.Load() is { Config: null, Problem: null } &&
+            StateDatabase.InFolder(folder).TryManifest(out Manifest? manifest, out _) && manifest is null)
+        {
+            await output.WriteLineAsync("{\"setupRequired\":true}");
+            return 0;
+        }
+
+        return await CompanionWatch.RunAsync(ServiceTrust.From(configFile), output, Console.Error);
+    }
+
     /// <summary>The person owns this terminal. The child owns the local service and the browser flow, and remains running after setup.</summary>
     private static async Task<int> StartQuickStart(CliCommand.AdminApp command)
     {

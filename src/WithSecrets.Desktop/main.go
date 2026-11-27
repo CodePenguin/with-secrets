@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync"
 
 	"fyne.io/systray"
 	"github.com/worldiety/gift/notify"
@@ -33,19 +34,27 @@ func main() {
 		status.Disable()
 		open := systray.AddMenuItem("Open Admin", "Open With Secrets in your browser")
 		open.Disable()
+		confirm := systray.AddMenuItem("Verify setup code", "Confirm that the browser shows the same code")
+		fingerprint := systray.AddMenuItem("Device fingerprint", "")
+		cancelSetup := systray.AddMenuItem("Cancel setup", "")
+		fingerprint.Disable()
+		confirm.Hide()
+		fingerprint.Hide()
+		cancelSetup.Hide()
 		alerts := systray.AddMenuItemCheckbox("Run request notifications", "Show local desktop notifications", true)
 		systray.AddSeparator()
 		quit := systray.AddMenuItem("Quit", "Close the desktop companion")
 
 		snapshots := make(chan snapshot)
+		retry := make(chan struct{}, 1)
 		go func() {
 			defer close(finished)
 			watchFinished := make(chan struct{})
 			go func() {
 				defer close(watchFinished)
-				watchService(ctx, service, snapshots)
+				watchService(ctx, service, snapshots, retry)
 			}()
-			runTray(ctx, snapshots, status, open, alerts, quit)
+			runTray(ctx, service, snapshots, retry, status, open, confirm, fingerprint, cancelSetup, alerts, quit)
 			cancel()
 			<-watchFinished
 		}()
@@ -54,9 +63,22 @@ func main() {
 	<-finished
 }
 
-func runTray(ctx context.Context, snapshots <-chan snapshot, status, open, alerts, quit *systray.MenuItem) {
+func runTray(ctx context.Context, service string, snapshots <-chan snapshot, retry chan<- struct{},
+	status, open, confirm, fingerprint, cancelSetup, alerts, quit *systray.MenuItem) {
+	ctx, closeTray := context.WithCancel(ctx)
 	var current snapshot
 	var lastLabel string
+	var setup setupUpdate
+	var stopSetup context.CancelFunc
+	var setupWorkers sync.WaitGroup
+	setupUpdates := make(chan setupUpdate)
+	verifyCode := make(chan struct{}, 1)
+	setupFailed := false
+	setupCanceled := false
+	defer func() {
+		closeTray()
+		setupWorkers.Wait()
+	}()
 	enabled := true
 	var permitted bool
 	notices := make(map[string]int)
@@ -114,6 +136,38 @@ func runTray(ctx context.Context, snapshots <-chan snapshot, status, open, alert
 		}
 	}()
 
+	drawStatus := func() {
+		label := current.label()
+		if stopSetup != nil {
+			label = "Setup in progress"
+		} else if current.SetupRequired && setupFailed {
+			label = "Setup ended. Try again."
+		}
+		if label != lastLabel {
+			status.SetTitle(label)
+			systray.SetTooltip("With Secrets: " + label)
+			systray.SetIcon(trayIcon(statusIcon(trayPNG, current, stopSetup != nil)))
+			lastLabel = label
+		}
+		switch {
+		case stopSetup != nil:
+			open.SetTitle("Open setup")
+		case current.SetupRequired:
+			open.SetTitle("Set up With Secrets")
+		case current.Stopped:
+			open.SetTitle("Start service")
+		case current.Locked:
+			open.SetTitle("Open Admin to unlock")
+		default:
+			open.SetTitle("Open Admin")
+		}
+		if (stopSetup != nil && setup.link != "") || (stopSetup == nil && (current.portAvailable() || current.SetupRequired || current.Stopped)) {
+			open.Enable()
+		} else {
+			open.Disable()
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -122,21 +176,81 @@ func runTray(ctx context.Context, snapshots <-chan snapshot, status, open, alert
 			systray.Quit()
 			return
 		case next := <-snapshots:
-			if label := next.label(); label != lastLabel {
-				status.SetTitle(label)
-				systray.SetTooltip("With Secrets: " + label)
-				lastLabel = label
-			}
 			current = next
-			if current.portAvailable() {
-				open.Enable()
-			} else {
-				open.Disable()
-			}
+			drawStatus()
 			refreshNotices()
 		case <-open.ClickedCh:
-			if current.portAvailable() {
+			switch {
+			case stopSetup != nil:
+				if setup.link != "" {
+					go openLink(setup.link)
+				}
+			case current.SetupRequired:
+				setupContext, cancelWorker := context.WithCancel(ctx)
+				stopSetup = cancelWorker
+				codeClicks := make(chan struct{}, 1)
+				verifyCode = codeClicks
+				setupFailed = false
+				setupCanceled = false
+				cancelSetup.Enable()
+				cancelSetup.Show()
+				drawStatus()
+				setupWorkers.Go(func() {
+					defer cancelWorker()
+					runSetup(ctx, setupContext, service, setupUpdates, codeClicks)
+				})
+			case current.Stopped:
+				select {
+				case retry <- struct{}{}:
+					current = snapshot{Starting: true}
+					drawStatus()
+				default:
+				}
+			case current.portAvailable():
 				go openLink(adminURL(current.AdminPort))
+			}
+		case update := <-setupUpdates:
+			if update.finished {
+				stopSetup()
+				stopSetup = nil
+				setup = setupUpdate{}
+				setupFailed = !update.success && !setupCanceled
+				confirm.Hide()
+				fingerprint.Hide()
+				cancelSetup.Hide()
+			} else if !setupCanceled {
+				openFirst := setup.link == "" && update.link != ""
+				setup = update
+				if setup.fingerprint != "" {
+					fingerprint.SetTitle("Device: " + setup.fingerprint)
+					fingerprint.Show()
+				}
+				if setup.code != "" {
+					confirm.SetTitle("Verify code " + setup.code)
+					confirm.Show()
+				} else {
+					confirm.Hide()
+				}
+				if openFirst {
+					go openLink(setup.link)
+				}
+			}
+			drawStatus()
+		case <-confirm.ClickedCh:
+			if setup.code != "" {
+				verifyCode <- struct{}{}
+				setup.code = ""
+				confirm.Hide()
+			}
+		case <-cancelSetup.ClickedCh:
+			if stopSetup != nil {
+				stopSetup()
+				setupCanceled = true
+				setup = setupUpdate{}
+				confirm.Hide()
+				fingerprint.Hide()
+				cancelSetup.Disable()
+				drawStatus()
 			}
 		case <-alerts.ClickedCh:
 			enabled = !enabled

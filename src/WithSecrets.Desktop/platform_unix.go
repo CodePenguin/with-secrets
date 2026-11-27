@@ -5,6 +5,7 @@ package main
 import (
 	"os/exec"
 	"runtime"
+	"syscall"
 )
 
 func trayIcon(png []byte) []byte { return png }
@@ -18,3 +19,7 @@ func openBrowser(link string) error {
 }
 
 func hideConsole(*exec.Cmd) {}
+
+func detachService(cmd *exec.Cmd) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+}

@@ -1,8 +1,10 @@
 # With Secrets desktop companion
 
-The companion shows local service status and opens the admin app in the default browser. A new pending run request generates a generic OS notification. Clicking it opens that request while it is pending. Review and passkey approval take place in the browser. The companion uses the installed With Secrets executable to authenticate to the local named pipe or Unix socket.
+The companion connects to the local service and starts it automatically on a configured installation if it is stopped. A lock badge means the authority is locked. An attention badge means setup is required or the service needs attention. Choose **Open Admin to unlock** to unlock with your passkey. Quitting the companion leaves an established service running.
 
-Build from this directory with Go 1.27.4 or later. The output does not require Go or .NET to be installed. It runs beside a compatible, self-contained With Secrets executable. Complete the normal With Secrets setup so the local service identity is pinned. For development, pass `-service` with the path to that executable. Include `THIRD-PARTY-NOTICES.txt` with distributed builds.
+On a fresh installation, choose **Set up With Secrets** in the tray menu. Compare the six-digit code on the setup page with the tray menu, then choose **Verify code** in the tray. Compare the device fingerprint there and finish setup in the browser. A pending run request produces a generic OS notification. Clicking it opens that request for review and passkey approval.
+
+Build from this directory with Go 1.27.4 or later. The output does not require Go or .NET to be installed. It runs beside a compatible, self-contained With Secrets executable. For development, pass `-service` with the path to that executable. Include `THIRD-PARTY-NOTICES.txt` with distributed builds.
 
 | Platform | Build |
 | --- | --- |
@@ -22,4 +24,4 @@ codesign --force --sign - "With Secrets.app"
 open "With Secrets.app"
 ```
 
-The ad hoc signature is for local testing. On any supported desktop, start the service, open the companion, close the browser, and submit a run that needs approval. Check that a generic notification appears and clicking it opens the pending request at `/admin/access/<requestId>`. Approve with your passkey in the browser. Choose **Quit** from the tray menu when finished.
+The ad hoc signature is for local testing. On any supported desktop, open the companion. Complete setup or unlock as indicated, close the browser, and submit a run that needs approval. Check that a generic notification appears and clicking it opens the pending request at `/admin/access/<requestId>`. Approve with your passkey in the browser. Choose **Quit** from the tray menu when finished.

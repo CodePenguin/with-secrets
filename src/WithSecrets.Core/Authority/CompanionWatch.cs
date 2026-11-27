@@ -22,6 +22,10 @@ public static class CompanionWatch
                 await Task.Delay(TimeSpan.FromSeconds(2));
             }
         }
+        catch (HttpRequestException problem) when (problem.StatusCode is not null || LocalChannelException.Find(problem) is not null)
+        {
+            return LaunchClient.ServiceUnavailable;
+        }
         catch (Exception problem) when (problem is HttpRequestException or IOException or OperationCanceledException)
         {
             return LaunchClient.ServiceNotRunning;

@@ -91,10 +91,11 @@ internal static partial class Program
         if (args is ["--watch-companion"])
         {
             using StreamWriter snapshots = new(Console.OpenStandardOutput(), new UTF8Encoding(false));
-            return await CompanionWatch.RunAsync(ServiceTrust.From(HostConfigFile.InFolder(StorePath())), snapshots, Console.Error);
+            return await WatchDesktop(snapshots);
         }
 
-        bool quickStart = args is ["--quick-start-worker", ..];
+        bool desktopSetup = args is ["--desktop-quick-start-worker", ..];
+        bool quickStart = desktopSetup || args is ["--quick-start-worker", ..];
         if (quickStart && (!Console.IsInputRedirected || !Console.IsOutputRedirected || !Console.IsErrorRedirected))
         {
             return RunCommand.Denied;
@@ -189,7 +190,7 @@ internal static partial class Program
                 return CommandWiring.Recover(state, command.Port);
 
             case CliCommand.Service:
-                return RunService(command, state, store, folder, quickStart);
+                return RunService(command, state, store, folder, quickStart, desktopSetup);
         }
 
         return RunCommand.Usage;
@@ -304,7 +305,7 @@ internal static partial class Program
         });
     }
 
-    private static int RunService(CliCommand command, StateDatabase state, SecretStore store, string folder, bool quickStart = false)
+    private static int RunService(CliCommand command, StateDatabase state, SecretStore store, string folder, bool quickStart = false, bool desktopSetup = false)
     {
         if (quickStart && (command is CliCommand.Service { MachinePort: not null }
             || !state.TryManifest(out Manifest? manifest, out _) || manifest is not null
@@ -436,7 +437,8 @@ internal static partial class Program
         {
             if (quickStart)
             {
-                int setup = CommandWiring.Setup(state, null, service, Console.Out.WriteLine, ReadQuickStartCode);
+                int setup = CommandWiring.Setup(state, null, service, Console.Out.WriteLine, ReadQuickStartCode,
+                    desktopSetup ? code => Console.Out.WriteLine("quick-start:desktop-code:" + code) : null);
                 Console.Out.WriteLine(QuickStartResult + setup.ToString(CultureInfo.InvariantCulture));
                 if (setup != 0) return setup;
             }

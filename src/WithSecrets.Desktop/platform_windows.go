@@ -27,3 +27,5 @@ func openBrowser(link string) error {
 func hideConsole(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
 }
+
+func detachService(cmd *exec.Cmd) { hideConsole(cmd) }
