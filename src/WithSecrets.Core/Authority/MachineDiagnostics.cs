@@ -57,19 +57,28 @@ internal static class DiagnosticWire
     }
 }
 
-/// <summary>Bounded, best-effort host queue. Failed delivery leaves the entries queued while the service is running.</summary>
-internal sealed class DiagnosticOutbox(TimeProvider clock)
+/// <summary>The host keeps its newest unsent warnings and removes them after the authority accepts the upload.</summary>
+internal sealed class DiagnosticOutbox(string path, TimeProvider clock)
 {
-    private const int Capacity = 128;
+    internal const int Capacity = 128;
     private readonly Lock _gate = new();
-    private readonly Queue<DiagnosticEvent> _events = new();
 
     public void Report(string code)
     {
-        lock (_gate)
+        try
         {
-            if (_events.Count >= Capacity) _events.Dequeue();
-            _events.Enqueue(new DiagnosticEvent(Guid.NewGuid(), clock.GetUtcNow(), code));
+            lock (_gate)
+            {
+                List<DiagnosticEvent> pending = ReadPending();
+                pending.Add(new DiagnosticEvent(Guid.NewGuid(), clock.GetUtcNow(), code));
+                if (pending.Count > Capacity)
+                    pending.RemoveRange(0, pending.Count - Capacity);
+                DiagnosticFile.Write(path, pending);
+            }
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            AppLog.Warn("a machine diagnostic could not be queued: {Type}", error.GetType().Name);
         }
     }
 
@@ -77,40 +86,56 @@ internal sealed class DiagnosticOutbox(TimeProvider clock)
     {
         try
         {
-            using PeriodicTimer timer = new(TimeSpan.FromSeconds(15));
-            while (await timer.WaitForNextTickAsync(stop))
+            using PeriodicTimer timer = new(TimeSpan.FromSeconds(15), clock);
+            do
             {
-                DiagnosticEvent[] batch;
-                lock (_gate)
-                {
-                    batch = [.. _events.Take(DiagnosticWire.BatchLimit)];
-                }
-                if (batch.Length == 0) continue;
-
                 try
                 {
-                    await deliver(batch, stop);
+                    await DrainAsync(deliver, stop);
                 }
                 catch (Exception error) when (error is not OutOfMemoryException)
                 {
-                    // The queue is best effort and independent of audit and approvals.
+                    // Failed delivery and local storage failures can be retried on the next tick.
                     if (stop.IsCancellationRequested) return;
-                    continue;
                 }
-
-                HashSet<Guid> delivered = batch.Select(item => item.Id).ToHashSet();
-                lock (_gate)
-                {
-                    while (_events.TryPeek(out DiagnosticEvent? next) && delivered.Contains(next.Id))
-                    {
-                        _events.Dequeue();
-                    }
-                }
-            }
+            } while (await timer.WaitForNextTickAsync(stop));
         }
         catch (OperationCanceledException) when (stop.IsCancellationRequested)
         {
             // The service is shutting down.
+        }
+    }
+
+    private async Task DrainAsync(Func<DiagnosticEvent[], CancellationToken, Task> deliver, CancellationToken stop)
+    {
+        List<DiagnosticEvent> snapshot;
+        lock (_gate) snapshot = ReadPending();
+
+        foreach (DiagnosticEvent[] batch in snapshot.Chunk(DiagnosticWire.BatchLimit))
+        {
+            stop.ThrowIfCancellationRequested();
+            await deliver(batch, stop);
+
+            HashSet<Guid> acknowledged = batch.Select(item => item.Id).ToHashSet();
+            lock (_gate)
+            {
+                List<DiagnosticEvent> pending = ReadPending();
+                if (pending.RemoveAll(item => acknowledged.Contains(item.Id)) != 0)
+                    DiagnosticFile.Write(path, pending);
+            }
+        }
+    }
+
+    private List<DiagnosticEvent> ReadPending()
+    {
+        try
+        {
+            return DiagnosticFile.Read<DiagnosticEvent>(path).Where(DiagnosticCatalog.Valid).TakeLast(Capacity).ToList();
+        }
+        catch (JsonException)
+        {
+            // A malformed snapshot cannot be replayed. The next warning can start a fresh queue.
+            return [];
         }
     }
 }
@@ -138,24 +163,7 @@ internal sealed class MachineDiagnosticsStore(string folder, TimeProvider clock)
             if (entries.Count > RetainedPerMachine)
                 entries.RemoveRange(0, entries.Count - RetainedPerMachine);
 
-            if (OperatingSystem.IsWindows())
-                Directory.CreateDirectory(folder);
-            else
-                Directory.CreateDirectory(folder, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-            string temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
-            try
-            {
-                FileStreamOptions options = new() { Mode = FileMode.CreateNew, Access = FileAccess.Write };
-                if (!OperatingSystem.IsWindows())
-                    options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
-                using (FileStream stream = new(temporary, options))
-                    JsonSerializer.Serialize(stream, entries, DiagnosticWire.Json);
-                File.Move(temporary, path, overwrite: true);
-            }
-            finally
-            {
-                File.Delete(temporary);
-            }
+            DiagnosticFile.Write(path, entries);
         }
     }
 
@@ -179,18 +187,53 @@ internal sealed class MachineDiagnosticsStore(string folder, TimeProvider clock)
         return Path.Combine(folder, fingerprint.ToUpperInvariant() + ".json");
     }
 
-    private static List<ReceivedDiagnostic> Read(string path)
+    private static List<ReceivedDiagnostic> Read(string path) => DiagnosticFile.Read<ReceivedDiagnostic>(path)
+        .Where(row => DiagnosticCatalog.Valid(row?.Event)).TakeLast(RetainedPerMachine).ToList();
+}
+
+/// <summary>Private, bounded snapshots for the host outbox and authority history.</summary>
+internal static class DiagnosticFile
+{
+    public static List<T> Read<T>(string path)
     {
         try
         {
             using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
             if (stream.Length > 65536) throw new IOException("the machine diagnostics file is too large");
-            List<ReceivedDiagnostic>? rows = JsonSerializer.Deserialize<List<ReceivedDiagnostic>>(stream, DiagnosticWire.Json);
-            return rows is null ? [] : rows.Where(row => DiagnosticCatalog.Valid(row?.Event)).TakeLast(RetainedPerMachine).ToList();
+            return JsonSerializer.Deserialize<List<T>>(stream, DiagnosticWire.Json) ?? [];
         }
         catch (Exception error) when (error is FileNotFoundException or DirectoryNotFoundException)
         {
             return [];
+        }
+    }
+
+    public static void Write<T>(string path, List<T> rows)
+    {
+        string folder = Path.GetDirectoryName(path)!;
+        if (OperatingSystem.IsWindows())
+            Directory.CreateDirectory(folder);
+        else
+            Directory.CreateDirectory(folder, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+
+        string temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            FileStreamOptions options = new() { Mode = FileMode.CreateNew, Access = FileAccess.Write };
+            if (!OperatingSystem.IsWindows())
+                options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+            using (FileStream stream = new(temporary, options))
+            {
+                JsonSerializer.Serialize(stream, rows, DiagnosticWire.Json);
+                stream.Flush(flushToDisk: true);
+            }
+            File.Move(temporary, path, overwrite: true);
+            if (OperatingSystem.IsLinux())
+                LinuxHardening.SyncDirectory(folder);
+        }
+        finally
+        {
+            File.Delete(temporary);
         }
     }
 }

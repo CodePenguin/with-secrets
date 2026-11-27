@@ -183,7 +183,8 @@ public sealed partial class HostService : IDisposable
         options.Deployment.Authority.Verifier ??= options.State is { } verifierState ? new ManifestApprovalVerifier(verifierState) : null;
         Authorization = options.Deployment.CreateAuthorization(options.Gate, options.Monotonic);
         TimeProvider authorityClock = options.Deployment.Clock ?? TimeProvider.System;
-        _diagnostics = new DiagnosticOutbox(authorityClock);
+        string diagnosticPath = Path.Combine(Path.GetDirectoryName(options.Deployment.Store.FilePath)!, "diagnostic-outbox", Authorization.Fingerprint + ".json");
+        _diagnostics = new DiagnosticOutbox(diagnosticPath, authorityClock);
         Approvals = new ApprovalQueue(authorityClock, () => options.TimeLimit ?? ApprovalSettings.Load(options.State, out _).Timeout);
 
         // In remote mode the unused local authority stays disabled. Runs depend only on the remote authority's lock.

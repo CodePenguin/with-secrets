@@ -475,6 +475,11 @@ internal static class Program
             AuditTrailTests.Run(Check).GetAwaiter().GetResult();
         }
 
+        if (Wants("MachineDiagnostics"))
+        {
+            MachineDiagnosticsTests.Run(Check).GetAwaiter().GetResult();
+        }
+
         if (Wants("Api"))
         {
             ApiTests.Run(Check).GetAwaiter().GetResult();
