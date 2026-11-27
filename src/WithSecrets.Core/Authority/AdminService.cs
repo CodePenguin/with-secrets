@@ -7,7 +7,7 @@ namespace WithSecrets;
 public sealed record AuthorityStatus(bool Locked, bool ReviewOpen);
 
 /// <summary>The answer to a request to start an operation: a link to the one-use passkey page, or why none was made.</summary>
-public sealed record AdminStart(string? Link, string? Error, int Status = 200);
+public sealed record AdminStart(string? Link, string? Error, int Status = 200, string? Code = null);
 
 /// <summary>Who asks: a browser with an admin session, or one without (which may only ask for what needs no session: unlock and sign in).</summary>
 public sealed record AdminCaller(AdminSession? Session);
@@ -551,8 +551,8 @@ public sealed partial class AdminService
         (string ticket, string code) = begun;
         AfterPlanForTests?.Invoke();
         (int idle, int absolute) = _p.Store.SessionTimeouts();
-        AdminPlan plan = new(OpLogin, "start a read-only browser session on the administration app. Its capabilities are determined by the enrolled passkey that signs in; it changes nothing, and every administrative change requires its own passkey tap. Session access lasts up to "
-            + absolute.ToString(CultureInfo.InvariantCulture) + " minutes, ending after " + idle.ToString(CultureInfo.InvariantCulture) + " minutes without use; it changes nothing and every change still needs its own passkey tap",
+        AdminPlan plan = new(OpLogin, "start a browser session on the administration app. An admin passkey allows routine admin changes for the session. An approval passkey opens an approvals session. Session access lasts up to "
+            + absolute.ToString(CultureInfo.InvariantCulture) + " minutes. " + (idle == 0 ? "Inactivity does not lock editing" : "Editing locks after " + idle.ToString(CultureInfo.InvariantCulture) + " idle minutes"),
             [("login", code)],
             authorization =>
             {
@@ -602,4 +602,4 @@ public sealed partial class AdminService
 /// </summary>
 internal sealed record AdminPlan(string Operation, string Sentence, IReadOnlyList<(string Name, string Value)> Parameters, Func<AdminAuthorization, string?> Apply,
     Func<Action<string>, Func<string?>, (bool Ok, string Detail, string Actor)>? Delegated = null, Action<string>? OnRefused = null, System.Runtime.CompilerServices.StrongBox<InvitationCreatedDto?>? Output = null,
-    System.Runtime.CompilerServices.StrongBox<string?>? Remark = null, bool WantsPrf = false);
+    System.Runtime.CompilerServices.StrongBox<string?>? Remark = null, bool WantsPrf = false, Func<AdminSession, string?>? ApplyFromSession = null);

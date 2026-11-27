@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { Navigate, useLocation } from 'react-router-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { ApiError, api, setSessionSecret } from '../../api/client'
 import { keys, useSession, useStatus } from '../../api/queries'
@@ -24,9 +25,10 @@ function encode(bytes: ArrayBuffer): string {
   return btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
-/** Sign-in grants this browser a read-only session. Every state change still needs its own passkey authorization. */
+/** Sign in to Admin or Approvals with an enrolled passkey. */
 export function SignInPage() {
   usePageTitle('Sign in')
+  const location = useLocation()
   const queryClient = useQueryClient()
   const session = useSession()
   const status = useStatus()
@@ -101,6 +103,8 @@ export function SignInPage() {
     start.mutate()
   }, [unlocked]) // eslint-disable-line react-hooks/exhaustive-deps -- once, when the authority is known to be unlocked
 
+  if (session.data?.authenticated) return <Navigate to={location.state?.returnTo ?? '/'} replace />
+
   if (status.data?.remote) {
     return (
       <div className={styles.page}>
@@ -122,8 +126,7 @@ export function SignInPage() {
         {status.isError ? <ProblemAlert error={status.error} title="The service status could not be read" /> : null}
         {status.data?.locked ? (
           <Notice kind="warning" title="The authority is locked">
-            <p>Unlock it first, then sign in.</p>
-            <p><Button variant="primary" onClick={() => startOperation(unlock())}><Icon name="unlock" /> Unlock the authority</Button></p>
+            <p><Button variant="primary" onClick={() => startOperation(unlock(true))}><Icon name="unlock" /> Unlock and sign in</Button></p>
           </Notice>
         ) : null}
         {start.isError ? <ProblemAlert error={start.error} title="Sign-in could not be prepared" /> : null}
@@ -131,7 +134,7 @@ export function SignInPage() {
         {error ? <ProblemAlert error={error} title="The sign-in did not complete" /> : null}
         {cancelled && !error ? <p role="status" className={styles.note}>Sign-in cancelled.</p> : null}
       </div>
-      <div className={styles.actions}>
+      {!locked ? <div className={styles.actions}>
         {challenge ? (
           <>
             <Button variant="primary" onClick={() => void signIn()} disabled={prompting}><Icon name="key" /> Sign in with passkey</Button>
@@ -142,7 +145,7 @@ export function SignInPage() {
             <Icon name="key" /> {start.isPending || status.isPending ? 'Preparing...' : login?.state === 'waiting' || login?.state === 'failed' || error ? 'Try again' : 'Sign in with passkey'}
           </Button>
         )}
-      </div>
+      </div> : null}
     </div>
   )
 }

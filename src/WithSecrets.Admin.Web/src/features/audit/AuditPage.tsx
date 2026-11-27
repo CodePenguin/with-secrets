@@ -1,6 +1,6 @@
 import { useState, type FormEvent, type ReactNode } from 'react'
 import { Link, NavLink, useSearchParams } from 'react-router-dom'
-import { useAuditChanges, useAuditEvents, useAuditGaps, type AuditFilters } from '../../api/queries'
+import { useAuditChanges, useAuditEvents, useAuditGaps, useSession, type AuditFilters } from '../../api/queries'
 import type { AuditChange, AuditEvent, AuditGap } from '../../api/types'
 import { Badge, Card, Empty, Facts, PageHeader } from '../../components/Card'
 import { Button } from '../../components/Button'
@@ -52,6 +52,7 @@ function filtersFrom(params: URLSearchParams, view: View): AuditFilters {
 export function AuditPage({ view }: { view: View }) {
   const title = view === 'events' ? 'Host events' : view === 'changes' ? 'Authority changes' : 'Numbering gaps'
   usePageTitle('Audit: ' + title)
+  const canSearchDetails = useSession().data?.authenticated === true
   const [params, setParams] = useSearchParams()
   const filters = filtersFrom(params, view)
 
@@ -67,7 +68,7 @@ export function AuditPage({ view }: { view: View }) {
       </nav>
       <h2>{title}</h2>
       {view === 'events' ? <p>Do not put secrets in command-line arguments: they may be recorded here.</p> : view === 'gaps' ? <p>A gap is a reason to look closer, not proof of tampering.</p> : null}
-      <AuditSearch key={view + ':' + params.toString()} view={view} title={title} params={params} onSearch={setParams} />
+      <AuditSearch key={view + ':' + params.toString()} view={view} title={title} params={params} onSearch={setParams} canSearchDetails={canSearchDetails} />
       {view === 'events' ? <Events key={params.toString()} filters={filters} />
         : view === 'changes' ? <Changes key={params.toString()} filters={filters} />
           : <Gaps key={params.toString()} machine={filters.machine ?? ''} />}
@@ -81,8 +82,8 @@ const ranges = [
   { id: 'week', label: 'Past 7 days', hours: 168 },
 ]
 
-function AuditSearch({ view, title, params, onSearch }: {
-  view: View; title: string; params: URLSearchParams; onSearch: (params: URLSearchParams) => void
+function AuditSearch({ view, title, params, onSearch, canSearchDetails }: {
+  view: View; title: string; params: URLSearchParams; canSearchDetails: boolean; onSearch: (params: URLSearchParams) => void
 }) {
   const appliedRange = ranges.find(option => option.id === params.get('range'))
   const [range, setRange] = useState(appliedRange?.id ?? (params.has('since') || params.has('until') ? 'custom' : ''))
@@ -114,7 +115,7 @@ function AuditSearch({ view, title, params, onSearch }: {
         <div className={styles.primary}>
           {view === 'gaps' ? <AuditField name="machine" params={params} /> : (
             <>
-              <AuditField name="text" params={params} />
+              {canSearchDetails ? <AuditField name="text" params={params} /> : null}
               <Field label="Time range">
                 {control => <select {...control} className={controlClass} value={range} onChange={event => setRange(event.target.value)}>
                   <option value="">Any time</option>
@@ -191,7 +192,7 @@ function auditMetadata(metadata: Record<string, string> = {}): Array<readonly [s
     const admin = metadata[adminField]
     if (!id || !name || (admin !== 'true' && admin !== 'false')) continue
 
-    items.push([role, <span title={id}>{name} ({admin === 'true' ? 'admin' : 'convenience'}, <code>{id.slice(0, 8)}</code>)</span>])
+    items.push([role, <span title={id}>{name} ({admin === 'true' ? 'admin' : 'approval'}, <code>{id.slice(0, 8)}</code>)</span>])
     fields.add(idField)
     fields.add(nameField)
     fields.add(adminField)

@@ -70,14 +70,14 @@ internal static class ApiHardeningTests
         // Another program on another localhost port is sent the cookies; it replays them here without the page's secret.
         AdminBrowser thief = app.Browser();
         CopyCookies(b, thief);
-        List<ApiRoute> reads = [.. app.Service.Admin.Api.Routes.Where(route => route.Access == ApiAccess.Read && !route.Template.Contains('{', StringComparison.Ordinal))];
+        List<ApiRoute> reads = [.. app.Service.Admin.Api.Routes.Where(route => route.Access == ApiAccess.ApprovalsRead && !route.Template.Contains('{', StringComparison.Ordinal))];
         int served = 0;
         foreach (ApiRoute route in reads)
         {
             served += (await thief.GetAsync(route.Template)).Status == 200 ? 1 : 0;
         }
 
-        check(reads.Count >= 6 && served == 0, "cookies: with the session cookie alone no read is served (" + served + " of " + reads.Count + ")");
+        check(reads.Count > 0 && served == 0, "cookies: with the session cookie alone no read is served (" + served + " of " + reads.Count + ")");
         served = 0;
         foreach (ApiRoute route in reads)
         {
@@ -85,7 +85,7 @@ internal static class ApiHardeningTests
         }
 
         check(served == 0, "cookies: with the session cookie and a made-up secret no read is served");
-        check((await thief.GetAsync("/api/v1/machines", token: b.BrowserToken)).Status == 401, "cookies: the browser's secret is not the session's");
+        check((await thief.GetAsync("/api/v1/approvals", token: b.BrowserToken)).Status == 401, "cookies: the browser's secret is not the session's");
         (int whoStatus, string who, _) = await thief.GetAsync("/api/v1/session");
         check(whoStatus == 200 && Member(who, "authenticated") == "false" && !who.Contains("antiForgery", StringComparison.OrdinalIgnoreCase) && thief.LastSetCookie.Length == 0, "cookies: GET /session with the cookie alone says nobody is signed in, gives no secret and sets no cookie");
         int askedBefore = app.Asked;
@@ -96,13 +96,13 @@ internal static class ApiHardeningTests
         moved.SetCookie(AdminSessions.SessionCookie, cookie[(cookie.IndexOf('.', StringComparison.Ordinal) + 1)..]);
         moved.BrowserToken = null;
         moved.SessionToken = b.SessionToken;
-        check((await moved.GetAsync("/api/v1/machines")).Status == 401, "cookies: a cookie value that is not bound to this port is not a session, whatever secret is sent");
+        check((await moved.GetAsync("/api/v1/approvals")).Status == 401, "cookies: a cookie value that is not bound to this port is not a session, whatever secret is sent");
 
         // A replayed cookie does not keep the session alive.
         app.Clock.Advance(TimeSpan.FromMinutes(10));
-        check((await thief.GetAsync("/api/v1/machines")).Status == 401, "cookies: replayed alone after 10 minutes");
+        check((await thief.GetAsync("/api/v1/approvals")).Status == 401, "cookies: replayed alone after 10 minutes");
         app.Clock.Advance(TimeSpan.FromMinutes(10));
-        check((await b.GetAsync("/api/v1/machines")).Status == 401, "cookies: the replay renewed nothing (the idle timeout ended the session 20 minutes after its last real use)");
+        check(Member((await b.GetAsync("/api/v1/session")).Html, "editingLocked") == "true", "cookies: polling a replayed cookie did not prevent editing from locking");
     }
 
     // ---- L8 and M1: GET /session claims nothing, the claim is a POST by the browser that began the sign-in ----
@@ -232,7 +232,7 @@ internal static class ApiHardeningTests
         check(Tap(app, pages[0], app.Laptop) != 200, "lock: the oldest page, pushed out by newer ones, is closed");
         Tapped newest = pages[^1];
         check(Tap(app, newest, app.Laptop) == 200, "lock: the newest page takes the tap");
-        check(await HostServiceTests.WaitFor(() => app.Service.Lock.IsLocked) && app.Service.Admin.Sessions.Count == 0 && (await admin.GetAsync("/api/v1/machines")).Status == 401, "lock: a fresh tap (no session, a Lock page of its own) locks, and ends every session");
+        check(await HostServiceTests.WaitFor(() => app.Service.Lock.IsLocked) && app.Service.Admin.Sessions.Count == 0 && (await admin.GetAsync("/api/v1/approvals")).Status == 401, "lock: a fresh tap (no session, a Lock page of its own) locks, and ends every session");
     }
 
     // ---- L1, L2: the key that was signed, and a lock that comes between planning and keeping ----
@@ -340,12 +340,12 @@ internal static class ApiHardeningTests
         (int schema, _) = await b.PostAsync("/api/v1/authorizations", "{\"operation\":\"no-such-operation\"}");
         check(schema == 400 && AuditText(app.Store).Contains("invalid request: invalid-request", StringComparison.Ordinal), "audit: a body that fails the schema is refused (400) and the refusal is audited");
 
-        // The end of a session by its idle timeout is audited.
+        // The end of a session by its absolute timeout is audited.
         AdminBrowser idle = await app.SignedIn();
-        app.Clock.Advance(TimeSpan.FromMinutes(16));
-        await b.GetAsync("/api/v1/status");
-        (int ended, _) = await idle.GetAsync("/api/v1/machines").ContinueWith(task => (task.Result.Status, 0));
-        check(ended == 401 && AuditText(app.Store).Contains("ended: idle timeout", StringComparison.Ordinal), "audit: a session that ran out (idle timeout) is audited");
+        app.Clock.Advance(TimeSpan.FromMinutes(481));
+        int ended = (await idle.GetAsync("/api/v1/approvals")).Status;
+        check(ended == 401 && AuditText(app.Store).Contains("ended: absolute timeout", StringComparison.Ordinal), "audit: a session that reached its absolute timeout is recorded");
+        app.Clock.Advance(TimeSpan.FromMinutes(-481));
 
         // L5: every refusal is a problem document, also the 404 of an authorization that is not the caller's.
         AdminBrowser c = await app.SignedIn();

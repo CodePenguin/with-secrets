@@ -102,6 +102,11 @@ public sealed partial class AdminService
     /// </summary>
     private async Task<(AdminPlan? Plan, string? Refusal, int Status)> PlanAsync(object owner, string op, IReadOnlyDictionary<string, string> args, CancellationToken cancel)
     {
+        if (owner is AdminSession sessionOwner && !IsRemote && !_p.Lock.IsLocked && PlanEditing(sessionOwner, op, args) is { } editing)
+        {
+            return editing;
+        }
+
         if (!IsRemote && op == "provider-refresh-values" && !_p.Lock.IsLocked)
         {
             if (owner is not AdminSession session || InteractiveRefreshes is not { } refreshes
@@ -129,6 +134,26 @@ public sealed partial class AdminService
         AdminPlan? plan = Plan(op, args, out string? refusal, out int status);
 
         return (plan, refusal, status);
+    }
+
+    private (AdminPlan? Plan, string? Refusal, int Status)? PlanEditing(AdminSession session, string op, IReadOnlyDictionary<string, string> args)
+    {
+        switch (op)
+        {
+            case "session-lock-editing":
+                string? LockEditing(AdminSession owner) => Sessions.LockEditing(owner) ? null : "the session has ended";
+                return (new AdminPlan(op, "lock editing in this browser session", [], _ => LockEditing(session), ApplyFromSession: LockEditing), null, 200);
+            case "session-resume-editing":
+                if (Sessions.LockedEditing(session) is not { } locked) return (null, "this session is not locked for editing", 409);
+                return (new AdminPlan(op, "resume routine editing in this browser session", [("session", session.Id), ("generation", locked.ToString(CultureInfo.InvariantCulture))], a =>
+                {
+                    if (CurrentManifest()?.IsAdmin(a.Admin!.Key.Id) != true)
+                        return "use an enrolled admin passkey to resume this session";
+                    return Sessions.ResumeEditing(session, locked) ? null : "the editing lock has changed or the session has ended";
+                }), null, 200);
+            default:
+                return null;
+        }
     }
 
     private AdminPlan? Plan(string op, IReadOnlyDictionary<string, string> args, out string? refusal, out int status)
@@ -161,9 +186,11 @@ public sealed partial class AdminService
                     return null;
                 }
 
+                string? login = Arg(args, "login-code");
+                string unlockText = "unlock the authority so that it serves secret requests again: the secret store key and the review key are opened in its memory until it locks";
                 return new AdminPlan("unlock-authority",
-                    "unlock the authority so that it serves secret requests again: the secret store key and the review key are opened in its memory until it locks. It creates no grant and widens none; every sensitive change still needs its own passkey tap",
-                    [("authority-key", key)],
+                    login is null ? unlockText : unlockText + "; also sign in to this browser with permission to make routine admin changes",
+                    login is null ? [("authority-key", key)] : [("authority-key", key), ("login", login)],
                     authorization =>
                     {
                         if (KeyMoved(key) is { } moved)
@@ -177,25 +204,24 @@ public sealed partial class AdminService
                         }
 
                         _p.OnUnlocked();
+                        if (login is not null && authorization.Admin!.Key is { Admin: true } signer)
+                            Sessions.CompleteLogin(login, signer.Name, null, SessionScope.Admin, signer);
 
                         return null;
                     }, WantsPrf: _p.Unlocked is not null);
 
             case OpLock:
+                string? LockAuthority()
+                {
+                    if (KeyMoved(key) is { } moved) return moved;
+                    _p.Lock.Lock("locked by an administrator");
+                    return null;
+                }
+
                 return new AdminPlan("lock-authority",
                     "lock the authority now: secret requests stop, the held keys and the synchronized grants are discarded, and every administrator session ends",
                     [("authority-key", key)],
-                    _ =>
-                    {
-                        if (KeyMoved(key) is { } moved)
-                        {
-                            return moved;
-                        }
-
-                        _p.Lock.Lock("locked by an administrator");
-
-                        return null;
-                    });
+                    _ => LockAuthority(), ApplyFromSession: _ => LockAuthority());
 
             case "authority-key-rotate":
                 return new AdminPlan("rotate-authority-key",
@@ -269,7 +295,7 @@ public sealed partial class AdminService
                     });
 
             case "set-session-timeouts":
-                if (!TryNumber(Arg(args, "idle"), 1, AuthorityStore.MaxSessionIdleMinutes, out int idle) || !TryNumber(Arg(args, "absolute"), 1, AuthorityStore.MaxSessionAbsoluteMinutes, out int absolute)
+                if (!TryNumber(Arg(args, "idle"), 0, AuthorityStore.MaxSessionIdleMinutes, out int idle) || !TryNumber(Arg(args, "absolute"), 1, AuthorityStore.MaxSessionAbsoluteMinutes, out int absolute)
                     || AuthorityStore.SessionTimeoutsProblem(idle, absolute) is { } timeoutProblem)
                 {
                     refusal = AuthorityStore.SessionTimeoutsProblem(TryNumber(Arg(args, "idle"), 0, 100000, out int shownIdle) ? shownIdle : 0, TryNumber(Arg(args, "absolute"), 0, 100000, out int shownAbsolute) ? shownAbsolute : 0) ?? "give both timeouts in minutes";
@@ -280,7 +306,7 @@ public sealed partial class AdminService
 
                 (string timeoutOperation, IReadOnlyList<(string, string)> timeoutParameters) = AuthorityStore.SessionTimeoutsOperation(idle, absolute);
 
-                return new AdminPlan(timeoutOperation, $"set the administrator session timeouts: a session ends after {idle} minutes without use, and at most {absolute} minutes after it started. Sessions already open keep working until they reach the new limits", timeoutParameters,
+                return new AdminPlan(timeoutOperation, $"set the administrator session timeouts: editing {(idle == 0 ? "never locks due to inactivity" : $"locks after {idle} minutes without activity")}; a session ends at most {absolute} minutes after it started", timeoutParameters,
                     a =>
                     {
                         _p.Store.SetSessionTimeouts(idle, absolute, a.Admin!);
@@ -343,12 +369,14 @@ public sealed partial class AdminService
 
                 string removeName = name!.Trim();
 
+                string? removedId = CurrentManifest()?.Keys.FirstOrDefault(item => item.Name == removeName)?.Id;
                 return new AdminPlan("remove-passkey", $"remove the passkey named \"{ApprovalSummary.Clean(removeName)}\" (any key but the last admin key). Its page asks an admin passkey to sign the new state", [("name", removeName)],
                     _ => null, (announce, stop) =>
                     {
                         ApprovalDecision decision = removing.Unenroll(removeName, announce, stop);
                         if (decision.Approved)
                         {
+                            if (removedId is not null) Sessions.RemoveCredential(removedId);
                             LockIfUnlockingKeyRemoved();
                         }
 
@@ -426,7 +454,8 @@ public sealed partial class AdminService
 
                 return new AdminPlan("revoke-pairing-invitation", $"revoke the pairing invitation {typedId} (created {CanonicalJson.Time(invitation.Created)}). It can no longer be used. A machine that already paired with it is not affected",
                     [("invitation", typedId)],
-                    a => revoking.Revoke(typedId, a.Admin!.Actor, a.Admin.Key) ? null : "the invitation is no longer pending");
+                    a => revoking.Revoke(typedId, a.Admin!.Actor, a.Admin.Key) ? null : "the invitation is no longer pending",
+                    ApplyFromSession: session => revoking.Revoke(typedId, "session of " + session.Identity, session.Key) ? null : "the invitation is no longer pending");
         }
 
         if (op.StartsWith("machine-", StringComparison.Ordinal))
@@ -722,10 +751,10 @@ public sealed partial class AdminService
             ? [("grant", grantId), ("new-grant", newGrantId!), ("new-end", GrantEvidence.EndText(newEnd))]
             : [("grant", grantId), ("revision", grantRevision.ToString(CultureInfo.InvariantCulture)), ("new-end", GrantEvidence.EndText(newEnd))];
 
-        return new AdminPlan("grant-" + verb, sentence, parameters, a =>
+        string? ApplyGrant(string actor, ApprovalEvidence? evidence, VerifiedCredential? sessionAdmin = null)
         {
-            GrantAdminCommand command = new("adm-" + Guid.NewGuid().ToString("N"), verb, grantId, minutes, indefinite, grantRevision, a.Admin!.Actor, newEnd, a.Evidence, newGrantId);
-            GrantResponse response = _p.Authority.AdminGrant(command);
+            GrantAdminCommand command = new("adm-" + Guid.NewGuid().ToString("N"), verb, grantId, minutes, indefinite, grantRevision, actor, newEnd, evidence, newGrantId);
+            GrantResponse response = sessionAdmin is null ? _p.Authority.AdminGrant(command) : _p.Authority.RevokeGrantFromSession(command, sessionAdmin);
 
             // The answer is signed by the authority key; it is checked here too, as a host checks one (key, signature, this request, this change).
             if (!response.Verify(_p.Keys.CurrentRecord().PublicKey) || response.RequestId != command.RequestId || response.RequestDigest != command.Digest())
@@ -734,7 +763,10 @@ public sealed partial class AdminService
             }
 
             return !response.HasGrant && response.Outcome is not (GrantOps.Revoked or GrantOps.Replaced) ? GrantReason(response.ReasonCode) : null;
-        });
+        }
+
+        return new AdminPlan("grant-" + verb, sentence, parameters, a => ApplyGrant(a.Admin!.Actor, a.Evidence),
+            ApplyFromSession: verb == "revoke" ? session => session.Key is { Admin: true } signer ? ApplyGrant("session of " + session.Identity, null, signer) : "an administrator session is required" : null);
     }
 
     private static string GrantReason(string code) => code switch

@@ -26,6 +26,7 @@ internal static class ApiTests
             await SaveSecretBatch(check, root);
             await InlineSignIn(check, root);
             await SessionTimeouts(check, root);
+            await EditingSession(check, root);
             await LogoutLockRestart(check, root);
             await ForgeryAndOrigin(check, root);
             await SensitiveMatrix(check, root);
@@ -379,7 +380,7 @@ internal static class ApiTests
         {
             using JsonDocument doc = JsonDocument.Parse(body);
 
-            return doc.RootElement.TryGetProperty("code", out JsonElement code) ? code.GetString() : null;
+            return doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("code", out JsonElement code) ? code.GetString() : null;
         }
         catch (JsonException)
         {
@@ -408,7 +409,12 @@ internal static class ApiTests
             && response.Headers.GetValues("X-Content-Type-Options").Single() == "nosniff" && response.Headers.GetValues("Content-Security-Policy").Single().Contains("default-src 'none'", StringComparison.Ordinal), "api status: JSON, version header, not frameable, not cached, no sniffing, a locked-down CSP");
 
         List<ApiRoute> reads = [.. app.Service.Admin.Api.Routes.Where(route => route.Access == ApiAccess.Read)];
-        check(reads.Count >= 9, "api reads: the route table has the read routes (" + reads.Count + ")");
+        check(reads.Count == 2, "api reads: grant evidence and interactive provider refresh details require a session");
+        foreach (string path in new[] { "/machines", "/grants", "/secrets", "/audit/events", "/audit/changes", "/settings", "/passkeys" })
+        {
+            (int metadataStatus, _, _) = await b.GetAsync("/api/v1" + path);
+            check(metadataStatus == 200, "api metadata: " + path + " is available without a credential");
+        }
         foreach (ApiRoute route in reads)
         {
             (int readStatus, string readBody, HttpResponseMessage readResponse) = await b.GetAsync(Fill(route));
@@ -424,7 +430,7 @@ internal static class ApiTests
         foreach ((string label, TestAuthenticator who, bool uv, Func<byte[], byte[]>? change) in bad)
         {
             bool started = await b.SignInAsync(who, uv, change);
-            check(!started && !b.HasSession && (await b.GetAsync("/api/v1/machines")).Status == 401, "session: " + label + " starts no session");
+            check(!started && !b.HasSession && (await b.GetAsync("/api/v1/approvals")).Status == 401, "session: " + label + " starts no session");
         }
 
         check(app.Service.Admin.Sessions.Count == 0, "session: after refused sign-ins the service holds no session");
@@ -522,19 +528,19 @@ internal static class ApiTests
 
     private static async Task SessionTimeouts(Action<bool, string> check, string root)
     {
-        // Idle: each use renews; fifteen minutes of nothing ends it.
+        // Polling metadata does not prevent editing from locking. The session remains available for resume.
         using (AdminApp app = new(root))
         {
             AdminBrowser b = await app.SignedIn();
             app.Clock.Advance(TimeSpan.FromMinutes(14));
             bool first = (await b.GetAsync("/api/v1/machines")).Status == 200;
             app.Clock.Advance(TimeSpan.FromMinutes(14));
-            bool renewed = (await b.GetAsync("/api/v1/machines")).Status == 200;
-            app.Clock.Advance(TimeSpan.FromMinutes(16));
-            (int expired, _, _) = await b.GetAsync("/api/v1/machines");
-            check(first && renewed && expired == 401 && app.Service.Admin.Sessions.Count == 0, "session: it ends after the idle timeout (15 minutes) without use, and each use renews it");
+            bool stillReadable = (await b.GetAsync("/api/v1/machines")).Status == 200;
+            string session = (await b.GetAsync("/api/v1/session")).Html;
+            check(first && stillReadable && Member(session, "editingLocked") == "true" && app.Service.Admin.Sessions.Count == 1,
+                "session: background reads leave editing locked after 15 minutes and keep the session available to resume");
             await b.LoadAsync();
-            check((await b.GetAsync("/api/v1/grants")).Status == 401 && (await b.PostAsync("/api/v1/lock", "{\"authorization\":\"AAAAAAAAAAAA\"}")).Status is 401 or 403, "session: an expired session's cookie reads and changes nothing");
+            check((await b.GetAsync("/api/v1/grants")).Status == 200 && (await b.PostAsync("/api/v1/lock", "{\"authorization\":\"AAAAAAAAAAAA\"}")).Status == 423, "session: a locked editing session can still browse, and cannot change the authority");
         }
 
         // Absolute: however busy, it ends at the absolute timeout. The timeouts are a setting (a tap of their own).
@@ -547,7 +553,79 @@ internal static class ApiTests
         absolute.Clock.Advance(TimeSpan.FromMinutes(4));
         bool a2 = (await c.GetAsync("/api/v1/machines")).Status == 200;
         absolute.Clock.Advance(TimeSpan.FromMinutes(4));
-        check(a1 && a2 && (await c.GetAsync("/api/v1/machines")).Status == 401, "session: it ends at the absolute timeout even when it was used within the idle timeout");
+        check(a1 && a2 && (await c.GetAsync("/api/v1/approvals")).Status == 401, "session: it ends at the absolute timeout even when it was used within the idle timeout");
+    }
+
+    private static async Task EditingSession(Action<bool, string> check, string root)
+    {
+        using AdminApp app = new(root);
+        app.Service.Lock.Lock("test combined unlock and sign-in");
+        AdminBrowser browser = app.Browser();
+        await browser.LoadAsync();
+
+        async Task<(int Status, string Body)> Start(string operation, object? parameters = null, bool applyFromSession = false) =>
+            await browser.PostAsync("/api/v1/authorizations/inline", JsonSerializer.Serialize(new { operation, parameters = parameters ?? new { }, applyFromSession }));
+
+        string ProofBody(string body, TestAuthenticator signer)
+        {
+            using JsonDocument result = JsonDocument.Parse(body);
+            using JsonDocument payload = JsonDocument.Parse(result.RootElement.GetProperty("proof").GetProperty("payload").GetString()!);
+            byte[] bind = Base64Url.DecodeFromChars(payload.RootElement.GetProperty("bind").GetString()!);
+            string proof = signer.Assert(bind, browser.Origin, payload.RootElement.GetProperty("rpId").GetString()!, TestState.NextCount());
+            if (result.RootElement.GetProperty("prfKey").GetString() is not { } prfKey) return JsonSerializer.Serialize(new { proof });
+            byte[] output = signer.Prf(Base64Url.DecodeFromChars(payload.RootElement.GetProperty("salt").GetString()!))!;
+            (string epk, string iv, string ct) = PrfBrowser.Seal(prfKey, bind, output);
+            return JsonSerializer.Serialize(new { proof, prf = new { epk, iv, ct } });
+        }
+
+        async Task<int> Submit(string body, TestAuthenticator signer, AdminBrowser? forBrowser = null) =>
+            (await (forBrowser ?? browser).PostAsync($"/api/v1/authorizations/{Member(body, "id")}/proof",
+                ProofBody(body, signer))).Status;
+
+        (int unlocking, string unlock) = await Start("unlock", new Dictionary<string, bool> { ["sign-in"] = true });
+        int accepted = unlocking == 201 ? await Submit(unlock, app.Laptop) : 0;
+        (int claimed, string claim) = accepted == 200 ? await browser.ClaimAsync() : (0, "{}");
+        check(claimed == 201 && Member((await browser.GetAsync("/api/v1/session")).Html, "identity") == "laptop",
+            $"editing: one admin assertion unlocks the authority and establishes the browser session ({unlocking}, {accepted}, {claimed} {Code(claim)})");
+        if (claimed != 201) return;
+
+        (int routineDenied, _) = await Start("machine-rename", new { fingerprint = app.Fingerprint, name = "not-applied" }, applyFromSession: true);
+        check(routineDenied == 403 && app.Store.Find(app.Fingerprint)?.FriendlyName != "not-applied",
+            "editing: an admin session cannot waive a fresh tap for a protected operation");
+
+        app.Clock.Advance(TimeSpan.FromMinutes(14));
+        check((await browser.PostAsync("/api/v1/session/activity", "{}")).Status == 200, "editing: explicit interaction renews an active session");
+        app.Clock.Advance(TimeSpan.FromMinutes(14));
+        check(Member((await browser.GetAsync("/api/v1/session")).Html, "editingLocked") == "false", "editing: the session stays open within the renewed idle window");
+        app.Clock.Advance(TimeSpan.FromMinutes(2));
+        check((await browser.PostAsync("/api/v1/session/activity", "{}")).Status == 423, "editing: an activity request cannot resume an idle session");
+        (int blocked, _) = await Start("lock", applyFromSession: true);
+        check(blocked == 423 && !app.Service.Lock.IsLocked && (await browser.GetAsync("/api/v1/machines")).Status == 200,
+            "editing: inactivity blocks changes while metadata and the authority remain available");
+
+        AdminBrowser other = app.Browser();
+        await other.LoadAsync();
+        (int refusedStatus, string refusedResume) = await Start("session-resume-editing");
+        check(refusedStatus == 201 && (await Submit(refusedResume, app.Phone)) == 409
+            && Member((await browser.GetAsync("/api/v1/session")).Html, "editingLocked") == "true",
+            "editing: an approval passkey cannot resume admin editing");
+        (int resumeStatus, string resume) = await Start("session-resume-editing");
+        check(resumeStatus == 201 && (await Submit(resume, app.Laptop, other)) == 404,
+            "editing: another browser cannot use the resume challenge");
+        if (resumeStatus != 201) return;
+        check(await Submit(resume, app.Laptop) == 200 && await Submit(resume, app.Laptop) == 409
+            && Member((await browser.GetAsync("/api/v1/session")).Html, "editingLocked") == "false"
+            && Member((await browser.GetAsync("/api/v1/session")).Html, "identity") == "laptop",
+            "editing: one admin tap resumes editing and retains the establishing admin identity");
+
+        (int manualStatus, string manual) = await Start("session-lock-editing", applyFromSession: true);
+        check(manualStatus == 201 && Member(manual, "state") == "consumed" && Member(manual, "proof") == "null"
+            && !app.Service.Lock.IsLocked,
+            "editing: a confirmed session can lock editing without touching the authority or prompting for a passkey");
+
+        app.Clock.Advance(TimeSpan.FromHours(9));
+        await browser.GetAsync("/api/v1/session");
+        check((await Start("session-resume-editing")).Status == 401, "editing: an expired session cannot be resumed with any passkey");
     }
 
     // ---- logout, lock and restart end sessions ----
@@ -562,7 +640,7 @@ internal static class ApiTests
         (int outStatus, _) = await b.SendAsync(HttpMethod.Delete, "/api/v1/session", null);
         AdminBrowser replay = app.Browser();
         replay.SetCookie(AdminSessions.SessionCookie, token);
-        check(outStatus == 200 && !b.HasSession && (await replay.GetAsync("/api/v1/machines")).Status == 401 && app.Service.Admin.Sessions.Count == 0, "session: sign out ends it; the old cookie value is refused afterwards");
+        check(outStatus == 200 && !b.HasSession && (await replay.GetAsync("/api/v1/approvals")).Status == 401 && app.Service.Admin.Sessions.Count == 0, "session: sign out ends it; the old cookie value is refused afterwards");
         check(app.Store.Audit(1000).Any(entry => entry.Event == "admin-operation" && entry.Detail.StartsWith("admin-session; ended: sign out", StringComparison.Ordinal)), "session: the end is audited too");
 
         // Lock destroys every session, and a locked authority starts none.
@@ -571,7 +649,7 @@ internal static class ApiTests
         check(app.Service.Admin.Sessions.Count == 2, "session: two browsers can be signed in at once");
         Tapped lockTap = await one.OpAsync(AdminService.OpLock, app.Laptop);
         check(lockTap.ApproveStatus == 200 && await HostServiceTests.WaitFor(() => app.Service.Lock.IsLocked), "lock: the admin key's fresh tap locks");
-        check(app.Service.Admin.Sessions.Count == 0 && (await one.GetAsync("/api/v1/machines")).Status == 401 && (await two.GetAsync("/api/v1/grants")).Status == 401, "lock: it destroys every session at once");
+        check(app.Service.Admin.Sessions.Count == 0 && (await one.GetAsync("/api/v1/approvals")).Status == 401 && (await two.GetAsync("/api/v1/approvals")).Status == 401, "lock: it destroys every session at once");
         // M4: with the authority locked the key operations (and every other change) are refused before any page, and the refusal is audited.
         AdminSession forged = new("t", "laptop", SessionScope.Admin, app.Clock.GetUtcNow(), "c");
         string keyBefore = app.Store.ActiveKey()?.Fingerprint ?? "";
@@ -586,7 +664,7 @@ internal static class ApiTests
         check(app.Store.Audit(1000).Count(entry => entry.Event == "admin-operation" && entry.Detail.Contains("authority is locked", StringComparison.Ordinal)) >= 3, "lock: those refused attempts are in the audit history");
         await two.LoadAsync();
         (int loginStatus, string loginBody) = await two.PostAsync("/api/v1/session", "{}");
-        check(loginStatus == 423 && Code(loginBody) == "authority-locked" && (await two.GetAsync("/api/v1/machines")).Status == 401 && app.Service.Admin.Sessions.Count == 0, "lock: a locked authority refuses to start a session (" + loginBody + ")");
+        check(loginStatus == 423 && Code(loginBody) == "authority-locked" && (await two.GetAsync("/api/v1/approvals")).Status == 401 && app.Service.Admin.Sessions.Count == 0, "lock: a locked authority refuses to start a session (" + loginBody + ")");
         Tapped unlock = await two.OpAsync(AdminService.OpUnlock, app.Laptop);
         check(unlock.MutationStatus == 200 && !app.Service.Lock.IsLocked && app.Service.Admin.Sessions.Count == 0, "lock: unlock needs no session and starts none " + unlock.PostStatus + " " + unlock.Error + " " + unlock.ApproveStatus + " " + unlock.MutationStatus + " " + unlock.MutationBody);
 
@@ -596,7 +674,7 @@ internal static class ApiTests
         app.Start(true);
         AdminBrowser after = app.Browser();
         after.SetCookie(AdminSessions.SessionCookie, oldToken);
-        check((await after.GetAsync("/api/v1/machines")).Status == 401 && app.Service.Admin.Sessions.Count == 0, "session: a service restart destroys every session");
+        check((await after.GetAsync("/api/v1/approvals")).Status == 401 && app.Service.Admin.Sessions.Count == 0, "session: a service restart destroys every session");
         // Stop the service before scanning the database and its sidecars on disk.
         app.Service.Dispose();
         string files = string.Join("\n", Directory.EnumerateFiles(app.Machine.Folder, "*", SearchOption.AllDirectories).Where(file => !file.EndsWith("-shm", StringComparison.Ordinal)).Select(file =>
@@ -877,11 +955,12 @@ internal static class ApiTests
         // k. An authorization whose tap never came expires (in its own app: the clock moves far, and a passkey page is only good for the time it was made for).
         using AdminApp slow = new(root);
         AdminBrowser sb = await slow.SignedIn();
+        await sb.OpAsync("set-session-timeouts", slow.Laptop, true, null, true, ("idle", "0"), ("absolute", "480"));
         await sb.LoadAsync();
         (int untappedStatus, string untapped) = await sb.PostAsync("/api/v1/authorizations", AdminBrowser.AuthorizationBody("machine-rename", ("fingerprint", slow.Fingerprint[..20]), ("name", "untapped")));
         for (int step = 0; step < 3; step++)
         {
-            // The session is kept in use (its idle timeout is shorter than the time an untapped authorization may wait: 35 minutes; it is forgotten after 37).
+            // The authorization can expire on its own while editing stays open.
             slow.Clock.Advance(TimeSpan.FromMinutes(12));
             await sb.GetAsync("/api/v1/machines");
         }
@@ -903,7 +982,9 @@ internal static class ApiTests
         using AdminApp app = new(root);
         AdminService admin = app.Service.Admin;
         LocalAuthority authority = app.Machine.Deployment.Authority;
-        AdminSession session = new("t-replace", "laptop", SessionScope.Admin, app.Clock.GetUtcNow(), "c");
+        (string ticket, string code) = admin.Sessions.BeginLogin("grant-replace-browser")!.Value;
+        admin.Sessions.CompleteLogin(code, "laptop", null, SessionScope.Admin);
+        AdminSession session = admin.Sessions.Claim(ticket, "grant-replace-browser")!;
         int revision = app.Store.Find(app.Fingerprint)!.SecurityRevision;
         string scope = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("scope replace")));
         const string reviewCanary = "<review-canary-7f3a>";

@@ -49,7 +49,7 @@ export function SettingsPage() {
       <Card title="Administrator sessions">
         <Facts
           items={[
-            ['Sign out when idle for', `${s.sessionIdleMinutes} minutes`],
+            ['Lock editing after inactivity', s.sessionIdleMinutes === 0 ? 'Never' : `${s.sessionIdleMinutes} minutes`],
             ['Sign out after', `${s.sessionAbsoluteMinutes} minutes, however busy`],
           ]}
         />

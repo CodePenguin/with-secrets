@@ -9,14 +9,6 @@
   min-height: 100dvh;
 }
 
-/* Before sign-in there is nothing to navigate to: the page is the header and the sign-in alone. */
-.bare {
-  grid-template-rows: auto 1fr;
-  grid-template-areas:
-    'header'
-    'main';
-}
-
 .skip {
   position: absolute;
   left: var(--space-2);
@@ -216,13 +208,6 @@
     grid-template-areas:
       'header header'
       'nav main';
-  }
-
-  .bare {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-areas:
-      'header'
-      'main';
   }
 
   .nav {

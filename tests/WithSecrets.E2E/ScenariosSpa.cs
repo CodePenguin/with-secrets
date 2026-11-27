@@ -1,4 +1,5 @@
 using Microsoft.Playwright;
+
 using WithSecrets.Bitwarden;
 using WithSecrets.LastPass;
 using WithSecrets.OnePassword;
@@ -237,10 +238,10 @@ internal static class ScenariosSpa
 
         IResponse? page = await c.Page.GotoAsync(app.Url);
         s.Check(page is { Status: 200 } && page.Headers.GetValueOrDefault("content-security-policy") == AdminWebAssets.ContentSecurityPolicy && page.Headers.GetValueOrDefault("permissions-policy") == "camera=(), microphone=(), geolocation=(), publickey-credentials-get=(self), publickey-credentials-create=()", "the application is served with a strict same-origin policy that enables passkey retrieval only in this page");
-        await Spa.Heading(c, "with-secrets").WaitForAsync();
+        await Spa.Heading(c, "Overview").WaitForAsync();
         s.Check(await c.PasskeyCalls() == 0, "tap rule: the application itself never asks for a passkey");
-        s.Check(await c.Page.GetByRole(AriaRole.Navigation, new() { Name = "Main" }).CountAsync() == 0, "no navigation before sign-in: the sign-in is all there is");
-        await Spa.Axe(c, s, "sign-in");
+        s.Check(await c.Page.GetByRole(AriaRole.Navigation, new() { Name = "Main" }).CountAsync() == 1, "metadata navigation is available before sign-in");
+        await Spa.Axe(c, s, "public metadata");
 
         await Spa.Tap(c, s);
         await Spa.Heading(c, "Overview").WaitForAsync(new() { Timeout = 20000 });
@@ -260,16 +261,17 @@ internal static class ScenariosSpa
         s.Check(c.Page.Url.EndsWith("/admin/machines", StringComparison.Ordinal), "a view is an address (/admin/machines)");
         await c.Page.ReloadAsync();
         await Spa.Heading(c, "Machines").WaitForAsync();
+        await c.Page.GetByText("Signed in with").First.WaitForAsync();
         s.Check(await c.Page.GetByText("Signed in with").First.IsVisibleAsync(), "a reload on a view lands on the same view, still signed in");
 
         // Sign out ends the session at the service.
         await c.DemoPressAsync(Spa.Button(c, "Sign out"), "Select Sign out to end this browser session.");
         await Spa.Button(c, "Sign out").ClickAsync();
-        await Spa.Heading(c, "with-secrets").WaitForAsync();
+        await c.Page.GetByRole(AriaRole.Link, new() { Name = "Sign in", Exact = true }).WaitForAsync();
         await c.DemoSnapAsync("You’re back on the sign-in page.");
         c.Ignore("401");
-        string after = await c.Page.EvaluateAsync<string>("async () => (await fetch('/api/v1/machines')).status + ''");
-        s.Check(after == "401", "after sign out the service refuses the views (401)");
+        string after = await c.Page.EvaluateAsync<string>("async () => (await fetch('/api/v1/machines')).status + ':' + (await fetch('/api/v1/approvals')).status");
+        s.Check(after == "200:401", "after sign-out metadata is available and pending approval details require sign-in");
         s.NoProblems(c);
     }
 
@@ -282,6 +284,7 @@ internal static class ScenariosSpa
         using SpaApp app = new(rig);
 
         await Spa.Open(c, app);
+        await c.Page.GetByRole(AriaRole.Link, new() { Name = "Sign in", Exact = true }).ClickAsync();
         await Spa.Heading(c, "with-secrets").WaitForAsync();
         ILocator use = Spa.Button(c, "Sign in with passkey", exact: true);
         ILocator cancel = Spa.Button(c, "Cancel", exact: true);
@@ -306,7 +309,7 @@ internal static class ScenariosSpa
         await Spa.Axe(c, s, "sign-in after the prompt was cancelled");
         s.Check(await note.GetAttributeAsync("role") == "status", "the cancelled note is a status message, so a screen reader announces it");
         s.Check(await cancel.CountAsync() == 0 && await c.Page.GetByRole(AriaRole.Alert).CountAsync() == 0, "cancelling is not an error: Cancel goes away with the prompt and no problem is shown");
-        s.Check(await c.Page.GetByRole(AriaRole.Navigation, new() { Name = "Main" }).CountAsync() == 0, "nothing was signed in");
+        s.Check(await Spa.Button(c, "Sign out", exact: true).CountAsync() == 0, "nothing was signed in");
 
         // Signing in works again with one click: the fresh sign-in was prepared already.
         await c.Presence(true);
@@ -586,7 +589,7 @@ internal static class ScenariosSpa
     {
         await Scenarios3.SeedSecret(rig, c, app);
         rig.WriteScript("check", "script-value");
-        CliCommand.Run run = (CliCommand.Run)Cmds.Parse(["--secrets", "E2E_SECRET", "--reason", "e2e grant", "--", ..Rig.ScriptCommand("check")]);
+        CliCommand.Run run = (CliCommand.Run)Cmds.Parse(["--secrets", "E2E_SECRET", "--reason", "e2e grant", "--", .. Rig.ScriptCommand("check")]);
         using Cmd<int> approve = new((port, o, e) => LaunchClient.RunAsync(run.Args, rig.Work, app.Service.Endpoint, null, o, e, rig.Machine.Trust, approve: true).GetAwaiter().GetResult());
 
         // The pre-approval waits in the Approvals queue like any request; the person picks how long it lasts and taps once.
@@ -627,13 +630,14 @@ internal static class ScenariosSpa
         await c.DemoPressAsync(revoke, "Choose Revoke in the grant details.");
         await revoke.ClickAsync();
         await dialog.WaitForAsync();
-        await Spa.WaitForPasskeyStep(dialog);
-        s.Check((await Spa.ConfirmButton(dialog).TextContentAsync() ?? "").Contains("Revoke grant", StringComparison.Ordinal) && (await dialog.TextContentAsync() ?? "").Contains("grant-revoke", StringComparison.Ordinal) && (await dialog.TextContentAsync() ?? "").Contains(id, StringComparison.Ordinal), "the dialog names the revocation and the grant, and its button says what the tap does");
-        s.Check(store.FindGrant(id) is { Status: "active" }, "nothing changed before the tap");
-        string page = await Spa.Continue(c, s, dialog);
-        await Spa.PageFeedback(c).WaitForAsync(new() { Timeout = 20000 });
-        s.Check(page.Contains("revoke this grant", StringComparison.OrdinalIgnoreCase) && page.Contains(id, StringComparison.Ordinal), "the result dialog retains the revocation and grant details");
-        s.Check(store.FindGrant(id) is { Status: "revoked" }, "the tap revokes the grant");
+        ILocator confirm = dialog.GetByRole(AriaRole.Button, new() { Name = "Revoke grant", Exact = true });
+        await confirm.WaitForAsync();
+        s.Check((await dialog.TextContentAsync() ?? "").Contains(id, StringComparison.Ordinal) && store.FindGrant(id) is { Status: "active" }, "the dialog names the active grant and waits for confirmation");
+        int passkeyCalls = await c.PasskeyCalls();
+        await c.DemoPressAsync(confirm, "Confirm the revocation in this admin session.");
+        await confirm.ClickAsync();
+        await Spa.PageFeedback(c).GetByText($"Revoked grant {id}.", new() { Exact = true }).WaitForAsync(new() { Timeout = 20000 });
+        s.Check(store.FindGrant(id) is { Status: "revoked" } && await c.PasskeyCalls() == passkeyCalls, "the session revokes the grant without another tap");
         await row.GetByText("revoked").First.WaitForAsync(new() { Timeout = 20000 });
         await c.DemoSnapAsync("The grant is revoked. Future requests need a new approval.");
         await row.GetByRole(AriaRole.Button).ClickAsync();
@@ -746,6 +750,17 @@ internal static class ScenariosSpa
         await Spa.SignIn(c, app, s);
         s.Check(!app.Service.Lock.IsLocked && await c.Page.GetByText("Authority unlocked").First.IsVisibleAsync(), "the header says the authority is unlocked");
 
+        int editingTaps = await c.PasskeyCalls();
+        await Spa.Button(c, "Lock editing", exact: true).ClickAsync();
+        ILocator editing = Spa.Dialog(c);
+        await editing.GetByRole(AriaRole.Button, new() { Name = "Lock editing", Exact = true }).ClickAsync();
+        await Spa.Button(c, "Resume editing", exact: true).WaitForAsync();
+        s.Check(!app.Service.Lock.IsLocked && await c.PasskeyCalls() == editingTaps, "manual editing lock takes no tap and leaves the authority unlocked");
+        await Spa.Button(c, "Resume editing", exact: true).ClickAsync();
+        await Spa.Continue(c, s, editing);
+        await Spa.Button(c, "Lock editing", exact: true).WaitForAsync();
+        s.Check(await c.PasskeyCalls() == editingTaps + 1, "one admin passkey assertion resumes editing");
+
         await c.DemoPressAsync(Spa.Button(c, "Lock the authority"), "From Overview, select Lock the authority. Locking ends all sessions.");
         await Spa.Button(c, "Lock the authority").ClickAsync();
         ILocator dialog = Spa.Dialog(c);
@@ -753,14 +768,15 @@ internal static class ScenariosSpa
         s.Check((await dialog.TextContentAsync() ?? "").Contains("ends every session", StringComparison.OrdinalIgnoreCase), "the dialog warns that every session ends");
         c.Ignore("401");
         c.Ignore("404");
-        await Spa.Continue(c, s, dialog);
-        // The lock ends the session, so the page confirms the lock using the public authority status.
+        int passkeyCalls = await c.PasskeyCalls();
+        await dialog.GetByRole(AriaRole.Button, new() { Name = "Lock", Exact = true }).ClickAsync();
+        // The lock ends the session and keeps public metadata visible.
         await Spa.PageFeedback(c).GetByText("The authority is locked.").WaitForAsync(new() { Timeout = 20000 });
-        s.Check(app.Service.Lock.IsLocked, "the tap locks the authority");
+        s.Check(app.Service.Lock.IsLocked && await c.PasskeyCalls() == passkeyCalls, "the active session locks the authority without another tap");
         s.Check(await dialog.CountAsync() == 0, "the lock confirmation appears on the page with the dialog closed");
-        await Spa.Heading(c, "with-secrets").WaitForAsync(new() { Timeout = 20000 });
-        s.Check(await c.Page.GetByText("The authority is locked").First.IsVisibleAsync(), "the locked authority is said in words on the sign-in view, which offers the unlock");
-        await Spa.Axe(c, s, "sign-in while locked");
+        await Spa.Heading(c, "Overview").WaitForAsync(new() { Timeout = 20000 });
+        s.Check(await c.Page.GetByText("The authority is locked").First.IsVisibleAsync(), "the lock is shown while metadata remains visible");
+        await Spa.Axe(c, s, "overview while locked");
 
         // Unlock needs its own authorization but no session.
         await c.DemoPressAsync(Spa.Button(c, "Unlock the authority"), "From the signed-out page, unlock the authority with an admin passkey that supports PRF.");
@@ -772,11 +788,11 @@ internal static class ScenariosSpa
         s.Check(page.Contains("unlock", StringComparison.OrdinalIgnoreCase), "the passkey page names the unlock (" + page.Split('\n')[0] + ")");
         await c.Page.GetByText("Authority unlocked").First.WaitForAsync(new() { Timeout = 20000 });
 
-        // The session ended with the lock: signing in again is a new tap.
+        // The standalone Unlock action leaves sign-in available.
         await Spa.Tap(c, s);
         await Spa.Heading(c, "Overview").WaitForAsync(new() { Timeout = 20000 });
         await c.DemoSnapAsync("The authority is unlocked and a fresh sign-in returns you to Overview.");
-        s.Check(true, "after the unlock a new sign-in starts a new read-only session");
+        s.Check(true, "after the unlock a new sign-in starts a new admin session");
         s.NoProblems(c);
     }
 

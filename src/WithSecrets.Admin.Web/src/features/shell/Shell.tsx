@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { NavLink, Outlet, useLocation } from 'react-router-dom'
+import { Link, NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { api, setSessionSecret } from '../../api/client'
 import { keys, useApprovals, useSession, useStatus } from '../../api/queries'
@@ -8,7 +8,9 @@ import { Badge } from '../../components/Card'
 import { Button } from '../../components/Button'
 import { Logo } from '../../components/Logo'
 import { usePollInterval } from '../authorization/poll'
-import { Gate } from '../session/Gate'
+import { lockEditing, resumeEditing } from '../authorization/operations'
+import { useStartOperation } from '../authorization/OperationProvider'
+import buttonStyles from '../../components/Button.module.css'
 import styles from './Shell.module.css'
 
 const links = [
@@ -59,9 +61,33 @@ export function Shell() {
     },
   })
   const signedIn = session.data?.authenticated === true
-  const canRead = session.data?.capabilities.includes('admin.read') === true
+  const adminSession = session.data?.scope === 'admin'
+  const editingLocked = session.data?.editingLocked === true
+  const startOperation = useStartOperation()
   const approvals = useApprovals(signedIn && status.data?.locked !== true, usePollInterval() * 3)
   const waiting = approvals.data?.items.length ?? 0
+  const tracksEditing = adminSession && !editingLocked && session.data?.idleExpires != null
+  const lastActivity = useRef(0)
+
+  useEffect(() => {
+    if (!tracksEditing) return
+
+    function recordActivity(event: Event) {
+      const now = Date.now()
+      if (!event.isTrusted || now - lastActivity.current < 10_000) return
+      lastActivity.current = now
+      void api.post('/api/v1/session/activity', { body: {} }).catch(() => {
+        void queryClient.invalidateQueries({ queryKey: keys.session })
+      })
+    }
+
+    window.addEventListener('pointerdown', recordActivity)
+    window.addEventListener('keydown', recordActivity)
+    return () => {
+      window.removeEventListener('pointerdown', recordActivity)
+      window.removeEventListener('keydown', recordActivity)
+    }
+  }, [tracksEditing, queryClient])
 
   useEffect(() => {
     if (!navigationOpen) return
@@ -78,16 +104,23 @@ export function Shell() {
   }, [navigationOpen])
 
   return (
-    <div className={[styles.shell, signedIn ? '' : styles.bare].join(' ')}>
+    <div className={styles.shell}>
       <a href="#main" className={styles.skip}>
         Skip to the main content
       </a>
       <header className={styles.header}>
-        {/* The sign-in page shows the name itself, large; the header repeats it only once signed in. */}
-        {signedIn ? <p className={styles.brand}><Logo className={styles.logo} /></p> : <span />}
+        {location.pathname === '/sign-in' ? <span /> : <p className={styles.brand}><Logo className={styles.logo} /></p>}
         <div className={styles.headerStatus}>
           {status.data?.remote ? <Badge tone="neutral">Remote host</Badge> : null}
           {status.data && !status.data.remote ? status.data.locked ? <Badge tone="warn">Authority locked</Badge> : <Badge tone="ok">Authority unlocked</Badge> : null}
+          {adminSession && !status.data?.locked ? (
+            <>
+              <Badge tone={editingLocked ? 'warn' : 'ok'}>{editingLocked ? 'Editing locked' : 'Editing unlocked'}</Badge>
+              <Button onClick={() => startOperation(editingLocked ? resumeEditing() : lockEditing())}>
+                {editingLocked ? 'Resume editing' : 'Lock editing'}
+              </Button>
+            </>
+          ) : null}
           {signedIn ? (
             <>
               <span className={styles.who}>
@@ -97,10 +130,12 @@ export function Shell() {
                 Sign out
               </Button>
             </>
+          ) : !status.data?.remote && location.pathname !== '/sign-in' ? (
+            <Link className={`${buttonStyles.button} ${buttonStyles.secondary}`} to="/sign-in" state={{ returnTo: location.pathname + location.search + location.hash }}>{status.data?.locked ? 'Unlock and sign in' : 'Sign in'}</Link>
           ) : null}
         </div>
       </header>
-      {signedIn ? (
+      {!status.data?.remote ? (
         <nav id="main-navigation" aria-label="Main" className={styles.nav} data-open={navigationOpen}>
           <button
             ref={menuButton}
@@ -113,7 +148,7 @@ export function Shell() {
             Menu
           </button>
           <ul id="main-navigation-links">
-            {links.filter((link) => link.to === '/' || link.to === '/access' || (canRead && (link.to !== '/providers' || status.data?.capabilities?.providers))).map((link) => (
+            {links.filter((link) => link.to !== '/providers' || status.data?.capabilities?.providers).map((link) => (
               <li key={link.to}>
                 <NavLink
                   to={link.to}
@@ -132,9 +167,7 @@ export function Shell() {
       {signedIn ? <span className="visually-hidden" role="status">{waiting > 0 ? waiting + (waiting === 1 ? ' pending approval' : ' pending approvals') : ''}</span> : null}
       <main id="main" ref={main} className={styles.main}>
         <div className={styles.flash}><Flash key={location.pathname} /></div>
-        <Gate>
-          <Outlet />
-        </Gate>
+        <Outlet />
       </main>
     </div>
   )

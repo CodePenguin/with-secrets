@@ -15,12 +15,13 @@ export function OverviewPage() {
   const canChange = session.data?.capabilities.includes('admin.decide') === true
   const machines = useMachines(true)
   const grants = useGrants(true)
-  const approvals = useApprovals(true)
+  const approvals = useApprovals(session.data?.authenticated === true)
   const start = useStartOperation()
 
   if (status.isPending) return <Loading what="the status" />
   if (status.isError) return <ProblemAlert error={status.error} title="The status could not be read" />
   const s = status.data
+  if (s.remote) return <><PageHeader title="Overview" /><p>Open the administration app on the authority to manage access and secrets.</p></>
   const pending = machines.data?.filter((machine) => machine.status === 'pending').length
   const changed = machines.data?.filter((machine) => machine.pendingHostName).length
   const active = grants.data?.filter((grant) => grant.state === 'active').length
@@ -30,13 +31,13 @@ export function OverviewPage() {
   return (
     <>
       <PageHeader title="Overview">
-        {canChange && !s.remote && s.locked ? (
+        {!s.remote && s.locked ? (
           <Button variant="primary" onClick={() => start(unlock())}>
             <Icon name="unlock" /> Unlock the authority
           </Button>
         ) : null}
         {canChange && !s.remote && !s.locked ? (
-          <Button variant="danger" onClick={() => start(lock())}>
+          <Button variant="danger" onClick={() => start(lock(true))}>
             <Icon name="lock" /> Lock the authority
           </Button>
         ) : null}

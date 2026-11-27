@@ -84,6 +84,8 @@ public sealed partial class AdminService
         public string ArgumentsKey { get; } = argumentsKey;
 
         public AdminPlan Plan { get; } = plan;
+        public int? EditingGeneration { get; init; }
+        public Lock EditingGate { get; } = owner is AdminSession session ? session.EditingGate : new Lock();
 
         public DateTimeOffset Created { get; } = created;
 
@@ -181,7 +183,7 @@ public sealed partial class AdminService
     /// Makes an authorization for <paramref name="owner" /> (the caller's <see cref="AdminSession" />, or for the unlock the text of the browser's pre-session cookie) to run <paramref name="op" /> with
     /// <paramref name="args" />: the plan is made and refused here when it does not apply, then a one-use passkey page is made whose signed text names the operation and every parameter.
     /// </summary>
-    internal async Task<(AuthorizationView? View, AdminStart Start)> BeginAuthorizationAsync(object owner, string op, IReadOnlyDictionary<string, string> args, CancellationToken cancel, bool inline = false)
+    internal async Task<(AuthorizationView? View, AdminStart Start)> BeginAuthorizationAsync(object owner, string op, IReadOnlyDictionary<string, string> args, CancellationToken cancel, bool inline = false, bool applyFromSession = false)
     {
         bool isSession = owner is AdminSession;
         string caller = CallerOf(owner);
@@ -192,6 +194,11 @@ public sealed partial class AdminService
 
             return (null, new AdminStart(null, "sign in first: this needs an administrator session", 401));
         }
+
+        int? editingGeneration = owner is AdminSession editingOwner && !OperationPolicy.IsSessionControl(op)
+            ? Sessions.ActiveEditingGeneration(editingOwner) : null;
+        if (isSession && !OperationPolicy.IsSessionControl(op) && editingGeneration is null && !_p.Lock.IsLocked)
+            return (null, new AdminStart(null, "editing is locked; resume this session with a passkey", 423, "editing-locked"));
 
         if (!TakeStart((op == OpLock ? "L" : "") + caller))
         {
@@ -208,10 +215,13 @@ public sealed partial class AdminService
             return (null, new AdminStart(null, refusal, refusalStatus));
         }
 
+        if (applyFromSession && (!inline || owner is not AdminSession { Scope: SessionScope.Admin } || plan.ApplyFromSession is null))
+            return (null, new AdminStart(null, "this operation needs its own passkey authorization", 403));
+
         AfterPlanForTests?.Invoke();
 
         string id = Convert.ToBase64String(RandomNumberGenerator.GetBytes(18)).Replace('+', '-').Replace('/', '_');
-        AuthorizationRecord record = new(id, owner, op, ArgumentsKey(args), plan, _clock.GetUtcNow(), epoch);
+        AuthorizationRecord record = new(id, owner, op, ArgumentsKey(args), plan, _clock.GetUtcNow(), epoch) { EditingGeneration = editingGeneration };
         lock (_authorizationGate)
         {
             SweepAuthorizations();
@@ -248,6 +258,13 @@ public sealed partial class AdminService
             }
 
             _authorizations[id] = record;
+        }
+
+        if (applyFromSession && owner is AdminSession editing && plan.ApplyFromSession is { } apply)
+        {
+            lock (_authorizationGate) record.State = AuthorizationState.Verified;
+            ApplyFromSession(record, editing, apply);
+            lock (_authorizationGate) return (View(record), new AdminStart(null, null));
         }
 
         if (inline)
@@ -519,6 +536,44 @@ public sealed partial class AdminService
         record.Done.TrySetResult();
     }
 
+    private void ApplyFromSession(AuthorizationRecord record, AdminSession session, Func<AdminSession, string?> apply)
+    {
+        if (!Claim(record)) return;
+        MutationResult outcome;
+        try
+        {
+            lock (session.EditingGate)
+            {
+                if (_p.Lock.IsLocked || !CanApplyWhileEditing(record))
+                {
+                    outcome = new MutationResult(423, "editing-locked", "the authority or editing session is locked");
+                }
+                else
+                {
+                    string? failure = record.Operation == OpLock ? apply(session) : _p.Lock.UseWhileUnlocked(() => apply(session));
+                    outcome = failure is null ? new MutationResult(200, null, null) : new MutationResult(409, "operation-failed", ApprovalSummary.Clean(failure));
+                    if (failure is null) Sessions.ActiveEditingGeneration(session, renew: true);
+                    _p.Authorizer.Record(record.Plan.Operation, failure is null ? "applied from session" : "session change failed",
+                        "session of " + session.Identity, AdminAuthorizer.Canonical(record.Plan.Parameters), session.Key);
+                    Note(record.Operation + (failure is null ? ": applied" : ": failed"));
+                }
+            }
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            AppLog.Warn("a session change failed: {Type}", error.GetType().Name);
+            outcome = new MutationResult(500, "operation-failed", "the change failed");
+        }
+        finally
+        {
+            Release(record);
+        }
+        Finish(record, outcome);
+    }
+
+    private bool CanApplyWhileEditing(AuthorizationRecord record) => record.EditingGeneration is not { } generation
+        || (record.Owner is AdminSession session && Sessions.ActiveEditingGeneration(session) == generation);
+
     /// <summary>Applies the plan that the verified tap authorized, once, and keeps how it came out. Runs on the passkey page's thread right after the tap is judged.</summary>
     private void ApplyAtTap(AuthorizationRecord record, string caller, Unlock? unlock = null)
     {
@@ -530,29 +585,37 @@ public sealed partial class AdminService
         MutationResult outcome;
         try
         {
-            AdminAuthorization result = record.Result! with { Unlock = unlock };
-            if (_p.Lock.IsLocked && record.Operation != OpUnlock)
+            lock (record.EditingGate)
             {
-                Refused(record.Operation, "the authority is locked", caller);
-                outcome = new MutationResult(423, "authority-locked", "the authority is locked; unlock it first");
-            }
-            else
-            {
-                string? failure = ApplyAuthorized(record.Plan, result, result.Admin!);
-                if (failure is not null)
+                AdminAuthorization result = record.Result! with { Unlock = unlock };
+                if (!CanApplyWhileEditing(record))
                 {
-                    outcome = new MutationResult(409, "operation-failed", ApprovalSummary.Clean(failure));
+                    outcome = new MutationResult(423, "editing-locked", "editing was locked after this authorization started; make a new one");
+                }
+                else if (_p.Lock.IsLocked && record.Operation != OpUnlock)
+                {
+                    Refused(record.Operation, "the authority is locked", caller);
+                    outcome = new MutationResult(423, "authority-locked", "the authority is locked; unlock it first");
                 }
                 else
                 {
-                    // The bundle of a new invitation is kept here, in this record, to be given once to the caller it was made for; the plan's own box is emptied now.
-                    InvitationCreatedDto? created = record.Plan.Output?.Value;
-                    if (record.Plan.Output is { } box)
+                    string? failure = ApplyAuthorized(record.Plan, result, result.Admin!);
+                    if (failure is not null)
                     {
-                        box.Value = null;
+                        outcome = new MutationResult(409, "operation-failed", ApprovalSummary.Clean(failure));
                     }
+                    else
+                    {
+                        if (record.Owner is AdminSession session) Sessions.ActiveEditingGeneration(session, renew: true);
+                        // The bundle of a new invitation is kept here, in this record, to be given once to the caller it was made for; the plan's own box is emptied now.
+                        InvitationCreatedDto? created = record.Plan.Output?.Value;
+                        if (record.Plan.Output is { } box)
+                        {
+                            box.Value = null;
+                        }
 
-                    outcome = new MutationResult(200, null, record.Plan.Remark?.Value is { } remark ? ApprovalSummary.Clean(remark) : null, null, created);
+                        outcome = new MutationResult(200, null, record.Plan.Remark?.Value is { } remark ? ApprovalSummary.Clean(remark) : null, null, created);
+                    }
                 }
             }
         }
@@ -580,7 +643,11 @@ public sealed partial class AdminService
         MutationResult outcome;
         try
         {
-            if (_p.Lock.IsLocked)
+            if (!CanApplyWhileEditing(record))
+            {
+                outcome = new MutationResult(423, "editing-locked", "editing was locked after this authorization started; make a new one");
+            }
+            else if (_p.Lock.IsLocked)
             {
                 outcome = new MutationResult(423, "authority-locked", "the authority is locked; unlock it first");
             }

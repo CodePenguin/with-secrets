@@ -50,7 +50,7 @@ internal sealed class AdminBrowser(HostService service, HttpClient http)
     public void SetCookie(string name, string value) => _cookies[name] = value;
 
     /// <summary>True when the browser holds a session the service still honours (a read-only view is served).</summary>
-    public async Task<bool> StillSignedIn() => HasSession && (await GetAsync("/api/v1/machines")).Status == 200;
+    public async Task<bool> StillSignedIn() => HasSession && (await GetAsync("/api/v1/approvals")).Status == 200;
 
     private void Keep(HttpResponseMessage response)
     {

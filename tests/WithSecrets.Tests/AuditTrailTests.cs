@@ -682,7 +682,11 @@ internal static class AuditTrailTests
         machine.Deployment.Authority.UploadAsync(Batch(machine, a, b, skipped)).GetAwaiter().GetResult();
         app.Start(true);
         AdminBrowser anon = app.Browser();
-        check((await anon.GetAsync("/api/v1/audit/events?text=build")).Status == 401 && (await anon.GetAsync("/api/v1/audit/changes")).Status == 401 && (await anon.GetAsync("/api/v1/audit/gaps")).Status == 401, "audit view: without a session nothing of the history is served");
+        (int publicStatus, string publicEvents, _) = await anon.GetAsync("/api/v1/audit/events?text=build");
+        check(publicStatus == 200 && publicEvents.Contains("build.sh", StringComparison.Ordinal) && publicEvents.Contains("test.sh", StringComparison.Ordinal)
+            && !publicEvents.Contains("--token", StringComparison.Ordinal) && (await anon.GetAsync("/api/v1/audit/changes")).Status == 200
+            && (await anon.GetAsync("/api/v1/audit/gaps")).Status == 200,
+            "audit view: public event and gap metadata can be browsed while arguments and full-text filtering require sign-in");
         AdminBrowser browser = await app.SignedIn();
         async Task<string> View(string query, string kind = "events") => (await browser.GetAsync("/api/v1/audit/" + kind + query)).Html;
         string all = await View("");

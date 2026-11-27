@@ -27,7 +27,9 @@ internal static class ProviderAdminOperationsTests
             }
 
             App = new AdminApp(root, providers: Registry);
-            Session = new AdminSession("t-providers", "laptop", SessionScope.Admin, App.Clock.GetUtcNow(), "c");
+            (string ticket, string code) = Service.Sessions.BeginLogin("provider-browser")!.Value;
+            Service.Sessions.CompleteLogin(code, "laptop", null, SessionScope.Admin);
+            Session = Service.Sessions.Claim(ticket, "provider-browser")!;
         }
 
         public ProviderRegistry? Registry { get; }

@@ -106,6 +106,6 @@ internal static class PairingAdminTests
         await lb.LoadAsync();
         (int lockedList, _) = await lb.SendAsync(HttpMethod.Get, "/api/v1/pairing/invitations", null);
         (int lockedCreate, _) = await lb.SendAsync(HttpMethod.Post, "/api/v1/pairing/invitations", "{}");
-        check(lockedList is 401 or 403 or 423 && lockedCreate is 401 or 403 or 423 && locked.Store.Invitations().Count == 0, "pairing api: without a session (a locked authority) the invitation routes refuse and nothing is made");
+        check(lockedList == 200 && lockedCreate is 401 or 403 or 423 && locked.Store.Invitations().Count == 0, "pairing api: a locked authority exposes invitation status and refuses to create an invitation");
     }
 }

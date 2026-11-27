@@ -29,7 +29,8 @@ describe('operations: what is authorized is exactly what is performed', () => {
     expect(renameMachine(machine()).prepare({ name: 'x'.repeat(41) })).toHaveProperty('errors.name')
     expect(setAuditRetention(90, 36500).prepare({ days: '-1' })).toHaveProperty('errors.days')
     expect(setAuditRetention(90, 36500).prepare({ days: '36501' })).toHaveProperty('errors.days')
-    expect(setSessionTimeouts(15, 480, 120, 1440).prepare({ idle: '0', absolute: '10' })).toHaveProperty('errors.idle')
+    expect(setSessionTimeouts(15, 480, 120, 1440).prepare({ idle: '-1', absolute: '10' })).toHaveProperty('errors.idle')
+    expect(prepared(setSessionTimeouts(15, 480, 120, 1440), { idle: '0', absolute: '10' }).parameters).toEqual({ idle: 0, absolute: 10 })
   })
 
   it('trust needs the full fingerprint typed again', () => {
@@ -63,7 +64,7 @@ describe('operations: what is authorized is exactly what is performed', () => {
 
   it('settings reviews state the exact effect before the passkey tap', () => {
     expect(prepared(setAuditRetention(90, 36500), { days: '0' }).summary).toBe('Keep audit events for ever.')
-    expect(prepared(setSessionTimeouts(15, 480, 120, 1440), { idle: '15', absolute: '480' }).summary).toBe('End a session after 15 minutes without use, or 480 minutes at most.')
+    expect(prepared(setSessionTimeouts(15, 480, 120, 1440), { idle: '15', absolute: '480' }).summary).toBe('Editing locks after 15 idle minutes. The session ends after 480 minutes.')
   })
 
   it('rotation follows a transition while recovery has no transition and enrolls every other host again', () => {

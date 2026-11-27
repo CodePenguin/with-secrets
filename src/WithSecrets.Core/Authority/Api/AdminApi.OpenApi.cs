@@ -116,6 +116,7 @@ internal sealed partial class AdminApi
             ["Session"] = S.Obj(
             [
                 ("authenticated", S.Bool()),
+                ("editingLocked", S.Bool()),
                 ("admin", S.Str(nullable: true, description: "Deprecated display alias for admin-scope sessions; use identity and scope.")),
                 ("identity", S.Str(nullable: true, description: "The trusted enrolled passkey identity that signed in.")),
                 ("scope", S.Str(values: ["admin", "approval"], nullable: true)),
@@ -346,10 +347,10 @@ internal sealed partial class AdminApi
             ["ProofStart"] = S.Obj([("mode", S.Str(values: ["webauthn"])), ("payload", S.Str(description: "Service-generated WebAuthn request data; the service retains the operation, nonce, origin and RP ID context."))]),
             ["InlineAuthorization"] = S.Obj(
             [
-                ("id", S.Str()), ("operation", S.Str(values: [.. Operations.Select(item => item.Operation)])), ("state", S.Str(values: ["pending"])),
+                ("id", S.Str()), ("operation", S.Str(values: [.. Operations.Select(item => item.Operation)])), ("state", S.Str(values: ["pending", "consumed"])),
                 ("detail", S.Str(nullable: true)), ("link", S.Str(nullable: true)), ("sentence", S.Str()), ("parameters", S.Arr(S.Ref("NameValue"))),
                 ("created", S.Time()), ("expires", S.Time()), ("lifetimeSeconds", S.Int()), ("result", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("AuthorizationResult"), new JsonObject { ["type"] = "null" }) }),
-                ("proof", S.Ref("ProofStart")), ("prfKey", S.Str(nullable: true)),
+                ("proof", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("ProofStart"), new JsonObject { ["type"] = "null" }) }), ("prfKey", S.Str(nullable: true)),
             ]),
             ["AuthorizationResult"] = S.Obj(
             [
@@ -503,7 +504,7 @@ internal sealed partial class AdminApi
                 responses["409"] = ProblemResponse(route.Access == ApiAccess.ApprovalsDecide
                     ? "The request is no longer pending, another proof flow is active, or a conflicting decision won (request-not-pending, approval-in-progress, decision-already-made)."
                     : "The operation does not apply, or the change failed (operation-refused, operation-failed).");
-                responses["423"] = ProblemResponse("The authority is locked (authority-locked).");
+                responses["423"] = ProblemResponse("The authority is locked or browser editing needs to resume (authority-locked, editing-locked).");
                 if (route.Access == ApiAccess.ApprovalsDecide)
                 {
                     responses["429"] = ProblemResponse("The bounded approval queue or rate limit was reached (too-many-requests).");

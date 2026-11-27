@@ -786,7 +786,7 @@ internal static class ConvenienceKeyTests
             return path.Contains('{', StringComparison.Ordinal) ? null : path;
         }
 
-        List<ApiRoute> reads = [.. auth.Service.Admin.Api.Routes.Where(route => route.Access == ApiAccess.Read)];
+        List<ApiRoute> reads = [.. auth.Service.Admin.Api.Routes.Where(route => (route.Access is ApiAccess.Read or ApiAccess.Public) && route.OperationId != "getOpenApi")];
         check(reads.Count >= 15 && reads.Any(route => route.OperationId == "getGrantReview"), "convenience reads: the route table has the read routes, the grant review among them (" + reads.Count + ")");
         foreach (ApiRoute route in reads)
         {
@@ -934,8 +934,8 @@ internal static class ConvenienceKeyTests
             }
         }
 
-        string[] adminOnly = [.. AdminApi.Operations.Select(item => item.Operation).Where(op => !OperationPolicy.AnyKey(op)).OrderBy(op => op == AdminService.OpUnlock ? 1 : 0)];
-        check(adminOnly.Length >= 20 && adminOnly.Contains(AdminService.OpUnlock) && adminOnly.Contains(AdminService.OpLock) && AdminApi.Operations.Where(item => OperationPolicy.AnyKey(item.Operation)).Select(item => item.Operation).Order(StringComparer.Ordinal).SequenceEqual(["grant-extend", "grant-renew", "grant-replace", "grant-revoke"], StringComparer.Ordinal),
+        string[] adminOnly = [.. AdminApi.Operations.Select(item => item.Operation).Where(op => !OperationPolicy.AnyKey(op) && !OperationPolicy.IsSessionControl(op)).OrderBy(op => op == AdminService.OpUnlock ? 1 : 0)];
+        check(adminOnly.Length >= 20 && adminOnly.Contains(AdminService.OpUnlock) && adminOnly.Contains(AdminService.OpLock) && AdminApi.Operations.Where(item => OperationPolicy.AnyKey(item.Operation) && !OperationPolicy.IsSessionControl(item.Operation)).Select(item => item.Operation).Order(StringComparer.Ordinal).SequenceEqual(["grant-extend", "grant-renew", "grant-replace", "grant-revoke"], StringComparer.Ordinal),
             "convenience taps: the operation list has every admin-only operation, unlock and lock among them, and exactly the four grant changes open to any key (" + adminOnly.Length + ")");
         foreach (string op in adminOnly)
         {

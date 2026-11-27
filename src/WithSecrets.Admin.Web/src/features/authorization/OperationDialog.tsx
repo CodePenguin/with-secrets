@@ -150,7 +150,7 @@ export function OperationDialog({ def, resume, onClose, onApplied }: Props) {
   const hasFields = typeof def?.fields === 'function' || (def?.fields?.length ?? 0) > 0 || def?.fieldGroup !== undefined
   // What the dialog asks for as it opens, when nothing needs typing (or the initial values are already valid): it starts in 'asking', never showing a button that is about to be pressed for the person.
   const [auto] = useState<Prepared | null>(() => {
-    if (resume || !def || def.validate || (hasFields && !def.autoPrepare)) return null
+    if (resume || !def || def.validate || def.applyFromSession || (hasFields && !def.autoPrepare)) return null
     const first = def.prepare(def.initial ?? {})
 
     return 'errors' in first ? null : first
@@ -340,10 +340,10 @@ export function OperationDialog({ def, resume, onClose, onApplied }: Props) {
   async function continueToPasskey(prepared: Prepared) {
     dispatch({ type: 'asking', prepared })
     try {
-      const made = await api.post('/api/v1/authorizations/inline', { body: { operation: prepared.operation, parameters: prepared.parameters } })
+      const made = await api.post('/api/v1/authorizations/inline', { body: { operation: prepared.operation, parameters: prepared.parameters, ...(def?.applyFromSession ? { applyFromSession: true } : {}) } })
       if (!mounted.current) {
-        // The dialog was closed while the service was answering: nothing is left waiting for it.
-        cancelAuthorization(made.id)
+        if (made.state === 'pending') cancelAuthorization(made.id)
+        else void queryClient.invalidateQueries()
 
         return
       }
@@ -351,6 +351,16 @@ export function OperationDialog({ def, resume, onClose, onApplied }: Props) {
         cancelAuthorization(made.id)
         dispatch({ type: 'failed', error: new ApiError(0, 'authorization-mismatch', 'Not the same operation', 'The service answered for a different request. Nothing was done.') })
 
+        return
+      }
+      if (def?.applyFromSession && made.state === 'consumed' && made.result) {
+        void queryClient.invalidateQueries()
+        if (made.result.outcome === 'applied') {
+          const summary = made.result.detail ?? prepared.done
+          if (!onApplied(prepared.operation, summary)) dispatch({ type: 'done', summary, result: made.result })
+        } else {
+          dispatch({ type: 'failed', error: new ApiError(0, made.result.code ?? 'operation-failed', 'The change was not made', made.result.detail ?? 'The service refused the change.') })
+        }
         return
       }
       if (!made.proof || made.proof.mode !== 'webauthn') {
@@ -659,7 +669,7 @@ export function OperationDialog({ def, resume, onClose, onApplied }: Props) {
           Cancel
         </Button>
         <Button key="continue" variant={confirmVariant} disabled={state.phase === 'asking'} onClick={() => void continueToPasskey(shown)} autoFocus>
-          {state.phase === 'asking' ? 'Preparing...' : 'Continue'}
+          {state.phase === 'asking' ? (def.applyFromSession ? 'Applying...' : 'Preparing...') : def.applyFromSession ? (def.confirmLabel ?? 'Confirm') : 'Continue'}
         </Button>
       </>
     )
@@ -830,7 +840,7 @@ export function OperationDialog({ def, resume, onClose, onApplied }: Props) {
         {state.phase === 'form'
           ? 'Enter the details, then continue to the passkey page.'
           : state.phase === 'review'
-            ? 'Check what will be authorized, then continue to the passkey page.'
+            ? (def?.applyFromSession ? 'Review and confirm the change.' : 'Check what will be authorized, then continue to the passkey page.')
             : state.phase === 'waiting'
               ? progress === 'checking'
                 ? 'Checking the result of your passkey confirmation.'

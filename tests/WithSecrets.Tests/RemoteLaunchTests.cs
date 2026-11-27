@@ -1022,7 +1022,7 @@ internal static class RemoteLaunchTests
                     "remote host: local sign-in stays disabled at " + route);
             }
 
-            check((await browser.GetAsync("/api/v1/machines")).Status == 401
+            check((await browser.GetAsync("/api/v1/approvals")).Status == 401
                 && (await browser.PostAsync("/api/v1/authorizations", AdminBrowser.AuthorizationBody("set-audit-retention", ("days", "1")))).Status == 401,
                 "remote host: removing the lock ceremony leaves protected reads and changes unavailable without a session");
 

@@ -152,11 +152,11 @@ internal static class ScenariosHappy
         await c.DemoCaptionAsync("Lock the authority from Overview. It ends every session and stops secret delivery until you unlock it.");
         c.Ignore("401");
         c.Ignore("404");
-        await Spa.Continue(c, s, dialog);
+        await dialog.GetByRole(AriaRole.Button, new() { Name = "Lock", Exact = true }).ClickAsync();
         await Spa.PageFeedback(c).GetByText("The authority is locked.").WaitForAsync(new() { Timeout = 20000 });
-        s.Check(app.Service.Lock.IsLocked, "the tap locks the authority");
+        s.Check(app.Service.Lock.IsLocked, "the session locks the authority");
         await c.DemoCaptionAsync("The authority is locked.");
-        await Spa.Heading(c, "with-secrets").WaitForAsync(new() { Timeout = 20000 });
+        await Spa.Heading(c, "Overview").WaitForAsync(new() { Timeout = 20000 });
         await Spa.Button(c, "Unlock the authority").ClickAsync();
         await dialog.WaitForAsync();
         await Spa.Continue(c, s, dialog);
