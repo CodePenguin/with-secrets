@@ -1541,11 +1541,32 @@ internal static class ApiTests
         [
             ("/api/v1/status", "Status"), ("/api/v1/session", "Session"), ("/api/v1/approvals", "ApprovalQueue"), ("/api/v1/machines", "MachineList"), ("/api/v1/machines/" + app.Fingerprint[..20], "Machine"), ("/api/v1/grants", "GrantList"), ("/api/v1/audit/events", "AuditEventList"),
             ("/api/v1/audit/changes", "AuditChangeList"), ("/api/v1/audit/gaps", "AuditGapList"), ("/api/v1/settings", "Settings"), ("/api/v1/passkeys", "Passkeys"),
+            ("/api/v1/machines/" + app.Fingerprint + "/diagnostics", "MachineDiagnostics"),
         ];
+        DiagnosticEvent[] warnings = Enumerable.Range(0, MachineDiagnosticsStore.RetainedPerMachine + 1)
+            .Select(_ => new DiagnosticEvent(Guid.NewGuid(), DateTimeOffset.UtcNow.AddMinutes(-1), DiagnosticCatalog.CheckInFailed)).ToArray();
+        string diagnosticsFolder = Path.Combine(root, "diagnostics-test");
+        MachineDiagnosticsStore diagnosticStore = new(diagnosticsFolder, TimeProvider.System);
+        diagnosticStore.Record(app.Fingerprint, warnings);
+        diagnosticStore.Record(app.Fingerprint, [warnings[^1]]);
+        MachineDiagnosticsView saved = new MachineDiagnosticsStore(diagnosticsFolder, TimeProvider.System).View(app.Fingerprint);
+        check(saved.Items.Count == MachineDiagnosticsStore.RetainedPerMachine && saved.Items[0].Id == warnings[^1].Id && saved.Items[^1].Id == warnings[1].Id
+            && saved.Items[0].ReceivedAt > saved.Items[0].Time && saved.LastReceivedAt == saved.Items[0].ReceivedAt
+            && diagnosticStore.View(new string('A', 64)).Items.Count == 0, "diagnostics: retained history survives reopening, is bounded and isolated by machine, and a retry does not duplicate or retime an event");
+        string diagnosticBody = JsonSerializer.Serialize(new DiagnosticBatch([warnings[0]]), DiagnosticWire.Json);
+        check(DiagnosticWire.TryRead(diagnosticBody, out _) && !DiagnosticWire.TryRead(diagnosticBody.Replace(DiagnosticCatalog.CheckInFailed, "unrecognized-code", StringComparison.Ordinal), out _)
+            && !DiagnosticWire.TryRead(diagnosticBody.Insert(1, "\"message\":\"arbitrary text\","), out _), "diagnostics: the wire accepts known codes and refuses arbitrary messages or codes");
+        app.Service.Admin.Store.Diagnostics.Record(app.Fingerprint, warnings);
         foreach ((string path, string schema) in shapes)
         {
             (int shapeStatus, string answer, _) = await s.GetAsync(path);
             check(shapeStatus == 200 && Conform(schema, answer) is null, "openapi: the answer of " + path + " conforms to " + schema + " (" + Conform(schema, answer) + ")");
+            if (shapeStatus == 200 && schema == "MachineDiagnostics")
+            {
+                using JsonDocument diagnosticResponse = JsonDocument.Parse(answer);
+                check(diagnosticResponse.RootElement.GetProperty("items").GetArrayLength() == DiagnosticOutbox.Capacity,
+                    "diagnostics: the Admin API returns the full 1,000-message history");
+            }
         }
 
         (int missingApprovalStatus, string missingApprovalBody, _) = await s.GetAsync("/api/v1/approvals/req-unknown");

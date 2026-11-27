@@ -75,6 +75,7 @@ internal sealed partial class AdminApi
         ("machine-untrust", ["fingerprint"]),
         ("machine-trust", ["fingerprint", "confirm"]),
         ("machine-rename", ["fingerprint", "name"]),
+        (AuthorityStore.SetMachineLogLevelOperation, ["fingerprint", "level"]),
         ("machine-host-change", ["fingerprint"]),
         ("grant-extend", ["id", "minutes", "indefinite"]),
         ("grant-renew", ["id", "minutes", "indefinite"]),
@@ -117,6 +118,7 @@ internal sealed partial class AdminApi
         "confirm-warnings" => S.Str(values: ["yes"], description: "Go on although the provider's validation reported warnings (it is signed)."),
         "confirm" => S.Str(max: 80, description: "The machine's full fingerprint, typed again to confirm."),
         "days" => S.Int(0, AuthorityStore.MaxAuditRetentionDays, description: "How many days audit events are kept; 0 keeps everything."),
+        "level" => S.Str(values: DiagnosticSettings.Levels, description: "The minimum severity for the machine's local logs and diagnostics."),
         "idle" => S.Int(1, AuthorityStore.MaxSessionIdleMinutes, description: "Minutes without use that end a session."),
         "absolute" => S.Int(1, AuthorityStore.MaxSessionAbsoluteMinutes, description: "Minutes after which a session ends however busy."),
         "minutes" => S.Int(1, operation == "grant-extend" ? ReuseSettings.MaxMinutes : ReuseSettings.MaxAdminMinutes, description: "Minutes to add to an active grant or to grant from now."),
@@ -124,7 +126,7 @@ internal sealed partial class AdminApi
         _ => throw new InvalidOperationException("unknown parameter " + name),
     };
 
-    private static readonly string[] RequiredParameters = ["days", "idle", "absolute", "confirm", "type", "config", "max-stale-seconds", "revision", "instance", "kind", "path", "base"];
+    private static readonly string[] RequiredParameters = ["days", "idle", "absolute", "confirm", "type", "config", "max-stale-seconds", "revision", "instance", "kind", "path", "base", "level"];
 
     /// <summary>A mutation route: the body names the parameters of the operation (those not in the path) and carries the authorization id.</summary>
     private ApiRoute Mutation(string method, string template, string operation, string id, string summary, string tag, params string[] body)
@@ -202,6 +204,7 @@ internal sealed partial class AdminApi
             new("DELETE", Prefix + "/page-settings/changes/{id}", "cancelPageSettingsChange", "Cancel a change that has not been saved.", "settings", ApiAccess.Authorize, 200, "Done", null, [], null, CancelSecretEntryAsync),
             new("GET", Prefix + "/machines", "listMachines", "The machines and where each stands (read-only session).", "machines", ApiAccess.Read, 200, "MachineList", null, [], null, _ => Task.FromResult(new ApiResult(200, new { items = admin.MachinesView() }))),
             new("GET", Prefix + "/machines/{fingerprint}", "getMachine", "One machine, by its fingerprint or an unambiguous start of it (read-only session).", "machines", ApiAccess.Read, 200, "Machine", null, [], null, GetMachineAsync),
+            new("GET", Prefix + "/machines/{fingerprint}/diagnostics", "getMachineDiagnostics", "Recent diagnostics and the log level for one machine.", "machines", ApiAccess.Read, 200, "MachineDiagnostics", null, [], null, GetMachineDiagnosticsAsync),
             new("GET", Prefix + "/grants", "listGrants", "The grants and what can be done to each (read-only session).", "grants", ApiAccess.Read, 200, "GrantList", null, [], null, _ => Task.FromResult(new ApiResult(200, new { items = admin.GrantsView() }))),
             new("GET", Prefix + "/grants/{id}", "getGrant", "One grant, by its id or an unambiguous start of it (read-only session).", "grants", ApiAccess.Read, 200, "Grant", null, [], null, GetGrantAsync),
             new("GET", Prefix + "/grants/{id}/review", "getGrantReview", "The signed approval text of a grant, available while the authority is unlocked, which opens review (state open, locked or none).", "grants", ApiAccess.Read, 200, "GrantReview", null, [], null, GetGrantReviewAsync),
@@ -229,6 +232,7 @@ internal sealed partial class AdminApi
             Mutation("POST", "/machines/{fingerprint}/untrust", "machine-untrust", "untrustMachine", "Withdraw trust from a machine.", "machines"),
             Mutation("POST", "/machines/{fingerprint}/trust", "machine-trust", "trustMachine", "Trust an untrusted machine again, confirmed by typing its full fingerprint.", "machines", "confirm"),
             Mutation("POST", "/machines/{fingerprint}/rename", "machine-rename", "renameMachine", "Rename a machine (display only).", "machines", "name"),
+            Mutation("PUT", "/machines/{fingerprint}/diagnostics/log-level", AuthorityStore.SetMachineLogLevelOperation, "setMachineLogLevel", "Set the machine's log level for local logs and diagnostics.", "machines", "level"),
             Mutation("POST", "/machines/{fingerprint}/approve-host-change", "machine-host-change", "approveMachineHostChange", "Accept the new host name a machine reported.", "machines"),
             Mutation("POST", "/grants/{id}/extend", "grant-extend", "extendGrant", "Extend a grant by minutes, or to no end.", "grants", "minutes", "indefinite"),
             Mutation("POST", "/grants/{id}/renew", "grant-renew", "renewGrant", "Renew an ended grant for minutes from now, or to no end.", "grants", "minutes", "indefinite"),

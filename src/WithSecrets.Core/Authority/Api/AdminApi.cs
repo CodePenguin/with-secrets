@@ -783,6 +783,15 @@ internal sealed partial class AdminApi
         return Task.FromResult(machine is not null ? new ApiResult(200, machine) : new ApiResult(status, new ApiProblem(status, status == 404 ? "not-found" : "invalid-request", problem ?? "not found")));
     }
 
+    private Task<ApiResult> GetMachineDiagnosticsAsync(ApiCall call)
+    {
+        (MachineDto? machine, string? problem, int status) = admin.FindMachineView(call.Path["fingerprint"]);
+        if (machine is null)
+            return Task.FromResult(new ApiResult(status, new ApiProblem(status, status == 404 ? "not-found" : "invalid-request", problem ?? "not found")));
+        MachineDiagnosticsView diagnostics = admin.Store.Diagnostics.View(machine.Fingerprint);
+        return Task.FromResult(new ApiResult(200, new { machineName = machine.FriendlyName ?? machine.HostName, machine.Fingerprint, logLevel = admin.Store.DiagnosticsSettings(machine.Fingerprint).Level, diagnostics.LastReceivedAt, diagnostics.Items }));
+    }
+
     private Task<ApiResult> GetGrantAsync(ApiCall call)
     {
         (GrantDto? grant, string? problem, int status) = admin.FindGrantView(call.Path["id"]);

@@ -317,6 +317,49 @@ internal static class ScenariosSpa
         s.NoProblems(c);
     }
 
+    public static async Task MachineDiagnostics(Host host, S s)
+    {
+        using Rig rig = new();
+        await using Ctx c = await Ctx.NewAsync(host);
+        await Flows.Configure(rig, c);
+        using SpaApp app = new(rig);
+        LocalDeployment deployment = rig.Machine.Deployment;
+
+        await Spa.SignIn(c, app, s);
+        await Spa.GoTo(c, "Machines", "Machines");
+        ILocator row = c.Page.GetByRole(AriaRole.Row).Filter(new() { HasText = KeyIdentity.Display(deployment.Fingerprint) });
+        await row.GetByRole(AriaRole.Button).ClickAsync();
+        await Spa.Dialog(c).GetByRole(AriaRole.Link, new() { Name = "View diagnostic logs" }).ClickAsync();
+        await c.Page.GetByText("No diagnostics have been received from this machine.").WaitForAsync();
+        s.Check(new Uri(c.Page.Url).AbsolutePath.EndsWith("/" + deployment.Fingerprint + "/diagnostics", StringComparison.Ordinal), "the machine details link opens an address for that machine's diagnostics");
+
+        deployment.Store.Diagnostics.Record(deployment.Fingerprint,
+            [new DiagnosticEvent(Guid.NewGuid(), DateTimeOffset.UtcNow.AddMinutes(-1), DiagnosticCatalog.CheckInFailed),
+             new DiagnosticEvent(Guid.NewGuid(), DateTimeOffset.UtcNow, DiagnosticCatalog.LaunchFailed)]);
+        await c.Page.ReloadAsync();
+        ILocator log = c.Page.GetByRole(AriaRole.Table, new() { Name = "Diagnostic log" });
+        await log.GetByRole(AriaRole.Cell, new() { Name = "The machine could not check in with its authority." }).WaitForAsync();
+        s.Check(await log.Locator("time[datetime]").CountAsync() == 4, "each diagnostic displays the recorded and received times after reload");
+        s.Check(await log.GetByRole(AriaRole.Row).Filter(new() { HasText = "A command launch failed" })
+            .GetByRole(AriaRole.Cell, new() { Name = "Error" }).IsVisibleAsync(), "an error has its own severity in the diagnostic log");
+        await Spa.Axe(c, s, "machine diagnostics");
+
+        await c.Page.GetByRole(AriaRole.Button, new() { Name = "Change log level" }).ClickAsync();
+        ILocator settings = Spa.Dialog(c);
+        await settings.GetByLabel("Log level").SelectOptionAsync("debug");
+        s.Check(await settings.GetByRole(AriaRole.Spinbutton).CountAsync() == 0, "the log level is the only diagnostic setting exposed");
+        IPage passkey = await Spa.OpenPasskeyPage(c, s, settings);
+        s.Check(deployment.Store.DiagnosticsSettings(deployment.Fingerprint) == DiagnosticSettings.Default, "the log level stays unchanged until the passkey tap");
+        await Spa.TapAfterBack(c, s, passkey, null);
+        await Spa.PageFeedback(c).WaitForAsync(new() { Timeout = 20000 });
+        s.Check(deployment.Store.DiagnosticsSettings(deployment.Fingerprint) == new DiagnosticSettings("debug"),
+            "the passkey authorizes the selected log level");
+        await c.Page.GetByText("Debug", new() { Exact = true }).WaitForAsync();
+
+        await c.Page.GetByRole(AriaRole.Link, new() { Name = "Back to machines" }).ClickAsync();
+        await c.Page.GetByRole(AriaRole.Heading, new() { Name = "Machines", Exact = true }).WaitForAsync();
+    }
+
     public static async Task ApproveMachine(Host host, S s)
     {
         using Rig rig = new();

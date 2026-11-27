@@ -933,6 +933,22 @@ public sealed class MachineListener : IDisposable
                     }
 
                     return Mine(batch.MachineFingerprint) ? Ok(RemoteWire.Write(await _authority.UploadAsync(batch, cancel))) : Fail("wrong-machine");
+                case RemoteOps.DiagnosticSettings:
+                    return body == RemoteWire.Empty ? Ok(System.Text.Json.JsonSerializer.Serialize(_store.DiagnosticsSettings(peer.Fingerprint), DiagnosticWire.Json)) : Fail("bad-request");
+                case RemoteOps.DiagnosticUpload:
+                    if (_store.Find(peer.Fingerprint) is not { Status: MachineStatus.Trusted })
+                    {
+                        return Fail("machine-not-trusted");
+                    }
+
+                    if (!DiagnosticWire.TryRead(body, out DiagnosticEvent[] events))
+                    {
+                        return Fail("bad-request");
+                    }
+
+                    DiagnosticSettings settings = _store.DiagnosticsSettings(peer.Fingerprint);
+                    _store.Diagnostics.Record(peer.Fingerprint, [.. events.Where(item => settings.Includes(item.Code))]);
+                    return Ok(RemoteWire.Empty);
                 default:
                     return Fail("unknown-operation");
             }

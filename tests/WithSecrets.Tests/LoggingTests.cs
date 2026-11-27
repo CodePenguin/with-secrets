@@ -113,6 +113,7 @@ internal static class LoggingTests
             Folders(check, root);
             await NormalMode(check, root);
             await DebugMode(check, root);
+            MachineLogLevel(check, root);
             await PromptGate(check, root);
             await PromptLastNormal(check, root);
             FileRules(check, root);
@@ -126,6 +127,29 @@ internal static class LoggingTests
             AppLog.Close();
             Directory.Delete(root, true);
         }
+    }
+
+    private static void MachineLogLevel(Action<bool, string> check, string root)
+    {
+        using Setup log = new(Path.Combine(root, "machine-level"), debug: false);
+        AppLog.Debug("machine default debug");
+        AppLog.Warn("machine default warning");
+        AppLog.SetMachineLogLevel(new DiagnosticSettings("debug"));
+        AppLog.Debug("machine enabled debug");
+        AppLog.SetMachineLogLevel(new DiagnosticSettings("information"));
+        AppLog.Debug("machine filtered debug");
+        AppLog.Info("machine enabled information");
+        AppLog.SetMachineLogLevel(new DiagnosticSettings("error"));
+        AppLog.Warn("machine filtered warning");
+        AppLog.Error("machine enabled error");
+
+        string file = log.Files();
+        check(file.Contains("machine default warning", StringComparison.Ordinal) && file.Contains("machine enabled debug", StringComparison.Ordinal)
+            && file.Contains("machine enabled information", StringComparison.Ordinal) && file.Contains("machine enabled error", StringComparison.Ordinal)
+            && !file.Contains("machine default debug", StringComparison.Ordinal) && !file.Contains("machine filtered debug", StringComparison.Ordinal)
+            && !file.Contains("machine filtered warning", StringComparison.Ordinal),
+            "log file: changing a machine's level applies immediately to its local file");
+        check(log.Screen.Length == 0, "log file: changing the machine level does not enable terminal output");
     }
 
     // ---------------------------------------------------------------------------------------------------------------

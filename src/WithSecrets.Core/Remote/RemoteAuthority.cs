@@ -5,6 +5,7 @@ using System.Net.Sockets;
 using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
+using System.Text.Json;
 
 namespace WithSecrets;
 
@@ -765,6 +766,18 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, ILaunchAuthority, 
         {
             _links.TryRemove(requestId, out _);
         }
+    }
+
+    internal async Task UploadDiagnosticsAsync(DiagnosticEvent[] events, CancellationToken cancel = default)
+    {
+        string body = JsonSerializer.Serialize(new DiagnosticBatch(events), DiagnosticWire.Json);
+        await CallAsync(RemoteOps.DiagnosticUpload, "diagnostics:" + Guid.NewGuid().ToString("N"), body, cancel);
+    }
+
+    internal async Task<DiagnosticSettings> GetDiagnosticsSettingsAsync(CancellationToken cancel)
+    {
+        string body = await CallAsync(RemoteOps.DiagnosticSettings, "diagnostic-settings:" + Guid.NewGuid().ToString("N"), RemoteWire.Empty, cancel);
+        return JsonSerializer.Deserialize<DiagnosticSettings>(body, DiagnosticWire.Json) ?? throw new RemoteTransportException("the authority returned no diagnostics settings");
     }
 
     // ---- IAuditSink ----

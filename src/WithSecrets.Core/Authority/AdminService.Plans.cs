@@ -248,6 +248,26 @@ public sealed partial class AdminService
                         return null;
                     });
 
+            case AuthorityStore.SetMachineLogLevelOperation:
+                (MachineRecord? diagnosticMachine, string? machineProblem) = ResolveMachine(Arg(args, "fingerprint"));
+                string level = Arg(args, "level") ?? "";
+                if (diagnosticMachine is null || !DiagnosticSettings.Levels.Contains(level, StringComparer.Ordinal))
+                {
+                    refusal = machineProblem ?? "choose Error, Warning, Information, or Debug";
+                    status = 400;
+                    return null;
+                }
+
+                DiagnosticSettings diagnosticSettings = new(level);
+                string diagnosticFingerprint = diagnosticMachine.Fingerprint;
+                return new AdminPlan(AuthorityStore.SetMachineLogLevelOperation,
+                    $"Set the log level of machine {KeyIdentity.Display(diagnosticFingerprint)} to {level}. This applies to local logs and diagnostics sent to Admin.",
+                    AuthorityStore.DiagnosticsSettingsParameters(diagnosticFingerprint, diagnosticSettings), a =>
+                    {
+                        _p.Store.SetDiagnosticsSettings(diagnosticFingerprint, diagnosticSettings, a.Admin!);
+                        return null;
+                    });
+
             case "set-session-timeouts":
                 if (!TryNumber(Arg(args, "idle"), 1, AuthorityStore.MaxSessionIdleMinutes, out int idle) || !TryNumber(Arg(args, "absolute"), 1, AuthorityStore.MaxSessionAbsoluteMinutes, out int absolute)
                     || AuthorityStore.SessionTimeoutsProblem(idle, absolute) is { } timeoutProblem)

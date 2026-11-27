@@ -317,6 +317,8 @@ public sealed class HostAudit(HostAuditOutbox outbox, AuditUploader uploader) : 
 
     public AuditUploader Uploader => uploader;
 
+    internal Action? OnEventsRejected { get; init; }
+
     public bool TryRecord(AuditFacts facts)
     {
         try
@@ -390,7 +392,13 @@ public sealed class HostAudit(HostAuditOutbox outbox, AuditUploader uploader) : 
                 bool failed;
                 try
                 {
-                    failed = (await uploader.DrainAsync(stop)).Failed;
+                    AuditUploadResult result = await uploader.DrainAsync(stop);
+                    failed = result.Failed;
+                    if (result.Rejected > 0)
+                    {
+                        AppLog.Warn("the authority refused {Count} audit event(s) and the outbox kept them for review", result.Rejected);
+                        OnEventsRejected?.Invoke();
+                    }
                 }
                 catch (Exception error) when (error is not (OutOfMemoryException or OperationCanceledException))
                 {

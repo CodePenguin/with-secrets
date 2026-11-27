@@ -1,4 +1,5 @@
 import type { Grant, Invitation, Machine, OperationName, ParameterValue, Passkey, ProviderValidation } from '../../api/types'
+import type { components } from '../../api/schema'
 
 /**
  * Every administrative change the page can ask for, as data: what the person fills in, the exact operation and parameters the passkey will
@@ -258,6 +259,39 @@ export function renameMachine(machine: Machine): OperationDef {
         parameters: { fingerprint: machine.fingerprint, name },
         summary: `Rename machine ${machine.display} to "${name}" (display only).`,
         done: `Renamed machine ${machine.display} to "${name}".`,
+      }
+    },
+  }
+}
+
+type MachineLogLevel = components['schemas']['MachineDiagnostics']['logLevel']
+
+export const diagnosticLevels: Record<MachineLogLevel, string> = {
+  error: 'Error',
+  warning: 'Warning',
+  information: 'Information',
+  debug: 'Debug',
+}
+
+export function setMachineLogLevel(fingerprint: string, machineName: string, logLevel: MachineLogLevel): OperationDef {
+  return {
+    key: 'machine-log-level',
+    title: 'Change log level',
+    about: [['Machine', machineName]],
+    fields: [
+      { name: 'level', label: 'Log level', kind: 'select', required: true, options: Object.entries(diagnosticLevels).map(([value, label]) => ({ value, label })) },
+    ],
+    initial: { level: logLevel },
+    confirmLabel: 'Save log level',
+    prepare: (values) => {
+      const level = text(values, 'level')
+      if (!Object.hasOwn(diagnosticLevels, level)) return { errors: { level: 'Choose a log level.' } }
+
+      return {
+        operation: 'machine-log-level',
+        parameters: { fingerprint, level },
+        summary: `Set the log level for ${machineName} to ${diagnosticLevels[level as MachineLogLevel]}. This applies to local logs and diagnostics sent to Admin.`,
+        done: `Updated the log level for ${machineName}.`,
       }
     },
   }

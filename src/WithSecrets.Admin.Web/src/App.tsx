@@ -3,6 +3,7 @@ import { SecretsPage } from './features/secrets/SecretsPage'
 import { AccessPage } from './features/access/AccessPage'
 import { AuditPage } from './features/audit/AuditPage'
 import { MachinesPage } from './features/machines/MachinesPage'
+import { MachineDiagnosticsPage } from './features/machines/MachineDiagnosticsPage'
 import { PasskeysPage } from './features/passkeys/PasskeysPage'
 import { ProvidersPage } from './features/providers/ProvidersPage'
 import { SettingsPage } from './features/settings/SettingsPage'
@@ -21,6 +22,7 @@ export function App() {
         <Route path="providers/:id" element={<ProvidersPage />} />
         <Route path="access/:requestId" element={<AccessPage />} />
         <Route path="machines" element={<MachinesPage />} />
+        <Route path="machines/:fingerprint/diagnostics" element={<MachineDiagnosticsPage />} />
         <Route path="audit" element={<AuditPage view="events" />} />
         <Route path="audit/changes" element={<AuditPage view="changes" />} />
         <Route path="audit/gaps" element={<AuditPage view="gaps" />} />

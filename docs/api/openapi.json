@@ -3455,6 +3455,107 @@
         ]
       }
     },
+    "/api/v1/machines/{fingerprint}/diagnostics": {
+      "get": {
+        "operationId": "getMachineDiagnostics",
+        "summary": "Recent diagnostics and the log level for one machine.",
+        "tags": [
+          "machines"
+        ],
+        "parameters": [
+          {
+            "name": "fingerprint",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 12,
+              "maxLength": 80,
+              "description": "The machine\u0027s fingerprint, or an unambiguous start of it (12 hex digits or more)."
+            }
+          }
+        ],
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MachineDiagnostics"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
     "/api/v1/grants": {
       "get": {
         "operationId": "listGrants",
@@ -10572,6 +10673,196 @@
         ]
       }
     },
+    "/api/v1/machines/{fingerprint}/diagnostics/log-level": {
+      "put": {
+        "operationId": "setMachineLogLevel",
+        "summary": "Set the machine\u0027s log level for local logs and diagnostics.",
+        "tags": [
+          "machines"
+        ],
+        "parameters": [
+          {
+            "name": "fingerprint",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 12,
+              "maxLength": 80,
+              "description": "The machine\u0027s fingerprint, or an unambiguous start of it (12 hex digits or more)."
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  },
+                  "level": {
+                    "type": "string",
+                    "enum": [
+                      "error",
+                      "warning",
+                      "information",
+                      "debug"
+                    ],
+                    "description": "The minimum severity for the machine\u0027s local logs and diagnostics."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization",
+                  "level"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "machine-log-level",
+        "description": "Set the machine\u0027s log level for local logs and diagnostics. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          },
+          {
+            "browserCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
     "/api/v1/machines/{fingerprint}/approve-host-change": {
       "post": {
         "operationId": "approveMachineHostChange",
@@ -13602,6 +13893,87 @@
           "items"
         ]
       },
+      "DiagnosticEntry": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "receivedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "error",
+              "warning",
+              "information",
+              "debug"
+            ]
+          },
+          "component": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "time",
+          "receivedAt",
+          "severity",
+          "component",
+          "message"
+        ]
+      },
+      "MachineDiagnostics": {
+        "type": "object",
+        "properties": {
+          "machineName": {
+            "type": "string"
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "logLevel": {
+            "type": "string",
+            "enum": [
+              "error",
+              "warning",
+              "information",
+              "debug"
+            ]
+          },
+          "lastReceivedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DiagnosticEntry"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "machineName",
+          "fingerprint",
+          "logLevel",
+          "lastReceivedAt",
+          "items"
+        ]
+      },
       "Grant": {
         "type": "object",
         "properties": {
@@ -14129,6 +14501,7 @@
               "machine-untrust",
               "machine-trust",
               "machine-rename",
+              "machine-log-level",
               "machine-host-change",
               "grant-extend",
               "grant-renew",
@@ -14278,6 +14651,7 @@
               "machine-untrust",
               "machine-trust",
               "machine-rename",
+              "machine-log-level",
               "machine-host-change",
               "grant-extend",
               "grant-renew",
@@ -14445,6 +14819,7 @@
               "machine-untrust",
               "machine-trust",
               "machine-rename",
+              "machine-log-level",
               "machine-host-change",
               "grant-extend",
               "grant-renew",

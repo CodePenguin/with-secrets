@@ -27,6 +27,7 @@ internal static class Program
         ("i1-spa-sign-in-out", ScenariosSpa.SignInAndOut),
         ("i1b-spa-sign-in-cancel", ScenariosSpa.SignInCancel),
         ("i2-spa-approve-machine", ScenariosSpa.ApproveMachine),
+        ("i2-spa-machine-diagnostics", ScenariosSpa.MachineDiagnostics),
         ("i3-spa-revoke-grant", ScenariosSpa.RevokeGrant),
         ("i4-spa-audit-search", ScenariosSpa.AuditSearch),
         ("i5-spa-lock-unlock", ScenariosSpa.LockUnlock),
