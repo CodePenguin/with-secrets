@@ -735,6 +735,27 @@ public sealed partial class HostService : IDisposable
             return;
         }
 
+        if (path == "/v1/companion")
+        {
+            if (!HttpMethods.IsGet(request.Method))
+            {
+                await Refuse(response, 405, "use GET");
+
+                return;
+            }
+
+            bool remote = Authorization.IsRemote;
+            await response.WriteAsJsonAsync(new
+            {
+                adminPort = Port,
+                locked = !remote && Lock.IsLocked,
+                remote,
+                requestIds = remote ? [] : Approvals.ListPending(ApprovalQueue.MaxPending, null, out _).Select(item => item.RequestId).ToArray(),
+            }, cancellationToken: context.RequestAborted);
+
+            return;
+        }
+
         if (path == "/v1/launch")
         {
             if (!HttpMethods.IsPost(request.Method))

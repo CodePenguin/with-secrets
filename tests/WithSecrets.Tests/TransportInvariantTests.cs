@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json;
 
 namespace WithSecrets.Tests;
 
@@ -30,6 +31,8 @@ internal static class TransportInvariantTests
             StringWriter adminOut = new();
             int adminCode = await AdminAppCommand.RunAsync(1, adminOut, new StringWriter(), rig.Machine.Trust, endpoint: rig.Service.Endpoint);
             check(adminCode == 0 && adminOut.ToString().Contains("http://localhost:" + rig.Service.Port + "/admin", StringComparison.Ordinal) && adminOut.ToString().Contains("running", StringComparison.Ordinal), "invariants: admin prints the admin web app's real port as the service reports it, whatever port was asked for (" + adminOut.ToString().Trim().Replace("\n", " | ") + ")");
+
+            await CheckCompanion(rig, check);
 
             string program = rig.Script("marker", "echo ran> \"%~dpn0.marker.txt\"", "echo ran > \"$0.marker.txt\"");
 
@@ -67,5 +70,28 @@ internal static class TransportInvariantTests
                 // A stray temp file is harmless.
             }
         }
+    }
+
+    private static async Task CheckCompanion(HostServiceTests.Rig rig, Action<bool, string> check)
+    {
+        const string requestId = "run-companion-test";
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        ApprovalRequest request = new("test", "test", [], rig.Work, "private test reason", ["PRIVATE_TEST_NAME"]);
+        ApprovalMachineView machine = new(rig.Machine.Trust.PinnedFingerprint!, "Private test name", "private-test-host");
+        check(rig.Service.Approvals.TryRegister(ApprovalQueue.BuildReview(requestId, new string('a', 64), now, now.AddMinutes(1), machine, request), out _), "companion: the request is pending");
+        using HttpClient local = new(rig.Service.Endpoint.CreateHandler());
+        Uri endpoint = new(rig.Service.Endpoint.BaseUri, "v1/companion");
+        using JsonDocument snapshot = JsonDocument.Parse(await local.GetStringAsync(endpoint));
+        JsonElement document = snapshot.RootElement;
+        check(document.EnumerateObject().Count() == 4 && document.GetProperty("adminPort").GetInt32() == rig.Service.Port &&
+            document.GetProperty("requestIds").EnumerateArray().Select(item => item.GetString()).SequenceEqual([requestId]), "companion: local snapshot contains only service status and pending request IDs");
+        using HttpClient browser = new();
+        using HttpResponseMessage reply = await browser.GetAsync($"http://localhost:{rig.Service.Port}/v1/companion");
+        check(reply.StatusCode == HttpStatusCode.NotFound, "companion: the browser port has no companion endpoint");
+
+        StringWriter output = new();
+        int result = await CompanionWatch.RunAsync(new ServiceTrust(new string('A', 64)), output, TextWriter.Null, rig.Service.Endpoint);
+        check(result == LaunchClient.ServiceNotAuthenticated && output.ToString() == "", "companion: an unpinned service produces no snapshots");
+        rig.Service.Approvals.Withdraw(requestId);
     }
 }

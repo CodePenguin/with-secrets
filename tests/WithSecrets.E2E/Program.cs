@@ -9,6 +9,7 @@ internal static class Program
     private static readonly (string Name, Func<Host, S, Task> Run)[] All =
     [
         ("a-first-run-setup", ScenariosQuickStart.FirstRun),
+        ("a1-desktop-first-run", ScenariosQuickStart.DesktopFirstRun),
         ("a2-first-run-security", Scenarios.FirstRunSecurity),
         ("b-spa-secrets", ScenariosSpa.Secrets),
         ("c-run-approval", Scenarios3.RunApproval),

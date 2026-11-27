@@ -13,12 +13,12 @@ public static class CommandWiring
     /// First-time setup (<c>admin</c> with nothing enrolled): the terminal shows only the link and the result. The page makes the
     /// first passkey and the first state, with the default settings.
     /// </summary>
-    public static int Setup(StateDatabase state, int? port, HostService? service = null, Action<string>? output = null, Func<string?>? input = null)
+    public static int Setup(StateDatabase state, int? port, HostService? service = null, Action<string>? output = null, Func<string?>? input = null, Action<string>? desktopCode = null)
     {
         Action<string> announce = output ?? TerminalPrompt.Line;
         Func<string?> readCode = input ?? CodeReader("Press Ctrl+C to cancel.");
         (EnrollmentTarget primary, EnrollmentTarget local) = Targets(state, ToolSettings.Defaults.Approval.WithPort(port), announce, readCode);
-        ConfigChange change = new FirstRunPage(state, primary, local, announce, readCode) { Service = service }.Run();
+        ConfigChange change = new FirstRunPage(state, primary, local, announce, readCode) { Service = service, DesktopCode = desktopCode }.Run();
         announce(change.Done ? change.Detail : "with-secrets: " + change.Detail);
 
         return change.Code;

@@ -39,6 +39,9 @@ public sealed class FirstRunPage(StateDatabase db, EnrollmentTarget primaryTarge
     /// <summary>The local service already running for a fresh interactive setup.</summary>
     public HostService? Service { get; init; }
 
+    /// <summary>The desktop launcher displays this device code in its tray menu before accepting confirmation.</summary>
+    internal Action<string>? DesktopCode { get; init; }
+
     /// <summary>The challenge the passkey signs for these settings: SHA-256(seed || SHA-256(UTF-8 of the canonical JSON)).</summary>
     internal static byte[] Challenge(byte[] seed, string canonical)
     {
@@ -92,6 +95,7 @@ public sealed class FirstRunPage(StateDatabase db, EnrollmentTarget primaryTarge
             announce("Quick Start · local service running");
             announce("Device: " + ApprovalSummary.Clean(quickStart.DeviceName));
             announce("Device fingerprint: " + quickStart.Fingerprint);
+            DesktopCode?.Invoke(quickStart.Code);
         }
 
         RegistrationPlan plan = new(
@@ -102,7 +106,8 @@ public sealed class FirstRunPage(StateDatabase db, EnrollmentTarget primaryTarge
                 ["options"] = Parse(options),
                 ["settings"] = current.Canonical(),
                 ["quickStart"] = quickStart is not null,
-            }), Carry?.PageNote, quickStart),
+                ["desktopSetup"] = DesktopCode is not null,
+            }), Carry?.PageNote, quickStart, DesktopCode is not null),
             (challenge, body) =>
             {
                 Dictionary<string, string>? members = StringMembers(body);
@@ -788,7 +793,7 @@ internal static class ConfigPageHtml
                 if (finished) return;
                 fetch(base + "/verified", { cache: "no-store" }).then(function (reply) {
                     if (!reply.ok) {
-                        finish("This setup has ended. Check the terminal.");
+                        finish(start.desktopSetup ? "This setup has ended. Check the With Secrets tray menu." : "This setup has ended. Check the terminal.");
                         return;
                     }
                     return reply.json().then(function (session) {
@@ -797,7 +802,9 @@ internal static class ConfigPageHtml
                             setTimeout(checkTerminal, 350);
                             return;
                         }
-                        document.getElementById("quick-terminal").textContent = "Code accepted. Compare the fingerprint with the one in your terminal.";
+                        document.getElementById("quick-terminal").textContent = start.desktopSetup
+                            ? "Code accepted. Compare the fingerprint with the one shown in the With Secrets tray menu."
+                            : "Code accepted. Compare the fingerprint with the one in your terminal.";
                         document.getElementById("quick-code").hidden = true;
                         verifyDevice.disabled = false;
                     });
@@ -814,7 +821,7 @@ internal static class ConfigPageHtml
                     post("verify-device", "").then(function (reply) {
                         if (finished) return;
                         if (!reply.ok) {
-                            finish("This setup has ended. Check the terminal.");
+                            finish(start.desktopSetup ? "This setup has ended. Check the With Secrets tray menu." : "This setup has ended. Check the terminal.");
                             return;
                         }
                         deviceVerified = true;
@@ -844,7 +851,7 @@ internal static class ConfigPageHtml
     /// served. <paramref name="start" /> is the JSON for the data block, made with the default encoder (which escapes &lt;,
     /// &gt; and &amp;, so it cannot end the block).
     /// </summary>
-    public static OneShotResponse Build(string start, string? note, QuickStartRegistration? quickStart = null)
+    public static OneShotResponse Build(string start, string? note, QuickStartRegistration? quickStart = null, bool desktopSetup = false)
     {
         string script = PrfClient.Fill(Script.Replace("//@SHOW_RECOVERY@", PasskeyRegistration.RecoveryScript, StringComparison.Ordinal).Replace("//@PROGRESS@", PasskeyRegistration.ProgressScript, StringComparison.Ordinal).ReplaceLineEndings("\n"));
         string quickStyle = quickStart is null ? "" : """
@@ -873,8 +880,10 @@ internal static class ConfigPageHtml
         else
         {
             page.Append("<p><strong>Quick Start</strong></p>\n<ol class=\"steps\" aria-label=\"Steps\"><li id=\"s1\" aria-current=\"step\">Verify device</li><li id=\"s2\">Create passkey</li><li id=\"s3\">Finish setup</li></ol>\n");
-            page.Append("<section id=\"quick-device\"><h2>Verify this device</h2><p id=\"quick-terminal\">Enter this six-digit code in the terminal that opened Quick Start.</p><div id=\"quick-code\" class=\"code-copy-row\"><div class=\"code-copy-actions\"><code id=\"terminal-code\">")
-                .Append(quickStart.Code).Append("</code>").Append(PasskeyRegistration.CopyCodeButton("terminal-code", "Copy terminal code"))
+            page.Append("<section id=\"quick-device\"><h2>Verify this device</h2><p id=\"quick-terminal\">")
+                .Append(desktopSetup ? "Compare this six-digit code with the With Secrets tray menu, then choose Verify code in that menu." : "Enter this six-digit code in the terminal that opened Quick Start.")
+                .Append("</p><div id=\"quick-code\" class=\"code-copy-row\"><div class=\"code-copy-actions\"><code id=\"terminal-code\">")
+                .Append(quickStart.Code).Append("</code>").Append(desktopSetup ? "" : PasskeyRegistration.CopyCodeButton("terminal-code", "Copy terminal code"))
                 .Append("</div>").Append(PasskeyRegistration.CopyFeedback).Append("</div><p>Device fingerprint for ").Append(Encode(quickStart.DeviceName))
                 .Append("</p><p><code id=\"device-fingerprint\">").Append(Encode(quickStart.Fingerprint)).Append("</code></p></section>\n");
             page.Append("<h2 id=\"quick-finish\" hidden>Finish setup</h2>\n");

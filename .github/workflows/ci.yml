@@ -57,6 +57,67 @@ jobs:
       working-directory: src/WithSecrets.Admin.Web
       run: npm run verify
 
+  desktop-companion:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - { os: windows-latest, runtime: win-x64, cgo: '0' }
+        - { os: ubuntu-latest, runtime: linux-x64, cgo: '0' }
+        - { os: macos-latest, runtime: osx-arm64, cgo: '1' }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      CGO_ENABLED: ${{ matrix.cgo }}
+    defaults:
+      run:
+        working-directory: src/WithSecrets.Desktop
+        shell: pwsh
+    steps:
+    - uses: actions/checkout@v7
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: src/WithSecrets.Desktop/go.mod
+        cache-dependency-path: src/WithSecrets.Desktop/go.sum
+    - name: Format, lint, and test
+      run: |
+        $unformatted = gofmt -l .
+        if ($unformatted) { throw "Run gofmt on $unformatted" }
+        go vet ./...
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        go test ./...
+    - name: Build standalone companion
+      run: |
+        $out = Join-Path $env:RUNNER_TEMP 'with-secrets-desktop'
+        New-Item -ItemType Directory -Path $out | Out-Null
+        if ($IsWindows) {
+          $binary = Join-Path $out 'with-secrets-desktop.exe'
+          go build -trimpath -ldflags '-s -w -H windowsgui' -o $binary .
+        } elseif ($IsMacOS) {
+          $bundle = Join-Path $out 'With Secrets.app'
+          $binary = Join-Path $bundle 'Contents/MacOS/with-secrets-desktop'
+          New-Item -ItemType Directory -Path (Split-Path $binary) -Force | Out-Null
+          Copy-Item Info.plist (Join-Path $bundle 'Contents/Info.plist')
+          go build -trimpath -ldflags '-s -w' -o $binary .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          codesign --force --sign - $bundle
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          codesign --verify --strict $bundle
+        } else {
+          $binary = Join-Path $out 'with-secrets-desktop'
+          go build -trimpath -ldflags '-s -w' -o $binary .
+        }
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        Copy-Item README.md, THIRD-PARTY-NOTICES.txt $out
+        Get-Item $binary | Select-Object Name, Length
+    - name: Archive the companion
+      run: tar -czf "${{ runner.temp }}/with-secrets-desktop.tar.gz" -C "${{ runner.temp }}/with-secrets-desktop" .
+    - uses: actions/upload-artifact@v7
+      with:
+        name: with-secrets-desktop-${{ matrix.runtime }}
+        path: ${{ runner.temp }}/with-secrets-desktop.tar.gz
+        if-no-files-found: error
+
   publish:
     # The release exactly as scripts/publish.ps1 makes and verifies it: one self-contained program with the web application embedded, for the platform of the runner.
     strategy:
