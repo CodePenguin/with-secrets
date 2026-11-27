@@ -41,6 +41,7 @@ public sealed class FirstRunPage(StateDatabase db, EnrollmentTarget primaryTarge
 
     /// <summary>The desktop launcher displays this device code in its tray menu before accepting confirmation.</summary>
     internal Action<string>? DesktopCode { get; init; }
+    internal Func<Task>? DesktopCancellation { get; init; }
 
     /// <summary>The challenge the passkey signs for these settings: SHA-256(seed || SHA-256(UTF-8 of the canonical JSON)).</summary>
     internal static byte[] Challenge(byte[] seed, string canonical)
@@ -89,7 +90,9 @@ public sealed class FirstRunPage(StateDatabase db, EnrollmentTarget primaryTarge
         string? sent = null;
         int failure = RunCommand.Denied;
         IReadOnlyDictionary<string, string> carried = new Dictionary<string, string>();
-        QuickStartRegistration? quickStart = Service is { } service && Carry is null ? new(service) : null;
+        QuickStartRegistration? quickStart = Service is { } service && Carry is null
+            ? new(service) { WaitForCancellation = DesktopCancellation }
+            : null;
         if (quickStart is not null)
         {
             announce("Quick Start · local service running");

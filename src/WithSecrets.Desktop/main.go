@@ -32,6 +32,9 @@ func main() {
 		systray.SetTitle("With Secrets")
 		status := systray.AddMenuItem("Connecting to service", "")
 		status.Disable()
+		startupDetail := systray.AddMenuItem("Service startup error", "")
+		startupDetail.Disable()
+		startupDetail.Hide()
 		open := systray.AddMenuItem("Open Admin", "Open With Secrets in your browser")
 		open.Disable()
 		confirm := systray.AddMenuItem("Verify setup code", "Confirm that the browser shows the same code")
@@ -41,7 +44,18 @@ func main() {
 		confirm.Hide()
 		fingerprint.Hide()
 		cancelSetup.Hide()
-		alerts := systray.AddMenuItemCheckbox("Run request notifications", "Show local desktop notifications", true)
+		preferences, preferenceError := notificationPreferencesPath()
+		enabled := true
+		if preferenceError == nil {
+			enabled, preferenceError = readNotificationPreference(preferences)
+		}
+		if preferenceError != nil {
+			enabled = false
+		}
+		alerts := systray.AddMenuItemCheckbox("Run request notifications", "Show local desktop notifications", enabled)
+		if preferenceError != nil {
+			alerts.SetTooltip("Could not read the notification preference")
+		}
 		systray.AddSeparator()
 		quit := systray.AddMenuItem("Quit", "Close the desktop companion")
 
@@ -54,7 +68,7 @@ func main() {
 				defer close(watchFinished)
 				watchService(ctx, service, snapshots, retry)
 			}()
-			runTray(ctx, service, snapshots, retry, status, open, confirm, fingerprint, cancelSetup, alerts, quit)
+			runTray(ctx, service, snapshots, retry, status, startupDetail, open, confirm, fingerprint, cancelSetup, alerts, quit, enabled, preferences)
 			cancel()
 			<-watchFinished
 		}()
@@ -64,7 +78,7 @@ func main() {
 }
 
 func runTray(ctx context.Context, service string, snapshots <-chan snapshot, retry chan<- struct{},
-	status, open, confirm, fingerprint, cancelSetup, alerts, quit *systray.MenuItem) {
+	status, startupDetail, open, confirm, fingerprint, cancelSetup, alerts, quit *systray.MenuItem, enabled bool, preferences string) {
 	ctx, closeTray := context.WithCancel(ctx)
 	var current snapshot
 	var lastLabel string
@@ -79,7 +93,6 @@ func runTray(ctx context.Context, service string, snapshots <-chan snapshot, ret
 		closeTray()
 		setupWorkers.Wait()
 	}()
-	enabled := true
 	var permitted bool
 	notices := make(map[string]int)
 	clicked := make(chan review)
@@ -96,7 +109,9 @@ func runTray(ctx context.Context, service string, snapshots <-chan snapshot, ret
 			}
 		})
 	}
-	authorize()
+	if enabled {
+		authorize()
+	}
 
 	refreshNotices := func() {
 		for id, port := range notices {
@@ -149,6 +164,12 @@ func runTray(ctx context.Context, service string, snapshots <-chan snapshot, ret
 			systray.SetIcon(trayIcon(statusIcon(trayPNG, current, stopSetup != nil)))
 			lastLabel = label
 		}
+		if current.StartupError != "" {
+			startupDetail.SetTitle(current.StartupError)
+			startupDetail.Show()
+		} else {
+			startupDetail.Hide()
+		}
 		switch {
 		case stopSetup != nil:
 			open.SetTitle("Open setup")
@@ -158,6 +179,8 @@ func runTray(ctx context.Context, service string, snapshots <-chan snapshot, ret
 			open.SetTitle("Start service")
 		case current.Locked:
 			open.SetTitle("Open Admin to unlock")
+		case current.NeedsDeviceApproval:
+			open.SetTitle("Open Machines to approve this device")
 		default:
 			open.SetTitle("Open Admin")
 		}
@@ -207,7 +230,11 @@ func runTray(ctx context.Context, service string, snapshots <-chan snapshot, ret
 				default:
 				}
 			case current.portAvailable():
-				go openLink(adminURL(current.AdminPort))
+				link := adminURL(current.AdminPort)
+				if current.NeedsDeviceApproval && !current.Locked {
+					link += "/machines"
+				}
+				go openLink(link)
 			}
 		case update := <-setupUpdates:
 			if update.finished {
@@ -253,7 +280,12 @@ func runTray(ctx context.Context, service string, snapshots <-chan snapshot, ret
 				drawStatus()
 			}
 		case <-alerts.ClickedCh:
+			if err := writeNotificationPreference(preferences, !enabled); err != nil {
+				alerts.SetTooltip("Could not save the notification preference")
+				continue
+			}
 			enabled = !enabled
+			alerts.SetTooltip("Show local desktop notifications")
 			if enabled {
 				alerts.Check()
 				authorize()

@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type setupUpdate struct {
@@ -38,6 +39,7 @@ func runSetup(parent, ctx context.Context, service string, updates chan<- setupU
 		}
 	}
 	success := false
+	reported := false
 	defer func() {
 		select {
 		case updates <- setupUpdate{finished: true, success: success}:
@@ -64,11 +66,10 @@ func runSetup(parent, ctx context.Context, service string, updates chan<- setupU
 		close(done)
 		_ = input.Close()
 		_ = output.Close()
-		if success {
-			go func() { _ = cmd.Wait() }()
-		} else {
-			_ = cmd.Process.Kill()
+		if reported && !success {
 			_ = cmd.Wait()
+		} else {
+			go func() { _ = cmd.Wait() }()
 		}
 	}()
 	lines := make(chan string)
@@ -86,13 +87,21 @@ func runSetup(parent, ctx context.Context, service string, updates chan<- setupU
 
 	var current setupUpdate
 	awaitingCode := false
+	cancel := ctx.Done()
+	var cancelTimeout <-chan time.Time
 	for {
 		var line string
 		select {
-		case <-ctx.Done():
+		case <-cancel:
+			// EOF requests cancellation. Only the service can determine whether
+			// the final assertion has already crossed the commit boundary.
+			_ = input.Close()
+			cancel = nil
+			cancelTimeout = time.After(8 * time.Second)
+		case <-cancelTimeout:
 			return
 		case <-confirm:
-			if awaitingCode {
+			if awaitingCode && cancel != nil {
 				if _, err := io.WriteString(input, current.code+"\n"); err != nil {
 					return
 				}
@@ -125,6 +134,7 @@ func runSetup(parent, ctx context.Context, service string, updates chan<- setupU
 			awaitingCode = true
 			send(current)
 		case strings.HasPrefix(line, "quick-start:result:"):
+			reported = true
 			success = line == "quick-start:result:0"
 			return
 		}

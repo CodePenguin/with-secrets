@@ -16,13 +16,15 @@ import (
 )
 
 type snapshot struct {
-	AdminPort     int      `json:"adminPort"`
-	Locked        bool     `json:"locked"`
-	Remote        bool     `json:"remote"`
-	RequestIDs    []string `json:"requestIds"`
-	SetupRequired bool     `json:"setupRequired"`
-	Starting      bool     `json:"-"`
-	Stopped       bool     `json:"-"`
+	AdminPort           int      `json:"adminPort"`
+	Locked              bool     `json:"locked"`
+	Remote              bool     `json:"remote"`
+	RequestIDs          []string `json:"requestIds"`
+	SetupRequired       bool     `json:"setupRequired"`
+	NeedsDeviceApproval bool     `json:"needsDeviceApproval"`
+	Starting            bool     `json:"-"`
+	Stopped             bool     `json:"-"`
+	StartupError        string   `json:"-"`
 }
 
 const retryDelay = 3 * time.Second
@@ -45,6 +47,8 @@ func (s snapshot) label() string {
 		return "Service needs attention"
 	case s.Remote:
 		return "Service running, remote authority"
+	case s.NeedsDeviceApproval:
+		return "Local device approval required"
 	case s.Locked:
 		return "Service running, authority locked"
 	default:
@@ -104,6 +108,8 @@ func watchService(ctx context.Context, service string, out chan<- snapshot, retr
 	}
 	automaticStart := true
 	var startingUntil time.Time
+	var launched <-chan string
+	var startupError string
 	for ctx.Err() == nil {
 		setupRequired := false
 		code := readSnapshots(ctx, service, func(next snapshot) {
@@ -111,6 +117,8 @@ func watchService(ctx context.Context, service string, out chan<- snapshot, retr
 			if next.portAvailable() {
 				automaticStart = false
 				startingUntil = time.Time{}
+				launched = nil
+				startupError = ""
 			}
 			send(next)
 		})
@@ -119,15 +127,21 @@ func watchService(ctx context.Context, service string, out chan<- snapshot, retr
 		}
 		if code == serviceNotRunning && automaticStart {
 			automaticStart = false
-			if err := startService(service); err == nil {
+			launched, startupError = startService(service)
+			if startupError == "" {
 				startingUntil = time.Now().Add(startupGrace)
 				send(snapshot{Starting: true})
 			} else {
-				send(snapshot{Stopped: true})
+				send(snapshot{Stopped: true, StartupError: startupError})
 			}
 		} else if !setupRequired {
-			starting := code == serviceNotRunning && time.Now().Before(startingUntil)
-			send(snapshot{Starting: starting, Stopped: code == serviceNotRunning && !starting})
+			select {
+			case startupError = <-launched:
+				launched = nil
+			default:
+			}
+			starting := code == serviceNotRunning && startupError == "" && time.Now().Before(startingUntil)
+			send(snapshot{Starting: starting, Stopped: code == serviceNotRunning && !starting, StartupError: startupError})
 		}
 		select {
 		case <-ctx.Done():
@@ -139,14 +153,52 @@ func watchService(ctx context.Context, service string, out chan<- snapshot, retr
 	}
 }
 
-func startService(service string) error {
+func startService(service string) (<-chan string, string) {
 	cmd := exec.Command(service, "service")
 	detachService(cmd)
+	var diagnostics startupDiagnostics
+	cmd.Stderr = &diagnostics
 	if err := cmd.Start(); err != nil {
-		return err
+		return nil, err.Error()
 	}
-	go func() { _ = cmd.Wait() }()
-	return nil
+	result := make(chan string, 1)
+	go func() {
+		if err := cmd.Wait(); err != nil {
+			message := diagnostics.lastLine()
+			if message == "" {
+				message = err.Error()
+			}
+			result <- message
+		}
+	}()
+	return result, ""
+}
+
+type startupDiagnostics struct{ text []byte }
+
+func (d *startupDiagnostics) Write(p []byte) (int, error) {
+	const keep = 4096
+	if len(p) >= keep {
+		d.text = append(d.text[:0], p[len(p)-keep:]...)
+	} else {
+		if excess := len(d.text) + len(p) - keep; excess > 0 {
+			d.text = append(d.text[:0], d.text[excess:]...)
+		}
+		d.text = append(d.text, p...)
+	}
+	return len(p), nil
+}
+
+func (d *startupDiagnostics) lastLine() string {
+	text := strings.TrimSpace(string(d.text))
+	if last := strings.LastIndexByte(text, '\n'); last >= 0 {
+		text = text[last+1:]
+	}
+	chars := []rune(text)
+	if len(chars) > 200 {
+		return string(chars[:197]) + "..."
+	}
+	return text
 }
 
 func readSnapshots(ctx context.Context, service string, send func(snapshot)) int {

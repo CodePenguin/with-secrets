@@ -9,7 +9,7 @@ import (
 )
 
 func statusIcon(base []byte, state snapshot, settingUp bool) []byte {
-	if state.portAvailable() && !state.Locked && !settingUp {
+	if state.portAvailable() && !state.Locked && !state.NeedsDeviceApproval && !settingUp {
 		return base
 	}
 	icon, err := png.Decode(bytes.NewReader(base))

@@ -968,7 +968,19 @@ internal static class PasskeyRegistration
                 {
                     _terminalVerified = !_decision.Task.IsCompleted;
                 }
-                _decision.Task.Wait(Left());
+                if (quickStart.WaitForCancellation is { } waitForCancellation)
+                {
+                    // End takes the same lock as the final assertion. Cancellation can win
+                    // before that assertion, or observe its completed result after the commit.
+                    if (Task.WaitAny([_decision.Task, waitForCancellation()], Left()) == 1)
+                    {
+                        return End(ApprovalDecision.Deny("setup was canceled; nothing was added"));
+                    }
+                }
+                else
+                {
+                    _decision.Task.Wait(Left());
+                }
                 return End(ApprovalDecision.Deny("no passkey confirmation before the time limit"));
             }
 
@@ -1552,8 +1564,11 @@ internal static class PasskeyRegistration
                         _decision.TrySetResult(session is not null ? outcome : outcome with { Detail = outcome.Detail + "\nOpen the admin page to finish unlocking or signing in." });
                         return new OneShotResponse(200, "application/json", JsonSerializer.Serialize(new
                         {
-                            ok = true, admin = AdminKey.Line(_next), recovery = RecoveryCode.Format(prf.FirstStore!.RecoveryCode),
-                            quickStart = true, antiForgery = session?.Csrf,
+                            ok = true,
+                            admin = AdminKey.Line(_next),
+                            recovery = RecoveryCode.Format(prf.FirstStore!.RecoveryCode),
+                            quickStart = true,
+                            antiForgery = session?.Csrf,
                         }), Session: session);
                     }
                 }

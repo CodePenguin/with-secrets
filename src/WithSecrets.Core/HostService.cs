@@ -751,6 +751,8 @@ public sealed partial class HostService : IDisposable
                 locked = !remote && Lock.IsLocked,
                 remote,
                 requestIds = remote ? [] : Approvals.ListPending(ApprovalQueue.MaxPending, null, out _).Select(item => item.RequestId).ToArray(),
+                needsDeviceApproval = !remote && (_options.Deployment.HostConfig.Load().Config?.Authority is null ||
+                    _options.Deployment.Store.Find(_options.Deployment.Fingerprint)?.Status == MachineStatus.Pending),
             }, cancellationToken: context.RequestAborted);
 
             return;

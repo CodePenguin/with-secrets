@@ -149,6 +149,26 @@ internal static class ScenariosQuickStart
         checks.NoProblems(browser);
     }
 
+    public static async Task DesktopCancellation(Host host, S checks)
+    {
+        using Rig rig = new(trusted: false);
+        await using Ctx browser = await Ctx.NewAsync(host);
+        using SpaApp app = new(rig, unlocked: false);
+        TaskCompletionSource cancellation = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        using Cmd<int> command = new((_, _, _) => CommandWiring.Setup(rig.State, null, app.Service,
+            desktopCode: _ => { }, desktopCancellation: () => cancellation.Task));
+        await browser.Page.GotoAsync(await command.LinkAsync());
+        string code = await browser.Text("#quick-code code");
+        await command.WaitPromptAsync();
+        command.Type(code);
+        await browser.Page.WaitForFunctionAsync("() => !document.getElementById('verify-device').disabled");
+        cancellation.TrySetResult();
+        checks.Check(await command.Result.WaitAsync(TimeSpan.FromSeconds(10)) == RunCommand.Denied &&
+            rig.State.TryManifest(out Manifest? manifest, out _) && manifest is null && app.Service.Lock.IsLocked,
+            "desktop cancellation after the code and before the passkey leaves setup untouched");
+        checks.NoProblems(browser);
+    }
+
     private static async Task RefuseWrongCode(Host host, S checks)
     {
         using Rig rig = new(trusted: false);

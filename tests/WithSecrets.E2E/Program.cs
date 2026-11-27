@@ -10,6 +10,7 @@ internal static class Program
     [
         ("a-first-run-setup", ScenariosQuickStart.FirstRun),
         ("a1-desktop-first-run", ScenariosQuickStart.DesktopFirstRun),
+        ("a1-desktop-cancel-setup", ScenariosQuickStart.DesktopCancellation),
         ("a2-first-run-security", Scenarios.FirstRunSecurity),
         ("b-spa-secrets", ScenariosSpa.Secrets),
         ("c-run-approval", Scenarios3.RunApproval),

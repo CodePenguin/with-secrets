@@ -33,6 +33,14 @@ internal static class TransportInvariantTests
             check(adminCode == 0 && adminOut.ToString().Contains("http://localhost:" + rig.Service.Port + "/admin", StringComparison.Ordinal) && adminOut.ToString().Contains("running", StringComparison.Ordinal), "invariants: admin prints the admin web app's real port as the service reports it, whatever port was asked for (" + adminOut.ToString().Trim().Replace("\n", " | ") + ")");
 
             await CheckCompanion(rig, check);
+            using (HostServiceTests.Rig pending = new(parent, trusted: false, startLocked: true))
+            {
+                using HttpClient pendingLocal = new(pending.Service.Endpoint.CreateHandler());
+                Uri pendingEndpoint = new(pending.Service.Endpoint.BaseUri, "v1/companion");
+                using JsonDocument pendingStatus = JsonDocument.Parse(await pendingLocal.GetStringAsync(pendingEndpoint));
+                check(pendingStatus.RootElement.GetProperty("needsDeviceApproval").GetBoolean() &&
+                    pendingStatus.RootElement.GetProperty("locked").GetBoolean(), "companion: a pending local device offers an unlock and approval path");
+            }
 
             string program = rig.Script("marker", "echo ran> \"%~dpn0.marker.txt\"", "echo ran > \"$0.marker.txt\"");
 
@@ -83,7 +91,7 @@ internal static class TransportInvariantTests
         Uri endpoint = new(rig.Service.Endpoint.BaseUri, "v1/companion");
         using JsonDocument snapshot = JsonDocument.Parse(await local.GetStringAsync(endpoint));
         JsonElement document = snapshot.RootElement;
-        check(document.EnumerateObject().Count() == 4 && document.GetProperty("adminPort").GetInt32() == rig.Service.Port &&
+        check(document.EnumerateObject().Count() == 5 && document.GetProperty("adminPort").GetInt32() == rig.Service.Port &&
             document.GetProperty("requestIds").EnumerateArray().Select(item => item.GetString()).SequenceEqual([requestId]), "companion: local snapshot contains only service status and pending request IDs");
         using HttpClient browser = new();
         using HttpResponseMessage reply = await browser.GetAsync($"http://localhost:{rig.Service.Port}/v1/companion");
