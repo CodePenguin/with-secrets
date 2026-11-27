@@ -1556,11 +1556,17 @@ internal static class ApiTests
         string diagnosticBody = JsonSerializer.Serialize(new DiagnosticBatch([warnings[0]]), DiagnosticWire.Json);
         check(DiagnosticWire.TryRead(diagnosticBody, out _) && !DiagnosticWire.TryRead(diagnosticBody.Replace(DiagnosticCatalog.CheckInFailed, "unrecognized-code", StringComparison.Ordinal), out _)
             && !DiagnosticWire.TryRead(diagnosticBody.Insert(1, "\"message\":\"arbitrary text\","), out _), "diagnostics: the wire accepts known codes and refuses arbitrary messages or codes");
-        app.Service.Admin.Store.Diagnostics.Record(app.Fingerprint, [warnings[0]]);
+        app.Service.Admin.Store.Diagnostics.Record(app.Fingerprint, warnings);
         foreach ((string path, string schema) in shapes)
         {
             (int shapeStatus, string answer, _) = await s.GetAsync(path);
             check(shapeStatus == 200 && Conform(schema, answer) is null, "openapi: the answer of " + path + " conforms to " + schema + " (" + Conform(schema, answer) + ")");
+            if (shapeStatus == 200 && schema == "MachineDiagnostics")
+            {
+                using JsonDocument diagnosticResponse = JsonDocument.Parse(answer);
+                check(diagnosticResponse.RootElement.GetProperty("items").GetArrayLength() == DiagnosticOutbox.Capacity,
+                    "diagnostics: the Admin API returns the full 1,000-message history");
+            }
         }
 
         (int missingApprovalStatus, string missingApprovalBody, _) = await s.GetAsync("/api/v1/approvals/req-unknown");

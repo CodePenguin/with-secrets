@@ -234,7 +234,8 @@ internal sealed class DiagnosticOutbox(string path, TimeProvider clock)
 /// <summary>The authority keeps the most recent entries for each machine in the private state directory.</summary>
 internal sealed class MachineDiagnosticsStore(string folder, TimeProvider clock)
 {
-    internal const int RetainedPerMachine = 200;
+    internal const int RetainedPerMachine = DiagnosticOutbox.Capacity;
+    private const int MaxHistoryBytes = 256 * 1024;
     private readonly Lock _gate = new();
 
     public void Record(string fingerprint, DiagnosticEvent[] batch)
@@ -278,7 +279,7 @@ internal sealed class MachineDiagnosticsStore(string folder, TimeProvider clock)
         return Path.Combine(folder, fingerprint.ToUpperInvariant() + ".json");
     }
 
-    private static List<ReceivedDiagnostic> Read(string path) => DiagnosticFile.Read<ReceivedDiagnostic>(path)
+    private static List<ReceivedDiagnostic> Read(string path) => DiagnosticFile.Read<ReceivedDiagnostic>(path, MaxHistoryBytes)
         .Where(row => DiagnosticCatalog.Valid(row?.Event)).TakeLast(RetainedPerMachine).ToList();
 }
 
