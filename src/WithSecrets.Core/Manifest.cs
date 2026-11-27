@@ -16,8 +16,8 @@ public sealed record ManifestKey(string Id, string Name, string PublicKey, int A
 /// <summary>
 /// The one signed description of what the tool trusts: every enrolled key (at least one of them an admin), the secret store's
 /// public key and the hash of every stored secret, and every setting, with a version that goes up by one with each change. It
-/// is stored as its canonical JSON text with an admin key's assertion over <see cref="Challenge" /> of that text (see
-/// <see cref="SignedManifest" />), and keys, the store key, the secret hashes and settings are read only from it.
+/// is stored as canonical JSON with an admin key's assertion over <see cref="Challenge" /> of that text (see
+/// <see cref="SignedManifest" />). Verified <see cref="SignedSecretWrite" /> entries update only its effective secret hashes and version.
 /// <para>
 /// The canonical text is exactly
 /// <c>{"v":N,"keys":[{"id":S,"name":S,"pub":S,"alg":N,"rp":S,"created":S,"admin":true|false[,"slot":{"salt":S,"wrap":S}]},...],"store":S,"vault":S[,"recovery":{"salt":S,"wrap":S}],"secrets":{NAME:HASH,...},"settings":SETTINGS}</c>:
@@ -54,7 +54,7 @@ public sealed record Manifest(long Version, IReadOnlyList<ManifestKey> Keys, Too
     /// <summary>The admin keys, oldest first (then by id).</summary>
     public IReadOnlyList<ManifestKey> Admins => [.. Keys.Where(key => key.Admin).OrderBy(key => key.Created).ThenBy(key => key.Id, StringComparer.Ordinal)];
 
-    /// <summary>The next version with <paramref name="key" /> added: an admin key, or (the default) a key that only approves runs.</summary>
+    /// <summary>The next version with <paramref name="key" /> added as an admin or a convenience passkey.</summary>
     public Manifest WithKey(PasskeyRecord key, bool admin = false) => Next([.. Keys, ManifestKey.From(key, admin)], Settings, Store, Secrets, Vault, Recovery);
 
     /// <summary>The next version without the key with this Id.</summary>

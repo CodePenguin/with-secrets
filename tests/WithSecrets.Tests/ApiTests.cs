@@ -1,3 +1,4 @@
+using System.Buffers.Text;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -22,6 +23,7 @@ internal static class ApiTests
         try
         {
             await PublicAndSignIn(check, root);
+            await SaveSecretBatch(check, root);
             await InlineSignIn(check, root);
             await SessionTimeouts(check, root);
             await LogoutLockRestart(check, root);
@@ -55,6 +57,59 @@ internal static class ApiTests
                 // A stray temp file is harmless.
             }
         }
+    }
+
+    private static async Task SaveSecretBatch(Action<bool, string> check, string root)
+    {
+        using AdminApp app = new(root, providers: new ProviderRegistry());
+        AdminBrowser browser = app.Browser();
+        check(await browser.SignInAsync(app.Phone), "secret batch API: a convenience passkey signs in");
+
+        string folder = string.Join('/', new string('a', 64), new string('b', 64), new string('c', 64));
+        string[] names = [.. Enumerable.Range(0, SecretEntry.MaxNames).Select(i => $"{folder}/S{i:D4}")];
+        string value = new('\u4e2d', SecretEntry.MaxValueLength);
+        Dictionary<string, string> values = names.ToDictionary(name => name, _ => value, StringComparer.Ordinal);
+        const string path = "/api/v1/secrets/entries";
+        (int starting, string entry) = await browser.PostAsync(path, JsonSerializer.Serialize(new { names }));
+        check(starting == 201, "secret batch API: start accepts all 20 full-length names (" + starting + ")");
+        if (starting != 201)
+        {
+            return;
+        }
+
+        using JsonDocument entered = JsonDocument.Parse(entry);
+        JsonElement info = entered.RootElement;
+        string id = info.GetProperty("id").GetString()!;
+        byte[] bind = Base64Url.DecodeFromChars(info.GetProperty("payload").GetProperty("bind").GetString()!);
+        byte[] serverKey = Base64Url.DecodeFromChars(info.GetProperty("publicKey").GetString()!);
+        byte[] iv = RandomNumberGenerator.GetBytes(12);
+        (byte[] epk, byte[] ct) = WebApprovalTests.BrowserEncrypt(serverKey, bind, iv, bind, JsonSerializer.SerializeToUtf8Bytes(values));
+        Dictionary<string, string> save = new()
+        {
+            ["epk"] = Base64Url.EncodeToString(epk),
+            ["iv"] = Base64Url.EncodeToString(iv),
+            ["ct"] = Base64Url.EncodeToString(ct),
+        };
+        (int sealedStatus, string sealedBody) = await browser.PostAsync($"{path}/{id}/seal", JsonSerializer.Serialize(save));
+        check(sealedStatus == 200, "secret batch API: seal accepts 20 maximum-length escaped values (" + sealedStatus + ")");
+        if (sealedStatus != 200)
+        {
+            return;
+        }
+
+        using JsonDocument sealedBatch = JsonDocument.Parse(sealedBody);
+        string batch = sealedBatch.RootElement.GetProperty("manifest").GetString()!;
+        string assertion = app.Phone.Assert(Manifest.Challenge(SecretCrypto.ManifestBind(bind, ct), batch), browser.Origin, "localhost", TestState.NextCount());
+        foreach ((string field, string data) in JsonSerializer.Deserialize<Dictionary<string, string>>(assertion)!)
+        {
+            save.Add(field, data);
+        }
+
+        (int saved, _) = await browser.PostAsync($"{path}/{id}/save", JsonSerializer.Serialize(save));
+        check(saved == 200 && new SecretStore(app.State).ListNames().SequenceEqual(names), "secret batch API: one convenience tap stores all 20 values (" + saved + ")");
+        check((await browser.PostAsync($"{path}/{id}/save", JsonSerializer.Serialize(save))).Status == 404, "secret batch API: the successful tap cannot be replayed");
+        (int move, string moveProblem) = await browser.PostAsync(path, JsonSerializer.Serialize(new { names = new[] { "MOVED" }, source = names[0] }));
+        check(move == 403 && Code(moveProblem) == "scope-required", "secret batch API: moving a secret requires an admin session");
     }
 
     public static async Task Contract(Action<bool, string> check)
@@ -403,8 +458,8 @@ internal static class ApiTests
         {
             string[] capabilities = [.. approvalSession.RootElement.GetProperty("capabilities").EnumerateArray().Select(item => item.GetString()!)];
             check(Member(approvalWho, "identity") == "phone" && Member(approvalWho, "scope") == "approval"
-                && capabilities.SequenceEqual([SessionCapabilities.ApprovalsRead, SessionCapabilities.ApprovalsDecide, SessionCapabilities.AdminRead, SessionCapabilities.GrantsDecide]),
-                "session: the non-admin passkey receives read and grant capabilities without admin.decide");
+                && capabilities.SequenceEqual([SessionCapabilities.ApprovalsRead, SessionCapabilities.ApprovalsDecide, SessionCapabilities.AdminRead, SessionCapabilities.GrantsDecide, SessionCapabilities.SecretsWrite]),
+                "session: a convenience passkey can read, manage grants and write secret values");
         }
         (int approvalQueueStatus, string approvalQueueBody, _) = await approvalOnly.GetAsync("/api/v1/approvals");
         (int approvalAdminRead, _, _) = await approvalOnly.GetAsync("/api/v1/machines");
@@ -423,7 +478,8 @@ internal static class ApiTests
             check(readStatus == 200 && !readBody.Contains(token, StringComparison.Ordinal) && !readBody.Contains("authenticatorData", StringComparison.Ordinal),
                 "convenience read: " + route.Template + " returns metadata without tokens or proofs");
         }
-        foreach (ApiRoute route in app.Service.Admin.Api.Routes.Where(item => item.Access is ApiAccess.Authorize or ApiAccess.Mutation && item.Tag != "authorizations" && !OperationPolicy.AnyKey(item.Operation)))
+        foreach (ApiRoute route in app.Service.Admin.Api.Routes.Where(item => item.Access is ApiAccess.Authorize or ApiAccess.Mutation
+            && item.Tag != "authorizations" && OperationPolicy.SessionCapability(item.Operation) == SessionCapabilities.AdminDecide))
         {
             (int gate, string rejected) = await approvalOnly.SendAsync(new HttpMethod(route.Method), Fill(route), route.Request is null ? null : "{}");
             check(gate == 403 && Code(rejected) == "scope-required", "convenience route gate: " + route.Method + " " + route.Template + " requires admin.decide");
@@ -439,6 +495,11 @@ internal static class ApiTests
         }
 
         check(Snapshot(app) == beforeConvenience, "convenience sessions cannot change administrator state");
+        foreach (ApiRoute route in app.Service.Admin.Api.Routes.Where(item => item.Operation == SecretFlows.SetCommand))
+        {
+            (int gate, string rejected) = await approvalOnly.SendAsync(new HttpMethod(route.Method), Fill(route), route.Request is null ? null : "{}");
+            check(gate is 400 or 404 or 503 && Code(rejected) != "scope-required", "convenience route gate: " + route.Method + " " + route.Template + " accepts secrets.write");
+        }
         (int approvalSignOut, _) = await approvalOnly.SendAsync(HttpMethod.Delete, "/api/v1/session", null);
         check(approvalSignOut == 200, "session: approval-only sessions can sign out");
 

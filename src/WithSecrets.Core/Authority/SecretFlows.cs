@@ -19,17 +19,18 @@ public sealed record SettingsChangeDto(string Id, string Text, string Manifest, 
 /// <summary>
 /// Changes to the secret store made in the administration web app: the same protocol as the set page of the command line, with the same
 /// checks, hosted by the service. Values are sealed in the browser to a key that lives here (the page and the network never carry a value
-/// in the clear), the program checks them and encrypts each to the store key, and one admin passkey assertion over the values and the new
-/// state stores them. A removal is one admin assertion over the next state. Each entry belongs to the session that made it, lives for a few
+/// in the clear), the program checks them and encrypts each to the store key, and one enrolled passkey assertion over the batch
+/// stores them. A removal is one admin assertion over the next state. Each entry belongs to the session that made it, lives for a few
 /// minutes, and ends at its first outcome; the number of open entries is small.
 /// </summary>
-internal sealed class SecretFlows(SecretStore store, AdminAudit audit, Func<IProofMethod?> proof, TimeProvider clock) : IDisposable
+internal sealed class SecretFlows(SecretStore store, AdminAudit audit, Func<IProofMethod?> proof, TimeProvider clock, AuthorityLock? authorityLock = null) : IDisposable
 {
     public static readonly TimeSpan Lifetime = TimeSpan.FromMinutes(5);
 
     /// <summary>How often an expired entry is found and closed when nobody calls: an abandoned entry lives at most <see cref="Lifetime" /> plus this.</summary>
     public static readonly TimeSpan SweepEvery = TimeSpan.FromSeconds(5);
     public const int MaxOpen = 4;
+    public const string SetCommand = "secrets-set";
     public const string RemoveCommand = "secrets-removed";
     public const string SettingsCommand = "settings-changed";
 
@@ -112,7 +113,7 @@ internal sealed class SecretFlows(SecretStore store, AdminAudit audit, Func<IPro
             return (null, "an edit needs one valid source and one destination");
         }
 
-        IProofMethod? method = AdminMethod();
+        IProofMethod? method = source is not null && source != names[0] ? AdminMethod() : proof();
         if (method is null)
         {
             return (null, "no passkey proof method is available");
@@ -194,7 +195,16 @@ internal sealed class SecretFlows(SecretStore store, AdminAudit audit, Func<IPro
             return null;
         }
 
-        (int Status, string Body) answer = Relay(flow.Session.Handle("POST", "save", body));
+        (int Status, string Body) answer;
+        try
+        {
+            OneShotResponse Save() => flow.Session.Handle("POST", "save", body);
+            answer = Relay(authorityLock is null ? Save() : authorityLock.UseWhileUnlocked(Save));
+        }
+        catch (AuthorityLockedException)
+        {
+            answer = (403, """{"ok":false,"error":"the authority is locked; nothing was stored"}""");
+        }
         End(flow);
         if (answer.Status != 200)
         {
@@ -503,7 +513,7 @@ internal sealed class SecretFlows(SecretStore store, AdminAudit audit, Func<IPro
     {
         IProofMethod? method = proof();
 
-        // Only an admin key may change the secret store.
+        // Removal and settings still need an admin signature over the next manifest.
         return method is PasskeyMethod passkey ? passkey.ForAdmin() : method;
     }
 

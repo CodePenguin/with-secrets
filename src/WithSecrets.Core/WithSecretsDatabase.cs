@@ -322,7 +322,8 @@ public sealed partial class WithSecretsDatabase
                     throw Damaged(check ?? "no result");
                 }
                 CheckVersion(connection);
-                if (LayoutProblem(connection, null) is { } problem)
+                using SqliteTransaction snapshot = connection.BeginTransaction(deferred: true);
+                if (LayoutProblem(connection, snapshot) is { } problem)
                 {
                     throw new WithSecretsDatabaseException($"{FileLabel} holds tables that are not those of with-secrets ({problem}); delete {FileLabel} to start over")
                     {
@@ -334,7 +335,7 @@ public sealed partial class WithSecretsDatabase
             EnsureWal(connection);
             if (checking)
             {
-                UpgradeProviderCachePolicy(connection);
+                UpgradeLayout(connection);
                 Volatile.Write(ref _checked, 1);
             }
             return connection;
@@ -346,9 +347,9 @@ public sealed partial class WithSecretsDatabase
         }
     }
 
-    private static void UpgradeProviderCachePolicy(SqliteConnection connection)
+    private static void UpgradeLayout(SqliteConnection connection)
     {
-        if (Scalar(connection, null, "PRAGMA user_version") is not 0L)
+        if (Scalar(connection, null, "PRAGMA user_version") is >= 2L)
         {
             return;
         }
@@ -360,7 +361,14 @@ public sealed partial class WithSecretsDatabase
             Execute(connection, transaction, "PRAGMA secure_delete = ON");
             Execute(connection, transaction, "UPDATE provider_instances SET max_stale_seconds = 0 WHERE max_stale_seconds <> 0");
             Execute(connection, transaction, "DELETE FROM provider_cache");
-            Execute(connection, transaction, "PRAGMA user_version = 1");
+        }
+        if (Scalar(connection, transaction, "PRAGMA user_version") is < 2L)
+        {
+            if (!Layout(connection, transaction).ContainsKey("secret_writes"))
+            {
+                Execute(connection, transaction, SecretWritesSchema);
+            }
+            Execute(connection, transaction, "PRAGMA user_version = 2");
         }
         transaction.Commit();
     }
@@ -400,7 +408,7 @@ public sealed partial class WithSecretsDatabase
                 EnsureWal(connection);
                 using SqliteTransaction transaction = connection.BeginTransaction();
                 Execute(connection, transaction, Schema);
-                Execute(connection, transaction, "PRAGMA user_version = 1");
+                Execute(connection, transaction, "PRAGMA user_version = 2");
                 Execute(connection, transaction, "INSERT INTO schema_version (version) VALUES ($version)", ("$version", SchemaVersion));
                 Execute(connection, transaction, "INSERT INTO outbox_counter (id, last_sequence, epoch, machine) VALUES (1, 0, $epoch, '')",
                     ("$epoch", Guid.NewGuid().ToString("N")));
@@ -431,7 +439,10 @@ public sealed partial class WithSecretsDatabase
 
     private SqliteConnection Connect(string path, SqliteOpenMode mode) => new(new SqliteConnectionStringBuilder
     {
-        DataSource = path, Mode = mode, Pooling = false, ForeignKeys = true,
+        DataSource = path,
+        Mode = mode,
+        Pooling = false,
+        ForeignKeys = true,
     }.ToString());
 
     private void Configure(SqliteConnection connection, long? start)
@@ -475,6 +486,11 @@ public sealed partial class WithSecretsDatabase
         {
             if (!found.Remove(name, out var actual))
             {
+                if (name == "secret_writes" && Scalar(connection, transaction, "PRAGMA user_version") is < 2L)
+                {
+                    continue;
+                }
+
                 return $"missing {definition.Type} {name}";
             }
             if (actual != definition)

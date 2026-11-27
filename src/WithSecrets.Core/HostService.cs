@@ -251,7 +251,7 @@ public sealed partial class HostService : IDisposable
         ISecretSource runs = options.Store;
         if (options.Store is SecretStore secretStore)
         {
-            Admin.Secrets = new SecretFlows(secretStore, options.State.Audit, approvalProof, options.Deployment.Clock ?? TimeProvider.System);
+            Admin.Secrets = new SecretFlows(secretStore, options.State.Audit, approvalProof, options.Deployment.Clock ?? TimeProvider.System, Lock);
 
             // The authority's runs decrypt with the keys an administrator's unlock opened, inside this lock, and read the native store plus every mounted secret (10.3); a name no mount selects is served by the native store as before. A host whose authority is remote has none of this: it holds no keys and decrypts nothing.
             if (Keys is { } unlocked)
