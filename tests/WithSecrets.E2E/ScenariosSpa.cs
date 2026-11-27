@@ -741,6 +741,55 @@ internal static class ScenariosSpa
         s.NoProblems(c);
     }
 
+    public static async Task AuthenticatorEditing(Host host, S s)
+    {
+        using Rig rig = new();
+        await using Ctx c = await Ctx.NewAsync(host);
+        await Flows.Configure(rig, c);
+        using SpaApp app = new(rig, unlocked: false);
+        await Spa.Unlock(c, app, s);
+        await Spa.SignIn(c, app, s);
+        await Spa.GoTo(c, "Access credentials", "Access credentials");
+        await Spa.Button(c, "Add authenticator app", exact: true).ClickAsync();
+        ILocator dialog = Spa.Dialog(c);
+        await dialog.GetByLabel("Name", new() { Exact = false }).FillAsync("My phone");
+        await Spa.Continue(c, s, dialog);
+        ILocator setup = dialog.Locator("code");
+        string encoded = (await setup.TextContentAsync())!.Trim();
+        byte[] seed = DecodeSetupKey(encoded);
+        s.Check(encoded.Length == 32 && await setup.IsVisibleAsync(), "authenticator enrollment shows the setup key after an admin tap");
+        await dialog.GetByRole(AriaRole.Button, new() { Name = "Close", Exact = true }).ClickAsync();
+
+        await Spa.Button(c, "Lock editing", exact: true).ClickAsync();
+        await dialog.GetByRole(AriaRole.Button, new() { Name = "Lock editing", Exact = true }).ClickAsync();
+        int passkeyCalls = await c.PasskeyCalls();
+        await Spa.Button(c, "Resume editing", exact: true).ClickAsync();
+        long step = DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 30;
+        await dialog.GetByLabel("Six-digit code").FillAsync(AuthenticatorCode.ForStep(seed, step));
+        await dialog.GetByRole(AriaRole.Button, new() { Name = "Resume editing", Exact = true }).ClickAsync();
+        await Spa.Button(c, "Lock editing", exact: true).WaitForAsync();
+        s.Check(await c.PasskeyCalls() == passkeyCalls && !app.Service.Lock.IsLocked, "the authenticator code resumes the live editing session without a passkey prompt");
+        s.NoProblems(c);
+    }
+
+    private static byte[] DecodeSetupKey(string encoded)
+    {
+        const string alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+        byte[] seed = new byte[encoded.Length * 5 / 8];
+        int buffer = 0;
+        int bits = 0;
+        int offset = 0;
+        foreach (char character in encoded)
+        {
+            buffer = (buffer << 5) | alphabet.IndexOf(character, StringComparison.Ordinal);
+            bits += 5;
+            if (bits < 8) continue;
+            bits -= 8;
+            seed[offset++] = (byte)(buffer >> bits);
+        }
+        return seed;
+    }
+
     public static async Task LockUnlock(Host host, S s)
     {
         using Rig rig = new();

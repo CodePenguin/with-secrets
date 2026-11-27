@@ -250,7 +250,7 @@ export function OperationDialog({ def, resume, onClose, onApplied }: Props) {
       setProgress('idle')
       setPendingAuthorization(null)
       void queryClient.invalidateQueries()
-      if (action.type === 'done' && action.result.outcome === 'applied' && !action.result.invitation && !action.result.invitationGone && waitingOperation &&
+      if (action.type === 'done' && action.result.outcome === 'applied' && !action.result.invitation && !action.result.invitationGone && !action.result.authenticatorSetup && !action.result.authenticatorSetupGone && waitingOperation &&
           showApplied(waitingOperation, action.result.detail ?? action.summary)) return
       dispatch(action)
     }
@@ -273,7 +273,7 @@ export function OperationDialog({ def, resume, onClose, onApplied }: Props) {
     }
     const look = async () => {
       try {
-        const current = await api.get('/api/v1/authorizations/{id}', { path: { id: waitingId }, query: { collect: 'invitation' } })
+        const current = await api.get('/api/v1/authorizations/{id}', { path: { id: waitingId }, query: { collect: waitingOperation === 'authenticator-add' ? 'authenticator-setup' : 'invitation' } })
         if (!live) return
         if (current.state === 'consumed' && current.result) {
           const result = current.result
@@ -773,6 +773,14 @@ export function OperationDialog({ def, resume, onClose, onApplied }: Props) {
             The invitation was made but cannot be shown again. Revoke it and create a new one.
           </Notice>
         ) : null}
+        {state.result.authenticatorSetup ? (
+          <div>
+            <p>In Google Authenticator or a compatible app, add a time-based account named {state.result.authenticatorSetup.name} and enter this setup key.</p>
+            <p><code>{state.result.authenticatorSetup.setupKey}</code></p>
+            <p>This key is shown once. Keep it private.</p>
+          </div>
+        ) : null}
+        {state.result.authenticatorSetupGone ? <Notice kind="warning">The setup key is no longer available. Remove the authenticator app and add it again to get a new key.</Notice> : null}
         {state.result.outcome === 'started' ? (
           next ? (
             <p>

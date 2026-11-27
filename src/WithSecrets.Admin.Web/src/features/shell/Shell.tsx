@@ -2,12 +2,13 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { api, setSessionSecret } from '../../api/client'
-import { keys, useApprovals, useSession, useStatus } from '../../api/queries'
+import { keys, useApprovals, useAuthenticators, useSession, useStatus } from '../../api/queries'
 import { Flash } from '../../components/Flash'
 import { Badge } from '../../components/Card'
 import { Button } from '../../components/Button'
 import { Logo } from '../../components/Logo'
 import { usePollInterval } from '../authorization/poll'
+import { AuthenticatorResumeDialog } from '../access-credentials/AuthenticatorResumeDialog'
 import { lockEditing, resumeEditing } from '../authorization/operations'
 import { useStartOperation } from '../authorization/OperationProvider'
 import buttonStyles from '../../components/Button.module.css'
@@ -22,6 +23,7 @@ const links = [
   { to: '/audit', label: 'Audit', end: false },
   { to: '/settings', label: 'Settings', end: false },
   { to: '/passkeys', label: 'Passkeys', end: false },
+  { to: '/access-credentials', label: 'Access credentials', end: false },
 ]
 
 /** After a navigation, focus moves to the new view's main heading (the document title changes too), so keyboard and screen reader users start at the top of it. */
@@ -63,6 +65,8 @@ export function Shell() {
   const signedIn = session.data?.authenticated === true
   const adminSession = session.data?.scope === 'admin'
   const editingLocked = session.data?.editingLocked === true
+  const authenticators = useAuthenticators(adminSession)
+  const [codeDialog, setCodeDialog] = useState(false)
   const startOperation = useStartOperation()
   const approvals = useApprovals(signedIn && status.data?.locked !== true, usePollInterval() * 3)
   const waiting = approvals.data?.items.length ?? 0
@@ -116,7 +120,10 @@ export function Shell() {
           {adminSession && !status.data?.locked ? (
             <>
               <Badge tone={editingLocked ? 'warn' : 'ok'}>{editingLocked ? 'Editing locked' : 'Editing unlocked'}</Badge>
-              <Button onClick={() => startOperation(editingLocked ? resumeEditing() : lockEditing())}>
+              <Button onClick={() => {
+                if (editingLocked && authenticators.data?.length) setCodeDialog(true)
+                else startOperation(editingLocked ? resumeEditing() : lockEditing())
+              }}>
                 {editingLocked ? 'Resume editing' : 'Lock editing'}
               </Button>
             </>
@@ -168,6 +175,12 @@ export function Shell() {
       <main id="main" ref={main} className={styles.main}>
         <div className={styles.flash}><Flash key={location.pathname} /></div>
         <Outlet />
+        {codeDialog && editingLocked && authenticators.data?.length ? (
+          <AuthenticatorResumeDialog items={authenticators.data} onClose={() => setCodeDialog(false)} onPasskey={() => {
+            setCodeDialog(false)
+            startOperation(resumeEditing())
+          }} />
+        ) : null}
       </main>
     </div>
   )

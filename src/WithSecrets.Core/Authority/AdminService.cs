@@ -602,4 +602,4 @@ public sealed partial class AdminService
 /// </summary>
 internal sealed record AdminPlan(string Operation, string Sentence, IReadOnlyList<(string Name, string Value)> Parameters, Func<AdminAuthorization, string?> Apply,
     Func<Action<string>, Func<string?>, (bool Ok, string Detail, string Actor)>? Delegated = null, Action<string>? OnRefused = null, System.Runtime.CompilerServices.StrongBox<InvitationCreatedDto?>? Output = null,
-    System.Runtime.CompilerServices.StrongBox<string?>? Remark = null, bool WantsPrf = false, Func<AdminSession, string?>? ApplyFromSession = null);
+    System.Runtime.CompilerServices.StrongBox<string?>? Remark = null, bool WantsPrf = false, Func<AdminSession, string?>? ApplyFromSession = null, System.Runtime.CompilerServices.StrongBox<AuthenticatorSetupDto?>? AuthenticatorSetup = null);

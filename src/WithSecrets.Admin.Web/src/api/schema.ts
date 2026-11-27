@@ -122,6 +122,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/access-credentials/authenticators": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List enrolled authenticator app names and identifiers. */
+        get: operations["listAuthenticators"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/session/resume/authenticator": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resume editing in this browser's locked admin session with a one-time authenticator code. */
+        post: operations["resumeWithAuthenticator"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/session/activity": {
         parameters: {
             query?: never;
@@ -1001,7 +1035,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Where an authorization stands (pending, verified, refused, consumed or expired) and, once its tap was verified, how the change it authorized came out (`result`: the service applies it at the tap, so this is readable after a reload or from another tab; a new invitation's bundle is given once, when collect=invitation is asked for or by the first retry of the mutation). Only for the caller it was made for (its session, or for the unlock its browser). */
+        /** Where an authorization stands (pending, verified, refused, consumed or expired) and, once its tap was verified, how the change it authorized came out (`result`: the service applies it at the tap, so this is readable after a reload or from another tab; a new invitation bundle or authenticator setup key can be collected once). Only for the caller it was made for (its session, or for the unlock its browser). */
         get: operations["getAuthorization"];
         put?: never;
         post?: never;
@@ -1946,7 +1980,7 @@ export interface components {
             /** @description Carry this in the `authorization` member of the one mutation it was made for. */
             id: string;
             /** @enum {string} */
-            operation: "unlock" | "lock" | "session-lock-editing" | "session-resume-editing" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-log-level" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
+            operation: "unlock" | "lock" | "session-lock-editing" | "session-resume-editing" | "authenticator-add" | "authenticator-remove" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-log-level" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
             /** @enum {string} */
             state: "pending" | "verified" | "refused" | "consumed" | "expired";
             detail: string | null;
@@ -1974,7 +2008,7 @@ export interface components {
         InlineAuthorization: {
             id: string;
             /** @enum {string} */
-            operation: "unlock" | "lock" | "session-lock-editing" | "session-resume-editing" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-log-level" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
+            operation: "unlock" | "lock" | "session-lock-editing" | "session-resume-editing" | "authenticator-add" | "authenticator-remove" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-log-level" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
             /** @enum {string} */
             state: "pending" | "consumed";
             detail: string | null;
@@ -1990,6 +2024,17 @@ export interface components {
             proof: components["schemas"]["ProofStart"] | null;
             prfKey: string | null;
         };
+        Authenticators: {
+            items: {
+                id: string;
+                name: string;
+            }[];
+        };
+        AuthenticatorSetup: {
+            name: string;
+            /** @description The secret Base32 setup key. Returned once to the browser that enrolled the app. */
+            setupKey: string;
+        };
         AuthorizationResult: {
             /**
              * @description applied: the service made the change when the tap was verified. started: the operation's own passkey pages continue at `link`. failed: the tap was good but the change was refused or could not be made (see `code` and `detail`); nothing was changed.
@@ -2002,6 +2047,9 @@ export interface components {
             invitation: components["schemas"]["InvitationCreated"] | null;
             /** @description True when a new invitation's bundle was already given (or held for 5 minutes without being collected): it is never given again. */
             invitationGone: boolean;
+            authenticatorSetup?: components["schemas"]["AuthenticatorSetup"] | null;
+            /** @description True when the setup key was collected or expired. */
+            authenticatorSetupGone?: boolean;
         };
         /** @description An operation and its parameters. Sensitive operations require a fresh passkey assertion. */
         AuthorizationRequest: {
@@ -2009,7 +2057,7 @@ export interface components {
              * @description The operation to authorize.
              * @enum {string}
              */
-            operation: "unlock" | "lock" | "session-lock-editing" | "session-resume-editing" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-log-level" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
+            operation: "unlock" | "lock" | "session-lock-editing" | "session-resume-editing" | "authenticator-add" | "authenticator-remove" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-log-level" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
             parameters?: {
                 config?: string;
             } & {
@@ -2716,6 +2764,179 @@ export interface operations {
             };
             /** @description The Host is not a loopback name (host-not-allowed). */
             421: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request failed (internal-error). Nothing the response does not say was changed. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    listAuthenticators: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Success. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Authenticators"];
+                };
+            };
+            /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The Host is not a loopback name (host-not-allowed). */
+            421: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request failed (internal-error). Nothing the response does not say was changed. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    resumeWithAuthenticator: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    id: string;
+                    code: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Success. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Done"];
+                };
+            };
+            /** @description The request is not valid (invalid-request, invalid-json). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No browser session (session-required). */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such resource (not-found). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The operation does not apply, or the change failed (operation-refused, operation-failed). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is too large (payload-too-large). */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is not application/json (unsupported-media-type). */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The Host is not a loopback name (host-not-allowed). */
+            421: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
+            423: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests (too-many-requests). */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -8298,8 +8519,8 @@ export interface operations {
     getAuthorization: {
         parameters: {
             query?: {
-                /** @description Give the bundle of a new invitation in this answer (once; it is never given again). */
-                collect?: "invitation";
+                /** @description Collect a new invitation bundle or authenticator setup key once. */
+                collect?: "invitation" | "authenticator-setup";
             };
             header?: never;
             path: {
@@ -8347,6 +8568,15 @@ export interface operations {
             };
             /** @description The Host is not a loopback name (host-not-allowed). */
             421: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Collecting an authenticator setup key requires an active admin session (editing-locked). */
+            423: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -352,6 +352,8 @@ internal sealed partial class AdminApi
                 ("created", S.Time()), ("expires", S.Time()), ("lifetimeSeconds", S.Int()), ("result", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("AuthorizationResult"), new JsonObject { ["type"] = "null" }) }),
                 ("proof", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("ProofStart"), new JsonObject { ["type"] = "null" }) }), ("prfKey", S.Str(nullable: true)),
             ]),
+            ["Authenticators"] = S.Obj([("items", S.Arr(S.Obj([("id", S.Str()), ("name", S.Str())])))]),
+            ["AuthenticatorSetup"] = S.Obj([("name", S.Str()), ("setupKey", S.Str(description: "The secret Base32 setup key. Returned once to the browser that enrolled the app."))]),
             ["AuthorizationResult"] = S.Obj(
             [
                 ("outcome", S.Str(values: ["applied", "started", "failed"], description: "applied: the service made the change when the tap was verified. started: the operation's own passkey pages continue at `link`. failed: the tap was good but the change was refused or could not be made (see `code` and `detail`); nothing was changed.")),
@@ -360,7 +362,9 @@ internal sealed partial class AdminApi
                 ("link", S.Str(nullable: true)),
                 ("invitation", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("InvitationCreated"), new JsonObject { ["type"] = "null" }) }),
                 ("invitationGone", S.Bool("True when a new invitation's bundle was already given (or held for " + AdminService.BundleHold.TotalMinutes + " minutes without being collected): it is never given again.")),
-            ]),
+                ("authenticatorSetup", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("AuthenticatorSetup"), new JsonObject { ["type"] = "null" }) }),
+                ("authenticatorSetupGone", S.Bool("True when the setup key was collected or expired.")),
+            ], ["authenticatorSetup", "authenticatorSetupGone"]),
             ["AuthorizationRequest"] = AuthorizationRequest(),
             ["Invitation"] = S.Obj(
             [
@@ -511,6 +515,9 @@ internal sealed partial class AdminApi
                     responses["503"] = ProblemResponse("No enrolled passkey proof method is currently available (internal-error).");
                 }
             }
+
+            if (route.OperationId == "getAuthorization")
+                responses["423"] = ProblemResponse("Collecting an authenticator setup key requires an active admin session (editing-locked).");
 
             if (route.Request is not null)
             {

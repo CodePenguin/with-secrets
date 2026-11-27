@@ -874,6 +874,227 @@
         ]
       }
     },
+    "/api/v1/access-credentials/authenticators": {
+      "get": {
+        "operationId": "listAuthenticators",
+        "summary": "List enrolled authenticator app names and identifiers.",
+        "tags": [
+          "session"
+        ],
+        "x-access": "public",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Authenticators"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/session/resume/authenticator": {
+      "post": {
+        "operationId": "resumeWithAuthenticator",
+        "summary": "Resume editing in this browser\u0027s locked admin session with a one-time authenticator code.",
+        "tags": [
+          "session"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 36,
+                    "maxLength": 36
+                  },
+                  "code": {
+                    "type": "string",
+                    "minLength": 6,
+                    "maxLength": 6
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "code"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Done"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked or browser editing needs to resume (authority-locked, editing-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          },
+          {
+            "browserCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
     "/api/v1/session/activity": {
       "post": {
         "operationId": "recordSessionActivity",
@@ -8346,7 +8567,7 @@
     "/api/v1/authorizations/{id}": {
       "get": {
         "operationId": "getAuthorization",
-        "summary": "Where an authorization stands (pending, verified, refused, consumed or expired) and, once its tap was verified, how the change it authorized came out (\u0060result\u0060: the service applies it at the tap, so this is readable after a reload or from another tab; a new invitation\u0027s bundle is given once, when collect=invitation is asked for or by the first retry of the mutation). Only for the caller it was made for (its session, or for the unlock its browser).",
+        "summary": "Where an authorization stands (pending, verified, refused, consumed or expired) and, once its tap was verified, how the change it authorized came out (\u0060result\u0060: the service applies it at the tap, so this is readable after a reload or from another tab; a new invitation bundle or authenticator setup key can be collected once). Only for the caller it was made for (its session, or for the unlock its browser).",
         "tags": [
           "authorizations"
         ],
@@ -8366,11 +8587,12 @@
             "name": "collect",
             "in": "query",
             "required": false,
-            "description": "Give the bundle of a new invitation in this answer (once; it is never given again).",
+            "description": "Collect a new invitation bundle or authenticator setup key once.",
             "schema": {
               "type": "string",
               "enum": [
-                "invitation"
+                "invitation",
+                "authenticator-setup"
               ]
             }
           }
@@ -8409,6 +8631,16 @@
           },
           "404": {
             "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "Collecting an authenticator setup key requires an active admin session (editing-locked).",
             "content": {
               "application/problem\u002Bjson": {
                 "schema": {
@@ -14397,6 +14629,8 @@
               "lock",
               "session-lock-editing",
               "session-resume-editing",
+              "authenticator-add",
+              "authenticator-remove",
               "set-audit-retention",
               "set-session-timeouts",
               "authority-key-rotate",
@@ -14549,6 +14783,8 @@
               "lock",
               "session-lock-editing",
               "session-resume-editing",
+              "authenticator-add",
+              "authenticator-remove",
               "set-audit-retention",
               "set-session-timeouts",
               "authority-key-rotate",
@@ -14662,6 +14898,51 @@
           "prfKey"
         ]
       },
+      "Authenticators": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "name"
+              ]
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "items"
+        ]
+      },
+      "AuthenticatorSetup": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "setupKey": {
+            "type": "string",
+            "description": "The secret Base32 setup key. Returned once to the browser that enrolled the app."
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "setupKey"
+        ]
+      },
       "AuthorizationResult": {
         "type": "object",
         "properties": {
@@ -14705,6 +14986,20 @@
           "invitationGone": {
             "type": "boolean",
             "description": "True when a new invitation\u0027s bundle was already given (or held for 5 minutes without being collected): it is never given again."
+          },
+          "authenticatorSetup": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AuthenticatorSetup"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "authenticatorSetupGone": {
+            "type": "boolean",
+            "description": "True when the setup key was collected or expired."
           }
         },
         "additionalProperties": false,
@@ -14727,6 +15022,8 @@
               "lock",
               "session-lock-editing",
               "session-resume-editing",
+              "authenticator-add",
+              "authenticator-remove",
               "set-audit-retention",
               "set-session-timeouts",
               "authority-key-rotate",

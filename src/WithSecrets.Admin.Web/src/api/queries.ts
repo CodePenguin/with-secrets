@@ -13,6 +13,7 @@ export const keys = {
   approval: (id: string) => ['approvals', id] as const,
   settings: ['settings'] as const,
   passkeys: ['passkeys'] as const,
+  authenticators: ['authenticators'] as const,
   providers: ['providers'] as const,
   providerTypes: ['provider-types'] as const,
   providerMounts: (id: string) => ['providers', id, 'mounts'] as const,
@@ -105,6 +106,10 @@ export function useGrants(enabled: boolean, poll: number | false = false) {
 
 export function useSettings(enabled: boolean) {
   return useQuery({ queryKey: keys.settings, queryFn: () => api.get('/api/v1/settings'), enabled })
+}
+
+export function useAuthenticators(enabled = true) {
+  return useQuery({ queryKey: keys.authenticators, queryFn: async () => (await api.get('/api/v1/access-credentials/authenticators')).items, enabled })
 }
 
 export function usePasskeys(enabled: boolean) {

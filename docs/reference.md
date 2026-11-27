@@ -49,7 +49,9 @@ The administration is a **JSON API** on the service's own loopback port under `/
 
 **Signing in.** An admin passkey starts an admin session. An approval passkey can sign in to approve runs, manage grants, and submit signed secret batches. Choose **Unlock and sign in** to unlock a locked authority with PRF and establish an admin session with the same tap. The browser claims the session with `POST /api/v1/session/claim` and gets an HttpOnly, SameSite=Strict cookie and a separate secret for the `X-Admin-Token` header. Protected requests require the cookie and header together. Changes also require the local Admin origin.
 
-**Editing lock.** In Settings, **Lock editing after inactivity** defaults to 15 minutes. Set it to 0 for **Never**, or choose 1 to 120 minutes. Changes and deliberate interactions with the Admin page count as activity. Background polling does not. When editing locks, you can keep browsing and choose **Resume editing** or **Sign out**. An admin passkey can resume the existing session. The session keeps its original admin identity. **Lock editing** locks the current browser session immediately.
+**Editing lock.** In Settings, **Lock editing after inactivity** defaults to 15 minutes. Set it to 0 for **Never**, or choose 1 to 120 minutes. Changes and deliberate interactions with the Admin page count as activity. Background polling does not. When editing locks, you can keep browsing and choose **Resume editing** or **Sign out**. An admin passkey or an enrolled authenticator app can resume the existing session. The session keeps its original admin identity. **Lock editing** locks the current browser session immediately.
+
+**Access credentials.** From **Access credentials**, choose **Add authenticator app** and confirm with an admin passkey. In Google Authenticator or a compatible app, create a time-based account using the setup key shown in Admin. The setup key is shown once. You can add several apps and remove each one individually with an admin passkey. Choose **Resume editing** and enter the current six-digit code. Accepted codes are single-use and attempts are rate-limited. Rotating the secret-store key clears the enrolled authenticator apps.
 
 **Session end.** The absolute timeout defaults to eight hours and accepts 1 to 1440 minutes. Sign-out, authority lock, and service restart also end the session. After it ends, a fresh admin tap is required to start another admin session. The authority keeps up to eight signed-in browser sessions and evicts the least recently active when full.
 
@@ -57,7 +59,7 @@ The administration is a **JSON API** on the service's own loopback port under `/
 | --- | --- |
 | Browse metadata | None on the local Admin port |
 | Open an admin session or unlock the authority | Admin passkey, with PRF for authority unlock |
-| Resume a locked admin session | Admin passkey |
+| Resume a locked admin session | Admin passkey or enrolled authenticator app code |
 | Lock editing, revoke a grant or pending pairing invitation, or lock the authority from Admin | Active admin session |
 | Approve a run, extend or renew a grant, allow repeat runs, or submit up to 20 secret values | Fresh eligible enrolled passkey tap |
 | Change machine trust, passkeys, provider configuration, mounts, or protected settings, move or remove secrets, or rotate or recover keys | Fresh admin passkey tap |

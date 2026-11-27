@@ -102,6 +102,9 @@ public sealed partial class AdminService
     /// </summary>
     private async Task<(AdminPlan? Plan, string? Refusal, int Status)> PlanAsync(object owner, string op, IReadOnlyDictionary<string, string> args, CancellationToken cancel)
     {
+        if (owner is AdminSession && !IsRemote && !_p.Lock.IsLocked && PlanAuthenticator(op, args) is { } authenticator)
+            return authenticator;
+
         if (owner is AdminSession sessionOwner && !IsRemote && !_p.Lock.IsLocked && PlanEditing(sessionOwner, op, args) is { } editing)
         {
             return editing;

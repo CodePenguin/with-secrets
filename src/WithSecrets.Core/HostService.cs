@@ -302,6 +302,7 @@ public sealed partial class HostService : IDisposable
                 return "the authority has no signing key; nothing was changed";
             }
 
+            AuthorityStore.ClearAuthenticators(connection, transaction);
             IReadOnlyList<Guid> providers = ProviderStore.RekeyConfigurations(connection, transaction, oldReviewPrivate, newReviewPublic);
             Lock.EnsureUnlocked();
             if (Keys is { } unlocked)

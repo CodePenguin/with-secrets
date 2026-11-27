@@ -31,6 +31,7 @@ internal static class Program
         ("i3-spa-revoke-grant", ScenariosSpa.RevokeGrant),
         ("i4-spa-audit-search", ScenariosSpa.AuditSearch),
         ("i5-spa-lock-unlock", ScenariosSpa.LockUnlock),
+        ("i5b-spa-authenticator-editing", ScenariosSpa.AuthenticatorEditing),
         ("i6-spa-settings-change", ScenariosSpa.Settings),
         ("i7-spa-refused-without-authorization", ScenariosSpa.RefusedWithoutAuthorization),
         ("i8-spa-accept-host-name", ScenariosSpa.AcceptHostName),
