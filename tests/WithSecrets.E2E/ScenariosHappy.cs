@@ -3,8 +3,8 @@ using Microsoft.Playwright;
 namespace WithSecrets.E2E;
 
 /// <summary>
-/// The whole happy path in one run, as a person lives it: set up the authority, sign in, store a secret, approve an agent's run, give a
-/// pre-approval and see a run go through without asking, add a second machine, read the audit history, then lock and unlock.
+/// The whole happy path in one run: set up the authority, sign in, store a secret, approve an agent's run, allow repeat runs,
+/// add a second machine, read the audit history, then lock and unlock.
 /// </summary>
 internal static class ScenariosHappy
 {
@@ -26,10 +26,11 @@ internal static class ScenariosHappy
 
         // 3. Store a secret: name, value, one passkey tap. The value is sealed in the browser and never shown again.
         await Spa.Click(c.Page.GetByRole(AriaRole.Link, new() { Name = "Secrets", Exact = true }));
-        await c.DemoCaptionAsync("Open Secrets and enter a name and value for the secret your command will need.");
+        await c.DemoPressAsync(Spa.Button(c, "Add secret", exact: true), "Choose Add secret.");
+        await Spa.Click(Spa.Button(c, "Add secret", exact: true));
         await c.Page.GetByLabel("Name").FillAsync("E2E_SECRET");
         await c.Page.GetByLabel("Value").FillAsync(SecretValue);
-        await c.DemoCaptionAsync("Save secret asks for one passkey tap.");
+        await c.DemoPressAsync(Spa.Button(c, "Save secret", exact: true), "Enter a name and value, then choose Save secret and confirm with your passkey.");
         await Spa.Click(Spa.Button(c, "Save secret", exact: true));
         await c.Page.GetByText("Saved E2E_SECRET.").First.WaitForAsync(new() { Timeout = 20000 });
         await c.DemoCaptionAsync("The secret is stored. Only its name is listed.");
@@ -40,7 +41,7 @@ internal static class ScenariosHappy
         using (Cmd<int> run = Cmds.Run(rig, "E2E_SECRET", Rig.ScriptCommand("check"), app: app))
         {
             await c.DemoCaptionAsync("Run a command that requests the secret. The terminal prints a link to review it.");
-            await Spa.OpenRequest(c, run, app, s);
+            await ReviewWaiting(c, run, app, s, Rig.ScriptFile("check"));
             await Spa.ShowRequestVariants(c, s);
             await c.DemoCaptionAsync("The request shows what would run and which secrets it would get. Approve asks for one tap.");
             await Spa.ApproveOnce(c);
@@ -49,18 +50,30 @@ internal static class ScenariosHappy
             await c.DemoCaptionAsync("Approved. The command ran with the secret; its output is redacted.");
         }
 
-        // 5. A pre-approval: the same kind of request, but it lets the same command run again for a while without asking.
-        CliCommand.Run grantRun = (CliCommand.Run)Cmds.Parse(["--secrets", "E2E_SECRET", "--reason", "e2e run", "--", ..Rig.ScriptCommand("check")]);
-        using (Cmd<int> preApprove = new((port, o, e) => LaunchClient.RunAsync(grantRun.Args, rig.Work, app.Service.Endpoint, null, o, e, rig.Machine.Trust, approve: true).GetAwaiter().GetResult()))
-        {
-            await c.DemoCaptionAsync("Create a pre-approval to let the same command run later for a period you choose.");
-            await Spa.OpenRequest(c, preApprove, app, s, "Run request from");
-            await c.DemoCaptionAsync("The arrow beside Approve chooses how long it lasts, and asks for one tap.");
-            await Spa.ApproveFor(c, "Approve for 1 hour");
-            await c.Page.GetByText("Grant created for").First.WaitForAsync(new() { Timeout = 20000 });
-            s.Check(await preApprove.Result.WaitAsync(TimeSpan.FromSeconds(30)) == 0 && store.Grants().Count(grant => grant.Usage == GrantUsage.Reusable) == 1 && store.Grants().Count(grant => grant.Usage == GrantUsage.Once && grant.Status == "consumed") == 1, "the first run (Approve once) recorded a used once-only grant and the pre-approval made one reusable grant");
-            await c.DemoCaptionAsync("The grant exists. The next run of that command will not ask.");
-        }
+        // 5. Turn the completed one-time approval into permission to repeat the same command.
+        GrantRecord once = store.Grants().Single(grant => grant.Usage == GrantUsage.Once && grant.Status == "consumed");
+        ILocator grants = c.Page.GetByRole(AriaRole.Table, new() { Name = "Grants", Exact = true });
+        ILocator used = grants.GetByRole(AriaRole.Row).Filter(new() { HasText = once.Id });
+        ILocator viewGrant = used.GetByRole(AriaRole.Button);
+        await viewGrant.WaitForAsync(new() { Timeout = 20000 });
+        s.Check(await used.GetByText("Used once", new() { Exact = true }).IsVisibleAsync(), "the approved run appears as used once in Grants");
+        await c.DemoPressAsync(viewGrant, "The approved request is listed in Grants. Select its row to open the details.");
+        await Spa.Click(viewGrant);
+        ILocator dialog = Spa.Dialog(c);
+        ILocator allowRepeat = dialog.GetByRole(AriaRole.Button, new() { Name = "Allow repeat runs" });
+        await c.DemoPressAsync(allowRepeat, "Choose Allow repeat runs to extend the same grant.");
+        await Spa.Click(allowRepeat);
+        ILocator choice = c.Page.GetByRole(AriaRole.Menuitem, new() { Name = "7 days", Exact = true });
+        await c.DemoPressAsync(choice, "Choose a duration. Selecting it starts the passkey prompt.");
+        int taps = await c.PasskeyCalls();
+        await Spa.Click(choice);
+        await Spa.PageFeedback(c).GetByText($"Extended grant {once.Id} for 7 days.").WaitForAsync(new() { Timeout = 20000 });
+        GrantRecord reusable = store.Grants().Single();
+        s.Check(reusable.Id == once.Id && reusable.Usage == GrantUsage.Reusable && reusable.Revision == once.Revision + 1
+            && reusable.Expires > reusable.Updated.AddDays(6), "repeat runs extend the existing grant to a seven-day duration");
+        s.Check(await dialog.CountAsync() == 0 && await c.PasskeyCalls() == taps + 1, "the duration choice starts one passkey prompt and success is shown on the page");
+        await grants.GetByRole(AriaRole.Button, new() { Name = "View grant " + reusable.Id }).WaitForAsync(new() { Timeout = 20000 });
+        await c.DemoSnapAsync("The original grant now allows repeat runs for seven days. The confirmation is on the page.");
 
         // The existing grant covers the first matching run while the authority is unlocked.
         using (Cmd<int> again = Cmds.Run(rig, "E2E_SECRET", Rig.ScriptCommand("check"), app: app))
@@ -75,7 +88,7 @@ internal static class ScenariosHappy
         using (Cmd<int> timed = Cmds.Run(rig, "E2E_SECRET", Rig.ScriptCommand("timed"), app: app))
         {
             await c.DemoCaptionAsync("Approve runs it once. The arrow offers a time or Always, which also lets it run again without asking.");
-            await Spa.OpenRequest(c, timed, app, s);
+            await ReviewWaiting(c, timed, app, s, Rig.ScriptFile("timed"));
             await Spa.ApproveFor(c, "Approve always");
             int exit = await timed.Result.WaitAsync(TimeSpan.FromSeconds(30));
             s.Check(exit == 0 && timed.Out.Text.Contains("timed-value=" + StreamRedactor.Mask) && store.Grants().Count(grant => grant.Usage == GrantUsage.Reusable) == 2 && store.Grants().Count(grant => grant.Usage == GrantUsage.Reusable && grant.Expires is null) == 1, "a run approved as Always ran, and made a grant with no end (exit " + exit + ": " + timed.Err.Text.Replace('\n', ' ') + ")");
@@ -83,9 +96,7 @@ internal static class ScenariosHappy
         }
 
         await Spa.GoTo(c, "Access", "Access");
-        await c.DemoCaptionAsync("The Grants page lists the active grants. Revoke ends one with one tap.");
-
-        ILocator dialog = Spa.Dialog(c);
+        await c.DemoCaptionAsync("Find active grants under Access. Use Revoke to end a grant.");
 
         // 6. Add a machine: an invitation, the second machine pairs, the person approves it.
         await Spa.GoTo(c, "Machines", "Machines");
@@ -117,16 +128,17 @@ internal static class ScenariosHappy
         });
         string fp = KeyIdentity.Fingerprint(machineKey.PublicKey);
         s.Check(paired.Ok && store.Find(fp) is { Status: MachineStatus.Pending }, "the second machine paired and waits for approval (" + (paired.Ok ? "paired" : paired.Message) + ")");
-        ILocator row = c.Page.GetByRole(AriaRole.Region, new() { Name = "A machine paired and is waiting for you" }).GetByRole(AriaRole.Listitem).Filter(new() { HasText = KeyIdentity.Display(fp) });
+        ILocator row = c.Page.GetByRole(AriaRole.Region, new() { Name = "A machine paired and is waiting for you" }).GetByRole(AriaRole.Row).Filter(new() { HasText = KeyIdentity.Display(fp) });
         await row.WaitForAsync(new() { Timeout = 45000 });
-        await c.DemoCaptionAsync("The new machine appears by itself. Check the fingerprint and host name, then Approve.");
-        await Spa.Click(row.GetByRole(AriaRole.Button, new() { Name = "Approve" }));
+        await c.DemoPressAsync(row.GetByRole(AriaRole.Button), "Invitations are listed first. Select the new machine in the table below.");
+        await Spa.Click(row.GetByRole(AriaRole.Button));
+        await c.DemoPressAsync(dialog.GetByRole(AriaRole.Button, new() { Name = "Approve" }), "Compare the fingerprint and host name, then choose Approve.");
+        await Spa.Click(dialog.GetByRole(AriaRole.Button, new() { Name = "Approve" }));
         await dialog.WaitForAsync();
         IPage approvePage = await Spa.OpenPasskeyPage(c, s, dialog);
         await Spa.TapAfterBack(c, s, approvePage, null);
-        await dialog.GetByText("Done").First.WaitForAsync(new() { Timeout = 20000 });
+        await Spa.PageFeedback(c).WaitForAsync(new() { Timeout = 20000 });
         s.Check(store.Find(fp) is { Status: MachineStatus.Trusted }, "the approval makes the machine trusted");
-        await dialog.GetByRole(AriaRole.Button, new() { Name = "Close" }).ClickAsync();
         await c.DemoCaptionAsync("The machine is trusted and can now ask for secrets.");
 
         // 7. The audit history.
@@ -141,22 +153,35 @@ internal static class ScenariosHappy
         c.Ignore("401");
         c.Ignore("404");
         await Spa.Continue(c, s, dialog);
-        await dialog.GetByText("The authority is locked.").First.WaitForAsync(new() { Timeout = 20000 });
+        await Spa.PageFeedback(c).GetByText("The authority is locked.").WaitForAsync(new() { Timeout = 20000 });
         s.Check(app.Service.Lock.IsLocked, "the tap locks the authority");
         await c.DemoCaptionAsync("The authority is locked.");
-        await dialog.GetByRole(AriaRole.Button, new() { Name = "Close" }).ClickAsync();
         await Spa.Heading(c, "with-secrets").WaitForAsync(new() { Timeout = 20000 });
         await Spa.Button(c, "Unlock the authority").ClickAsync();
         await dialog.WaitForAsync();
         await Spa.Continue(c, s, dialog);
-        await dialog.GetByText("Done").First.WaitForAsync(new() { Timeout = 20000 });
+        await Spa.PageFeedback(c).WaitForAsync(new() { Timeout = 20000 });
         s.Check(!app.Service.Lock.IsLocked, "the tap unlocks the authority");
-        await dialog.GetByRole(AriaRole.Button, new() { Name = "Close" }).ClickAsync();
         await c.Page.GetByText("Authority unlocked").First.WaitForAsync(new() { Timeout = 20000 });
         await c.DemoCaptionAsync("Unlocked. Sign in again to continue.");
 
         List<string> events = [.. AuditChecks.Events(rig)];
         s.Check(new[] { "setup", "secrets-set", "authorization-approved", "authorization-granted", "key-enrolled" }.Take(4).All(events.Contains), "the audit holds the setup, the secret, the approval and the grant (" + string.Join(", ", events) + ")");
         s.NoProblems(c);
+    }
+
+    private static async Task ReviewWaiting(Ctx c, Cmd<int> run, SpaApp app, S s, string script)
+    {
+        string link = await run.LinkAsync();
+        s.Check(link.StartsWith(app.Url + "/access/", StringComparison.Ordinal), "the terminal links to the same request shown in the queue");
+        await Spa.GoTo(c, "Access", "Access", capture: false);
+        ILocator review = c.Page.GetByRole(AriaRole.Table, new() { Name = "Run requests" })
+            .Locator("a[href=\"" + new Uri(link).AbsolutePath + "\"]");
+        await review.WaitForAsync(new() { Timeout = 20000 });
+        s.Check((await review.TextContentAsync())?.Contains(script, StringComparison.Ordinal) == true, "the queue names the script rather than just its shell");
+        await c.DemoPressAsync(review, "Under Waiting for you, check the requesting machine and time left, then select the command to review it.");
+        await Spa.Click(review);
+        await c.Page.GetByRole(AriaRole.Dialog, new() { Name = "Run request from" }).WaitForAsync(new() { Timeout = 20000 });
+        await c.DemoSnapAsync("The request opens over Access with the command, secrets, and reason.");
     }
 }

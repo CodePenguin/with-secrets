@@ -892,7 +892,7 @@ internal static class ConfigPageHtml
         page.Append(PasskeyRegistration.NameField(Enrollment.DefaultName, []));
         if (quickStart is not null) page.Append("</div>\n");
         page.Append("<div class=\"buttons\">");
-        if (quickStart is not null) page.Append("<button id=\"verify-device\" type=\"button\" disabled>Fingerprint matches. Continue</button>");
+        if (quickStart is not null) page.Append("<button id=\"verify-device\" type=\"button\" disabled>Fingerprint matches</button>");
         page.Append(quickStart is null ? "<button id=\"save\" type=\"button\">Create passkey</button>"
             : "<button id=\"save\" type=\"button\" hidden>Create passkey</button>");
         page.Append(PasskeyRegistration.StepTwoButton);

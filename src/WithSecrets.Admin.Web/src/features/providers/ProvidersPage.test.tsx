@@ -12,6 +12,10 @@ const instance = provider({ type: 'bitwarden', configuration: bitwardenConfig })
 const mounted = mount()
 const validate = 'POST /api/v1/providers/validate'
 const authorize = 'POST /api/v1/authorizations/inline'
+const buildProject = '11111111-1111-4111-8111-111111111111'
+const stagingProject = '22222222-2222-4222-8222-222222222222'
+const buildToken = buildProject + '/S_99999999999949999999999999999999'
+const stagingToken = stagingProject + '/S_88888888888848888888888888888888'
 
 function providerApi() {
   return signedIn({
@@ -20,6 +24,12 @@ function providerApi() {
     'GET /api/v1/providers': { body: [instance] },
     'GET /api/v1/providers/types': { body: [{ type: 'bitwarden', adapterVersion: '1.0' }] },
     [bitwardenSeal]: { body: { config: replacementBitwardenConfig } },
+    [`POST /api/v1/providers/${instance.id}/mount-options`]: ({ body }) => {
+      const parent = (body as { parentPath?: string }).parentPath
+      return { body: parent === buildProject ? [{ name: 'Build token', path: buildToken }] :
+        parent === stagingProject ? [{ name: 'Staging token', path: stagingToken }] :
+          [{ name: 'Build project', path: buildProject }, { name: 'Staging', path: stagingProject }] }
+    },
     [`GET /api/v1/providers/${instance.id}/mounts`]: { body: [mounted] },
     [`GET /api/v1/mounts/${mounted.id}/entries`]: { body: [entry()] },
     [`POST /api/v1/mounts/${mounted.id}/refresh`]: { body: { complete: true, added: 1, removed: 0, changed: 0 } },
@@ -43,7 +53,10 @@ describe('Providers page', () => {
     expect(await within(navigation).findByRole('link', { name: 'Providers' })).toBeVisible()
     expect(await screen.findByText('healthy')).toBeVisible()
     expect(await violations(container)).toEqual([])
-    await user.click(screen.getByRole('link', { name: instance.name }))
+    const grid = within(screen.getByRole('table', { name: 'Providers' }))
+    expect(grid.getByText('Bitwarden Secrets Manager')).toBeVisible()
+    expect(grid.queryByRole('button', { name: /Change configuration/ })).not.toBeInTheDocument()
+    await user.click(grid.getByRole('link', { name: new RegExp(instance.name, 'i') }))
     await user.click(await screen.findByRole('button', { name: 'Show entries for team' }))
     expect(await screen.findByText('team/TOKEN')).toBeVisible()
     await user.click(screen.getByRole('button', { name: 'Refresh namespace team' }))
@@ -290,17 +303,27 @@ describe('Providers page', () => {
     })
 
     it('remove provider', async () => {
-      const body = await signed(`Remove provider ${full.name}`, async () => undefined, '/providers')
+      const body = await signed(`Remove provider ${full.name}`, async () => undefined)
       expect(body).toEqual({ operation: 'provider-remove', parameters: { id: full.id, revision: '2' } })
     })
 
-    it('add mount', async () => {
+    it('mounts a Bitwarden secret by name and clears the selection when the project changes', async () => {
       const body = await signed(`Add mount ${full.name}`, async (form, user) => {
         await user.selectOptions(form.getByLabelText(/Mount kind/), 'single')
         await user.type(form.getByLabelText(/Logical path/), 'ops/TOKEN')
-        await user.type(form.getByLabelText(/Provider path/), 'kv/ops/token')
+        expect(form.queryByLabelText(/Provider path/)).not.toBeInTheDocument()
+        const project = form.getByLabelText(/^Project/)
+        await form.findByRole('option', { name: 'Build project' })
+        await user.selectOptions(project, 'Build project')
+        await form.findByRole('option', { name: 'Build token' })
+        const secret = form.getByLabelText(/^Secret/)
+        await user.selectOptions(secret, 'Build token')
+        await user.selectOptions(project, 'Staging')
+        await form.findByRole('option', { name: 'Staging token' })
+        expect(secret).toHaveValue('')
+        await user.selectOptions(secret, 'Staging token')
       })
-      expect(body).toEqual({ operation: 'mount-add', parameters: { instance: full.id, kind: 'single', path: 'ops/TOKEN', base: 'kv/ops/token' } })
+      expect(body).toEqual({ operation: 'mount-add', parameters: { instance: full.id, kind: 'single', path: 'ops/TOKEN', base: stagingToken } })
     })
 
     it('remove mount', async () => {

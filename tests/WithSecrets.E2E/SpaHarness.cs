@@ -34,10 +34,10 @@ internal static class Spa
     /// <summary>The dialog has asked the authority for its passkey challenge and offers the confirmation.</summary>
     public static Task WaitForPasskeyStep(ILocator dialog) => dialog.Locator("xpath=self::*[@data-step='waiting']").WaitForAsync(new() { Timeout = 20000 });
 
-    public static async Task Open(Ctx c, SpaApp app, string path = "")
+    public static async Task Open(Ctx c, SpaApp app, string path = "", bool capture = true)
     {
         await c.Page.GotoAsync(app.Url + path);
-        if (!c.IsDemo) return;
+        if (!c.IsDemo || !capture) return;
         // The picture is taken once the app has drawn its first screen, not while the previous page is still showing.
         try { await c.Page.WaitForFunctionAsync("() => !!document.querySelector('h1')", null, new() { Timeout = 5000 }); }
         catch (TimeoutException) { /* A screen without a heading is pictured as it is. */ }
@@ -61,13 +61,13 @@ internal static class Spa
     }
 
     /// <summary>Completes the prepared in-page sign-in with a user gesture that directly invokes WebAuthn.</summary>
-    public static async Task Tap(Ctx c, S s, string linkName = "Sign in with passkey", Func<IPage, string, Task>? beforeTap = null)
+    public static async Task Tap(Ctx c, S s, string linkName = "Sign in with passkey", Func<IPage, string, Task>? beforeTap = null, bool capture = true)
     {
         string before = c.Page.Url;
         if (beforeTap is not null) await beforeTap(c.Page, "starts a read-only administrator session");
         ILocator button = c.Page.GetByRole(AriaRole.Button, new() { Name = linkName, Exact = true });
         await button.WaitForAsync(new() { Timeout = 20000 });
-        await c.DemoPressAsync(button, $"Select {linkName}, then use your passkey.");
+        if (capture) await c.DemoPressAsync(button, $"Select {linkName}, then use your passkey.");
         await button.ClickAsync(new() { Timeout = 20000 });
         Clicks++;
         await Heading(c, "Overview").WaitForAsync(new() { Timeout = 20000 });
@@ -78,13 +78,13 @@ internal static class Spa
     /// Gets the dialog to its confirm step while the SPA stays loaded. A change that needs nothing typed has its challenge prepared as the dialog opens; one with a form
     /// is prepared by Continue (a click). The next gesture invokes WebAuthn.
     /// </summary>
-    public static async Task<IPage> OpenPasskeyPage(Ctx c, S s, ILocator dialog)
+    public static async Task<IPage> OpenPasskeyPage(Ctx c, S s, ILocator dialog, bool capture = true)
     {
         string before = c.Page.Url;
         ILocator next = dialog.GetByRole(AriaRole.Button, new() { Name = "Continue", Exact = true });
         if (await next.CountAsync() > 0 && await next.IsEnabledAsync())
         {
-            await c.DemoPressAsync(next, "Select Continue to review the change before confirming with your passkey.");
+            if (capture) await c.DemoPressAsync(next, "Select Continue to review the change before confirming with your passkey.");
             await next.ClickAsync();
             Clicks++;
         }
@@ -101,7 +101,7 @@ internal static class Spa
         await dialog.GetByLabel(label).FillAsync(name);
     }
 
-    /// <summary>Prepares the challenge and taps it in the SPA. Returns the result dialog text.</summary>
+    /// <summary>Prepares the challenge and taps it in the SPA. Returns the review and resulting feedback.</summary>
     public static async Task<string> Continue(Ctx c, S s, ILocator dialog, Func<IPage, string, Task>? beforeTap = null) => await TapAfterBack(c, s, await OpenPasskeyPage(c, s, dialog), beforeTap);
 
     /// <summary>Clicks a control of the application and counts the click.</summary>
@@ -183,10 +183,12 @@ internal static class Spa
     /// <summary>The final button of a prepared dialog (last in its footer): named for what the tap does.</summary>
     public static ILocator ConfirmButton(ILocator dialog) => dialog.GetByRole(AriaRole.Button).Last;
 
+    public static ILocator PageFeedback(Ctx c) => c.Page.Locator("main [data-page-feedback]");
+
     /// <summary>The clicks a person made since <see cref="Clicks" /> was last set to zero.</summary>
     public static int Clicks { get; set; }
 
-    public static async Task<string> TapAfterBack(Ctx c, S s, IPage page, Func<IPage, string, Task>? beforeTap)
+    public static async Task<string> TapAfterBack(Ctx c, S s, IPage page, Func<IPage, string, Task>? beforeTap, bool capture = true)
     {
         ILocator dialog = Spa.Dialog(c);
         string beforeUrl = c.Page.Url;
@@ -195,38 +197,46 @@ internal static class Spa
         if (beforeTap is not null) await beforeTap(page, beforeText);
         // After a reload the dialog first finds its request again: until then its last button is Cancel, not the confirmation.
         await c.Page.WaitForFunctionAsync("() => { const d = document.querySelector('dialog[open]'); const b = d && [...d.querySelectorAll('button')].at(-1); return !!b && !b.disabled && !/^Cancel/.test(b.textContent.trim()); }", null, new() { Timeout = 20000 });
-        await c.DemoPressAsync(ConfirmButton(dialog), "The user confirms the change with the passkey.");
+        if (capture) await c.DemoPressAsync(ConfirmButton(dialog), "The user confirms the change with the passkey.");
         await ConfirmButton(dialog).ClickAsync(new() { Timeout = 20000 });
         Clicks++;
-        await page.WaitForFunctionAsync("() => !!document.querySelector('dialog[open]') && (document.querySelector('dialog[open]')?.textContent.includes('Done') || !!document.querySelector('dialog[open] [role=alert]'))", null, new() { Timeout = 20000 });
-        await c.DemoSnapAsync("The passkey was used. The dialog shows the result.");
+        await page.WaitForFunctionAsync("() => { const dialog = document.querySelector('dialog[open]'); return dialog ? dialog.dataset.step === 'done' || !!dialog.querySelector('[role=alert]') : !!document.querySelector('main [data-page-feedback]'); }", null, new() { Timeout = 20000 });
+        bool staysOpen = await dialog.CountAsync() != 0;
+        if (capture) await c.DemoSnapAsync(staysOpen ? "The passkey was used. The dialog shows the next step." : "The dialog closes and the page confirms the change.");
         s.Check(await c.PasskeyCalls() == beforeCalls + 1, "the final confirmation gesture made exactly one WebAuthn call");
         s.Check(c.Page.Url == beforeUrl, "passkey authentication kept the SPA loaded in the same tab");
-        return await dialog.TextContentAsync() ?? "";
+        return staysOpen ? await dialog.TextContentAsync() ?? "" : beforeText + "\n" + await PageFeedback(c).TextContentAsync();
     }
 
     public static async Task Unlock(Ctx c, SpaApp app, S s)
     {
-        await Open(c, app);
+        await Open(c, app, capture: false);
         await Button(c, "Unlock the authority").ClickAsync();
         ILocator dialog = Dialog(c);
         await dialog.WaitForAsync();
-        await Continue(c, s, dialog);
-        await dialog.GetByText("Done").First.WaitForAsync(new() { Timeout = 20000 });
-        await dialog.GetByRole(AriaRole.Button, new() { Name = "Close" }).ClickAsync();
+        await TapAfterBack(c, s, await OpenPasskeyPage(c, s, dialog, capture: false), null, capture: false);
+        await PageFeedback(c).WaitForAsync(new() { Timeout = 20000 });
         await c.Page.GetByText("Authority unlocked").First.WaitForAsync(new() { Timeout = 20000 });
     }
 
-    /// <summary>Signs in with a prepared challenge and an in-page WebAuthn gesture.</summary>
+    /// <summary>Signs in through the real UI, then captures Overview for demos where sign-in is a prerequisite.</summary>
     public static async Task SignIn(Ctx c, SpaApp app, S s)
     {
         if (c.Page.Url.TrimEnd('/') != app.Url)
         {
-            await Open(c, app);
+            await Open(c, app, capture: false);
         }
         await Heading(c, "with-secrets").WaitForAsync();
-        await Tap(c, s);
-        await Heading(c, "Overview").WaitForAsync(new() { Timeout = 20000 });
+        await Tap(c, s, capture: false);
+        await c.DemoSnapAsync("Overview is open and you’re signed in.");
+    }
+
+    public static async Task StartDemoFromOverview(Ctx c)
+    {
+        if (!c.IsDemo) return;
+        if (!await Heading(c, "Overview").IsVisibleAsync()) await GoTo(c, "Overview", "Overview", capture: false);
+        await c.StartDemoAsync();
+        await c.DemoSnapAsync("Overview is open and you’re signed in.");
     }
 
     /// <summary>Runs axe-core (WCAG 2.0, 2.1 and 2.2 A and AA rules, contrast included) in the real browser against the page as it is and checks that nothing is violated.</summary>

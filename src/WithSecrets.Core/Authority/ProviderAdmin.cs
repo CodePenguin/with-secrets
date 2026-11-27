@@ -51,6 +51,11 @@ internal sealed class ProviderAdmin(ProviderAuthority providers, AdminAudit audi
         return [.. providers.Store.Entries(mountId).Select(entry => new NamespaceEntryDto(entry.LogicalPath, entry.ProviderPath, entry.ExternalId, entry.Description, entry.DescriptionSource == DescriptionSource.Local ? "local" : "provider"))];
     }
 
+    public async Task<IReadOnlyList<ProviderMountOption>?> BrowseMountOptionsAsync(Guid id, string? parentPath, CancellationToken cancellationToken)
+        => providers.Registry.Adapter(id) is IProviderMountBrowser browser
+            ? await browser.BrowseMountOptionsAsync(parentPath, cancellationToken).ConfigureAwait(false)
+            : null;
+
     /// <summary>The changes the admin app may offer for an instance: the removal only while it has no mounts.</summary>
     public IReadOnlyList<string> ProviderActions(ProviderInstance instance) => ProviderActions(instance, providers.Store.Mounts());
 

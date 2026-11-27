@@ -22,5 +22,5 @@ export function Flash() {
     navigate(location.pathname + location.search + location.hash, { replace: true, state: null })
   }, [incoming, location.key]) // eslint-disable-line react-hooks/exhaustive-deps -- once per incoming history entry
 
-  return text === null ? null : <Notice kind="ok">{text}</Notice>
+  return text === null ? null : <div data-page-feedback><Notice kind="ok">{text}</Notice></div>
 }

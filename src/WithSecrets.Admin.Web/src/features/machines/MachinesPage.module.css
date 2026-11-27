@@ -1,14 +1,8 @@
-.paired {
-  margin-bottom: var(--space-5);
-}
-
-.paired h2 {
-  margin-top: 0;
-}
-
-.pairedItem {
-  border-color: var(--warn);
-  background: var(--warn-soft);
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--space-1);
 }
 
 .mono {
@@ -33,5 +27,9 @@
 }
 
 .section {
-  margin-top: var(--space-6);
+  margin-bottom: var(--space-6);
+}
+
+.section h2 {
+  margin-top: 0;
 }

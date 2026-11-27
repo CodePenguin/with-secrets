@@ -6,8 +6,8 @@ import { keys, useEntries, useMounts, useProviders, useProviderTypes, useSession
 import type { Mount, Provider } from '../../api/types'
 import { Button } from '../../components/Button'
 import { Badge, Empty, Facts, PageHeader } from '../../components/Card'
+import { DetailsLink, DetailsTable } from '../../components/DetailsTable'
 import { Loading, Notice, ProblemAlert, useAnnounce } from '../../components/Feedback'
-import { Flash } from '../../components/Flash'
 import list from '../../components/List.module.css'
 import { Time } from '../../lib/format'
 import { usePageTitle } from '../../lib/usePageTitle'
@@ -30,14 +30,18 @@ function Duration({ seconds }: { seconds: number }) {
   return <>{parts.join(' ')}</>
 }
 
+function ProviderHealth({ provider }: { provider: Provider }) {
+  const health = provider.status?.health
+  return health ? <Badge tone={health === 'healthy' ? 'ok' : health === 'unavailable' || health === 'misconfigured' ? 'bad' : 'warn'}><span className={styles.state}>{health}</span></Badge> : <>Unknown</>
+}
+
 function ProviderFacts({ provider }: { provider: Provider }) {
   const status = provider.status
-  const health = status?.health
   return (
     <Facts items={[
       ['Type', providerTypeLabel(provider.type)],
       ['Lifecycle', status ? <><span className={styles.state}>{status.lifecycle === 'shuttingdown' ? 'shutting down' : status.lifecycle}</span> · <Time value={status.lifecycleAt} />{status.lifecycleMessage ? <div>{status.lifecycleMessage}</div> : null}</> : 'Not running'],
-      ['Health', status ? <><Badge tone={health === 'healthy' ? 'ok' : health === 'unavailable' || health === 'misconfigured' ? 'bad' : 'warn'}><span className={styles.state}>{health}</span></Badge> · <Time value={status.healthAt} />{status.healthMessage ? <div>{status.healthMessage}</div> : null}</> : 'Unknown'],
+      ['Health', status ? <><ProviderHealth provider={provider} /> · <Time value={status.healthAt} />{status.healthMessage ? <div>{status.healthMessage}</div> : null}</> : 'Unknown'],
       ...(provider.type === lastPassRefresh ? [] : [['Cache freshness', <Duration seconds={provider.maxStaleSeconds} />] as const]),
       ['Mounts', provider.mounts],
     ]} />
@@ -150,7 +154,6 @@ export function ProvidersPage() {
       <>
         <p><Link to="/providers">All providers</Link></p>
         <PageHeader title={provider?.name ?? 'Provider'} />
-        <Flash key={id} />
         {provider ? (
           <>
             <ProviderFacts provider={provider} />
@@ -171,20 +174,21 @@ export function ProvidersPage() {
       <PageHeader title="Providers">
         {canChange && types.data?.some(({ type }) => hasProviderForm(type)) ? <Button variant="primary" onClick={() => start(addProvider(types.data))}>Add provider</Button> : null}
       </PageHeader>
-      <Flash key="provider-list" />
       {types.isError ? <ProblemAlert error={types.error} title="Could not load provider types" /> : null}
       {types.data?.length === 0 ? <Notice>No provider adapter types are registered.</Notice> : null}
       {types.data?.some(({ type }) => !hasProviderForm(type)) ? <p>Provider types without a configuration form can be configured through the API.</p> : null}
       {providers.data.length ? (
-        <ul className={list.list}>
+        <DetailsTable label="Providers" columns={['Provider', 'Health', 'Mounts']}>
           {providers.data.map((item) => (
-            <li key={item.id} className={list.item}>
-              <h2><Link to={`/providers/${item.id}`}>{item.name}</Link></h2>
-              <ProviderFacts provider={item} />
-              <ProviderActions provider={item} canChange={canChange} />
-            </li>
+            <tr key={item.id}>
+              <th scope="row">
+                <DetailsLink to={'/providers/' + encodeURIComponent(item.id)} title={item.name} subtitle={providerTypeLabel(item.type)} />
+              </th>
+              <td><ProviderHealth provider={item} /></td>
+              <td>{item.mounts}</td>
+            </tr>
           ))}
-        </ul>
+        </DetailsTable>
       ) : <Empty>No provider instances configured.</Empty>}
     </>
   )

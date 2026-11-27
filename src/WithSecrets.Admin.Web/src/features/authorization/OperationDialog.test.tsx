@@ -79,6 +79,7 @@ function setup(options: Options = {}) {
 
 async function openApprove(user: ReturnType<typeof userEvent.setup>) {
   renderApp('/machines')
+  await user.click(await screen.findByRole('button', { name: /View machine/ }))
   await user.click(await screen.findByRole('button', { name: /^approve/i }))
 
   return screen.findByRole('dialog')
@@ -106,8 +107,8 @@ describe('an administrative change', () => {
     expect(navigator.credentials.get).toHaveBeenCalledTimes(1)
 
     // The SPA only reports success after its proof submission and service state confirm application.
-    expect(await within(dialog).findByRole('button', { name: 'Close' })).toBeInTheDocument()
-    expect(within(dialog).getByText('Done')).toBeInTheDocument()
+    expect(await screen.findByText(/^Approved machine/)).toBeVisible()
+    expect(screen.queryByRole('dialog')).toBeNull()
     expect(fake.count(approvePath)).toBe(0)
     expect(fake.calls.filter((call) => call.method !== 'GET').map((call) => call.method + ' ' + call.path)).toEqual([inlinePath, proofPath])
     const fetchCalls = fetchMock.mock.calls.map(([input]) => String(input))
@@ -124,8 +125,8 @@ describe('an administrative change', () => {
     await user.click(await within(dialog).findByRole('button', { name: 'Approve machine' }))
 
     // The lost answer is not a failure: the SPA keeps reading the authorization the service applied.
-    expect(await within(dialog).findByText('Done')).toBeInTheDocument()
-    expect(within(dialog).getByRole('button', { name: 'Close' })).toBeInTheDocument()
+    expect(await screen.findByText(/^Approved machine/)).toBeVisible()
+    expect(screen.queryByRole('dialog')).toBeNull()
     expect(fake.service.accepted).toBe(1)
     expect(fake.service.applied).toBe(1)
     expect(fake.service.proofs).toBe(1)
@@ -147,7 +148,7 @@ describe('an administrative change', () => {
 
     await user.click(within(dialog).getByRole('button', { name: 'Send the same confirmation again' }))
 
-    expect(await within(dialog).findByText('Done')).toBeInTheDocument()
+    expect(await screen.findByText(/^Approved machine/)).toBeVisible()
     expect(fake.service.proofs).toBe(2)
     expect(fake.service.accepted).toBe(1)
     expect(fake.service.applied).toBe(1)
@@ -201,7 +202,7 @@ describe('an administrative change', () => {
     fireEvent.click(confirm)
     fireEvent.click(confirm)
 
-    expect(await within(dialog).findByText('Done')).toBeInTheDocument()
+    expect(await screen.findByText(/^Approved machine/)).toBeVisible()
     expect(vi.mocked(navigator.credentials.get)).toHaveBeenCalledTimes(1)
     expect(fake.service.proofs).toBe(1)
     expect(fake.service.applied).toBe(1)
@@ -335,13 +336,13 @@ describe('an administrative change', () => {
 
     renderApp('/machines')
     for (const round of [1, 2]) {
+      await user.click(await screen.findByRole('button', { name: /View machine/ }))
       await user.click(await screen.findByRole('button', { name: /^approve/i }))
       const dialog = await screen.findByRole('dialog')
       await user.click(await within(dialog).findByRole('button', { name: 'Approve machine' }))
-      await user.click(await within(dialog).findByRole('button', { name: 'Close' }))
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
       expect(fake.count(inlinePath)).toBe(round)
       expect(fake.count(`POST /api/v1/authorizations/auth-id-${round}/proof`)).toBe(1)
-      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     }
   })
 
@@ -404,7 +405,7 @@ describe('a tap is never lost: the page that comes back reads what the service m
     renderApp('/machines')
 
     const dialog = await screen.findByRole('dialog')
-    expect(await within(dialog).findByText('The authority is locked.')).toBeInTheDocument()
+    expect(await screen.findByText('The authority is locked.')).toBeInTheDocument()
     expect(within(dialog).queryByRole('alert')).toBeNull()
   })
 

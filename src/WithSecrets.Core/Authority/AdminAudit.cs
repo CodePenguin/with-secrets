@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+
 using Microsoft.Data.Sqlite;
 
 namespace WithSecrets;
@@ -18,7 +19,7 @@ internal sealed record AdminEvent(string Name, IReadOnlyList<string> Names, stri
     /// <summary>A change to what can approve (a key added or removed, approvals revoked), approved by <paramref name="key" />.</summary>
     public static AdminEvent Change(string name, string detail, string key, VerifiedCredential? credential = null) => new(name, [], detail, key, credential);
 
-    /// <summary>A change to the secret store ("secrets-set" or "secrets-removed"), approved by <paramref name="key" />. Names only.</summary>
+    /// <summary>A change to the secret store approved by <paramref name="key" />. Names only.</summary>
     public static AdminEvent Secrets(string name, IReadOnlyList<string> names, string detail, string key, VerifiedCredential? credential = null) => new(name, names, detail, key, credential);
 
     /// <summary>A change to provider instances or mounts, or a namespace refresh ("provider-added", "mount-removed", "namespace-refreshed" and so on). Names and counts only: never configuration values.</summary>

@@ -58,7 +58,8 @@ public sealed record ApprovalQueueItemDto(
     ApprovalMachineView Machine,
     string Program,
     string Reason,
-    IReadOnlyList<string> SecretNames);
+    IReadOnlyList<string> SecretNames,
+    string? ScriptName);
 
 /// <summary>Detail response including authoritative status and optional full review or minimal terminal facts.</summary>
 public sealed record ApprovalDetailDto(
@@ -556,7 +557,12 @@ public sealed class ApprovalQueue : IDisposable
         entry.Review.Machine,
         entry.Review.Program,
         entry.Review.Reason,
-        entry.Review.SecretNames);
+        entry.Review.SecretNames,
+        ScriptName(entry.Review.Script?.Path));
+
+    // A request can come from a host on a different operating system.
+    private static string? ScriptName(string? path) =>
+        string.IsNullOrEmpty(path) ? null : path[(path.LastIndexOfAny(['/', '\\']) + 1)..];
 
     public ApprovalDetailDto? GetDetail(string requestId, Func<string, ProcessedRequest?> processed)
     {
@@ -907,7 +913,7 @@ public sealed class ApprovalQueue : IDisposable
             {
                 entry.Status = ApprovalStatuses.Cancelled;
                 entry.DecisionInProgress = false;
-                                entry.Expiry?.Dispose();
+                entry.Expiry?.Dispose();
                 entry.Decision.TrySetResult(ApprovalDecision.Deny("the authority service stopped", reasonCode: ReasonCodes.Cancelled));
             }
         }

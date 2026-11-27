@@ -16,7 +16,7 @@ Building needs the .NET 10 SDK and **Node.js 22 or newer** on the PATH (the admi
 
 Use your own terminal to run `with-secrets admin`. With no passkey enrolled, it starts the local service in the background and opens Quick Start on Windows. Open the printed link if your browser did not open.
 
-1. **Verify device.** Enter the six-digit code in your terminal. Compare the full fingerprint on both screens and select **Fingerprint matches. Continue**.
+1. **Verify device.** Enter the six-digit code in your terminal. Compare the full fingerprint on both screens and select **Fingerprint matches**.
 2. **Create passkey.** Name and create a PRF-capable admin passkey.
 3. **Finish setup.** Select **Confirm setup and unlock** to trust the local device, pin the authority, and sign in. Save the recovery code shown on this screen. Expand **See how a secret is used** for an example, or select **Open with-secrets** to go straight to Overview.
 
