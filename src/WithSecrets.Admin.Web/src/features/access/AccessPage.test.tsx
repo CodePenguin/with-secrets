@@ -43,13 +43,19 @@ async function enabledApprove() {
 
 describe('approvals', () => {
   it('lists the run requests that wait, with a way to review each', async () => {
-    signedIn({ 'GET /api/v1/approvals': { body: { items: [approvalItem()], nextCursor: null, serverTime: '2026-11-09T10:00:00Z' } } })
+    const later = approvalItem({ requestId: 'req-0002', expiresAt: '2026-11-09T10:20:00Z' })
+    const api = signedIn({ 'GET /api/v1/approvals': { body: { items: [later, approvalItem({ scriptName: 'deploy.cmd' })], nextCursor: null, serverTime: '2026-11-09T10:00:00Z' } } })
     renderApp('/access')
 
-    const list = await screen.findByRole('list', { name: 'Run requests' })
-    expect(within(list).getByRole('heading', { name: 'build box' })).toBeInTheDocument()
-    expect(within(list).getByText('DEPLOY_TOKEN')).toBeInTheDocument()
-    expect(within(list).getByRole('link', { name: /review/i })).toHaveAttribute('href', expect.stringContaining('/access/req-0001'))
+    const table = await screen.findByRole('table', { name: 'Run requests' })
+    const rows = within(table).getAllByRole('row').slice(1)
+    expect(within(rows[0]!).getByText('build box')).toBeInTheDocument()
+    expect(within(rows[0]!).getByText('deploy.cmd')).toBeInTheDocument()
+    expect(within(rows[0]!).getByText('5 min')).toBeInTheDocument()
+    expect(within(rows[1]!).getByText('20 min')).toBeInTheDocument()
+    expect(within(table).queryByText('DEPLOY_TOKEN')).not.toBeInTheDocument()
+    expect(within(rows[0]!).getByRole('link', { name: /review/i })).toHaveAttribute('href', '/access/req-0001')
+    expect(api.calls.find(call => call.path === '/api/v1/approvals')?.query.get('limit')).toBe('64')
     expect(await violations(document.body)).toEqual([])
   })
 
@@ -303,29 +309,53 @@ describe('approvals', () => {
 })
 
 describe('grants: used once-only grants', () => {
-  const used = grant({ id: 'g-once0001', state: 'consumed', status: 'consumed', usage: 'once', consumed: '2026-11-09T09:00:05Z', expires: null, ends: 'used 2026-11-09T09:00:05.0000000Z', actions: ['replace'] })
+  const used = grant({ id: 'g-once0001', state: 'consumed', status: 'consumed', usage: 'once', consumed: '2026-11-09T09:00:05Z', expires: null, ends: 'used 2026-11-09T09:00:05.0000000Z', actions: ['extend'], repeatTimes: [60, 120, 240, 480, 1440, 10080, 43200, 1000000] })
 
-  it('shows Used once and a used state, and Make a grant from this sends grant-replace with minutes or no end', async () => {
+  it('shows used approvals and lets a person allow repeat runs', async () => {
     const user = userEvent.setup()
+    let proved = false
     const fake = signedIn({
       'GET /api/v1/grants': { body: { items: [used, grant({ id: 'g-new00002', replaces: 'g-once0001' })] } },
-      'POST /api/v1/authorizations/inline': { status: 201, body: authorization({ operation: 'grant-replace', link: null, proof: { mode: 'webauthn', payload: JSON.stringify({ bind: 'AQ', rpId: 'localhost', timeout: 60000 }) }, parameters: [] }) },
+      'POST /api/v1/authorizations/auth-id-0001/proof': () => {
+        proved = true
+        return { body: { ok: true } }
+      },
+      'GET /api/v1/authorizations/auth-id-0001': () => ({ body: authorization({
+        operation: 'grant-extend', state: proved ? 'consumed' : 'pending',
+        result: proved ? { outcome: 'applied', code: null, detail: null, link: null, invitation: null, invitationGone: false } : null,
+      }) }),
     })
     renderApp('/access')
 
-    const list = await screen.findByRole('list', { name: 'Grants' })
-    expect(within(list).getByText('Used once')).toBeInTheDocument()
-    expect(within(list).getByText('Used')).toBeInTheDocument()
-    expect(within(list).getByText('Replaces g-once0001')).toBeInTheDocument()
-    expect(within(list).getByText('used 2026-11-09T09:00:05.0000000Z')).toBeInTheDocument()
-    expect(await violations(list)).toEqual([])
+    const table = within(await screen.findByRole('table', { name: 'Grants' }))
+    expect(table.getByText('Used once')).toBeInTheDocument()
+    expect(table.queryByRole('button', { name: /Allow repeat runs/ })).toBeNull()
+    await user.click(table.getByRole('button', { name: /View grant g-once0001/ }))
+    const details = within(await screen.findByRole('dialog', { name: 'Grant for deploy.cmd' }))
+    expect(details.getByText('Used')).toBeInTheDocument()
+    expect(details.getByText('DEPLOY_TOKEN')).toBeInTheDocument()
+    await user.click(details.getByRole('button', { name: /Allow repeat runs/ }))
+    const choices = await screen.findAllByRole('menuitem')
+    expect(choices.map(option => option.textContent)).toEqual(['1 hour', '2 hours', '4 hours', '8 hours', '24 hours', '7 days', '30 days', 'Always'])
+    expect(credentials.get).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('menuitem', { name: '30 days' }))
+    await waitFor(() => expect(credentials.get).toHaveBeenCalledTimes(1))
+    expect(fake.calls.find((call) => call.path === '/api/v1/authorizations/inline')?.body).toEqual({ operation: 'grant-extend', parameters: { id: 'g-once0001', minutes: 43200 } })
+    expect(fake.count('POST /api/v1/authorizations/auth-id-0001/proof')).toBe(1)
+    expect(await screen.findByText('Extended grant g-once0001 for 30 days.')).toBeVisible()
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
 
-    await user.click(within(list).getByRole('button', { name: /Make a grant from this/ }))
-    const dialog = await screen.findByRole('dialog')
-    expect(await violations(dialog)).toEqual([])
-    await user.click(within(dialog).getByRole('button', { name: 'Continue' }))
-    await waitFor(() => expect(fake.count('POST /api/v1/authorizations/inline')).toBe(1))
-    expect(fake.calls.find((call) => call.path === '/api/v1/authorizations/inline')?.body).toEqual({ operation: 'grant-replace', parameters: { id: 'g-once0001', minutes: 60 } })
+  it('removes expired grants from the list as it refreshes', async () => {
+    const running = grant({ id: 'g-ending' })
+    const fake = signedIn({ 'GET /api/v1/grants': { body: { items: [running, used] } } })
+    renderApp('/access')
+
+    const table = within(await screen.findByRole('table', { name: 'Grants' }))
+    expect(table.getByRole('button', { name: /View grant g-ending/ })).toBeVisible()
+    fake.on('GET /api/v1/grants', { body: { items: [{ ...running, state: 'expired', actions: ['renew'] }, used] } })
+    await waitFor(() => expect(table.queryByRole('button', { name: /View grant g-ending/ })).not.toBeInTheDocument(), { timeout: 5000 })
+    expect(table.getByRole('button', { name: /View grant g-once0001/ })).toBeVisible()
   })
 })
 
@@ -338,10 +368,14 @@ describe('convenience passkey sessions', () => {
     })
     renderApp('/access')
 
-    expect(await screen.findByRole('button', { name: /^Extend\s*grant grant-0001$/ })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /^Revoke\s*grant grant-0001$/ })).toBeInTheDocument()
+    await user.click(await screen.findByRole('button', { name: /View grant grant-0001/ }))
+    const details = within(await screen.findByRole('dialog'))
+    expect(details.getByRole('button', { name: /^Extend\s*grant grant-0001$/ })).toBeInTheDocument()
+    expect(details.getByRole('button', { name: /^Revoke\s*grant grant-0001$/ })).toBeInTheDocument()
+    await user.click(details.getByRole('button', { name: 'Close' }))
     await user.click(screen.getByRole('link', { name: 'Secrets' }))
-    expect(await screen.findByRole('heading', { name: 'TOKEN' })).toBeInTheDocument()
+    const secrets = await screen.findByRole('list', { name: 'Secrets' })
+    expect(within(secrets).getByText('TOKEN', { exact: true })).toBeVisible()
     expect(screen.queryByLabelText('Value')).toBeNull()
     expect(screen.queryByRole('button', { name: /remove secret/i })).toBeNull()
   })
@@ -356,6 +390,7 @@ describe('grant review', () => {
     })
     renderApp('/access')
 
+    await user.click(await screen.findByRole('button', { name: /View grant grant-0001/ }))
     await user.click(await screen.findByRole('button', { name: /^Review\s*grant grant-0001$/ }))
     expect(await screen.findByText('Review text opens when an administrator unlocks the authority with an admin passkey.')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /tap to review/i })).toBeNull()
@@ -371,6 +406,7 @@ describe('grant review', () => {
     })
     renderApp('/access')
 
+    await user.click(await screen.findByRole('button', { name: /View grant grant-0001/ }))
     await user.click(await screen.findByRole('button', { name: /^Review\s*grant grant-0001$/ }))
     expect((await screen.findByText(text)).tagName).toBe('PRE')
     expect(document.querySelector('pre script')).toBeNull()
@@ -378,15 +414,20 @@ describe('grant review', () => {
   })
 
   it('says an ended grant keeps no review text and an unverified grant is not used', async () => {
+    const user = userEvent.setup()
     signedIn({
       'GET /api/v1/grants': { body: { items: [grant({ id: 'g-ended001', status: 'revoked', state: 'revoked', actions: [] }), grant({ id: 'g-planted1', verified: false })] } },
       'GET /api/v1/grants/g-planted1/review': { body: { state: 'locked', text: null, verified: false } },
     })
     renderApp('/access')
 
-    expect(await screen.findByText('No review text is kept for an ended grant.')).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /grant g-ended001$/ })).toBeNull()
-    expect(screen.getAllByText('This grant is not verified and is not used.')).toHaveLength(1)
+    await user.click(await screen.findByRole('button', { name: /View grant g-ended001/ }))
+    const details = within(await screen.findByRole('dialog'))
+    expect(details.getByText('No review text is kept for an ended grant.')).toBeInTheDocument()
+    expect(details.queryByRole('button', { name: /grant g-ended001$/ })).toBeNull()
+    await user.click(details.getByRole('button', { name: 'Close' }))
+    await user.click(screen.getByRole('button', { name: /View grant g-planted1/ }))
+    expect(within(await screen.findByRole('dialog')).getByText('This grant is not verified and is not used.')).toBeVisible()
     expect(await violations(document.body)).toEqual([])
   })
 })

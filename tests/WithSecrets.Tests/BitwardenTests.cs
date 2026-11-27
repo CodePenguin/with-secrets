@@ -44,7 +44,7 @@ internal static class BitwardenTests
         switch (args[..^6])
         {
             case ["project", "list"] when server is DefaultServer or CustomServer:
-                Console.Write(JsonSerializer.Serialize(new[] { new { id = Project } }));
+                Console.Write(JsonSerializer.Serialize(new[] { new { id = Project, name = "Build project" } }));
                 break;
             case ["project", "get", Project] when server == DefaultServer:
                 Console.Write(JsonSerializer.Serialize(new { id = Project }));
@@ -53,7 +53,7 @@ internal static class BitwardenTests
                 Console.Write(JsonSerializer.Serialize(new { id = OtherProject }));
                 break;
             case ["secret", "list", Project] when server == DefaultServer:
-                Console.Write(JsonSerializer.Serialize(new[] { new { id = Secret, projectId = Project, value = Value } }));
+                Console.Write(JsonSerializer.Serialize(new[] { new { id = Secret, projectId = Project, key = "Build token", value = Value } }));
                 break;
             case ["secret", "get", Secret] when server == DefaultServer:
                 Console.Write(JsonSerializer.Serialize(new { id = Secret, projectId = Project, value = Value }));
@@ -149,6 +149,14 @@ internal static class BitwardenTests
                 check((await adapter.ValidateConfigurationAsync(custom, default)).Single().Target == "serverUrl",
                     "Bitwarden rejects invalid server URLs before starting the CLI");
             }
+
+            var browser = (IProviderMountBrowser)adapter;
+            IReadOnlyList<ProviderMountOption> projects = await browser.BrowseMountOptionsAsync(null, default);
+            IReadOnlyList<ProviderMountOption> secrets = await browser.BrowseMountOptionsAsync(Project, default);
+            check(projects.SequenceEqual([new ProviderMountOption(Project, "Build project")])
+                && secrets.SequenceEqual([new ProviderMountOption(Project + "/" + Leaf, "Build token")])
+                && !JsonSerializer.Serialize(secrets).Contains(Value, StringComparison.Ordinal),
+                "Bitwarden mount discovery returns project and secret names with their paths, without secret values");
 
             ListSecretsResult listed = await adapter.ListSecretsAsync(new(Project, null, null), default);
             ProviderSecretInfo info = listed.Secrets.Single();

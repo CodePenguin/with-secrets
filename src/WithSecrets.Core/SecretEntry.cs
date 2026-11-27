@@ -65,6 +65,17 @@ public static class SecretEntry
     {
         List<(string Name, bool Replace)> fields = [.. names.Select(name => (name, stored.Contains(name)))];
         string text = "Store these secrets: " + string.Join(", ", fields.Select(field => field.Name + (field.Replace ? " (replace)" : " (new)"))) + ".";
+        return WithNameWarnings(text, names, stored, method);
+    }
+
+    internal static string EditText(string source, string destination, HashSet<string> stored, IProofMethod method)
+    {
+        string text = source == destination ? $"Replace the value of {source}." : $"Move {source} to {destination}. Keep its value unless a replacement is supplied.";
+        return WithNameWarnings(text, [destination], stored, method);
+    }
+
+    private static string WithNameWarnings(string text, IReadOnlyList<string> names, HashSet<string> stored, IProofMethod method)
+    {
         // Names are case-sensitive: a name that differs from a stored one only by case is a different secret. A warning, not a refusal;
         // it is part of the bound text, so the person signs what they were warned about. Names are public.
         foreach (string name in names)
@@ -95,11 +106,13 @@ public static class SecretEntry
         return text;
     }
 
+    internal sealed record Edit(string Source, string Ciphertext);
+
     /// <summary>
     /// The state of one set page. Requests are handled one at a time under one lock; the first outcome is final, and after
     /// it every request is 404. The store is written inside the lock, so the time limit cannot cut a write in half.
     /// </summary>
-    internal sealed class Session(IProofMethod method, SecretStore store, Manifest manifest, string storeKey, List<string> names, byte[] serverKey)
+    internal sealed class Session(IProofMethod method, SecretStore store, Manifest manifest, string storeKey, List<string> names, byte[] serverKey, Edit? edit = null)
     {
         private static readonly OneShotResponse Ok = new(200, "application/json", "{\"ok\":true}");
         private static readonly OneShotResponse Refused = new(403, "application/json", "{\"ok\":false}");
@@ -113,6 +126,7 @@ public static class SecretEntry
         private const int Kept = 16;
 
         private readonly Lock _gate = new();
+        private readonly string[] _removes = edit is not null && edit.Source != names[0] ? [edit.Source] : [];
         internal VerifiedCredential? VerifiedFailure { get; private set; }
 
         private readonly TaskCompletionSource<SecretChange> _decision = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -231,10 +245,10 @@ public static class SecretEntry
             Dictionary<string, string> rows = new(StringComparer.Ordinal);
             foreach (string name in names)
             {
-                rows[name] = store.Encrypt(values[name], storeKey);
+                rows[name] = values.Count == 0 ? edit!.Ciphertext : store.Encrypt(values[name], storeKey);
             }
 
-            string text = SecretStore.Next(manifest, storeKey, rows, []).Canonical();
+            string text = SecretStore.Next(manifest, storeKey, rows, _removes).Canonical();
             _sealed[key] = (text, rows);
             _order.Enqueue(key);
             while (_order.Count > Kept)
@@ -335,7 +349,9 @@ public static class SecretEntry
             }
 
             SignedManifest signed = new(prepared.Manifest, manifestBind, assertion);
-            string? problemWriting = store.TryApply(manifest.Version, signed, prepared.Rows, [], AdminEvent.Secrets("secrets-set", names, result.Detail, result.Credential?.Name ?? AdminAudit.KeyName(result.Detail), result.Credential));
+            AdminEvent change = AdminEvent.Secrets(edit is null ? "secrets-set" : "secrets-edited", [.. _removes, .. names],
+                result.Detail, result.Credential?.Name ?? AdminAudit.KeyName(result.Detail), result.Credential);
+            string? problemWriting = store.TryApply(manifest.Version, signed, prepared.Rows, _removes, change);
             if (problemWriting is not null)
             {
                 VerifiedFailure = result.Credential;
@@ -355,6 +371,18 @@ public static class SecretEntry
             if (values is null)
             {
                 return "the secrets are not a JSON object of names and text values, each name once";
+            }
+
+            if (edit is not null && values.Count == 0)
+            {
+                if (_removes.Length == 0)
+                {
+                    return "the name, path and value are unchanged";
+                }
+
+                // Moving a dotenvx private key into the ordinary namespace would let a command request its existing value.
+                return SecretNames.IsPrivateKeyName(edit.Source) == SecretNames.IsPrivateKeyName(names[0])
+                    ? null : "enter a new value to move a secret between private-key and ordinary paths";
             }
 
             if (values.Count != names.Count || names.Any(name => !values.ContainsKey(name)))

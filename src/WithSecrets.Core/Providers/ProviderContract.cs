@@ -141,6 +141,13 @@ public interface IAdapterConfiguration
     void Load(JsonDocument document);
 }
 
+public interface IProviderMountBrowser
+{
+    Task<IReadOnlyList<ProviderMountOption>> BrowseMountOptionsAsync(string? parentPath, CancellationToken cancellationToken);
+}
+
+public sealed record ProviderMountOption(string Path, string Name);
+
 public interface IProviderAdapter
 {
     Type ConfigurationType { get; }

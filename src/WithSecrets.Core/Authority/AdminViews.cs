@@ -24,7 +24,7 @@ public sealed record CopyWarningDto(int Count, string FirstAddress, string LastA
 public sealed record MachineDto(string Fingerprint, string Display, string Status, int Revision, string HostName, string? PendingHostName, string? FriendlyName, DateTimeOffset Created, DateTimeOffset Updated, bool ThisMachine, IReadOnlyList<string> Actions, CopyWarningDto? CopyWarning);
 
 public sealed record GrantDto(string Id, string Fingerprint, string? MachineName, string State, string Status, int Revision, DateTimeOffset Created, DateTimeOffset Updated, DateTimeOffset? Expires, string Ends, string SecretNames, string Program, string WorkingDirectory,
-    string ApprovedBy, DateTimeOffset? Revoked, string Usage, DateTimeOffset? Consumed, string? Replaces, IReadOnlyList<string> Actions, bool Verified);
+    string ApprovedBy, DateTimeOffset? Revoked, string Usage, DateTimeOffset? Consumed, string? Replaces, IReadOnlyList<string> Actions, bool Verified, IReadOnlyList<int> RepeatTimes);
 
 public sealed record GrantReviewDto(string State, string? Text, bool Verified);
 
@@ -121,16 +121,18 @@ public sealed partial class AdminService
     {
         MachineRecord? machine = _p.Store.Find(grant.Fingerprint);
         List<string> actions = [];
-        foreach (string verb in new[] { "extend", "renew", "revoke", "replace" })
+        IReadOnlyList<int> repeatTimes = grant.Status == "consumed" && GrantProblem("extend", grant, now, _p.Store) is null
+            ? ReuseSettings.Load(new StateDatabase(_p.Store.Database)).WithAlways : [];
+        foreach (string verb in new[] { "extend", "renew", "revoke" })
         {
-            if (GrantProblem(verb, grant, now, _p.Store) is null)
+            if (grant.Status == "consumed" ? verb == "extend" && repeatTimes.Count > 0 : GrantProblem(verb, grant, now, _p.Store) is null)
             {
                 actions.Add(verb);
             }
         }
 
         return new GrantDto(grant.Id, grant.Fingerprint, machine?.FriendlyName is { } name ? C(name) : null, GrantState(grant, now), grant.Status, grant.Revision, grant.Created, grant.Updated, grant.Expires, GrantEnds(grant, now), C(grant.SecretNames), C(grant.Program),
-            C(grant.WorkingDirectory), C(grant.ApprovedBy), grant.Revoked, grant.Usage, grant.Consumed, grant.Replaces, actions, GrantVerified(grant));
+            C(grant.WorkingDirectory), C(grant.ApprovedBy), grant.Revoked, grant.Usage, grant.Consumed, grant.Replaces, actions, GrantVerified(grant), repeatTimes);
     }
 
     internal IReadOnlyList<GrantDto> GrantsView()

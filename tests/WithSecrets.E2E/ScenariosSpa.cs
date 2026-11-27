@@ -14,8 +14,9 @@ namespace WithSecrets.E2E;
 internal static class ScenariosSpa
 {
     private const string SecretValue = "s3cr3t-e2e-value-1";
+    private const string BitwardenProjectPath = "11111111-1111-4111-8111-111111111111";
 
-    private sealed class TestProvider<TConfiguration> : ProviderAdapter<TConfiguration> where TConfiguration : class, IAdapterConfiguration
+    private class TestProvider<TConfiguration> : ProviderAdapter<TConfiguration> where TConfiguration : class, IAdapterConfiguration
     {
         protected override Task InitializeAsync(TConfiguration configuration, AdapterInitializationContext context, CancellationToken cancellationToken)
         {
@@ -33,17 +34,30 @@ internal static class ScenariosSpa
             Task.FromResult(new ListSecretsResult([new ProviderSecretInfo("TOKEN", "test-token", "Deployment token metadata")], null, true));
     }
 
+    private sealed class TestBitwardenProvider : TestProvider<BitwardenConfiguration>, IProviderMountBrowser
+    {
+        public Task<IReadOnlyList<ProviderMountOption>> BrowseMountOptionsAsync(string? parentPath, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<ProviderMountOption>>(parentPath switch
+            {
+                null => [new(BitwardenProjectPath, "Build project"), new("22222222-2222-4222-8222-222222222222", "Staging")],
+                BitwardenProjectPath => [new(BitwardenProjectPath + "/TOKEN", "Deployment token")],
+                _ => [],
+            });
+    }
+
     public static async Task Providers(Host host, S s)
     {
         using Rig rig = new();
         await using Ctx c = await Ctx.NewAsync(host);
         await Flows.Configure(rig, c);
         ProviderRegistry registry = new();
-        registry.RegisterType("bitwarden", "1.0", () => new TestProvider<BitwardenConfiguration>(), () => new BitwardenConfiguration());
+        registry.RegisterType("bitwarden", "1.0", () => new TestBitwardenProvider(), () => new BitwardenConfiguration());
         using SpaApp app = new(rig, providers: registry, sealBitwarden: (token, url) =>
             rig.State.TryManifest(out Manifest? manifest, out _) && manifest?.Review is { } review
                 ? BitwardenProvider.SealConfiguration(token, url, review.PublicKey) : null);
         await Spa.SignIn(c, app, s);
+        await Scenarios3.SeedSecret(rig, c, app, "apps/API_KEY");
+        await Spa.StartDemoFromOverview(c);
         await Spa.GoTo(c, "Providers", "Providers");
         ILocator dialog = Spa.Dialog(c);
 
@@ -68,7 +82,9 @@ internal static class ScenariosSpa
         await dialog.GetByLabel("Bitwarden access token").FillAsync("demo-bitwarden-token-first");
         await c.DemoSnapAsync("Choose Bitwarden Secrets Manager and enter the access token. WithSecrets encrypts it before asking for passkey approval.");
         await Complete("Added provider Build vault.");
-        await c.Page.GetByRole(AriaRole.Link, new() { Name = "Build vault" }).ClickAsync();
+        ILocator providerRow = c.Page.GetByRole(AriaRole.Table, new() { Name = "Providers" }).GetByRole(AriaRole.Link, new() { Name = "Build vault" });
+        await c.DemoPressAsync(providerRow, "Compare provider health and mount counts in the list. Select Build vault for its settings.");
+        await providerRow.ClickAsync();
         await Spa.Heading(c, "Build vault").WaitForAsync();
         s.Check(await c.Page.GetByText("healthy", new() { Exact = true }).IsVisibleAsync(), "the registered adapter reports healthy");
         await Spa.Axe(c, s, "provider detail");
@@ -85,27 +101,36 @@ internal static class ScenariosSpa
             !(await Scenarios2.RawState(rig)).Contains("demo-bitwarden-token-replacement", StringComparison.Ordinal),
             "the same save changed the cache policy and provider settings without storing the Bitwarden token in plaintext");
 
-        await Spa.Button(c, "Add mount Build vault").ClickAsync();
-        const string providerPath = "11111111-1111-4111-8111-111111111111";
-        await dialog.GetByLabel("Logical path").FillAsync("team");
-        await dialog.GetByLabel("Provider path").FillAsync(providerPath);
-        await Complete("Added mount team.");
-        await Spa.Button(c, "Show entries for team").ClickAsync();
-        await c.Page.GetByText("team/TOKEN", new() { Exact = true }).WaitForAsync();
-        s.Check(await c.Page.GetByText(providerPath + "/TOKEN", new() { Exact = true }).IsVisibleAsync(), "the immediate reconciliation listed entry metadata");
-        await Spa.Button(c, "Refresh namespace team").ClickAsync();
-        await c.Page.GetByText("Namespace refreshed. Added", new() { Exact = false }).WaitForAsync();
-        await c.DemoSnapAsync("Show entries lists names under the mount. Refresh namespace updates the listing.");
-
         await Spa.GoTo(c, "Secrets", "Secrets");
-        ILocator mounted = c.Page.Locator("summary").Filter(new() { HasText = "team/" });
-        await c.DemoPressAsync(mounted, "In Secrets, open a mount to browse the names it provides. Local is the mount for manually added secrets.");
+        ILocator tree = c.Page.GetByRole(AriaRole.List, new() { Name = "Secrets", Exact = true });
+        await tree.GetByText("apps", new() { Exact = true }).ClickAsync();
+        ILocator mountProvider = Spa.Button(c, "Mount provider", exact: true);
+        await c.DemoPressAsync(mountProvider, "Review the tree, then choose Mount provider at the top of Secrets.");
+        await Spa.Click(mountProvider);
+        await dialog.GetByLabel("Project").SelectOptionAsync(new SelectOptionValue { Label = "Build project" });
+        await dialog.GetByLabel("Mount kind").SelectOptionAsync(new SelectOptionValue { Label = "Single secret" });
+        await dialog.GetByLabel("Secret").SelectOptionAsync(new SelectOptionValue { Label = "Deployment token" });
+        await c.DemoSnapAsync("For a single-secret mount, choose the Bitwarden project and secret by name.");
+        await dialog.GetByLabel("Mount kind").SelectOptionAsync(new SelectOptionValue { Label = "Entire project" });
+        await dialog.GetByLabel("Logical path").FillAsync("team");
+        await c.DemoSnapAsync("Mount the entire Build project at team.");
+        await Complete("Added mount team.");
+        ILocator mounted = tree.Locator("summary").Filter(new() { HasText = "team" });
+        await c.DemoPressAsync(mounted, "In Secrets, open team to browse every name under that path.");
         await mounted.ClickAsync();
-        await c.Page.GetByRole(AriaRole.Heading, new() { Name = "TOKEN", Exact = true }).WaitForAsync();
-        await c.DemoSnapAsync("The mount lists the secret by its logical path. Provider entries are read-only here.");
+        await tree.GetByText("TOKEN", new() { Exact = true }).WaitForAsync();
+        s.Check(await tree.GetByText("API_KEY", new() { Exact = true }).IsVisibleAsync(),
+            "after mounting, Secrets keeps the open folder and shows the new provider folder in the same tree");
+        await c.DemoSnapAsync("The same tree shows the manual secret under apps and the provider secret under team.");
         await Spa.GoTo(c, "Providers", "Providers");
         await c.Page.GetByRole(AriaRole.Link, new() { Name = "Build vault" }).ClickAsync();
         await Spa.Heading(c, "Build vault").WaitForAsync();
+        await Spa.Button(c, "Show entries for team").ClickAsync();
+        await c.Page.GetByText("team/TOKEN", new() { Exact = true }).WaitForAsync();
+        s.Check(await c.Page.GetByText(BitwardenProjectPath + "/TOKEN", new() { Exact = true }).IsVisibleAsync(), "the immediate reconciliation listed entry metadata");
+        await Spa.Button(c, "Refresh namespace team").ClickAsync();
+        await c.Page.GetByText("Namespace refreshed. Added", new() { Exact = false }).WaitForAsync();
+        await c.DemoSnapAsync("In Providers, Show entries lists the mount's metadata. Refresh namespace updates it.");
 
         await Spa.Button(c, "Remove mount team").ClickAsync();
         await Complete("Removed mount team.");
@@ -119,7 +144,7 @@ internal static class ScenariosSpa
         await Spa.GoTo(c, "Audit", "Audit");
         foreach (string outcome in new[] { "provider-added", "provider-config-changed", "provider-max-stale-changed", "mount-added", "namespace-refreshed", "mount-removed", "provider-removed" })
         {
-            await c.Page.GetByText("admin: " + outcome, new() { Exact = true }).First.WaitForAsync();
+            await c.Page.GetByRole(AriaRole.Table, new() { Name = "Host events" }).GetByRole(AriaRole.Cell, new() { Name = outcome, Exact = true }).First.WaitForAsync();
         }
         s.Check(!(await c.Page.ContentAsync()).Contains("demo-bitwarden-token-replacement", StringComparison.Ordinal), "the audit page omits the Bitwarden token");
         s.NoProblems(c);
@@ -179,8 +204,9 @@ internal static class ScenariosSpa
         await Spa.Click(confirm);
         await dialog.WaitForAsync(new() { State = WaitForSelectorState.Detached });
         await c.Page.GetByRole(AriaRole.Main).GetByText($"Added provider {name}.", new() { Exact = true }).WaitForAsync();
-        await c.Page.GetByRole(AriaRole.Link, new() { Name = name, Exact = true }).WaitForAsync();
-        await c.DemoSnapAsync("The provider appears in the list. Open its name to configure mounts.");
+        ILocator providerRow = c.Page.GetByRole(AriaRole.Table, new() { Name = "Providers" }).GetByRole(AriaRole.Link, new() { Name = name });
+        await providerRow.WaitForAsync();
+        await c.DemoSnapAsync("The list shows the new provider, its type, health, and mount count. Select its row to open its settings.");
         ProviderInstance stored = app.Service.Providers!.Store.Instances().Single();
         s.Check(stored.ProviderType == type && stored.Name == name, "the selected provider is saved");
         if (token is { } fixture)
@@ -192,6 +218,7 @@ internal static class ScenariosSpa
                 "LastPass saves the selected region and applies the built-in refresh lifetime");
             s.Check(await c.Page.GetByText("Cache freshness", new() { Exact = true }).CountAsync() == 0,
                 "LastPass hides cache freshness in the provider list");
+            await providerRow.ClickAsync();
             await Spa.Button(c, $"Change configuration {name}", exact: true).ClickAsync();
             await dialog.WaitForAsync();
             s.Check(await dialog.GetByRole(AriaRole.Group, new() { Name = "Cache freshness" }).CountAsync() == 0,
@@ -314,19 +341,22 @@ internal static class ScenariosSpa
         (_, long signsAfterSignIn) = await c.AuthOps();
 
         await Spa.GoTo(c, "Machines", "Machines");
-        ILocator row = c.Page.GetByRole(AriaRole.Listitem).Filter(new() { HasText = KeyIdentity.Display(fp) });
+        ILocator row = c.Page.GetByRole(AriaRole.Row).Filter(new() { HasText = KeyIdentity.Display(fp) });
         await row.WaitForAsync();
         string rowText = await row.TextContentAsync() ?? "";
         s.Check(rowText.Contains("pending", StringComparison.Ordinal) && rowText.Contains("other-host", StringComparison.Ordinal), "the machines view lists the Pending machine with its host name and its status in words");
-        s.Check(await c.Page.GetByRole(AriaRole.Region, new() { Name = "A machine paired and is waiting for you" }).CountAsync() == 1 && await c.Page.GetByRole(AriaRole.Listitem).Filter(new() { HasText = KeyIdentity.Display(fp) }).CountAsync() == 1, "the paired machine is shown once, as the card that asks to check its fingerprint and host name");
+        s.Check(await c.Page.GetByRole(AriaRole.Region, new() { Name = "A machine paired and is waiting for you" }).CountAsync() == 1 && await row.CountAsync() == 1, "the paired machine has one row in the waiting table");
         await Spa.Axe(c, s, "machines");
 
         // Approving a machine: review, prepare the challenge, then confirm with one in-page WebAuthn gesture.
-        await c.DemoPressAsync(row.GetByRole(AriaRole.Button, new() { Name = "Approve" }), "On Machines, compare the name and fingerprint with the paired device, then choose Approve.");
+        await c.DemoPressAsync(row.GetByRole(AriaRole.Button), "Select the pending machine to open its details.");
+        await row.GetByRole(AriaRole.Button).ClickAsync();
+        ILocator dialog = Spa.Dialog(c);
+        ILocator approve = dialog.GetByRole(AriaRole.Button, new() { Name = "Approve" });
+        await c.DemoPressAsync(approve, "Compare the name and fingerprint with the paired device, then choose Approve.");
         mutations.Clear();
         Spa.Clicks = 0;
-        await Spa.Click(row.GetByRole(AriaRole.Button, new() { Name = "Approve" }));
-        ILocator dialog = Spa.Dialog(c);
+        await Spa.Click(approve);
         await dialog.WaitForAsync();
         await Spa.WaitForPasskeyStep(dialog);
         s.Check((await dialog.TextContentAsync() ?? "").Contains("as \"other-host\"", StringComparison.Ordinal), "the machine is approved under the host name the machine reported unless the person changes it");
@@ -341,34 +371,32 @@ internal static class ScenariosSpa
 
         string page = await Spa.TapAfterBack(c, s, passkeyPage, null);
         s.Check(page.Contains("approve this machine", StringComparison.OrdinalIgnoreCase) && page.Contains(KeyIdentity.Display(fp), StringComparison.Ordinal) && page.Contains("other-host", StringComparison.Ordinal), "the SPA result retains the approved action, fingerprint and name");
-        await dialog.GetByText("Done").First.WaitForAsync(new() { Timeout = 20000 });
+        await Spa.PageFeedback(c).WaitForAsync(new() { Timeout = 20000 });
         s.Check(store.Find(fp) is { Status: MachineStatus.Trusted, FriendlyName: "other-host" }, "the tap approves the machine (the service made the change when the tap was verified)");
-        s.Check(Spa.Clicks == 2, "approval took two clicks: open and confirm (" + Spa.Clicks + ")");
+        s.Check(Spa.Clicks == 2, "approval took two clicks from the details: approve and confirm (" + Spa.Clicks + ")");
         s.Check(await c.PasskeyCalls() == callsBefore + 1 && mutations.Count == 2 && mutations[0] == "POST /api/v1/authorizations/inline" && new Uri(c.Page.Url).AbsolutePath.StartsWith("/admin", StringComparison.Ordinal) && mutations[1].StartsWith("POST /api/v1/authorizations/", StringComparison.Ordinal) && mutations[1].EndsWith("/proof", StringComparison.Ordinal), "challenge preparation and assertion submission stay inside the SPA without a separate operation endpoint (" + string.Join(", ", mutations) + ")");
         s.Check(store.Audit(100).Any(entry => entry.Event == "machine-approve" && entry.Actor.StartsWith("admin passkey", StringComparison.Ordinal)), "the audit history names the admin passkey that tapped");
-        await dialog.GetByRole(AriaRole.Button, new() { Name = "Close" }).ClickAsync();
         await dialog.WaitForAsync(new() { State = WaitForSelectorState.Detached });
-        await c.Page.GetByRole(AriaRole.Heading, new() { Name = "other-host" }).WaitForAsync();
-        s.Check((await row.TextContentAsync() ?? "").Contains("trusted", StringComparison.Ordinal) || (await c.Page.GetByRole(AriaRole.Listitem).Filter(new() { HasText = "other-host" }).TextContentAsync() ?? "").Contains("trusted", StringComparison.Ordinal), "the list shows it Trusted under its new name");
+        await row.GetByText("trusted").WaitForAsync();
+        s.Check((await row.TextContentAsync() ?? "").Contains("other-host", StringComparison.Ordinal), "the table shows the trusted machine under its name");
         await c.DemoSnapAsync("The machine is now trusted.");
 
         // The next change needs its own challenge and a new assertion.
         (_, long signsAfterApprove) = await c.AuthOps();
         s.Check(signsAfterApprove == signsAfterSignIn + 1, "the approval was exactly one passkey signature");
-        ILocator renamed = c.Page.GetByRole(AriaRole.Listitem).Filter(new() { HasText = "other-host" });
+        await row.GetByRole(AriaRole.Button).ClickAsync();
         Spa.Clicks = 0;
-        await Spa.Click(renamed.GetByRole(AriaRole.Button, new() { Name = "Rename" }));
+        await Spa.Click(dialog.GetByRole(AriaRole.Button, new() { Name = "Rename" }));
         await dialog.GetByLabel("New name").FillAsync("e2e renamed");
         await c.DemoSnapAsync("Choose Rename to give the trusted machine a different name. Confirm that change with a separate passkey prompt.");
         IPage renamePageTab = await Spa.OpenPasskeyPage(c, s, dialog);
         s.Check(store.Find(fp)!.FriendlyName == "other-host", "the earlier approval does not authorize the rename (it is still the old name before the tap)");
         string renamePage = await Spa.TapAfterBack(c, s, renamePageTab, null);
-        await dialog.GetByText("Done").First.WaitForAsync(new() { Timeout = 20000 });
+        await Spa.PageFeedback(c).WaitForAsync(new() { Timeout = 20000 });
         s.Check(renamePage.Contains("e2e renamed", StringComparison.Ordinal) && store.Find(fp)!.FriendlyName == "e2e renamed", "a second change needed its own assertion and was applied by the service");
         s.Check(Spa.Clicks == 3, "an administrative rename took three clicks: open, prepare, and confirm (" + Spa.Clicks + ")");
         (_, long signsAfterRename) = await c.AuthOps();
         s.Check(signsAfterRename == signsAfterApprove + 1, "each change is exactly one more passkey signature");
-        await dialog.GetByRole(AriaRole.Button, new() { Name = "Close" }).ClickAsync();
         await dialog.WaitForAsync(new() { State = WaitForSelectorState.Detached });
 
         // Cancelling the browser's pending passkey prompt leaves the operation unapplied.
@@ -376,8 +404,9 @@ internal static class ScenariosSpa
         byte[] refusedChallenge = await rig.Machine.Deployment.Authority.BeginEnrollmentAsync();
         await rig.Machine.Deployment.Authority.EnrollAsync(EnrollmentRequest.Create("refused-host", refusedChallenge, refusedKey));
         string refusedFp = KeyIdentity.Fingerprint(refusedKey.PublicKey);
-        ILocator refusedRow = c.Page.GetByRole(AriaRole.Listitem).Filter(new() { HasText = KeyIdentity.Display(refusedFp) });
-        await refusedRow.GetByRole(AriaRole.Button, new() { Name = "Approve" }).ClickAsync();
+        ILocator refusedRow = c.Page.GetByRole(AriaRole.Row).Filter(new() { HasText = KeyIdentity.Display(refusedFp) });
+        await refusedRow.GetByRole(AriaRole.Button).ClickAsync();
+        await dialog.GetByRole(AriaRole.Button, new() { Name = "Approve" }).ClickAsync();
         IPage failedPage = await Spa.OpenPasskeyPage(c, s, dialog);
         await c.Presence(false);
         await Spa.ConfirmButton(dialog).ClickAsync();
@@ -420,7 +449,9 @@ internal static class ScenariosSpa
         int approvesBefore = store.Audit(200).Count(entry => entry.Event == "machine-approve");
 
         // 1. Reload while the passkey page waits for its tap: the application finds the waiting authorization again, and shows what the tap came to.
-        await Spa.Click(c.Page.GetByRole(AriaRole.Listitem).Filter(new() { HasText = KeyIdentity.Display(fp) }).GetByRole(AriaRole.Button, new() { Name = "Approve" }));
+        ILocator machineRow = c.Page.GetByRole(AriaRole.Row).Filter(new() { HasText = KeyIdentity.Display(fp) });
+        await machineRow.GetByRole(AriaRole.Button).ClickAsync();
+        await Spa.Click(dialog.GetByRole(AriaRole.Button, new() { Name = "Approve" }));
         await Spa.ChangeName(dialog, "Friendly name", "reloaded one");
         IPage passkeyPage = await Spa.OpenPasskeyPage(c, s, dialog);
         await c.Page.ReloadAsync();
@@ -429,19 +460,19 @@ internal static class ScenariosSpa
         s.Check(store.Find(fp)!.Status == MachineStatus.Pending, "after the reload the machine is still Pending (no tap yet)");
         s.Check(await c.Page.EvaluateAsync<bool>("() => Object.keys(sessionStorage).every((key) => ['ws.session-secret', 'ws.browser-secret', 'ws.pending-authorization'].includes(key)) && !sessionStorage.getItem('ws.pending-authorization').includes('http') && localStorage.length === 0"), "the tab keeps only the id and the title of the waiting authorization (no link, no parameter), and nothing in localStorage");
         await Spa.TapAfterBack(c, s, passkeyPage, null);
-        await dialog.GetByText("Done").First.WaitForAsync(new() { Timeout = 20000 });
+        await Spa.PageFeedback(c).WaitForAsync(new() { Timeout = 20000 });
         s.Check(store.Find(fp) is { Status: MachineStatus.Trusted, FriendlyName: "reloaded one" }, "the tap made after the reload approved the machine: the service made the change, the page only read the outcome");
         s.Check(mutations.Count(item => item == "POST /api/v1/authorizations/inline") == 2 && mutations.Count(item => item.StartsWith("DELETE /api/v1/authorizations/", StringComparison.Ordinal)) == 1 && mutations.Count(item => item.EndsWith("/proof", StringComparison.Ordinal)) == 1 && !mutations.Any(item => item.Contains("/approve", StringComparison.Ordinal)), "the SPA only prepared and submitted the assertion; it sent no operation mutation before or after reload (" + string.Join(", ", mutations) + ")");
-        await dialog.GetByRole(AriaRole.Button, new() { Name = "Close" }).ClickAsync();
         s.Check(await c.Page.EvaluateAsync<bool>("() => sessionStorage.getItem('ws.pending-authorization') === null"), "the waiting record is gone when the result was seen");
 
         // 2. Reload right after the tap (the tab never saw the result): the change is made, once, and the page never offers it again.
-        await Spa.Click(c.Page.GetByRole(AriaRole.Listitem).Filter(new() { HasText = "reloaded one" }).GetByRole(AriaRole.Button, new() { Name = "Rename" }));
+        await machineRow.GetByRole(AriaRole.Button).ClickAsync();
+        await Spa.Click(dialog.GetByRole(AriaRole.Button, new() { Name = "Rename" }));
         await dialog.GetByLabel("New name").FillAsync("reloaded two");
         await Spa.Continue(c, s, dialog);
         await c.Page.ReloadAsync();
         await Spa.Heading(c, "Machines").WaitForAsync();
-        await c.Page.GetByRole(AriaRole.Heading, new() { Name = "reloaded two" }).WaitForAsync(new() { Timeout = 20000 });
+        await machineRow.GetByText("reloaded two", new() { Exact = true }).WaitForAsync(new() { Timeout = 20000 });
         await c.DemoSnapAsync("After confirming and reloading, Machines shows the saved name.");
         s.Check(store.Find(fp)!.FriendlyName == "reloaded two", "a reload right after the tap loses nothing: the rename was made by the service");
         s.Check(store.Audit(200).Count(entry => entry.Event == "machine-approve") == approvesBefore + 1 && store.Audit(200).Count(entry => entry.Event == "machine-rename") == 1, "each change is in the audit once (" + string.Join(", ", store.Audit(200).Select(entry => entry.Event)) + ")");
@@ -467,27 +498,30 @@ internal static class ScenariosSpa
         (_, long signsAfterSignIn) = await c.AuthOps();
 
         await Spa.GoTo(c, "Machines", "Machines");
-        ILocator row = c.Page.GetByRole(AriaRole.Listitem).Filter(new() { HasText = "travel laptop" });
+        ILocator row = c.Page.GetByRole(AriaRole.Row).Filter(new() { HasText = "travel laptop" });
         await row.WaitForAsync();
-        string text = await row.TextContentAsync() ?? "";
-        s.Check(text.Contains("New host name reported", StringComparison.Ordinal) && text.Contains("laptop-old", StringComparison.Ordinal) && text.Contains("laptop-new", StringComparison.Ordinal), "the machines view shows the enrolled and the reported host name and says a new name was reported");
-        await c.DemoPressAsync(row.GetByRole(AriaRole.Button, new() { Name = "Accept host name" }), "Compare the existing and reported host names. Choose Accept host name if you recognize the change.");
+        s.Check(await row.GetByText("New host name reported").IsVisibleAsync(), "the table flags the reported host name");
+        await c.DemoPressAsync(row.GetByRole(AriaRole.Button), "Open the machine marked New host name reported.");
+        await row.GetByRole(AriaRole.Button).ClickAsync();
+        ILocator dialog = Spa.Dialog(c);
+        string text = await dialog.TextContentAsync() ?? "";
+        s.Check(text.Contains("laptop-old", StringComparison.Ordinal) && text.Contains("laptop-new", StringComparison.Ordinal), "the details show the enrolled and reported host names");
+        ILocator accept = dialog.GetByRole(AriaRole.Button, new() { Name = "Accept host name" });
+        await c.DemoPressAsync(accept, "Compare the existing and reported host names. Choose Accept host name if you recognize the change.");
         await Spa.Axe(c, s, "machines with a reported host name");
 
-        await row.GetByRole(AriaRole.Button, new() { Name = "Accept host name" }).ClickAsync();
-        ILocator dialog = Spa.Dialog(c);
+        await accept.ClickAsync();
         await dialog.WaitForAsync();
         string review = await dialog.TextContentAsync() ?? "";
         s.Check(review.Contains("machine-host-change", StringComparison.Ordinal) && review.Contains("laptop-new", StringComparison.Ordinal) && review.Contains(fp, StringComparison.Ordinal), "the dialog names the exact operation, the machine and the host name that would be accepted");
         s.Check(store.Find(fp) is { HostName: "laptop-old" } && await c.PasskeyCalls() == 1, "nothing changed and WebAuthn was not invoked before the final confirmation");
         string page = await Spa.Continue(c, s, dialog);
-        await dialog.GetByText("Done").First.WaitForAsync(new() { Timeout = 20000 });
+        await Spa.PageFeedback(c).WaitForAsync(new() { Timeout = 20000 });
         s.Check(page.Contains("laptop-new", StringComparison.Ordinal) && page.Contains(KeyIdentity.Display(fp), StringComparison.Ordinal), "the result dialog confirms the accepted host name and identifies its machine");
         s.Check(store.Find(fp) is { HostName: "laptop-new", PendingHostName: null } done && done.SecurityRevision == revision, "the tap binds the new host name and leave the security revision alone");
         (_, long signs) = await c.AuthOps();
         s.Check(signs == signsAfterSignIn + 1, "exactly one passkey signature");
         s.Check(store.History(fp).Any(entry => entry.Kind == "host-name-mismatch") && store.Audit(100).Any(entry => entry.Actor.StartsWith("admin passkey", StringComparison.Ordinal) && entry.Detail.Contains("laptop-new", StringComparison.Ordinal)), "the history records the mismatch and the audit names the admin passkey that accepted the name");
-        await dialog.GetByRole(AriaRole.Button, new() { Name = "Close" }).ClickAsync();
         await dialog.WaitForAsync(new() { State = WaitForSelectorState.Detached });
         // The list is refetched when the result is settled (the dialog invalidates every query); that answer can land after the dialog closes, so wait for it.
         bool gone = true;
@@ -501,7 +535,7 @@ internal static class ScenariosSpa
         }
 
         s.Check(gone, "the warning is gone from the list");
-        await c.DemoSnapAsync("Machines shows the accepted host name and clears the warning.");
+        await c.DemoSnapAsync("The page confirms the accepted host name and clears the warning.");
         s.NoProblems(c);
     }
 
@@ -531,31 +565,37 @@ internal static class ScenariosSpa
         using SpaApp app = new(rig);
         await Spa.SignIn(c, app, s);
         string id = await MakeGrant(c, rig, app, s);
-        await c.StartDemoAsync();
+        await Spa.StartDemoFromOverview(c);
         AuthorityStore store = rig.Machine.Deployment.Store;
         await Spa.GoTo(c, "Access", "Access");
-        ILocator row = c.Page.GetByRole(AriaRole.Listitem).Filter(new() { HasText = id });
+        ILocator row = c.Page.GetByRole(AriaRole.Table, new() { Name = "Grants" }).GetByRole(AriaRole.Row).Filter(new() { HasText = id });
         await row.WaitForAsync();
-        string text = await row.TextContentAsync() ?? "";
-        s.Check(text.Contains("active", StringComparison.Ordinal) && text.Contains("E2E_SECRET", StringComparison.Ordinal) && text.Contains("Program", StringComparison.Ordinal) && text.Contains(Rig.ScriptCommand("check")[0], StringComparison.Ordinal), "the grants view lists the grant with its state, the secret NAMES and the program (" + System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ") + ")");
-        s.Check(!(await c.Page.ContentAsync()).Contains(SecretValue, StringComparison.Ordinal), "no secret value is anywhere in the page");
+        s.Check(await row.GetByText("active").IsVisibleAsync(), "the grants table shows the active grant");
         await Spa.Axe(c, s, "grants");
 
-        await c.DemoPressAsync(row.GetByRole(AriaRole.Button, new() { Name = "Revoke" }), "Find the active grant in Access and choose Revoke.");
-        await row.GetByRole(AriaRole.Button, new() { Name = "Revoke" }).ClickAsync();
+        await c.DemoPressAsync(row.GetByRole(AriaRole.Button), "Select a grant in Access to open its details.");
+        await row.GetByRole(AriaRole.Button).ClickAsync();
         ILocator dialog = Spa.Dialog(c);
+        string text = await dialog.TextContentAsync() ?? "";
+        s.Check(text.Contains("E2E_SECRET", StringComparison.Ordinal) && text.Contains("Program", StringComparison.Ordinal), "the grant details show the secret name and program");
+        s.Check(!(await c.Page.ContentAsync()).Contains(SecretValue, StringComparison.Ordinal), "no secret value is anywhere in the page");
+        await Spa.Axe(c, s, "grant details");
+        ILocator revoke = dialog.GetByRole(AriaRole.Button, new() { Name = "Revoke" });
+        await c.DemoPressAsync(revoke, "Choose Revoke in the grant details.");
+        await revoke.ClickAsync();
         await dialog.WaitForAsync();
         await Spa.WaitForPasskeyStep(dialog);
         s.Check((await Spa.ConfirmButton(dialog).TextContentAsync() ?? "").Contains("Revoke grant", StringComparison.Ordinal) && (await dialog.TextContentAsync() ?? "").Contains("grant-revoke", StringComparison.Ordinal) && (await dialog.TextContentAsync() ?? "").Contains(id, StringComparison.Ordinal), "the dialog names the revocation and the grant, and its button says what the tap does");
         s.Check(store.FindGrant(id) is { Status: "active" }, "nothing changed before the tap");
         string page = await Spa.Continue(c, s, dialog);
-        await dialog.GetByText("Done").First.WaitForAsync(new() { Timeout = 20000 });
+        await Spa.PageFeedback(c).WaitForAsync(new() { Timeout = 20000 });
         s.Check(page.Contains("revoke this grant", StringComparison.OrdinalIgnoreCase) && page.Contains(id, StringComparison.Ordinal), "the result dialog retains the revocation and grant details");
         s.Check(store.FindGrant(id) is { Status: "revoked" }, "the tap revokes the grant");
-        await dialog.GetByRole(AriaRole.Button, new() { Name = "Close" }).ClickAsync();
         await row.GetByText("revoked").First.WaitForAsync(new() { Timeout = 20000 });
         await c.DemoSnapAsync("The grant is revoked. Future requests need a new approval.");
-        s.Check(await row.GetByRole(AriaRole.Button).CountAsync() == 0, "the revoked grant offers no further action");
+        await row.GetByRole(AriaRole.Button).ClickAsync();
+        s.Check(await dialog.GetByRole(AriaRole.Button, new() { Name = "Revoke" }).CountAsync() == 0, "the revoked grant offers no further action");
+        await dialog.GetByRole(AriaRole.Button, new() { Name = "Close", Exact = true }).ClickAsync();
         s.NoProblems(c);
     }
 
@@ -576,10 +616,10 @@ internal static class ScenariosSpa
             s.Check(await cmd.Result.WaitAsync(TimeSpan.FromSeconds(30)) == 0, "fixture: a run was approved and ran");
         }
 
-        await c.StartDemoAsync();
+        await Spa.StartDemoFromOverview(c);
         await Spa.GoTo(c, "Audit", "Audit");
         // The host uploads its events a moment after the run.
-        ILocator results = c.Page.GetByRole(AriaRole.List, new() { Name = "Host events" });
+        ILocator results = c.Page.GetByRole(AriaRole.Table, new() { Name = "Host events" });
         bool found = false;
         for (int i = 0; i < 30 && !found; i++)
         {
@@ -587,7 +627,7 @@ internal static class ScenariosSpa
             await c.Page.GetByRole(AriaRole.Button, new() { Name = "Search", Exact = true }).ClickAsync();
             try
             {
-                await results.GetByText(Rig.ScriptFile("check")).First.WaitForAsync(new() { Timeout = 1500 });
+                await results.GetByRole(AriaRole.Cell, new() { Name = "approved", Exact = true }).First.WaitForAsync(new() { Timeout = 1500 });
                 // The events arrive one after the other: the run's first event is not all of them. Done when the authorization and the start have both come.
                 string seen = await results.TextContentAsync() ?? "";
                 found = seen.Contains("approved", StringComparison.Ordinal) && seen.Contains("started", StringComparison.Ordinal);
@@ -604,29 +644,47 @@ internal static class ScenariosSpa
         s.Check(all.Contains("approved", StringComparison.Ordinal) && all.Contains("started", StringComparison.Ordinal) && !all.Contains(SecretValue, StringComparison.Ordinal), "it shows the authorization and launch outcomes and no secret value");
         s.Check(c.Page.Url.Contains("text=" + Rig.ScriptFile("check"), StringComparison.Ordinal), "the search is in the address");
         await Spa.Axe(c, s, "audit events");
+        // Measure the app at 320 px without the recorder's side-by-side terminal taking up part of that width.
+        if (!c.IsDemo)
+        {
+            var desktop = c.Page.ViewportSize;
+            await c.Page.SetViewportSizeAsync(320, 568);
+            s.Check(await results.EvaluateAsync<bool>("table => table.getBoundingClientRect().width <= table.parentElement.clientWidth + 1"),
+                "the audit results fit a 320 px viewport");
+            if (desktop is not null) await c.Page.SetViewportSizeAsync(desktop.Width, desktop.Height);
+        }
+        await results.GetByRole(AriaRole.Button, new() { Name = "View approved event" }).First.ClickAsync();
+        ILocator eventDetails = c.Page.GetByRole(AriaRole.Dialog, new() { Name = "authorization: approved" });
+        await eventDetails.GetByText("Received", new() { Exact = true }).WaitForAsync();
+        ILocator command = eventDetails.GetByText("Program", new() { Exact = true }).Locator("xpath=following-sibling::dd");
+        s.Check((await command.TextContentAsync())?.Contains(Rig.ScriptFile("check"), StringComparison.Ordinal) == true, "the event dialog shows the complete script command");
+        await c.DemoSnapAsync("Select an event to inspect the command, full machine fingerprint, and other audit evidence.");
+        await eventDetails.GetByRole(AriaRole.Button, new() { Name = "Close", Exact = true }).ClickAsync();
 
+        await c.Page.GetByText("More filters", new() { Exact = true }).ClickAsync();
+        await c.Page.GetByLabel("Time range").SelectOptionAsync("day");
         await c.Page.GetByLabel("Kind of event").SelectOptionAsync("launch");
         await c.Page.GetByRole(AriaRole.Button, new() { Name = "Search", Exact = true }).ClickAsync();
         await c.Page.WaitForFunctionAsync("() => location.search.includes('type=launch')");
         await c.Page.GetByRole(AriaRole.Status).Filter(new() { HasTextRegex = new System.Text.RegularExpressions.Regex(@"^(Showing \d+ events\.|1 event found\.)$") }).First.WaitForAsync();
         // The status line that says "found" is also there from the search before: wait for the list itself to be the narrowed one.
-        await c.Page.WaitForFunctionAsync("() => { const t = document.querySelector('[aria-label=\"Host events\"]')?.textContent ?? ''; return t.includes('launch:') && !t.includes('authorization:'); }", null, new() { Timeout = 10000 });
+        await c.Page.WaitForFunctionAsync("() => { const t = document.querySelector('[aria-label=\"Host events\"]')?.textContent ?? ''; return t.includes('launch') && !t.includes('authorization'); }", null, new() { Timeout = 10000 });
         string narrowed = await results.TextContentAsync() ?? "";
 
-        s.Check(narrowed.Contains("launch:", StringComparison.Ordinal) && !narrowed.Contains("authorization:", StringComparison.Ordinal), "the kind filter narrows the events to the launch");
-        await c.DemoSnapAsync("Use Kind of event to show just launch events.");
+        s.Check(narrowed.Contains("launch", StringComparison.Ordinal) && !narrowed.Contains("authorization", StringComparison.Ordinal) && c.Page.Url.Contains("since=", StringComparison.Ordinal) && c.Page.Url.Contains("until=", StringComparison.Ordinal), "the kind filter narrows the events to the launch");
+        await c.DemoSnapAsync("Choose Past 24 hours and set Kind of event under More filters to see only recent launch events.");
 
         // A reload keeps the search (it is in the address).
         await c.Page.ReloadAsync();
         await Spa.Heading(c, "Audit").WaitForAsync();
-        s.Check(await c.Page.GetByLabel("Contains text").InputValueAsync() == Rig.ScriptFile("check") && await c.Page.GetByLabel("Kind of event").InputValueAsync() == "launch", "a reload keeps the search");
+        s.Check(await c.Page.GetByLabel("Contains text").InputValueAsync() == Rig.ScriptFile("check") && await c.Page.GetByLabel("Kind of event").InputValueAsync() == "launch" && await c.Page.GetByLabel("Time range").InputValueAsync() == "day", "a reload keeps the search and time range");
 
         await c.Page.GetByLabel("Contains text").FillAsync("nothing-like-this");
         await c.Page.GetByRole(AriaRole.Button, new() { Name = "Search", Exact = true }).ClickAsync();
         await c.Page.GetByText("No events match these filters.").WaitForAsync();
         s.Check(true, "a search with no match says so");
         await c.Page.GetByRole(AriaRole.Link, new() { Name = "Authority changes" }).ClickAsync();
-        await c.Page.GetByRole(AriaRole.List, new() { Name = "Authority changes" }).WaitForAsync();
+        await c.Page.GetByRole(AriaRole.Table, new() { Name = "Authority changes" }).WaitForAsync();
         await c.DemoSnapAsync("Authority changes shows administrative actions, such as a secret being saved.");
         s.Check(true, "the authority's own change history is a view of its own");
         await Spa.Axe(c, s, "audit changes");
@@ -653,11 +711,10 @@ internal static class ScenariosSpa
         c.Ignore("401");
         c.Ignore("404");
         await Spa.Continue(c, s, dialog);
-        // The lock ends the session, so the page cannot read this request's own outcome; the public status says the authority is locked, and so does the dialog.
-        await dialog.GetByText("The authority is locked.").First.WaitForAsync(new() { Timeout = 20000 });
+        // The lock ends the session, so the page confirms the lock using the public authority status.
+        await Spa.PageFeedback(c).GetByText("The authority is locked.").WaitForAsync(new() { Timeout = 20000 });
         s.Check(app.Service.Lock.IsLocked, "the tap locks the authority");
-        s.Check(!(await dialog.TextContentAsync() ?? "").Contains("Do not repeat", StringComparison.Ordinal) && await dialog.GetByRole(AriaRole.Alert).CountAsync() == 0, "the dialog says the authority is locked, not that the outcome is unknown");
-        await dialog.GetByRole(AriaRole.Button, new() { Name = "Close" }).ClickAsync();
+        s.Check(await dialog.CountAsync() == 0, "the lock confirmation appears on the page with the dialog closed");
         await Spa.Heading(c, "with-secrets").WaitForAsync(new() { Timeout = 20000 });
         s.Check(await c.Page.GetByText("The authority is locked").First.IsVisibleAsync(), "the locked authority is said in words on the sign-in view, which offers the unlock");
         await Spa.Axe(c, s, "sign-in while locked");
@@ -667,10 +724,9 @@ internal static class ScenariosSpa
         await Spa.Button(c, "Unlock the authority").ClickAsync();
         await dialog.WaitForAsync();
         string page = await Spa.Continue(c, s, dialog);
-        await dialog.GetByText("Done").First.WaitForAsync(new() { Timeout = 20000 });
+        await Spa.PageFeedback(c).WaitForAsync(new() { Timeout = 20000 });
         s.Check(!app.Service.Lock.IsLocked, "the tap unlocks the authority, with no session");
         s.Check(page.Contains("unlock", StringComparison.OrdinalIgnoreCase), "the passkey page names the unlock (" + page.Split('\n')[0] + ")");
-        await dialog.GetByRole(AriaRole.Button, new() { Name = "Close" }).ClickAsync();
         await c.Page.GetByText("Authority unlocked").First.WaitForAsync(new() { Timeout = 20000 });
 
         // The session ended with the lock: signing in again is a new tap.
@@ -710,10 +766,9 @@ internal static class ScenariosSpa
         s.Check(review.Contains("Keep audit events for 30 days", StringComparison.Ordinal), "after browser Back, the dialog names the pending retention change");
         s.Check(store.AuditRetentionDays() == before, "the setting is unchanged until the tap");
         string page = await Spa.TapAfterBack(c, s, passkeyPage, null);
-        await dialog.GetByText("Done").First.WaitForAsync(new() { Timeout = 20000 });
+        await Spa.PageFeedback(c).WaitForAsync(new() { Timeout = 20000 });
         s.Check(store.AuditRetentionDays() == 30, "the tap changes the setting");
         s.Check(page.Contains("30", StringComparison.Ordinal), "the passkey page shows the new value");
-        await dialog.GetByRole(AriaRole.Button, new() { Name = "Close" }).ClickAsync();
         await c.Page.GetByText("30 days", new() { Exact = true }).WaitForAsync();
         await c.DemoSnapAsync("Settings now shows the confirmed retention of 30 days.");
         s.Check(true, "the settings view shows the new retention");
@@ -743,9 +798,10 @@ internal static class ScenariosSpa
         await Spa.GoTo(c, "Machines", "Machines");
 
         // In the application: asking for the authorization and not tapping changes nothing, and no mutation is sent.
-        ILocator row = c.Page.GetByRole(AriaRole.Listitem).Filter(new() { HasText = KeyIdentity.Display(fp) });
-        await row.GetByRole(AriaRole.Button, new() { Name = "Approve" }).ClickAsync();
+        ILocator row = c.Page.GetByRole(AriaRole.Row).Filter(new() { HasText = KeyIdentity.Display(fp) });
+        await row.GetByRole(AriaRole.Button).ClickAsync();
         ILocator dialog = Spa.Dialog(c);
+        await dialog.GetByRole(AriaRole.Button, new() { Name = "Approve" }).ClickAsync();
         await Spa.ChangeName(dialog, "Friendly name", "");
         await dialog.GetByRole(AriaRole.Button, new() { Name = "Continue", Exact = true }).ClickAsync();
         s.Check((await dialog.GetByRole(AriaRole.Alert).TextContentAsync() ?? "").Contains("Enter a friendly name", StringComparison.Ordinal), "a pending machine cannot be approved without a name: refused on the field before anything is asked");
@@ -839,14 +895,17 @@ internal static class ScenariosSpa
         // Long identifiers and a revealed full fingerprint stay inside the narrowest page.
         await c.Page.SetViewportSizeAsync(320, 568);
         await Spa.GoTo(c, "Machines", "Machines", capture: false);
-        await c.Page.Locator("main summary").First.ClickAsync();
-        string fullFingerprint = await c.Page.Locator("main code").First.TextContentAsync() ?? "";
-        bool revealedOverflow = await c.Page.EvaluateAsync<bool>("() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1");
+        await c.Page.GetByRole(AriaRole.Button, new() { Name = longHost }).ClickAsync();
+        ILocator fingerprintDetails = Spa.Dialog(c);
+        await fingerprintDetails.Locator("summary").ClickAsync();
+        string fullFingerprint = await fingerprintDetails.Locator("details code").TextContentAsync() ?? "";
+        bool revealedOverflow = await fingerprintDetails.EvaluateAsync<bool>("element => element.scrollWidth > element.clientWidth + 1");
         s.Check(fullFingerprint.Length == 64, "the complete machine fingerprint is revealed, not a shortened value (" + fullFingerprint.Length + " characters)");
         s.Check(!revealedOverflow, "no horizontal scrolling with a long host name and a full fingerprint revealed at 320 px");
         ILocator copyFull = c.Page.GetByRole(AriaRole.Button, new() { Name = "Copy full fingerprint for " + longHost });
         s.Check(await copyFull.CountAsync() == 1 && await copyFull.First.IsVisibleAsync(), "the revealed complete fingerprint has a copy control for the machine it belongs to");
         await c.DemoSnapAsync("At 320 pixels wide, Machines can show and copy the complete device fingerprint.");
+        await fingerprintDetails.GetByRole(AriaRole.Button, new() { Name = "Close", Exact = true }).ClickAsync();
 
         // The complete public authority fingerprint also stays readable and copyable inside Settings at the same width.
         await Spa.GoTo(c, "Settings", "Settings", capture: false);
@@ -894,8 +953,8 @@ internal static class ScenariosSpa
         s.Check(await c.Page.EvaluateAsync<bool>("() => !!document.activeElement.closest('main')"), "after the skip link, Tab continues inside the main content");
 
         await Spa.GoTo(c, "Machines", "Machines", capture: false);
-        ILocator approve = c.Page.GetByRole(AriaRole.Button, new() { Name = "Approve" }).First;
-        await approve.FocusAsync();
+        ILocator machineDetails = c.Page.GetByRole(AriaRole.Button, new() { Name = "View machine" }).First;
+        await machineDetails.FocusAsync();
         await c.Page.Keyboard.PressAsync("Enter");
         ILocator dialog = Spa.Dialog(c);
         await dialog.WaitForAsync();
@@ -913,7 +972,7 @@ internal static class ScenariosSpa
         await c.Page.Keyboard.PressAsync("Escape");
         await dialog.WaitForAsync(new() { State = WaitForSelectorState.Detached });
         string back = await c.Page.EvaluateAsync<string>("() => document.activeElement.textContent.trim()");
-        s.Check(back.StartsWith("Approve", StringComparison.Ordinal), "Escape closes the dialog and focus returns to the control that opened it (" + back + ")");
+        s.Check(back.Contains("View machine", StringComparison.Ordinal), "Escape returns focus to the machine row (" + back + ")");
 
         // Visible focus: the focused element has an outline.
         await c.Page.Keyboard.PressAsync("Tab");
@@ -934,22 +993,29 @@ internal static class ScenariosSpa
         using SpaApp app = new(rig, unlocked: false, timeLimit: TimeSpan.FromSeconds(12));
         await Spa.Unlock(c, app, s);
         await Spa.SignIn(c, app, s);
-        await c.StartDemoAsync();
+        await Spa.StartDemoFromOverview(c);
 
         // Add: type the name and the value, one tap.
         await Spa.GoTo(c, "Secrets", "Secrets");
+        ILocator add = Spa.Button(c, "Add secret", exact: true);
+        ILocator dialog = c.Page.GetByRole(AriaRole.Dialog, new() { Name = "Add secret" });
+        s.Check(await c.Page.GetByLabel("Value").CountAsync() == 0, "the secret form is hidden until Add secret is opened");
+        await c.DemoPressAsync(add, "Choose Add secret to open the form.");
+        await Spa.Click(add);
+        await Spa.Axe(c, s, "add secret dialog");
         await c.Page.GetByLabel("Name").FillAsync("E2E_SECRET");
         await c.Page.GetByLabel("Value").FillAsync(SecretValue);
         int before = await c.PasskeyCalls();
-        await c.DemoPressAsync(Spa.Button(c, "Save secret", exact: true), "Enter a name and value in Secrets. Choose Save secret and confirm with your passkey.");
+        await c.DemoPressAsync(Spa.Button(c, "Save secret", exact: true), "Enter a name and value, then choose Save secret and confirm with your passkey.");
         await Spa.Click(Spa.Button(c, "Save secret", exact: true));
         await c.Page.GetByText("Saved E2E_SECRET.").First.WaitForAsync(new() { Timeout = 20000 });
+        s.Check(await dialog.CountAsync() == 0, "saving closes the Add secret dialog");
         s.Check(await c.PasskeyCalls() == before + 1, "saving used the passkey exactly once");
         s.Check(rig.Store.ListNames().SequenceEqual(["E2E_SECRET"]), "state lists the secret name");
         s.Check(!(await c.Page.ContentAsync()).Contains(SecretValue, StringComparison.Ordinal), "the value is nowhere in the page");
         s.Check(!(await Scenarios2.RawState(rig)).Contains(SecretValue, StringComparison.Ordinal), "with-secrets.db holds no plaintext of the value");
         s.Check(rig.State.TryCheck(out _), "with-secrets.db passes its check");
-        await c.Page.GetByRole(AriaRole.Heading, new() { Name = "E2E_SECRET", Level = 3 }).WaitForAsync();
+        await c.Page.GetByRole(AriaRole.List, new() { Name = "Secrets", Exact = true }).GetByText("E2E_SECRET", new() { Exact = true }).WaitForAsync();
         await c.DemoSnapAsync("The saved secret appears by name.");
 
         // A run gets the stored value (the output is redacted: the mask shows it was there).
@@ -961,26 +1027,49 @@ internal static class ScenariosSpa
             s.Check(await run.Result.WaitAsync(TimeSpan.FromSeconds(30)) == 0 && run.Out.Text.Contains("got=" + StreamRedactor.Mask), "a run decrypts the stored value (output redacted)");
         }
 
-        // Replace: the same name asks for a new value.
+        // Move and rename without a replacement.
         await Spa.GoTo(c, "Secrets", "Secrets");
-        await c.Page.GetByLabel("Name").FillAsync("E2E_SECRET");
-        await c.Page.GetByLabel("Value").FillAsync(SecretValue + "-2");
-        await c.DemoPressAsync(Spa.Button(c, "Replace secret", exact: true), "Enter the same name and a new value, then choose Replace secret.");
-        await Spa.Click(Spa.Button(c, "Replace secret", exact: true));
-        await c.Page.GetByText("Saved E2E_SECRET.").First.WaitForAsync(new() { Timeout = 20000 });
-        s.Check(rig.Store.ListNames().SequenceEqual(["E2E_SECRET"]), "a replaced secret keeps one name");
+        ILocator edit = Spa.Button(c, "Edit secret E2E_SECRET", exact: true);
+        await c.DemoPressAsync(edit, "Choose the pencil beside a secret to edit it.");
+        await Spa.Click(edit);
+        ILocator editor = c.Page.GetByRole(AriaRole.Dialog, new() { Name = "Edit secret" });
+        ILocator newValue = editor.GetByLabel("New value");
+        s.Check(await newValue.InputValueAsync() == "" && await newValue.GetAttributeAsync("type") == "password",
+            "editing shows a blank, masked replacement field");
+        await Spa.Axe(c, s, "edit secret dialog");
+        await editor.GetByLabel("Name").FillAsync("DEPLOY_KEY");
+        await editor.GetByLabel("Folder path").FillAsync("apps");
+        ILocator saveChanges = Spa.Button(c, "Save changes", exact: true);
+        before = await c.PasskeyCalls();
+        await c.DemoPressAsync(saveChanges, "Change the name or folder. Leave New value blank to keep the saved value.");
+        await Spa.Click(saveChanges);
+        const string moved = "apps/DEPLOY_KEY";
+        await c.Page.GetByText("Saved " + moved + ".").First.WaitForAsync(new() { Timeout = 20000 });
+        s.Check(rig.Store.ListNames().SequenceEqual([moved]) && await c.PasskeyCalls() == before + 1, "moving and renaming uses one passkey tap");
+        await c.Page.Locator("summary").GetByText("apps", new() { Exact = true }).ClickAsync();
+
+        // Replace a value from the same editor.
+        await Spa.Click(Spa.Button(c, "Edit secret " + moved, exact: true));
+        s.Check(await newValue.InputValueAsync() == "", "opening the editor again leaves the saved value hidden");
+        await newValue.FillAsync(SecretValue + "-2");
+        await c.DemoPressAsync(saveChanges, "To replace a value, enter the new value here and choose Save changes.");
+        await Spa.Click(saveChanges);
+        await editor.WaitForAsync(new() { State = WaitForSelectorState.Detached });
+        await c.Page.GetByText("Saved " + moved + ".").First.WaitForAsync(new() { Timeout = 20000 });
+        s.Check(rig.Store.ListNames().SequenceEqual([moved]) && !(await c.Page.ContentAsync()).Contains(SecretValue, StringComparison.Ordinal),
+            "replacing a value keeps the path and leaves no secret value on the page");
 
         // Remove: one tap.
         before = await c.PasskeyCalls();
-        await c.DemoPressAsync(Spa.Button(c, "Remove secret E2E_SECRET"), "Choose Remove beside the secret and confirm with your passkey.");
-        await Spa.Click(Spa.Button(c, "Remove secret E2E_SECRET"));
-        await c.Page.GetByText("Removed E2E_SECRET.").First.WaitForAsync(new() { Timeout = 20000 });
+        await c.DemoPressAsync(Spa.Button(c, "Remove secret " + moved), "Choose the trash can beside the secret and confirm with your passkey.");
+        await Spa.Click(Spa.Button(c, "Remove secret " + moved));
+        await c.Page.GetByText("Removed " + moved + ".").First.WaitForAsync(new() { Timeout = 20000 });
         await c.DemoSnapAsync("The secret was removed.");
         s.Check(await c.PasskeyCalls() == before + 1, "removing used the passkey exactly once");
         s.Check(rig.Store.ListNames().Count == 0, "state no longer lists the secret");
         s.Check(!(await Scenarios2.RawState(rig)).Contains(SecretValue, StringComparison.Ordinal), "with-secrets.db still holds no plaintext");
         await Spa.Axe(c, s, "secrets");
-        AuditChecks.Expect(s, rig, "setup", "secrets-set", "authorization-approved", "launch-started", "execution-exited", "secrets-set", "secrets-removed");
+        AuditChecks.Expect(s, rig, "setup", "secrets-set", "authorization-approved", "launch-started", "execution-exited", "secrets-edited", "secrets-edited", "secrets-removed");
         s.NoProblems(c);
     }
 }

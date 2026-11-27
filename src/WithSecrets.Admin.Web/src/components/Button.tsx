@@ -1,7 +1,7 @@
 import type { ButtonHTMLAttributes, Ref } from 'react'
 import styles from './Button.module.css'
 
-type Props = ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'primary' | 'secondary' | 'danger' | 'quiet'; ref?: Ref<HTMLButtonElement> }
+type Props = ButtonHTMLAttributes<HTMLButtonElement> & { variant?: 'primary' | 'secondary' | 'danger' | 'dangerOutline' | 'quiet'; ref?: Ref<HTMLButtonElement> }
 
 /** A native button with the shared look. `type` defaults to "button" so a button never submits a form by accident. */
 export function Button({ variant = 'secondary', className, type = 'button', ...rest }: Props) {

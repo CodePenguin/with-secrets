@@ -46,6 +46,12 @@
   filter: brightness(1.1);
 }
 
+.dangerOutline {
+  border-color: var(--danger);
+  background: transparent;
+  color: var(--danger);
+}
+
 .quiet {
   border-color: transparent;
   background: transparent;

@@ -101,7 +101,7 @@ internal sealed partial class AdminApi
 
     private static readonly string[] AuditFilters = ["machine", "since", "until", "type", "outcome", "grant", "folder", "text", "last"];
 
-    private static JsonObject ParameterSchema(string name) => name switch
+    private static JsonObject ParameterSchema(string name, string? operation = null) => name switch
     {
         "fingerprint" => S.Str(max: 80, min: 12, description: "The machine's fingerprint, or an unambiguous start of it (12 hex digits or more)."),
         "id" => S.Str(max: 80, min: 4, description: "The id of what the operation changes: a grant's id (or an unambiguous start of it), a pairing invitation's, or a provider instance's or mount's (its full id)."),
@@ -119,7 +119,7 @@ internal sealed partial class AdminApi
         "days" => S.Int(0, AuthorityStore.MaxAuditRetentionDays, description: "How many days audit events are kept; 0 keeps everything."),
         "idle" => S.Int(1, AuthorityStore.MaxSessionIdleMinutes, description: "Minutes without use that end a session."),
         "absolute" => S.Int(1, AuthorityStore.MaxSessionAbsoluteMinutes, description: "Minutes after which a session ends however busy."),
-        "minutes" => S.Int(1, ReuseSettings.MaxAdminMinutes, description: "Minutes to add to (extend) or to grant from now (renew)."),
+        "minutes" => S.Int(1, operation == "grant-extend" ? ReuseSettings.MaxMinutes : ReuseSettings.MaxAdminMinutes, description: "Minutes to add to an active grant or to grant from now."),
         "indefinite" => S.Bool("True for a grant with no end (instead of minutes)."),
         _ => throw new InvalidOperationException("unknown parameter " + name),
     };
@@ -133,7 +133,7 @@ internal sealed partial class AdminApi
         string[] required = [.. body.Where(name => !((operation is "provider-add" or "provider-config") && name == "max-stale-seconds") &&
             (RequiredParameters.Contains(name) || (operation is "machine-rename" or "provider-add" && name == "name")))];
         List<(string, JsonObject)> members = [("authorization", S.Str(max: 64, min: 8, description: "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."))];
-        members.AddRange(body.Select(name => (name, ParameterSchema(name))));
+        members.AddRange(body.Select(name => (name, ParameterSchema(name, operation))));
         JsonObject request = S.Obj(members, members.Select(item => item.Item1).Where(name => name != "authorization" && !required.Contains(name)));
 
         return new ApiRoute(method, Prefix + template, id, summary, tag, ApiAccess.Mutation, 200, "MutationResponse", request, [], operation,
@@ -190,7 +190,7 @@ internal sealed partial class AdminApi
             new("POST", Prefix + "/approvals/{requestId}/approve", "approveOnce", "Verify the prepared passkey assertion and approve this request once.", "approvals", ApiAccess.ApprovalsDecide, 200, "ApprovalDetail", ApprovalDecisionBody(), [], null, ApproveOnceAsync),
             new("POST", Prefix + "/approvals/{requestId}/deny", "denyApproval", "Refuse this pending run request without a passkey; no secrets are released.", "approvals", ApiAccess.ApprovalsDecide, 200, "ApprovalDetail", null, [], null, DenyApprovalAsync),
             new("GET", Prefix + "/secrets", "listSecrets", "The names of the stored secrets (names only; a value is never readable).", "secrets", ApiAccess.Read, 200, "SecretList", null, [], null, ListSecretsAsync),
-            new("POST", Prefix + "/secrets/entries", "startSecretEntry", "Start entering values for these secret names: answers the text the passkey will sign, the passkey request and the public key the values are sealed to in the browser. Stores nothing.", "secrets", ApiAccess.Authorize, 201, "SecretEntry", SecretNamesBody(), [], null, StartSecretEntryAsync),
+            new("POST", Prefix + "/secrets/entries", "startSecretEntry", "Prepare to store secrets or edit one stored secret when a source is supplied. A move can keep its value by sealing an empty object. Stores nothing.", "secrets", ApiAccess.Authorize, 201, "SecretEntry", SecretEntryBody(), [], null, StartSecretEntryAsync),
             new("POST", Prefix + "/secrets/entries/{id}/seal", "sealSecretEntry", "Send the values, sealed to the entry's public key. The service checks them and answers the next state the passkey will sign. Stores nothing.", "secrets", ApiAccess.Authorize, 200, "SecretSealed", SecretSealBody(), [], null, SealSecretEntryAsync, BodyLimit: SecretBodyLimit),
             new("POST", Prefix + "/secrets/entries/{id}/save", "saveSecretEntry", "Store the sealed values with one admin passkey assertion over them and the next state.", "secrets", ApiAccess.Authorize, 200, "Done", SecretSaveBody(), [], null, SaveSecretEntryAsync, BodyLimit: SecretBodyLimit),
             new("DELETE", Prefix + "/secrets/entries/{id}", "cancelSecretEntry", "Cancel an entry that has not been saved.", "secrets", ApiAccess.Authorize, 200, "Done", null, [], null, CancelSecretEntryAsync),

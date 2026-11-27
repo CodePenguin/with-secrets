@@ -6,7 +6,7 @@ import styles from './SplitButton.module.css'
 type Item = { label: string; onSelect: () => void }
 
 /** A primary action with an arrow beside it that opens the other ways to do it. Choosing one does it at once. */
-export function SplitButton({ label, onPress, items, menuLabel, disabled }: { label: string; onPress: () => void; items: readonly Item[]; menuLabel: string; disabled?: boolean }) {
+export function SplitButton({ label, onPress, items, menuLabel, disabled }: { label: string; onPress?: () => void; items: readonly Item[]; menuLabel: string; disabled?: boolean }) {
   const [open, setOpen] = useState(false)
   const root = useRef<HTMLDivElement>(null)
   const toggle = useRef<HTMLButtonElement>(null)
@@ -53,10 +53,12 @@ export function SplitButton({ label, onPress, items, menuLabel, disabled }: { la
     // The keys are for the menu inside; the buttons are the controls.
     // eslint-disable-next-line jsx-a11y/no-static-element-interactions
     <div className={styles.split} ref={root} onKeyDown={keys}>
-      <Button variant="primary" className={styles.main} onClick={onPress} disabled={disabled}>
+      {onPress ? <Button variant="primary" className={styles.main} onClick={onPress} disabled={disabled}>
         {label}
-      </Button>
-      <Button variant="primary" className={styles.arrow} ref={toggle} aria-label={menuLabel} aria-haspopup="menu" aria-expanded={open} disabled={disabled} onClick={() => setOpen(!open)}>
+      </Button> : null}
+      <Button variant={onPress ? 'primary' : 'secondary'} className={onPress ? styles.arrow : undefined} ref={toggle}
+        aria-label={menuLabel} aria-haspopup="menu" aria-expanded={open} disabled={disabled} onClick={() => setOpen(!open)}>
+        {onPress ? null : label}
         <ChevronDown size="1em" strokeWidth={2.5} aria-hidden="true" focusable="false" />
       </Button>
       {open ? (

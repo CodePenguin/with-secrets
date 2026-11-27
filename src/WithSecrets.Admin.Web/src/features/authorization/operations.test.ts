@@ -47,7 +47,7 @@ describe('operations: what is authorized is exactly what is performed', () => {
     expect(changeGrantEnd(g, 'renew').prepare({ minutes: '2000', indefinite: false })).toHaveProperty('errors.minutes')
     expect(prepared(changeGrantEnd(g, 'replace'), { minutes: '30', indefinite: false })).toMatchObject({ operation: 'grant-replace', parameters: { id: 'grant-0001', minutes: 30 } })
     expect(prepared(changeGrantEnd(g, 'replace'), { minutes: '30', indefinite: true }).parameters).toEqual({ id: 'grant-0001', indefinite: true })
-    expect(changeGrantEnd(g, 'replace').title).toBe('Make a grant from this')
+    expect(changeGrantEnd(g, 'replace').title).toBe('Allow repeat runs')
     expect(prepared(revokeGrant(g)).parameters).toEqual({ id: 'grant-0001' })
     expect(prepared(revokeGrant(g)).operation).toBe('grant-revoke')
   })

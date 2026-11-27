@@ -709,7 +709,8 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
             return Refuse(GrantReasons.BadOperation);
         }
 
-        if (command.Operation != GrantOps.Revoke && !command.Indefinite && command.Minutes is null or < 1 or > ReuseSettings.MaxAdminMinutes)
+        int maxMinutes = command.Operation == GrantOps.Extend && first.Status == "consumed" ? ReuseSettings.MaxMinutes : ReuseSettings.MaxAdminMinutes;
+        if (command.Operation != GrantOps.Revoke && !command.Indefinite && (command.Minutes is null or < 1 || command.Minutes > maxMinutes))
         {
             return Refuse(GrantReasons.NoTime);
         }
@@ -735,10 +736,26 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
                 return ReplaceGrant(tx, command, grant, machine, now, Answer, RefuseIn);
             }
 
-            if (grant.Status != "active")
+            bool extendOnce = command.Operation == GrantOps.Extend && grant is { Status: "consumed", Usage: GrantUsage.Once };
+            if (extendOnce)
+            {
+                if (machine is not { Status: MachineStatus.Trusted } || machine.SecurityRevision != grant.SecurityRevision)
+                    return new AuthorityStore.GrantPlan(RefuseIn(ReasonCodes.AuthorizationChanged), null, "", false);
+                if (tx.FindByScope(grant.Fingerprint, grant.ScopeKey) is not null)
+                    return new AuthorityStore.GrantPlan(RefuseIn(GrantReasons.Exists), null, "", false);
+                ReuseOffer offer = tx.Manifest(new StateDatabase(store.Database))?.Settings.Reuse ?? ReuseOffer.Off;
+                if (!offer.Allows(command.Indefinite ? ReuseOffer.Always : command.Minutes!.Value)
+                    || !command.Indefinite && (command.NewEnd is not { } end || end <= now || end > now.AddMinutes(command.Minutes!.Value)))
+                    return new AuthorityStore.GrantPlan(RefuseIn(GrantReasons.NoTime), null, "", false);
+            }
+
+            if (!extendOnce && grant.Status != "active")
             {
                 return new AuthorityStore.GrantPlan(RefuseIn(GrantReasons.NotActive), null, "", false);
             }
+
+            if (!extendOnce && command.Operation == GrantOps.Extend && !command.Indefinite && command.Minutes > ReuseSettings.MaxAdminMinutes)
+                return new AuthorityStore.GrantPlan(RefuseIn(GrantReasons.NoTime), null, "", false);
 
             // Only an admin passkey's assertion over a page that says exactly this change to this grant (as it is now) changes it.
             if (GrantEvidence.AdminProblem(Verifier, command, grant, now) is { } evidenceProblem)
@@ -760,6 +777,13 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
 
                     return new AuthorityStore.GrantPlan(Answer(GrantOps.Revoked, GrantReasons.Ok, revoked.Info, revision), "grant-revoked", $"grant {grant.Id} by {command.Actor}", Key: Verifier?.Verify(command.Evidence!, 0).Credential);
                 case GrantOps.Extend:
+                    if (extendOnce)
+                    {
+                        GrantRecord repeatable = tx.ActivateOnce(grant.Id, command.Indefinite ? null : command.NewEnd, command.Actor, adminEvidence, now);
+                        return new AuthorityStore.GrantPlan(Answer(GrantOps.Extended, GrantReasons.Ok, repeatable.Info, revision), "grant-extended",
+                            $"grant {grant.Id} by {command.Actor}; repeat runs " + (command.Indefinite ? "indefinite" : $"{command.Minutes} min"), Key: repeatable.ChangedKey);
+                    }
+
                     if (grant.IsExpired(now))
                     {
                         return new AuthorityStore.GrantPlan(RefuseIn(GrantReasons.Expired), null, "", false);

@@ -48,6 +48,7 @@ describe('the primary views have no automated accessibility violations', () => {
       },
     })
     const { container } = renderApp('/audit')
+    await userEvent.setup().click(await screen.findByRole('button', { name: /View secrets-set event/ }))
     expect(await screen.findByText('<img src=x onerror=alert(1)>')).toBeInTheDocument()
     expect(screen.getByText('Metadata: names')).toBeInTheDocument()
     expect(container.querySelector('main img')).toBeNull() // the logo in the header is an image; the audit text is not
@@ -140,7 +141,7 @@ describe('machine identity details', () => {
     const user = userEvent.setup()
     signedIn()
     renderApp('/machines')
-    await screen.findByRole('heading', { name: 'build-host' })
+    await user.click(await screen.findByRole('button', { name: /build-host.*View machine/ }))
 
     await user.click(screen.getByText('Show full fingerprint'))
     expect(screen.getByText(machine().fingerprint)).toBeInTheDocument()
@@ -157,7 +158,8 @@ describe('machine identity details', () => {
       },
     })
     renderApp('/machines')
-    const card = (await screen.findByRole('heading', { name: friendlyName })).closest('li') as HTMLElement
+    await user.click(await screen.findByRole('button', { name: /View machine/ }))
+    const card = await screen.findByRole('dialog', { name: friendlyName })
 
     expect(within(card).getByText(hostName)).toBeInTheDocument()
     expect(within(card).getByText(reported)).toBeInTheDocument()
@@ -174,9 +176,8 @@ describe('the overview', () => {
     expect(await screen.findByRole('button', { name: 'Unlock the authority' })).toBeInTheDocument()
     expect(screen.getByText(/The authority is locked/)).toBeInTheDocument()
     expect(screen.getAllByText('Authority locked')).toHaveLength(1)
-    const authority = screen.getByRole('heading', { name: 'Authority' }).closest('section') as HTMLElement
-    expect(within(authority).queryByText('State')).toBeNull()
-    expect(within(authority).queryByText('Authority locked')).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'Authority' })).toBeNull()
+    expect(within(screen.getByRole('navigation', { name: 'Main' })).getByText('Version ' + __APP_VERSION__)).toBeInTheDocument()
     expect(screen.getAllByText(/Signed in/)).toHaveLength(1)
   })
 
@@ -312,7 +313,7 @@ describe('sign-in', () => {
     expect(fake.calls.find((call) => call.method === 'POST' && call.path === '/api/v1/session/inline')?.headers['X-Admin-Token']).toBe('browser-secret-1')
 
     expect(await screen.findByRole('heading', { level: 1, name: 'Machines' }, { timeout: 4000 })).toBeInTheDocument()
-    expect(await screen.findByRole('heading', { name: 'build-host' })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /build-host.*View machine/ })).toBeInTheDocument()
     // The claim is a POST made by the page (the read of the session claims nothing), and from then on every request carries the session's own secret.
     expect(fake.calls.some((call) => call.method === 'POST' && call.path === '/api/v1/session/claim')).toBe(true)
     expect(fake.calls.filter((call) => call.path === '/api/v1/machines').every((call) => call.headers['X-Admin-Token'] === 'session-secret-1')).toBe(true)
@@ -412,7 +413,7 @@ describe('the locked authority', () => {
     await user.click(await within(dialog).findByRole('button', { name: 'Unlock' }))
 
     // One step; the service makes the change at the tap, and this page only reads the result (no unlock call of its own).
-    expect(await within(dialog).findByText('Done')).toBeInTheDocument()
+    expect(await screen.findByText('The authority is unlocked.')).toBeInTheDocument()
     expect(fake.count('POST /api/v1/unlock')).toBe(0)
     expect(fake.calls.find((call) => call.path === '/api/v1/authorizations/inline')?.body).toEqual({ operation: 'unlock', parameters: {} })
     expect(openSpy).not.toHaveBeenCalled()
@@ -425,6 +426,8 @@ describe('audit search', () => {
     const fake = signedIn()
     renderApp('/audit')
     await user.type(await screen.findByLabelText(/contains text/i), 'deploy.cmd')
+    await user.click(screen.getByText('More filters'))
+    await user.selectOptions(screen.getByLabelText('Time range'), 'day')
     await user.selectOptions(screen.getByLabelText(/kind of event/i), 'launch')
     await user.click(screen.getByRole('button', { name: 'Search' }))
 
@@ -432,10 +435,11 @@ describe('audit search', () => {
       const last = fake.calls.filter((call) => call.path === '/api/v1/audit/events').at(-1)
       expect(last?.query.get('text')).toBe('deploy.cmd')
       expect(last?.query.get('type')).toBe('launch')
+      expect(Date.parse(last?.query.get('until') ?? '') - Date.parse(last?.query.get('since') ?? '')).toBe(24 * 60 * 60 * 1000)
     })
     expect(await screen.findByText('No events match these filters.')).toBeInTheDocument()
     expect(screen.getByLabelText(/maximum results/i)).toBeInTheDocument()
-    expect(screen.getByText('Default 100, maximum 1000. A limited result is not the complete history.')).toBeInTheDocument()
+    expect(screen.getByText('Defaults to 100. Increase the limit to see more history.')).toBeInTheDocument()
   })
 })
 
@@ -568,7 +572,8 @@ describe('settings and passkey context', () => {
     signedIn()
     renderApp('/passkeys')
 
-    expect(await screen.findByText(/Admin passkeys can also lock or unlock the authority and change settings, secrets and passkeys/)).toBeInTheDocument()
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'admin key View passkey' }))
+    expect(within(screen.getByRole('dialog')).getByText(/Admin passkeys can approve runs/)).toBeInTheDocument()
   })
 
   it('keeps each passkey name, role, kind and creation time readable', async () => {
@@ -588,14 +593,19 @@ describe('settings and passkey context', () => {
     })
     renderApp('/passkeys')
 
-    const admin = (await screen.findByRole('heading', { level: 3, name: longName })).closest('li') as HTMLElement
-    expect(within(admin).getByText('admin')).toBeInTheDocument()
-    expect(within(admin).getByText('security key')).toBeInTheDocument()
+    const user = userEvent.setup()
+    const adminButton = await screen.findByRole('button', { name: longName + ' View passkey' })
+    const admin = adminButton.closest('tr') as HTMLElement
+    expect(within(admin).getByText('Admin')).toBeInTheDocument()
     expect(admin.querySelector('time')).toHaveAttribute('datetime', created)
+    await user.click(adminButton)
+    expect(within(screen.getByRole('dialog')).getByText('security key')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Close' }))
 
-    const approval = (await screen.findByRole('heading', { level: 3, name: 'deploy approval' })).closest('li') as HTMLElement
-    expect(within(approval).getByText('convenience')).toBeInTheDocument()
-    expect(within(approval).getByText('platform passkey')).toBeInTheDocument()
+    const approvalButton = screen.getByRole('button', { name: 'deploy approval View passkey' })
+    expect(within(approvalButton.closest('tr') as HTMLElement).getByText('Convenience')).toBeInTheDocument()
+    await user.click(approvalButton)
+    expect(within(screen.getByRole('dialog')).getByText('platform passkey')).toBeInTheDocument()
   })
 
   it('explains the delegated enrollment sequence before Add and in its review', async () => {
@@ -603,7 +613,7 @@ describe('settings and passkey context', () => {
     signedIn()
     renderApp('/passkeys')
 
-    await user.click(await screen.findByRole('button', { name: 'Add a passkey...' }))
+    await user.click(await screen.findByRole('button', { name: 'Add passkey' }))
     const dialog = await screen.findByRole('dialog')
     expect(within(dialog).getByText('Tap your passkey on each page that opens.')).toBeInTheDocument()
     expect(within(dialog).getByText('Add a passkey: the enrollment pages follow, each with its own passkey tap.')).toBeInTheDocument()
@@ -618,8 +628,8 @@ describe('settings and passkey context', () => {
     })
     renderApp('/passkeys')
 
-    const card = (await screen.findByRole('heading', { level: 3, name: 'old key' })).closest('li') as HTMLElement
-    await user.click(within(card).getByRole('button', { name: 'Remove passkey old key' }))
+    await user.click(await screen.findByRole('button', { name: 'old key View passkey' }))
+    await user.click(within(screen.getByRole('dialog', { name: 'old key' })).getByRole('button', { name: 'Remove passkey' }))
     const dialog = await screen.findByRole('dialog')
     expect(within(dialog).getByText('Passkey').parentElement).toHaveTextContent('old key')
     expect(within(dialog).getByText('Kind').parentElement).toHaveTextContent('security key')
@@ -636,7 +646,7 @@ describe('settings and passkey context', () => {
     expect(await screen.findByText('Passkeys are not available')).toBeInTheDocument()
     expect(screen.getByText('The passkey store could not be read.')).toBeInTheDocument()
     expect(screen.queryByText('No passkey is enrolled.')).toBeNull()
-    expect(screen.queryByRole('list', { name: 'Enrolled passkeys' })).toBeNull()
+    expect(screen.queryByRole('table', { name: 'Enrolled passkeys' })).toBeNull()
   })
 
   it('shows an empty store only when passkey storage is available', async () => {
@@ -659,9 +669,11 @@ describe('settings and passkey context', () => {
 
 describe('grant and audit navigation', () => {
   it('links a grant to its host events and machine authority changes', async () => {
+    const user = userEvent.setup()
     signedIn({ 'GET /api/v1/grants': { body: { items: [grant()] } } })
     renderApp('/access')
 
+    await user.click(await screen.findByRole('button', { name: /View grant grant-0001/ }))
     expect(await screen.findByRole('link', { name: 'Events for this grant' })).toHaveAttribute('href', '/audit?grant=grant-0001')
     expect(screen.getByRole('link', { name: 'Changes to this machine' })).toHaveAttribute(
       'href',
@@ -695,6 +707,7 @@ describe('grant and audit navigation', () => {
     })
     renderApp('/audit')
 
+    await userEvent.setup().click(await screen.findByRole('button', { name: /View .* event/ }))
     expect(await screen.findByRole('link', { name: machine().fingerprint })).toHaveAttribute(
       'href',
       '/audit?machine=' + machine().fingerprint,
@@ -723,6 +736,7 @@ describe('grant and audit navigation', () => {
     })
     renderApp('/audit')
 
+    await userEvent.setup().click(await screen.findByRole('button', { name: /View started event/ }))
     const approved = await screen.findByText('Grant approved by')
     expect(approved.parentElement).toHaveTextContent('phone (convenience, phone001)')
     expect(screen.getByText('Grant changed by').parentElement).toHaveTextContent('phone (convenience, phone002)')
@@ -742,6 +756,7 @@ describe('grant and audit navigation', () => {
     })
     renderApp('/audit/changes')
 
+    await userEvent.setup().click(await screen.findByRole('button', { name: /View change/ }))
     const role = await screen.findByText('Session passkey')
     expect(role.parentElement).toHaveTextContent('phone (convenience, phone001)')
     expect(screen.queryByText('Passkey used')).toBeNull()
@@ -755,6 +770,7 @@ describe('grant and audit navigation', () => {
     })
     renderApp('/audit/changes')
 
+    await userEvent.setup().click(await screen.findByRole('button', { name: /View change/ }))
     expect(await screen.findByRole('link', { name: machine().fingerprint })).toHaveAttribute(
       'href',
       '/audit/changes?machine=' + machine().fingerprint,
@@ -769,6 +785,7 @@ describe('grant and audit navigation', () => {
     })
     renderApp('/audit/gaps')
 
+    await userEvent.setup().click(await screen.findByRole('button', { name: /View gap/ }))
     expect(await screen.findByRole('link', { name: machine().fingerprint })).toHaveAttribute(
       'href',
       '/audit/gaps?machine=' + machine().fingerprint,
@@ -791,29 +808,35 @@ describe('grant and audit navigation', () => {
 
 describe('what is shown', () => {
   it('lists machines with the actions each one offers', async () => {
+    const user = userEvent.setup()
     signedIn({ 'GET /api/v1/machines': { body: { items: [machine(), machine({ fingerprint: 'ff'.repeat(32), display: 'ffff', status: 'trusted', friendlyName: 'ci box', actions: ['disable', 'untrust', 'rename'] })] } } })
     renderApp('/machines')
-    const heading = await screen.findByRole('heading', { name: 'ci box' })
-    const card = heading.closest('li') as HTMLElement
-
+    await user.click(await screen.findByRole('button', { name: /ci box.*View machine/ }))
+    const card = await screen.findByRole('dialog', { name: 'ci box' })
     expect(within(card).getByText('build-host')).toBeInTheDocument()
     expect(within(card).getByText('ffff')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /^approve/i })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /^disable/i })).toBeInTheDocument()
+    expect(within(card).getByRole('button', { name: /^disable/i })).toBeInTheDocument()
+    await user.click(within(card).getByRole('button', { name: 'Close' }))
+    await user.click(screen.getByRole('button', { name: /build-host.*View machine/ }))
+    expect(within(await screen.findByRole('dialog', { name: 'build-host' })).getByRole('button', { name: /^approve/i })).toBeInTheDocument()
   })
 
   it('warns on a machine whose identity may have been copied, never by itself disabling it', async () => {
+    const user = userEvent.setup()
     signedIn({
       'GET /api/v1/machines': {
         body: { items: [machine({ status: 'trusted', actions: ['disable', 'rename'], copyWarning: { count: 3, firstAddress: '10.0.0.5', lastAddress: '10.0.0.9', firstSeen: '2026-11-09T10:00:00Z', lastSeen: '2026-11-09T10:04:00Z' } }), machine({ fingerprint: 'ff'.repeat(32), display: 'ffff', hostName: 'clean-host', status: 'trusted', actions: ['disable'] })] },
       },
     })
     renderApp('/machines')
-    await screen.findByRole('heading', { name: 'clean-host' })
-
-    expect(screen.getAllByText(/Disable this machine if you did not start both./)).toHaveLength(1)
-    expect(screen.getByText(/10.0.0.9/)).toBeInTheDocument()
-    expect(screen.getAllByRole('button', { name: /^disable/i })).toHaveLength(2)
+    const table = within(await screen.findByRole('table', { name: 'Machines' }))
+    expect(table.getAllByText('Identity warning')).toHaveLength(1)
+    expect(table.getAllByText('trusted')).toHaveLength(2)
+    await user.click(table.getByRole('button', { name: /build-host.*View machine/ }))
+    const details = within(await screen.findByRole('dialog', { name: 'build-host' }))
+    expect(details.getByText(/Disable this machine if you did not start both./)).toBeInTheDocument()
+    expect(details.getByText(/10.0.0.9/)).toBeInTheDocument()
+    expect(details.getByRole('button', { name: /^disable/i })).toBeInTheDocument()
   })
 
   it('states the status in words as well as colour', async () => {

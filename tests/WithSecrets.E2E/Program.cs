@@ -32,10 +32,10 @@ internal static class Program
         ("i7-spa-refused-without-authorization", ScenariosSpa.RefusedWithoutAuthorization),
         ("i8-spa-accept-host-name", ScenariosSpa.AcceptHostName),
         ("i9-spa-reload-between-tap-and-result", ScenariosSpa.ReloadBetweenTapAndResult),
-        ("i10-spa-providers", ScenariosSpa.Providers),
-        ("i11-provider-1password", ScenariosSpa.OnePasswordSetup),
-        ("i12-provider-vault", ScenariosSpa.VaultSetup),
-        ("i13-provider-lastpass", ScenariosSpa.LastPassSetup),
+        ("i10a-provider-bitwarden", ScenariosSpa.Providers),
+        ("i10b-provider-1password", ScenariosSpa.OnePasswordSetup),
+        ("i10c-provider-vault", ScenariosSpa.VaultSetup),
+        ("i10d-provider-lastpass", ScenariosSpa.LastPassSetup),
         ("j1-spa-accessibility", ScenariosSpa.Accessibility),
         ("k1-spa-pair-machine", ScenariosPairing.PairMachine),
         ("z-happy-path", ScenariosHappy.HappyPath),
@@ -126,6 +126,7 @@ internal static class Program
     {
         string esc(string value) => WebUtility.HtmlEncode(value);
         string relative(string path) => Path.GetRelativePath(directory, path).Replace(Path.DirectorySeparatorChar, '/');
+        ScenarioResult? firstProvider = results.FirstOrDefault(result => result.Name.StartsWith("i10", StringComparison.Ordinal));
         string rows = string.Join(Environment.NewLine, results.Select(result =>
         {
             string status = result.Passed ? "Passed" : "Failed";
@@ -142,7 +143,8 @@ internal static class Program
             }
 
             string diagnostics = evidence.Count == 0 ? "<span class=\"muted\">—</span>" : string.Join(" ", evidence);
-            return $"<tr><td>{(result.Videos.Length == 0 ? $"<code>{esc(result.Name)}</code>" : videos)}</td><td class=\"{(result.Passed ? "pass" : "fail")}\">{status}</td><td>{result.ChecksPassed} passed / {result.ChecksFailed} failed</td><td>{result.Seconds:F1}s</td><td>{diagnostics}</td></tr>";
+            string group = ReferenceEquals(result, firstProvider) ? "<tr><th colspan=\"5\">i10. Provider checks</th></tr>" + Environment.NewLine : "";
+            return group + $"<tr><td>{(result.Videos.Length == 0 ? $"<code>{esc(result.Name)}</code>" : videos)}</td><td class=\"{(result.Passed ? "pass" : "fail")}\">{status}</td><td>{result.ChecksPassed} passed / {result.ChecksFailed} failed</td><td>{result.Seconds:F1}s</td><td>{diagnostics}</td></tr>";
         }));
         string html = $$"""
             <!doctype html>

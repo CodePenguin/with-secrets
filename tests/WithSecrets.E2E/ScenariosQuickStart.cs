@@ -55,7 +55,7 @@ internal static class ScenariosQuickStart
             Data = "{}",
         });
         checks.Check(beforeFingerprint.Status == 403, "the server requires explicit device verification after accepting the code");
-        await browser.DemoSnapAsync("The code is accepted. Compare the full fingerprint, then choose Fingerprint matches. Continue.");
+        await browser.DemoSnapAsync("The code is accepted. Compare the full fingerprint, then choose Fingerprint matches.");
         const string background = "element => getComputedStyle(element).backgroundColor";
         string verifyColor = await verify.EvaluateAsync<string>(background);
         string cancelColor = await browser.Page.Locator("#deny").EvaluateAsync<string>(background);

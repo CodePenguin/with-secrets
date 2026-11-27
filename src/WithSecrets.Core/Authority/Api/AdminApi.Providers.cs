@@ -29,6 +29,8 @@ internal sealed partial class AdminApi
             ApiAccess.Authorize, 200, "SealedProviderConfiguration", S.Obj([("token", S.Str(min: 1, max: 1024)), ("serverUrl", S.Str(min: 1, max: 512))]), [], null, SealBitwardenConfigurationAsync),
         new("POST", Prefix + "/providers/validate", "validateProvider", "Validate a proposed provider configuration or mount path.", "providers", ApiAccess.Authorize, 200,
             "ProviderValidation", ProviderValidationBody(), [], null, ValidateProviderAsync, BodyLimit: ConfigurationBodyLimit),
+        new("POST", Prefix + "/providers/{id}/mount-options", "browseProviderMountOptions", "List names and paths available to mount.", "providers", ApiAccess.Authorize, 200,
+            "ProviderMountOptions", S.Obj([("parentPath", ParameterSchema("base"))], ["parentPath"]), [], null, BrowseProviderMountOptionsAsync),
         new("POST", Prefix + "/mounts/{id}/refresh", "refreshMount", "Refresh the namespace entries of a mount from its provider.", "providers", ApiAccess.Authorize, 200,
             "MountRefresh", null, [], null, RefreshMountAsync),
         new("POST", Prefix + "/providers/{id}/value-refreshes", "startProviderValueRefresh", "Open the local terminal and begin an interactive provider refresh.", "providers",
@@ -158,6 +160,33 @@ internal sealed partial class AdminApi
         }
 
         return new ApiResult(200, await providers.ValidateMountAsync(id, config, mountBase!, cancel, mountKind));
+    }
+
+    private async Task<ApiResult> BrowseProviderMountOptionsAsync(ApiCall call)
+    {
+        if (ProviderRequestProblem(call.Session) is { } refusal)
+        {
+            return refusal;
+        }
+
+        ProviderAdmin providers = admin.Providers!;
+        if (!Guid.TryParseExact(call.Path["id"], "D", out Guid id) || providers.Store.Instance(id) is null)
+        {
+            return ProviderProblem(404, "not-found", "no provider instance has that id");
+        }
+
+        string? parent = call.Body!.Value.TryGetProperty("parentPath", out JsonElement path) ? path.GetString() : null;
+        try
+        {
+            IReadOnlyList<ProviderMountOption>? options = await providers.BrowseMountOptionsAsync(id, parent, call.Context.RequestAborted);
+            return options is not null
+                ? new ApiResult(200, options)
+                : ProviderProblem(409, "operation-refused", "This provider does not support browsing mount options.");
+        }
+        catch (Exception error) when (error is ProviderAdapterException or KeyNotFoundException or InvalidOperationException)
+        {
+            return ProviderProblem(409, "operation-refused", "Could not list mount options. Check the provider connection and access permissions.");
+        }
     }
 
     private async Task<ApiResult> RefreshMountAsync(ApiCall call)

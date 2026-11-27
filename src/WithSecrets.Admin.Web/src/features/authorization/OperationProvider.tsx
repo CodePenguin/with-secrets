@@ -31,11 +31,13 @@ export function OperationProvider({ children }: { children: ReactNode }) {
   }
 
   function showApplied(operation: string, message: string) {
-    if (!providerOperations.has(operation)) return false
     const providerDetail = location.pathname.startsWith('/providers/') && operation !== 'provider-remove' && operation !== 'provider-add'
-    const destination = providerDetail ? location.pathname : '/providers'
+    const secretsMount = location.pathname === '/secrets' && operation === 'mount-add'
+    const destination = providerOperations.has(operation) && !providerDetail && !secretsMount
+      ? '/providers'
+      : location.pathname + location.search + location.hash
     close()
-    navigate(destination, { replace: destination === location.pathname || operation === 'provider-remove', state: flash(message) })
+    navigate(destination, { replace: destination === location.pathname + location.search + location.hash || operation === 'provider-remove', state: flash(message) })
     return true
   }
 

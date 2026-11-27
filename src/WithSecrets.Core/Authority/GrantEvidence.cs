@@ -163,7 +163,7 @@ public static class GrantEvidence
     /// <summary>The machine-readable lines of an admin grant page (the passkey signs them): what changes, to which grant, and its new revision and end.</summary>
     public static string AdminLines(string change, GrantRecord grant, int newRevision, DateTimeOffset? newEnd)
     {
-        return string.Join('\n',
+        string lines = string.Join('\n',
             ChangePrefix + change,
             GrantIdPrefix + grant.Id,
             GrantScopePrefix + grant.ScopeKey,
@@ -172,6 +172,7 @@ public static class GrantEvidence
             SecurityRevisionPrefix + grant.SecurityRevision.ToString(CultureInfo.InvariantCulture),
             NewRevisionPrefix + newRevision.ToString(CultureInfo.InvariantCulture),
             NewEndPrefix + EndText(newEnd));
+        return change == GrantOps.Extend && grant.Status == "consumed" ? lines + "\n" + NewUsagePrefix + GrantUsage.Reusable : lines;
     }
 
     /// <summary>
@@ -230,6 +231,7 @@ public static class GrantEvidence
 
         if (!replace && (Line(evidence.Text, GrantIdPrefix) != grant.Id
             || Line(evidence.Text, ReplacesPrefix) is not null
+            || Line(evidence.Text, NewUsagePrefix) != (change == GrantOps.Extend && grant.Status == "consumed" ? GrantUsage.Reusable : null)
             || Line(evidence.Text, NewRevisionPrefix) != (grant.Revision + 1).ToString(CultureInfo.InvariantCulture)))
         {
             return "the admin page text is not this change to this grant";
@@ -306,6 +308,11 @@ public static class GrantEvidence
         // A replacement is believed only as what its page made: a reusable grant with this id, linked to the grant it replaces, at its first revision.
         string? change = Line(text, ChangePrefix);
         bool replacement = change == GrantOps.Replace;
+        if (!replacement && Line(text, NewUsagePrefix) is { } newUsage
+            && (change != GrantOps.Extend || row.Status != "active" || row.Usage != GrantUsage.Reusable || newUsage != row.Usage))
+        {
+            return "the signed text is not for this grant as it is now";
+        }
         if (replacement && (row.Replaces is null || row.Usage != GrantUsage.Reusable || Line(text, ReplacesPrefix) != row.Replaces || Line(text, NewUsagePrefix) != row.Usage))
         {
             return "the signed text is not for this grant as it is now";

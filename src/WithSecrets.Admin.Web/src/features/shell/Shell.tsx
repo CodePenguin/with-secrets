@@ -3,6 +3,7 @@ import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { api, setSessionSecret } from '../../api/client'
 import { keys, useApprovals, useSession, useStatus } from '../../api/queries'
+import { Flash } from '../../components/Flash'
 import { Badge } from '../../components/Card'
 import { Button } from '../../components/Button'
 import { Logo } from '../../components/Logo'
@@ -120,15 +121,17 @@ export function Shell() {
                   className={({ isActive }) => (isActive ? styles.active : undefined)}
                   onClick={() => setOpenNavigationPath(null)}
                 >
-                  {link.label}{link.to === '/access' && waiting > 0 ? <span aria-hidden="true"> <Badge tone="warn">{waiting}</Badge></span> : null}
+                  {link.label}{link.to === '/access' && waiting > 0 ? <span className={styles.navBadge} aria-hidden="true"><Badge tone="warn">{waiting}</Badge></span> : null}
                 </NavLink>
               </li>
             ))}
           </ul>
+          {status.data?.version ? <p className={styles.version}>Version {status.data.version}</p> : null}
         </nav>
       ) : null}
       {signedIn ? <span className="visually-hidden" role="status">{waiting > 0 ? waiting + (waiting === 1 ? ' pending approval' : ' pending approvals') : ''}</span> : null}
       <main id="main" ref={main} className={styles.main}>
+        <div className={styles.flash}><Flash key={location.pathname} /></div>
         <Gate>
           <Outlet />
         </Gate>

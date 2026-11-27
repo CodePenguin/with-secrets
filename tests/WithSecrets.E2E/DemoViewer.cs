@@ -7,10 +7,10 @@ internal static class DemoViewer
 {
     public static string Title(string scenario) => scenario switch
     {
-        "i10-spa-providers" => "Set up Bitwarden Secrets Manager",
-        "i11-provider-1password" => "Set up 1Password",
-        "i12-provider-vault" => "Set up HashiCorp Vault",
-        "i13-provider-lastpass" => "Set up LastPass",
+        "i10a-provider-bitwarden" => "i10a. Set up Bitwarden Secrets Manager",
+        "i10b-provider-1password" => "i10b. Set up 1Password",
+        "i10c-provider-vault" => "i10c. Set up HashiCorp Vault",
+        "i10d-provider-lastpass" => "i10d. Set up LastPass",
         _ => scenario,
     };
 
@@ -27,14 +27,14 @@ internal static class DemoViewer
             :root{color-scheme:light dark;--bg:#fff;--fg:#20242b;--muted:#68717d;--line:#d9dde3;--panel:#f5f6f8;--accent:#1d4ed8}
             @media (prefers-color-scheme:dark){:root{--bg:#10151c;--fg:#e6edf5;--muted:#9fb3c8;--line:#2c3644;--panel:#171f2a;--accent:#7aa2ff}}
             *{box-sizing:border-box}
-            body{margin:0;background:var(--bg);color:var(--fg);font:16px system-ui,sans-serif;height:100vh;display:grid;grid-template-columns:20rem minmax(0,1fr)}
-            nav{border-right:1px solid var(--line);overflow:auto;background:var(--panel)}
+            body{margin:0;background:var(--bg);color:var(--fg);font:16px system-ui,sans-serif;height:100vh;display:grid;grid-template-columns:20rem minmax(0,1fr);grid-template-areas:"steps viewer"}
+            nav{grid-area:steps;border-right:1px solid var(--line);overflow:auto;background:var(--panel)}
             nav h1{font-size:1rem;margin:0;padding:14px 16px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--panel)}
             nav a{display:block;padding:9px 16px;color:inherit;text-decoration:none;border-bottom:1px solid var(--line);font-size:.9rem;line-height:1.35}
             nav a span{color:var(--muted);margin-right:6px}
             nav a[aria-current=step]{background:var(--accent);color:#fff}
             nav a[aria-current=step] span{color:#fff}
-            main{display:grid;grid-template-rows:auto minmax(0,1fr) auto;min-width:0}
+            main{grid-area:viewer;display:grid;grid-template-rows:auto minmax(0,1fr) auto;min-width:0}
             .bar{display:flex;gap:12px;align-items:center;padding:10px 16px;border-bottom:1px solid var(--line)}
             .bar .count{margin-left:auto;color:var(--muted)}
             button{font:inherit;padding:6px 16px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:inherit;cursor:pointer}
@@ -42,12 +42,17 @@ internal static class DemoViewer
             .shot{overflow:auto;padding:16px;display:flex;justify-content:center;align-items:flex-start}
             .shot img{max-width:100%;max-height:100%;object-fit:contain;border:1px solid var(--line)}
             .caption{min-height:5.5rem;padding:14px 20px;border-top:1px solid var(--line);background:var(--panel);font-size:1.1rem;line-height:1.45}
-            @media (max-width:800px){body{grid-template-columns:1fr;grid-template-rows:auto 1fr;height:auto}nav{max-height:30vh;border-right:0;border-bottom:1px solid var(--line)}}
+            @media (max-width:800px){
+              body{grid-template-columns:minmax(0,1fr);grid-template-rows:auto auto;grid-template-areas:"viewer" "steps";height:auto}
+              main{grid-template-rows:auto auto auto}
+              nav{border-right:0}
+              nav h1{position:static}
+              .caption{min-height:0}
+            }
           </style>
         </head>
         <body>
-          <nav aria-label="Steps"><h1>{{TITLE}}</h1><div id="list"></div></nav>
-          <main>
+          <main id="viewer" aria-label="{{TITLE}}" tabindex="-1">
             <div class="bar">
               <button id="back" type="button">&larr; Back</button>
               <button id="next" type="button">Next &rarr;</button>
@@ -56,9 +61,11 @@ internal static class DemoViewer
             <div class="shot"><img id="img" alt=""></div>
             <div class="caption" id="caption" aria-live="polite"></div>
           </main>
+          <nav aria-label="Steps"><h1>{{TITLE}}</h1><div id="list"></div></nav>
           <script>
             const steps = {{STEPS}};
             const $ = (id) => document.getElementById(id);
+            const compact = matchMedia('(max-width:800px)');
             let at = Math.max(0, Math.min(steps.length - 1, (parseInt(location.hash.slice(1), 10) || 1) - 1));
             const list = $('list');
             steps.forEach((step, index) => {
@@ -67,7 +74,14 @@ internal static class DemoViewer
               const n = document.createElement('span');
               n.textContent = index + 1;
               a.append(n, step.caption);
-              a.addEventListener('click', (event) => { event.preventDefault(); go(index); });
+              a.addEventListener('click', (event) => {
+                event.preventDefault();
+                go(index);
+                if (compact.matches) {
+                  $('viewer').focus({ preventScroll: true });
+                  $('viewer').scrollIntoView({ block: 'start' });
+                }
+              });
               list.appendChild(a);
             });
             function go(index) {
@@ -78,7 +92,10 @@ internal static class DemoViewer
               $('count').textContent = 'Step ' + (at + 1) + ' of ' + steps.length;
               $('back').disabled = at === 0;
               $('next').disabled = at === steps.length - 1;
-              [...list.children].forEach((a, i) => { if (i === at) { a.setAttribute('aria-current', 'step'); a.scrollIntoView({ block: 'nearest' }); } else a.removeAttribute('aria-current'); });
+              list.querySelector('[aria-current]')?.removeAttribute('aria-current');
+              const activeStep = list.children[at];
+              activeStep.setAttribute('aria-current', 'step');
+              if (!compact.matches) activeStep.scrollIntoView({ block: 'nearest' });
               history.replaceState(null, '', '#' + (at + 1));
               if (steps[at + 1]) new Image().src = steps[at + 1].image;
             }

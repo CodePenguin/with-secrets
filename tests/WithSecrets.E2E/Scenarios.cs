@@ -276,8 +276,8 @@ internal static class Scenarios3
 {
     private const string Secret = "s3cr3t-e2e-value-1";
 
-    /// <summary>Sets E2E_SECRET through the page (a fixture of the run scenarios).</summary>
-    public static async Task SeedSecret(Rig rig, Ctx c, SpaApp? signedIn = null)
+    /// <summary>Sets a fixture secret through the page.</summary>
+    public static async Task SeedSecret(Rig rig, Ctx c, SpaApp? signedIn = null, string name = "E2E_SECRET")
     {
         // As a person does it: in the admin app, one tap. The session cookie is shared by every localhost port, so a
         // scenario that already has its app signed in seeds through that one.
@@ -287,10 +287,11 @@ internal static class Scenarios3
             await Spa.SignIn(c, own, new S("seed"));
         }
         await Spa.GoTo(c, "Secrets", "Secrets");
-        await c.Page.GetByLabel("Name").FillAsync("E2E_SECRET");
+        await Spa.Click(Spa.Button(c, "Add secret", exact: true));
+        await c.Page.GetByLabel("Name").FillAsync(name);
         await c.Page.GetByLabel("Value").FillAsync(Secret);
         await Spa.Click(Spa.Button(c, "Save secret", exact: true));
-        await c.Page.GetByText("Saved E2E_SECRET.").First.WaitForAsync(new() { Timeout = 20000 });
+        await c.Page.GetByText($"Saved {name}.").First.WaitForAsync(new() { Timeout = 20000 });
     }
 
     public static async Task RunApproval(Host host, S s)
@@ -303,7 +304,7 @@ internal static class Scenarios3
         using SpaApp app = new(rig, unlocked: false, timeLimit: TimeSpan.FromSeconds(12));
         await Spa.Unlock(c, app, s);
         await Spa.SignIn(c, app, s);
-        await c.StartDemoAsync();
+        await Spa.StartDemoFromOverview(c);
 
         // 1. A script file: the request shows its contents; approve once; the program output appears.
         using (Cmd<int> run = Cmds.Run(rig, "E2E_SECRET", Rig.ScriptCommand("check"), app: app))
@@ -390,7 +391,7 @@ internal static class Scenarios3
         using SpaApp app = new(rig, unlocked: false);
         await Spa.Unlock(c, app, s);
         await Spa.SignIn(c, app, s);
-        await c.StartDemoAsync();
+        await Spa.StartDemoFromOverview(c);
         using Cmd<int> run = Cmds.Run(rig, "E2E_SECRET", Rig.ScriptCommand("check"), app: app);
         await Spa.OpenRequest(c, run, app, s);
         ILocator warning = c.Page.GetByRole(AriaRole.Region, new() { Name = "Code changes" });
@@ -529,7 +530,14 @@ internal static class Scenarios6
         await c.Page.GetByRole(AriaRole.Navigation, new() { Name = "Main" })
             .GetByRole(AriaRole.Link, new() { Name = "Passkeys", Exact = true }).ClickAsync();
         await Spa.Heading(c, "Passkeys").WaitForAsync();
-        ILocator add = Spa.Button(c, "Add a passkey...");
+        ILocator passkey = c.Page.GetByRole(AriaRole.Table, new() { Name = "Enrolled passkeys" }).GetByRole(AriaRole.Button, new() { Name = "View passkey" }).First;
+        await c.DemoPressAsync(passkey, "The Passkeys list shows each credential's role and creation date. Select one to see its details.");
+        await passkey.ClickAsync();
+        ILocator details = Spa.Dialog(c);
+        await details.GetByText("Kind", new() { Exact = true }).WaitForAsync();
+        await c.DemoSnapAsync("Passkey details explain what the role can do and give admins a place to remove that credential.");
+        await details.GetByRole(AriaRole.Button, new() { Name = "Close", Exact = true }).ClickAsync();
+        ILocator add = Spa.Button(c, "Add passkey", exact: true);
         await add.WaitForAsync();
         await c.DemoPressAsync(add, caption);
     }
@@ -546,8 +554,8 @@ internal static class Scenarios6
             if (c.IsDemo)
             {
                 // The secret is a fixture for the approval at the end of the walkthrough.
-                await c.StartDemoAsync();
-                await ShowPasskeysEntry(c, "Start in Passkeys and choose Add a passkey. Confirm the request with your admin passkey, then continue to the enrollment page.");
+                await Spa.StartDemoFromOverview(c);
+                await ShowPasskeysEntry(c, "Start in Passkeys and choose Add passkey. Confirm the request with your admin passkey, then continue to the enrollment page.");
             }
             await c.Page.GotoAsync("about:blank");
         }
@@ -605,12 +613,13 @@ internal static class Scenarios6
         AuthorityStore store = rig.Machine.Deployment.Store;
         GrantRecord grant = store.Grants().Single(item => item.Usage == GrantUsage.Reusable);
         await Spa.GoTo(c, "Access", "Access");
+        await Spa.Button(c, "View grant " + grant.Id).ClickAsync();
         await Spa.Button(c, "Extend grant " + grant.Id).ClickAsync();
         ILocator dialog = Spa.Dialog(c);
         await dialog.GetByLabel("Minutes to add to the present end").FillAsync("30");
         long beforeExtend = (await c.AuthOps(second)).Signs;
         await Spa.Continue(c, s, dialog);
-        await dialog.GetByText("Done").First.WaitForAsync(new() { Timeout = 20000 });
+        await Spa.PageFeedback(c).WaitForAsync(new() { Timeout = 20000 });
         GrantRecord? changed = store.FindGrant(grant.Id);
         s.Check(grant.Expires is { } previous && changed?.Expires == previous.AddMinutes(30), "the convenience passkey extended the same grant by 30 minutes");
         s.Check(beforeExtend > signsSecond && (await c.AuthOps(second)).Signs > beforeExtend && (await c.AuthOps(adminAuth)).Signs == signsFirst, "the approval and extension both came from the device without PRF");
@@ -643,12 +652,12 @@ internal static class Scenarios7
         if (c.IsDemo)
         {
             await Spa.SignIn(c, app, new S("demo sign-in"));
-            await c.StartDemoAsync();
+            await Spa.StartDemoFromOverview(c);
             await Spa.GoTo(c, "Settings", "Settings", capture: false);
             ILocator address = c.Page.GetByLabel("Address of the pages", new() { Exact = false });
             await address.WaitForAsync();
             await c.DemoPressAsync(address, "In Settings, find Approval pages. The address for another host name needs HTTPS. This example tries an HTTP address.");
-            await Scenarios6.ShowPasskeysEntry(c, "Open Passkeys and choose Add a passkey. Confirm with your current admin passkey to reach the enrollment review.");
+            await Scenarios6.ShowPasskeysEntry(c, "Open Passkeys and choose Add passkey. Confirm with your current admin passkey to reach the enrollment review.");
         }
 
         using Cmd<ApprovalDecision> cmd = new((port, o, e) =>
@@ -674,8 +683,15 @@ internal static class Scenarios7
         s.Check(AuditChecks.All(rig).Any(e => e.Type == AuditEventTypes.Admin && e.Outcome == AdminEvent.ChangeDenied && e.Reason.Contains("https address or localhost")), "audit records the refusal");
         if (c.IsDemo)
         {
-            await c.Page.WaitForURLAsync(url => url.StartsWith("http://ws.localhost:", StringComparison.Ordinal)
-                || url.StartsWith("chrome-error:", StringComparison.Ordinal), new() { WaitUntil = WaitUntilState.Commit, Timeout = 10000 });
+            try
+            {
+                await c.Page.WaitForURLAsync(url => url.StartsWith("http://ws.localhost:", StringComparison.Ordinal)
+                    || url.StartsWith("chrome-error:", StringComparison.Ordinal), new() { WaitUntil = WaitUntilState.Commit, Timeout = 10000 });
+            }
+            catch (PlaywrightException error) when (error.Message.Contains("ERR_CONNECTION_REFUSED", StringComparison.Ordinal))
+            {
+                // The server refuses the HTTP handoff. Chromium may report the failed navigation before showing its error page.
+            }
             await c.Page.GotoAsync(app.Url + "/passkeys");
             await Spa.Heading(c, "Passkeys").WaitForAsync();
             await c.DemoSnapAsync("Enrollment stopped because the other host uses HTTP. Only the original passkey is listed. Set an HTTPS address and start again.");

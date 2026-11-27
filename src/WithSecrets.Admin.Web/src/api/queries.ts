@@ -108,8 +108,12 @@ export function useMounts(id: string, enabled: boolean) {
   return useQuery({ queryKey: keys.providerMounts(id), queryFn: () => api.get('/api/v1/providers/{id}/mounts', { path: { id } }), enabled, refetchInterval: 10_000 })
 }
 
+export function mountEntriesQuery(id: string) {
+  return { queryKey: keys.mountEntries(id), queryFn: () => api.get('/api/v1/mounts/{id}/entries', { path: { id } }), refetchInterval: 10_000 }
+}
+
 export function useEntries(id: string) {
-  return useQuery({ queryKey: keys.mountEntries(id), queryFn: () => api.get('/api/v1/mounts/{id}/entries', { path: { id } }), refetchInterval: 10_000 })
+  return useQuery(mountEntriesQuery(id))
 }
 
 export function useAllMounts(enabled: boolean) {
@@ -130,7 +134,8 @@ export function useAuditGaps(machine: string, enabled: boolean) {
 
 /** The run requests waiting for a decision. `poll`: ask again every so many milliseconds, so a request that has just arrived appears by itself. */
 export function useApprovals(enabled: boolean, poll: number | false = false) {
-  return useQuery({ queryKey: keys.approvals, queryFn: () => api.get('/api/v1/approvals'), enabled, refetchInterval: poll })
+  // Read the whole bounded queue so Access can order every waiting request by expiry.
+  return useQuery({ queryKey: keys.approvals, queryFn: () => api.get('/api/v1/approvals', { query: { limit: 64 } }), enabled, refetchInterval: poll })
 }
 
 export function useApproval(id: string, poll: number | false = false) {

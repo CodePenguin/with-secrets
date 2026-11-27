@@ -640,6 +640,16 @@ public sealed partial class AuthorityStore
             return Find(id)!;
         }
 
+        internal GrantRecord ActivateOnce(string id, DateTimeOffset? expires, string approvedBy, PlainEvidence evidence, DateTimeOffset at)
+        {
+            WithSecretsDatabase.Execute(_connection, _transaction,
+                "UPDATE grants SET status = 'active', usage = $usage, consumed = NULL, expires = $expires, updated = $now, grant_revision = grant_revision + 1, approved_by = $by WHERE id = $id AND status = 'consumed' AND usage = $once",
+                ("$usage", GrantUsage.Reusable), ("$expires", expires is { } end ? Time(end) : null), ("$now", Time(at)), ("$by", approvedBy), ("$id", id), ("$once", GrantUsage.Once));
+            Seal(id, evidence);
+            _store.Fault?.Invoke("after-grant");
+            return Find(id)!;
+        }
+
         /// <summary>Ends the grant for good and queues the notice for its machine.</summary>
         public GrantRecord Revoke(string id)
         {

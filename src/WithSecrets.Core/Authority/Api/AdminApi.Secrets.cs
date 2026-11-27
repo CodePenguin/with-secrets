@@ -10,7 +10,12 @@ internal sealed partial class AdminApi
     /// <summary>A sealed value of one secret is at most 4096 characters; the sealed payload and its assertion fit in this.</summary>
     private const int SecretBodyLimit = 49152;
 
-    private static JsonObject SecretNamesBody() => S.Obj([("names", S.Arr(S.Str(max: 80)))]);
+    private static JsonObject SecretNamesBody() => S.Obj([("names", S.Arr(S.Str(max: SecretNames.MaxNameLength)))]);
+
+    private static JsonObject SecretEntryBody() => S.Obj([
+        ("names", S.Arr(S.Str(max: SecretNames.MaxNameLength))),
+        ("source", S.Str(min: 1, max: SecretNames.MaxNameLength)),
+    ], ["source"]);
 
     private static JsonObject SecretSealBody() => S.Obj(
     [
@@ -109,7 +114,9 @@ internal sealed partial class AdminApi
             return Task.FromResult(refusal!);
         }
 
-        (SecretEntryDto? entry, string? problem) = flows.StartSet(NamesOf(call.Body!.Value), sessionId, call.Context.Request.Headers.Origin.ToString());
+        JsonElement body = call.Body!.Value;
+        string? source = body.TryGetProperty("source", out JsonElement from) ? from.GetString() : null;
+        (SecretEntryDto? entry, string? problem) = flows.StartSet(NamesOf(body), sessionId, call.Context.Request.Headers.Origin.ToString(), source);
 
         return Task.FromResult(entry is not null ? new ApiResult(201, entry) : SecretProblem(400, problem!));
     }

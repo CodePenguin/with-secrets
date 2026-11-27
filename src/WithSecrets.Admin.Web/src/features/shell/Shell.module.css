@@ -106,6 +106,10 @@
   background: var(--surface);
 }
 
+.navBadge {
+  margin-inline-start: var(--space-2);
+}
+
 /* The current view is marked by an underline and weight as well as colour (not colour alone). */
 .nav a.active {
   background: var(--surface);
@@ -132,6 +136,13 @@
   background: var(--surface-2);
 }
 
+.version {
+  margin: 0;
+  padding: var(--space-2) var(--space-4);
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+
 .main {
   grid-area: main;
   width: 100%;
@@ -142,6 +153,10 @@
 
 .main:focus {
   outline: none;
+}
+
+.flash:not(:empty) {
+  margin-block-end: var(--space-4);
 }
 
 /* Medium layouts keep one predictable row; the nav scrolls independently if labels need more room. */
@@ -173,6 +188,10 @@
 
   .nav[data-open='true'] ul {
     display: flex;
+  }
+
+  .nav[data-open='false'] .version {
+    display: none;
   }
 
   .nav li,
@@ -207,8 +226,15 @@
   }
 
   .nav {
+    display: flex;
+    flex-direction: column;
     border-bottom: 0;
     border-right: 1px solid var(--border-soft);
+  }
+
+  .version {
+    margin-top: auto;
+    padding: var(--space-3) var(--space-4);
   }
 
   .nav ul {
