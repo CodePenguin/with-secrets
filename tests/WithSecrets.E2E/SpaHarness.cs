@@ -1,4 +1,5 @@
 using System.Text.Json;
+
 using Microsoft.Playwright;
 
 namespace WithSecrets.E2E;
@@ -63,15 +64,17 @@ internal static class Spa
     /// <summary>Completes the prepared in-page sign-in with a user gesture that directly invokes WebAuthn.</summary>
     public static async Task Tap(Ctx c, S s, string linkName = "Sign in with passkey", Func<IPage, string, Task>? beforeTap = null, bool capture = true)
     {
-        string before = c.Page.Url;
-        if (beforeTap is not null) await beforeTap(c.Page, "starts a read-only administrator session");
+        ILocator signIn = c.Page.GetByRole(AriaRole.Link, new() { Name = "Sign in", Exact = true });
+        if (await signIn.IsVisibleAsync()) await signIn.ClickAsync();
+        if (beforeTap is not null) await beforeTap(c.Page, "starts an administrator session");
         ILocator button = c.Page.GetByRole(AriaRole.Button, new() { Name = linkName, Exact = true });
         await button.WaitForAsync(new() { Timeout = 20000 });
         if (capture) await c.DemoPressAsync(button, $"Select {linkName}, then use your passkey.");
         await button.ClickAsync(new() { Timeout = 20000 });
         Clicks++;
         await Heading(c, "Overview").WaitForAsync(new() { Timeout = 20000 });
-        s.Check(c.Page.Url == before, "sign-in keeps the SPA loaded in the same tab");
+        await Button(c, "Sign out", exact: true).WaitForAsync(new() { Timeout = 20000 });
+        s.Check(!c.Page.Url.EndsWith("/sign-in", StringComparison.Ordinal), "sign-in returns to the Admin view in the same tab");
     }
 
     /// <summary>
@@ -226,7 +229,7 @@ internal static class Spa
         {
             await Open(c, app, capture: false);
         }
-        await Heading(c, "with-secrets").WaitForAsync();
+        await Heading(c, "Overview").WaitForAsync();
         await Tap(c, s, capture: false);
         await c.DemoSnapAsync("Overview is open and you’re signed in.");
     }

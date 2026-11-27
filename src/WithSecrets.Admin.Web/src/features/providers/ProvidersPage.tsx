@@ -135,17 +135,16 @@ export function ProvidersPage() {
   const status = useStatus()
   const session = useSession()
   const available = status.data?.capabilities?.providers === true
-  const canRead = session.data?.capabilities.includes('admin.read') === true
   const canChange = session.data?.capabilities.includes('admin.decide') === true && status.data?.locked === false
-  const providers = useProviders(available && canRead)
-  const types = useProviderTypes(available && canRead && !id)
+  const providers = useProviders(available)
+  const types = useProviderTypes(available && !id)
   const provider = providers.data?.find((item) => item.id === id)
-  const mounts = useMounts(id ?? '', available && canRead && !!provider)
+  const mounts = useMounts(id ?? '', available && !!provider)
   usePageTitle(provider?.name ?? 'Providers')
 
   if (status.isPending) return <><PageHeader title="Providers" /><Loading what="service status" /></>
   if (status.isError) return <><PageHeader title="Providers" /><ProblemAlert error={status.error} /></>
-  if (!available || !canRead) return <><PageHeader title="Providers" /><Empty>Provider administration is unavailable in this session.</Empty></>
+  if (!available) return <><PageHeader title="Providers" /><Empty>Providers are unavailable on this host.</Empty></>
   if (providers.isPending) return <><PageHeader title="Providers" /><Loading what="providers" /></>
   if (providers.isError) return <><PageHeader title="Providers" /><ProblemAlert error={providers.error} /></>
 

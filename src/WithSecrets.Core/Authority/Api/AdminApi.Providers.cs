@@ -9,17 +9,17 @@ internal sealed partial class AdminApi
 {
     private IReadOnlyList<ApiRoute> ProviderRoutes() =>
     [
-        new("GET", Prefix + "/providers", "listProviders", "List configured provider instances.", "providers", ApiAccess.Read, 200, "ProviderList", null, [], null,
-            _ => Task.FromResult(new ApiResult(200, admin.Providers?.Providers() ?? []))),
-        new("GET", Prefix + "/providers/{id}", "getProvider", "Read one provider instance by id.", "providers", ApiAccess.Read, 200, "Provider", null, [], null, GetProviderAsync),
+        new("GET", Prefix + "/providers", "listProviders", "List configured provider instances.", "providers", ApiAccess.Public, 200, "ProviderList", null, [], null,
+            call => Task.FromResult(new ApiResult(200, admin.Providers?.Providers().Select(item => ProviderMetadata(call, item)).ToArray() ?? []))),
+        new("GET", Prefix + "/providers/{id}", "getProvider", "Read one provider instance by id.", "providers", ApiAccess.Public, 200, "Provider", null, [], null, GetProviderAsync),
         // The dispatcher uses the last match, so the literal path must follow the id route.
-        new("GET", Prefix + "/providers/types", "listProviderTypes", "List registered provider types.", "providers", ApiAccess.Read, 200, "ProviderTypeList", null, [], null,
+        new("GET", Prefix + "/providers/types", "listProviderTypes", "List registered provider types.", "providers", ApiAccess.Public, 200, "ProviderTypeList", null, [], null,
             _ => Task.FromResult(new ApiResult(200, admin.Providers?.Types() ?? []))),
-        new("GET", Prefix + "/providers/{id}/mounts", "listProviderMounts", "List mounts of a provider instance.", "providers", ApiAccess.Read, 200, "MountList", null, [], null,
+        new("GET", Prefix + "/providers/{id}/mounts", "listProviderMounts", "List mounts of a provider instance.", "providers", ApiAccess.Public, 200, "MountList", null, [], null,
             call => Task.FromResult(ProviderRead(call, (providers, id) => providers.Mounts(id)))),
-        new("GET", Prefix + "/mounts", "listMounts", "List all provider mounts.", "providers", ApiAccess.Read, 200, "MountList", null, [], null,
+        new("GET", Prefix + "/mounts", "listMounts", "List all provider mounts.", "providers", ApiAccess.Public, 200, "MountList", null, [], null,
             _ => Task.FromResult(new ApiResult(200, admin.Providers?.Mounts() ?? []))),
-        new("GET", Prefix + "/mounts/{id}/entries", "listMountEntries", "List namespace entry metadata for a mount.", "providers", ApiAccess.Read, 200, "NamespaceEntryList", null, [], null,
+        new("GET", Prefix + "/mounts/{id}/entries", "listMountEntries", "List namespace entry metadata for a mount.", "providers", ApiAccess.Public, 200, "NamespaceEntryList", null, [], null,
             call => Task.FromResult(ProviderRead(call, (providers, id) => providers.Entries(id)))),
         new("POST", Prefix + "/providers/onepassword/seal", "sealOnePasswordConfiguration", "Seal a write-only 1Password token for provider configuration.", "providers",
             ApiAccess.Authorize, 200, "SealedProviderConfiguration", S.Obj([("serviceAccountToken", S.Str(min: 1, max: 2000))]), [], null, SealOnePasswordConfigurationAsync),
@@ -55,7 +55,9 @@ internal sealed partial class AdminApi
     };
 
     // One item is never an empty list: where there is no provider authority there is no item to answer with.
-    private Task<ApiResult> GetProviderAsync(ApiCall call) => Task.FromResult(admin.Providers is null ? ProvidersUnavailable() : ProviderRead(call, (providers, id) => providers.Provider(id)));
+    private Task<ApiResult> GetProviderAsync(ApiCall call) => Task.FromResult(admin.Providers is null ? ProvidersUnavailable() : ProviderRead(call, (providers, id) => providers.Provider(id) is { } item ? ProviderMetadata(call, item) : null));
+
+    private static ProviderDto ProviderMetadata(ApiCall call, ProviderDto item) => call.Session is null ? item with { Configuration = "{}", Status = null } : item;
 
     private ApiResult ProviderRead(ApiCall call, Func<ProviderAdmin, Guid, object?> read)
     {

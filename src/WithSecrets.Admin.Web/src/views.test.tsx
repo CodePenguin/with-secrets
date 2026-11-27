@@ -5,7 +5,7 @@ import { setBrowserSecret } from './api/client'
 import { authorization, grant, installFakeApi, machine, problem, session, settings, signedIn, status, violations } from './test/fakeApi'
 import { renderApp } from './test/render'
 
-const signedOut = () => session({ authenticated: false, admin: null, started: null, idleExpires: null, absoluteExpires: null })
+const signedOut = () => session({ authenticated: false, scope: null, capabilities: [], admin: null, started: null, idleExpires: null, absoluteExpires: null })
 
 describe('the primary views have no automated accessibility violations', () => {
   const views: Array<[string, string, string]> = [
@@ -56,7 +56,7 @@ describe('the primary views have no automated accessibility violations', () => {
 
   it('the sign-in view', async () => {
     installFakeApi({ 'GET /api/v1/status': { body: status({ locked: true }) }, 'GET /api/v1/session': { body: signedOut() } })
-    const { container } = renderApp('/')
+    const { container } = renderApp('/sign-in')
     expect(await screen.findByRole('heading', { level: 1, name: 'with-secrets' })).toBeInTheDocument()
     await screen.findByText('The authority is locked')
     expect(await violations(container)).toEqual([])
@@ -282,7 +282,7 @@ describe('machine polling', () => {
 })
 
 describe('sign-in', () => {
-  it('starts a read-only session with an in-page passkey tap and then shows the views', async () => {
+  it('signs in with one passkey tap and returns to the metadata view', async () => {
     const user = userEvent.setup()
     let tapped = false
     let started = false
@@ -308,6 +308,8 @@ describe('sign-in', () => {
     })
     Object.defineProperty(navigator, 'credentials', { configurable: true, value: { get: vi.fn(async () => ({ rawId: new Uint8Array([1]).buffer, response: { authenticatorData: new Uint8Array([2]).buffer, clientDataJSON: new Uint8Array([3]).buffer, signature: new Uint8Array([4]).buffer } })) } })
     renderApp('/machines')
+    expect(await screen.findByRole('button', { name: /build-host.*View machine/ })).toBeVisible()
+    await user.click(await screen.findByRole('link', { name: 'Sign in' }))
     await user.click(await screen.findByRole('button', { name: 'Sign in with passkey' }))
     expect(vi.mocked(navigator.credentials.get)).toHaveBeenCalledTimes(1)
     expect(fake.calls.find((call) => call.method === 'POST' && call.path === '/api/v1/session/inline')?.headers['X-Admin-Token']).toBe('browser-secret-1')
@@ -316,7 +318,7 @@ describe('sign-in', () => {
     expect(await screen.findByRole('button', { name: /build-host.*View machine/ })).toBeInTheDocument()
     // The claim is a POST made by the page (the read of the session claims nothing), and from then on every request carries the session's own secret.
     expect(fake.calls.some((call) => call.method === 'POST' && call.path === '/api/v1/session/claim')).toBe(true)
-    expect(fake.calls.filter((call) => call.path === '/api/v1/machines').every((call) => call.headers['X-Admin-Token'] === 'session-secret-1')).toBe(true)
+    await waitFor(() => expect(fake.calls.some((call) => call.path === '/api/v1/machines' && call.headers['X-Admin-Token'] === 'session-secret-1')).toBe(true))
   })
 
   it('is not signed in by a click made before the sign-in is prepared: until then nothing is named like the sign-in button', async () => {
@@ -336,7 +338,7 @@ describe('sign-in', () => {
 
       return prepared(input, init)
     })
-    renderApp('/machines')
+    renderApp('/sign-in')
 
     const waiting = await screen.findByRole('button', { name: /Preparing/ })
     expect(waiting).toBeDisabled()
@@ -354,7 +356,7 @@ describe('sign-in', () => {
       'POST /api/v1/browser': { status: 201, body: { antiForgery: 'browser-secret-1' } },
       'POST /api/v1/session/inline': problem(409, 'proof-unavailable', 'no admin passkey is available'),
     })
-    renderApp('/')
+    renderApp('/sign-in')
     await user.click(await screen.findByRole('button', { name: /sign in with passkey/i }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent('no admin passkey is available')
@@ -374,11 +376,12 @@ describe('sign-in', () => {
     renderApp('/')
     await user.click(await screen.findByRole('button', { name: 'Sign out' }))
 
-    expect(await screen.findByRole('heading', { level: 1, name: 'with-secrets' })).toBeInTheDocument()
+    expect(await screen.findByRole('link', { name: 'Sign in' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 1, name: 'Overview' })).toBeInTheDocument()
     expect(fake.calls.find((call) => call.method === 'DELETE')?.headers['X-Admin-Token']).toBe('session-secret-1')
   })
 
-  it('shows the sign-in when a view answers 401 (the session ended)', async () => {
+  it('offers sign-in without closing the current page when the session ends', async () => {
     let ended = false
     signedIn({
       'GET /api/v1/session': () => ({ body: ended ? signedOut() : session() }),
@@ -390,7 +393,8 @@ describe('sign-in', () => {
     })
     renderApp('/machines')
 
-    expect(await screen.findByRole('heading', { level: 1, name: 'with-secrets' })).toBeInTheDocument()
+    expect(await screen.findByRole('link', { name: 'Sign in' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { level: 1, name: 'Machines' })).toBeInTheDocument()
   })
 })
 
@@ -603,7 +607,7 @@ describe('settings and passkey context', () => {
     await user.click(screen.getByRole('button', { name: 'Close' }))
 
     const approvalButton = screen.getByRole('button', { name: 'deploy approval View passkey' })
-    expect(within(approvalButton.closest('tr') as HTMLElement).getByText('Convenience')).toBeInTheDocument()
+    expect(within(approvalButton.closest('tr') as HTMLElement).getByText('Approval')).toBeInTheDocument()
     await user.click(approvalButton)
     expect(within(screen.getByRole('dialog')).getByText('platform passkey')).toBeInTheDocument()
   })
@@ -738,8 +742,8 @@ describe('grant and audit navigation', () => {
 
     await userEvent.setup().click(await screen.findByRole('button', { name: /View started event/ }))
     const approved = await screen.findByText('Grant approved by')
-    expect(approved.parentElement).toHaveTextContent('phone (convenience, phone001)')
-    expect(screen.getByText('Grant changed by').parentElement).toHaveTextContent('phone (convenience, phone002)')
+    expect(approved.parentElement).toHaveTextContent('phone (approval, phone001)')
+    expect(screen.getByText('Grant changed by').parentElement).toHaveTextContent('phone (approval, phone002)')
     expect(screen.getByText('Authority unlocked by').parentElement).toHaveTextContent('laptop (admin, laptop01)')
     expect(screen.getByTitle('phone001long')).toBeInTheDocument()
     expect(screen.queryByText('Metadata: grantApprovedId')).toBeNull()
@@ -758,7 +762,7 @@ describe('grant and audit navigation', () => {
 
     await userEvent.setup().click(await screen.findByRole('button', { name: /View change/ }))
     const role = await screen.findByText('Session passkey')
-    expect(role.parentElement).toHaveTextContent('phone (convenience, phone001)')
+    expect(role.parentElement).toHaveTextContent('phone (approval, phone001)')
     expect(screen.queryByText('Passkey used')).toBeNull()
   })
 

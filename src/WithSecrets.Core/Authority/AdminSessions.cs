@@ -4,7 +4,7 @@ using System.Text;
 
 namespace WithSecrets;
 
-/// <summary>An administrator's session on the admin web app. It authorizes read-only views and nothing else: every change still needs its own fresh passkey tap.</summary>
+/// <summary>A browser session with permissions derived from the credential that established it.</summary>
 public sealed class AdminSession
 {
     internal AdminSession(string token, string identity, SessionScope scope, DateTimeOffset started, string csrf, VerifiedCredential? key = null)
@@ -43,7 +43,10 @@ public sealed class AdminSession
 
     public DateTimeOffset Started { get; }
 
+    internal Lock EditingGate { get; } = new();
     internal DateTimeOffset LastSeen { get; set; }
+    internal bool EditingLocked { get; set; }
+    internal int EditingGeneration { get; set; }
 }
 
 /// <summary>Where a login attempt stands (see <see cref="AdminSessions.BeginLogin" />).</summary>
@@ -56,12 +59,9 @@ public enum LoginState
 }
 
 /// <summary>
-/// The admin sessions, in the service's memory only (never written anywhere, so a restart or a lock ends every one). A session starts when an administrator's fresh passkey tap
-/// (user verification, a one-use page whose signed text names this login) has been verified, and the browser that began the login claims it: the random token goes to that browser in an
-/// HttpOnly, SameSite=Strict cookie and nowhere else. It ends at the idle timeout (each use renews it), at the absolute timeout, on logout, on lock and when the service stops.
-/// A session never authorizes a change; it is only the right to read. A session is the cookie AND a second random secret (<see cref="AdminSession.Csrf" />) that is given once, in the answer that claims
-/// the session, and sent as a header: a program that is only sent the cookie (cookies are not isolated by port on localhost) cannot read or use the session. Before a session the browser's pre-session
-/// cookie has its own anti-forgery value (an HMAC of the cookie under a key made at start), given once when the cookie is made.
+/// Browser sessions are held in memory and end on sign-out, absolute expiry, authority lock, or service restart.
+/// An inactive admin session locks editing and can be resumed. An approval session expires on inactivity.
+/// Protected requests carry both the session cookie and the secret supplied to its browser when it claims the session.
 /// </summary>
 public sealed class AdminSessions(TimeProvider clock, Func<(TimeSpan Idle, TimeSpan Absolute)> timeouts)
 {
@@ -148,7 +148,77 @@ public sealed class AdminSessions(TimeProvider clock, Func<(TimeSpan Idle, TimeS
         }
     }
 
-    private static bool Expired(AdminSession session, DateTimeOffset now, TimeSpan idle, TimeSpan absolute) => now - session.LastSeen >= idle || now - session.Started >= absolute;
+    private static bool Expired(AdminSession session, DateTimeOffset now, TimeSpan idle, TimeSpan absolute) =>
+        now - session.Started >= absolute || (session.Scope == SessionScope.Approval && idle > TimeSpan.Zero && now - session.LastSeen >= idle);
+
+    private bool IsCurrent(AdminSession session) => _sessions.TryGetValue(KeyOf(session.Token), out AdminSession? current) && ReferenceEquals(current, session);
+
+    private void CheckInactivity(AdminSession session)
+    {
+        TimeSpan idle = timeouts().Idle;
+        if (session.Scope == SessionScope.Admin && !session.EditingLocked && idle > TimeSpan.Zero && clock.GetUtcNow() - session.LastSeen >= idle)
+        {
+            session.EditingLocked = true;
+            session.EditingGeneration++;
+        }
+    }
+
+    internal int? ActiveEditingGeneration(AdminSession session, bool renew = false)
+    {
+        lock (_lock)
+        {
+            Sweep();
+            if (!IsCurrent(session)) return null;
+            CheckInactivity(session);
+            if (session.EditingLocked) return null;
+            if (renew) session.LastSeen = clock.GetUtcNow();
+            return session.EditingGeneration;
+        }
+    }
+
+    internal int? LockedEditing(AdminSession session)
+    {
+        lock (_lock)
+        {
+            Sweep();
+            if (!IsCurrent(session) || session.Scope != SessionScope.Admin) return null;
+            CheckInactivity(session);
+            return session.EditingLocked ? session.EditingGeneration : null;
+        }
+    }
+
+    internal bool ResumeEditing(AdminSession session, int generation)
+    {
+        lock (_lock)
+        {
+            Sweep();
+            if (!IsCurrent(session) || session.Scope != SessionScope.Admin || !session.EditingLocked || session.EditingGeneration != generation) return false;
+            session.EditingLocked = false;
+            session.LastSeen = clock.GetUtcNow();
+            return true;
+        }
+    }
+
+    internal bool LockEditing(AdminSession session)
+    {
+        lock (_lock)
+        {
+            Sweep();
+            if (!IsCurrent(session) || session.Scope != SessionScope.Admin) return false;
+            session.EditingLocked = true;
+            session.EditingGeneration++;
+            return true;
+        }
+    }
+
+    internal void RemoveCredential(string id)
+    {
+        lock (_lock)
+        {
+            foreach (string token in _sessions.Where(item => item.Value.Key?.Id == id).Select(item => item.Key).ToArray()) _sessions.Remove(token);
+            foreach (string ticket in _logins.Where(item => item.Value.Key?.Id == id).Select(item => item.Key).ToArray()) _logins.Remove(ticket);
+        }
+    }
 
     /// <summary>
     /// The live session of a cookie value, renewed for the idle timeout; null for none, an expired one, a made-up value, or a cookie presented without the session's own secret
@@ -169,7 +239,8 @@ public sealed class AdminSessions(TimeProvider clock, Func<(TimeSpan Idle, TimeS
                 return null;
             }
 
-            if (renew) session.LastSeen = clock.GetUtcNow();
+            CheckInactivity(session);
+            if (renew && !session.EditingLocked) session.LastSeen = clock.GetUtcNow();
 
             return session;
         }

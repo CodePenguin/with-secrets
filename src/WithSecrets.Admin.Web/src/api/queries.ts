@@ -72,7 +72,13 @@ export function useSession() {
       return session
     },
     // While a sign-in waits for its tap the session resource is asked again (once the tap is verified the login is ready and the page claims the session).
-    refetchInterval: (query) => (query.state.data?.login?.state === 'waiting' ? 1_000 : query.state.data?.authenticated ? 30_000 : false),
+    refetchInterval: (query) => {
+      const session = query.state.data
+      if (session?.login?.state === 'waiting') return 1_000
+      if (!session?.authenticated) return false
+      if (session.editingLocked || !session.idleExpires) return 30_000
+      return Math.max(250, Math.min(30_000, Date.parse(session.idleExpires) - Date.now()))
+    },
   })
 }
 
@@ -106,7 +112,8 @@ export function usePasskeys(enabled: boolean) {
 }
 
 export function useProviders(enabled: boolean) {
-  return useQuery({ queryKey: keys.providers, queryFn: () => api.get('/api/v1/providers'), enabled, refetchInterval: 10_000 })
+  const session = useSession()
+  return useQuery({ queryKey: [...keys.providers, session.data?.authenticated === true], queryFn: () => api.get('/api/v1/providers'), enabled, refetchInterval: 10_000 })
 }
 
 export function useProviderTypes(enabled: boolean) {
@@ -130,11 +137,13 @@ export function useAllMounts(enabled: boolean) {
 }
 
 export function useAuditEvents(filters: AuditFilters, enabled: boolean) {
-  return useQuery({ queryKey: keys.auditEvents(filters), queryFn: async () => (await api.get('/api/v1/audit/events', { query: filters as EventQuery })).items, enabled })
+  const session = useSession()
+  return useQuery({ queryKey: [...keys.auditEvents(filters), session.data?.authenticated === true], queryFn: async () => (await api.get('/api/v1/audit/events', { query: filters as EventQuery })).items, enabled })
 }
 
 export function useAuditChanges(filters: AuditFilters, enabled: boolean) {
-  return useQuery({ queryKey: keys.auditChanges(filters), queryFn: async () => (await api.get('/api/v1/audit/changes', { query: filters as EventQuery })).items, enabled })
+  const session = useSession()
+  return useQuery({ queryKey: [...keys.auditChanges(filters), session.data?.authenticated === true], queryFn: async () => (await api.get('/api/v1/audit/changes', { query: filters as EventQuery })).items, enabled })
 }
 
 export function useAuditGaps(machine: string, enabled: boolean) {

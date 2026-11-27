@@ -39,26 +39,26 @@ public sealed partial class AuthorityStore
                 return (DefaultSessionIdleMinutes, DefaultSessionAbsoluteMinutes);
             }
 
-            int idle = ReadMinutes(connection, IdleSetting, DefaultSessionIdleMinutes, MaxSessionIdleMinutes);
+            int idle = ReadMinutes(connection, IdleSetting, DefaultSessionIdleMinutes, MaxSessionIdleMinutes, min: 0);
             int absolute = ReadMinutes(connection, AbsoluteSetting, DefaultSessionAbsoluteMinutes, MaxSessionAbsoluteMinutes);
 
             return idle <= absolute ? (idle, absolute) : (DefaultSessionIdleMinutes, DefaultSessionAbsoluteMinutes);
         });
     }
 
-    private static int ReadMinutes(SqliteConnection connection, string name, int fallback, int max)
+    private static int ReadMinutes(SqliteConnection connection, string name, int fallback, int max, int min = 1)
     {
         object? stored = WithSecretsDatabase.Scalar(connection, null, "SELECT value FROM authority_settings WHERE name = $name", ("$name", name));
 
-        return stored is string text && int.TryParse(text, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out int minutes) && minutes >= 1 && minutes <= max ? minutes : fallback;
+        return stored is string text && int.TryParse(text, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out int minutes) && minutes >= min && minutes <= max ? minutes : fallback;
     }
 
     /// <summary>The problem with these timeouts, or null when they may be set.</summary>
     public static string? SessionTimeoutsProblem(int idle, int absolute)
     {
-        if (idle < 1 || idle > MaxSessionIdleMinutes)
+        if (idle < 0 || idle > MaxSessionIdleMinutes)
         {
-            return "the idle timeout is 1 to " + MaxSessionIdleMinutes + " minutes";
+            return "the editing idle timeout is 0 (Never) or 1 to " + MaxSessionIdleMinutes + " minutes";
         }
 
         if (absolute < 1 || absolute > MaxSessionAbsoluteMinutes)

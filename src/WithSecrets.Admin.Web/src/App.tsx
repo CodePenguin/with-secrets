@@ -7,6 +7,7 @@ import { MachineDiagnosticsPage } from './features/machines/MachineDiagnosticsPa
 import { PasskeysPage } from './features/passkeys/PasskeysPage'
 import { ProvidersPage } from './features/providers/ProvidersPage'
 import { SettingsPage } from './features/settings/SettingsPage'
+import { SignInPage } from './features/session/SignInPage'
 import { Shell } from './features/shell/Shell'
 import { OverviewPage } from './features/status/OverviewPage'
 
@@ -16,6 +17,7 @@ export function App() {
     <Routes>
       <Route element={<Shell />}>
         <Route index element={<OverviewPage />} />
+        <Route path="sign-in" element={<SignInPage />} />
         <Route path="access" element={<AccessPage />} />
         <Route path="secrets" element={<SecretsPage />} />
         <Route path="providers" element={<ProvidersPage />} />

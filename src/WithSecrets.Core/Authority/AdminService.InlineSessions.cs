@@ -39,8 +39,8 @@ public sealed partial class AdminService
         (string ticket, string code) = begun;
         AfterPlanForTests?.Invoke();
         (int idle, int absolute) = _p.Store.SessionTimeouts();
-        string sentence = "start a read-only browser session on the administration app. Its capabilities are determined by the enrolled passkey that signs in; it changes nothing, and every administrative change requires its own passkey tap. Session access lasts up to "
-            + absolute.ToString(CultureInfo.InvariantCulture) + " minutes, ending after " + idle.ToString(CultureInfo.InvariantCulture) + " minutes without use; it changes nothing and every change still needs its own passkey tap";
+        string sentence = "start a browser session on the administration app. An admin passkey allows routine changes. An approval passkey opens an approvals session. The session lasts up to "
+            + absolute.ToString(CultureInfo.InvariantCulture) + " minutes. " + (idle == 0 ? "Inactivity does not lock editing" : "Editing locks after " + idle.ToString(CultureInfo.InvariantCulture) + " idle minutes");
 
         try
         {

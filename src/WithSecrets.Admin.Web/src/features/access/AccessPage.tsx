@@ -49,21 +49,23 @@ export function AccessPage() {
   const { requestId } = useParams()
   const navigate = useNavigate()
   const poll = usePollInterval()
-  const approvals = useApprovals(true, poll * 3)
+  const session = useSession()
+  const signedIn = session.data?.authenticated === true
+  const approvals = useApprovals(signedIn, poll * 3)
   const grants = useGrants(true, poll * 3)
   const visibleGrants = grants.data?.filter(grant => grant.state !== 'expired')
   const [selectedGrantId, setSelectedGrantId] = useState<string | null>(null)
   const selectedGrant = visibleGrants?.find(grant => grant.id === selectedGrantId)
   const status = useStatus()
-  const session = useSession()
   const canChange = session.data?.capabilities.includes('grants.decide') === true
   const start = useStartOperation()
 
   return (
     <>
       <PageHeader title="Access" />
+      {requestId && !signedIn ? <p><Link to="/sign-in" state={{ returnTo: `/access/${encodeURIComponent(requestId)}` }}>Sign in to review this request</Link></p> : null}
 
-      <section className={styles.section} aria-labelledby="waiting-heading">
+      {signedIn ? <section className={styles.section} aria-labelledby="waiting-heading">
         <h2 id="waiting-heading">Waiting for you</h2>
         {approvals.isPending ? <Loading what="the requests" /> : null}
         {approvals.isError ? <ProblemAlert error={approvals.error} title="The requests could not be read" /> : null}
@@ -71,7 +73,7 @@ export function AccessPage() {
         {approvals.data && approvals.data.items.length > 0 ? (
           <PendingRequests queue={approvals.data} receivedAt={approvals.dataUpdatedAt} />
         ) : null}
-      </section>
+      </section> : null}
 
       <section className={styles.section} aria-labelledby="grants-heading">
         <h2 id="grants-heading">Grants</h2>
@@ -95,13 +97,13 @@ export function AccessPage() {
       </section>
 
       {selectedGrant && !requestId ? (
-        <GrantDetails grant={selectedGrant} reviewOpen={status.data?.reviewOpen === true} poll={poll * 3} canChange={canChange}
+        <GrantDetails grant={selectedGrant} reviewOpen={status.data?.reviewOpen === true} poll={poll * 3} canChange={canChange} signedIn={signedIn} adminSession={session.data?.scope === 'admin'}
           onClose={() => setSelectedGrantId(null)} onAction={operation => {
             setSelectedGrantId(null)
             start(operation)
           }} />
       ) : null}
-      {requestId ? <ApprovalDialog key={requestId} requestId={requestId} onClose={() => navigate('/access')} /> : null}
+      {requestId && signedIn ? <ApprovalDialog key={requestId} requestId={requestId} onClose={() => navigate('/access')} /> : null}
     </>
   )
 }
@@ -160,8 +162,8 @@ function GrantEnd({ grant }: { grant: Grant }) {
   return grant.expires ? <Time value={grant.expires} /> : <>No end</>
 }
 
-function GrantDetails({ grant, reviewOpen, poll, canChange, onClose, onAction }: {
-  grant: Grant; reviewOpen: boolean; poll: number; canChange: boolean; onClose: () => void; onAction: (operation: OperationDef) => void
+function GrantDetails({ grant, reviewOpen, poll, canChange, signedIn, adminSession, onClose, onAction }: {
+  grant: Grant; reviewOpen: boolean; poll: number; canChange: boolean; signedIn: boolean; adminSession: boolean; onClose: () => void; onAction: (operation: OperationDef) => void
 }) {
   const ended = grant.status === 'revoked' || grant.status === 'invalidated'
   return (
@@ -175,7 +177,7 @@ function GrantDetails({ grant, reviewOpen, poll, canChange, onClose, onAction }:
               onSelect: () => onAction(repeatGrant(grant, minutes)),
             }))} />
         ) : (
-          <Button key={action} variant={action === 'revoke' ? 'dangerOutline' : 'secondary'} onClick={() => onAction(builders[action](grant))}>
+          <Button key={action} variant={action === 'revoke' ? 'dangerOutline' : 'secondary'} onClick={() => onAction(action === 'revoke' ? revokeGrant(grant, adminSession) : builders[action](grant))}>
             {labels[action]}{' '}<span className="visually-hidden">grant {grant.id}</span>
           </Button>
         ))}
@@ -200,7 +202,7 @@ function GrantDetails({ grant, reviewOpen, poll, canChange, onClose, onAction }:
         <Link to={'/audit?' + new URLSearchParams({ grant: grant.id })}>Events for this grant</Link>
         <Link to={'/audit/changes?' + new URLSearchParams({ machine: grant.fingerprint })}>Changes to this machine</Link>
       </div>
-      <GrantReview grant={grant} reviewOpen={reviewOpen} poll={poll} />
+      {signedIn ? <GrantReview grant={grant} reviewOpen={reviewOpen} poll={poll} /> : null}
     </Dialog>
   )
 }

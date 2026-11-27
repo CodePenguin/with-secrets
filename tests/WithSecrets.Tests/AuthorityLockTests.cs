@@ -584,7 +584,10 @@ internal static class AuthorityLockTests
         check(status.Contains("\"locked\":true", StringComparison.Ordinal) && head.Headers.Contains("X-Frame-Options") && head.Headers.Contains("Content-Security-Policy"), "api: the public status shows running/locked, and the answer cannot be framed or run as script");
         using HttpResponseMessage auditResponse = await http.GetAsync(baseUrl + "/api/v1/audit/changes");
         string audit = await auditResponse.Content.ReadAsStringAsync();
-        check(auditResponse.StatusCode == HttpStatusCode.Unauthorized && !audit.Contains("admin-operation", StringComparison.Ordinal), "api: the audit history is served to a signed-in session only (401 without one, M2)");
+        using JsonDocument publicAudit = JsonDocument.Parse(audit);
+        check(auditResponse.StatusCode == HttpStatusCode.OK && publicAudit.RootElement.GetProperty("items").EnumerateArray()
+            .All(item => item.GetProperty("detail").GetString() == "" && !item.GetProperty("metadata").EnumerateObject().Any()),
+            "api: a locked authority serves audit metadata and withholds details and attached metadata without a session");
     }
 
     // ---- store-level guards ----

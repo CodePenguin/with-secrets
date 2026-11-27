@@ -40,7 +40,7 @@ describe('Providers page', () => {
   it('hides provider navigation when the service lacks provider support', async () => {
     const api = signedIn()
     renderApp('/providers')
-    expect(await screen.findByText('Provider administration is unavailable in this session.')).toBeVisible()
+    expect(await screen.findByText('Providers are unavailable on this host.')).toBeVisible()
     expect(within(screen.getByRole('navigation', { name: 'Main' })).queryByRole('link', { name: 'Providers' })).not.toBeInTheDocument()
     expect(api.count('GET /api/v1/providers')).toBe(0)
   })

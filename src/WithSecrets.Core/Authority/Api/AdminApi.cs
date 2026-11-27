@@ -265,7 +265,7 @@ internal sealed partial class AdminApi
         string? token = Cookie(request, AdminSessions.SessionCookie);
         string? presented = request.Headers.TryGetValue(TokenHeader, out Microsoft.Extensions.Primitives.StringValues presentedValues) && presentedValues.Count == 1 ? presentedValues[0] : null;
         AdminSession? session = route.OperationId is "getStatus" or "getOpenApi" or "startBrowser" ? null
-            : admin.Sessions.Validate(token, presented, renew: route.OperationId is not ("listApprovals" or "getSession"));
+            : admin.Sessions.Validate(token, presented, renew: false);
         admin.RecordEndedSessions();
         string? browserCookie = Cookie(request, AdminSessions.BrowserCookie);
 
@@ -302,6 +302,13 @@ internal sealed partial class AdminApi
             }
 
             return await Respond(response, route, new ApiCall(context, values, null, session, browser, token));
+        }
+
+        if (session is not null && (route.Access is ApiAccess.Authorize or ApiAccess.Mutation or ApiAccess.ApprovalsDecide)
+            && route.OperationId is not ("createAuthorization" or "createInlineAuthorization" or "submitInlineAuthorizationProof")
+            && admin.Sessions.ActiveEditingGeneration(session) is null)
+        {
+            return new ApiProblem(423, "editing-locked", "editing is locked; resume this browser session with a passkey");
         }
 
         if (route.Access == ApiAccess.ApprovalsDecide)
@@ -383,6 +390,10 @@ internal sealed partial class AdminApi
         {
             return problem;
         }
+
+        if (call.Session is { } session && result.Status < 400 && (route.Access is ApiAccess.Authorize or ApiAccess.Mutation or ApiAccess.ApprovalsDecide)
+            && route.OperationId is not ("createAuthorization" or "createInlineAuthorization" or "submitInlineAuthorizationProof"))
+            admin.Sessions.ActiveEditingGeneration(session, renew: true);
 
         await WriteJson(response, result.Status, result.Body);
 
@@ -473,7 +484,7 @@ internal sealed partial class AdminApi
     /// <summary>The caller an authorization is bound to: the session, or, for the one change that needs none (the unlock), the browser's pre-session cookie.</summary>
     private static object? OwnerOf(ApiCall call) => call.Session is not null ? call.Session : call.Browser;
 
-    private static ApiProblem FromStart(AdminStart start) => new(start.Status, start.Status switch
+    private static ApiProblem FromStart(AdminStart start) => new(start.Status, start.Code ?? (start.Status switch
     {
         401 => "session-required",
         423 => "authority-locked",
@@ -482,7 +493,7 @@ internal sealed partial class AdminApi
         400 => "invalid-request",
         404 => "not-found",
         _ => "operation-refused",
-    }, ApprovalSummary.Clean(start.Error ?? "refused"));
+    }), ApprovalSummary.Clean(start.Error ?? "refused"));
 
     private Task<ApiResult> StartBrowserAsync(ApiCall call)
     {
@@ -523,6 +534,7 @@ internal sealed partial class AdminApi
             return new ApiResult(200, new
             {
                 authenticated = false,
+                editingLocked = false,
                 admin = (string?)null,
                 identity = (string?)null,
                 scope = (string?)null,
@@ -535,15 +547,16 @@ internal sealed partial class AdminApi
             });
         }
 
-        (DateTimeOffset idle, DateTimeOffset absolute) = admin.SessionEnds(session);
+        (DateTimeOffset? idle, DateTimeOffset absolute) = admin.SessionEnds(session);
 
         return new ApiResult(200, new
         {
             authenticated = true,
+            editingLocked = admin.Sessions.LockedEditing(session) is not null,
             admin = session.Scope == SessionScope.Admin ? ApprovalSummary.Clean(session.Identity) : null,
             identity = ApprovalSummary.Clean(session.Identity),
             scope = SessionCapabilities.WireName(session.Scope),
-            capabilities = SessionCapabilities.For(session.Scope),
+            capabilities = session.EditingLocked ? SessionCapabilities.For(SessionScope.Approval).Where(item => item is SessionCapabilities.AdminRead or SessionCapabilities.ApprovalsRead).ToArray() : SessionCapabilities.For(session.Scope),
             started = session.Started,
             idleExpires = idle,
             absoluteExpires = absolute,
@@ -603,7 +616,7 @@ internal sealed partial class AdminApi
         SetCookie(response, AdminSessions.SessionCookie, claimed.Token);
         DropCookie(response, AdminSessions.LoginCookie);
         admin.RecordSessionStart(claimed);
-        (DateTimeOffset idle, DateTimeOffset absolute) = admin.SessionEnds(claimed);
+        (DateTimeOffset? idle, DateTimeOffset absolute) = admin.SessionEnds(claimed);
 
         return new ApiResult(201, new
         {
@@ -611,6 +624,7 @@ internal sealed partial class AdminApi
             session = new
             {
                 authenticated = true,
+                editingLocked = false,
                 admin = claimed.Scope == SessionScope.Admin ? ApprovalSummary.Clean(claimed.Identity) : null,
                 identity = ApprovalSummary.Clean(claimed.Identity),
                 scope = SessionCapabilities.WireName(claimed.Scope),
@@ -660,6 +674,10 @@ internal sealed partial class AdminApi
         DropCookie(call.Context.Response, AdminSessions.LoginCookie);
         return Task.FromResult(new ApiResult(200, new { ok = true }));
     }
+
+    private Task<ApiResult> RecordSessionActivityAsync(ApiCall call) => Task.FromResult(call.Session is null
+        ? new ApiResult(401, new ApiProblem(401, "session-required", "an administrator session is required"))
+        : new ApiResult(200, new { ok = true }));
 
     private Task<ApiResult> EndSessionAsync(ApiCall call)
     {
@@ -844,7 +862,12 @@ internal sealed partial class AdminApi
 
         try
         {
-            return Task.FromResult(new ApiResult(200, new { items = admin.AuditEventsView(query) }));
+            return Task.FromResult(new ApiResult(200, new
+            {
+                items = call.Session is null
+                ? admin.AuditEventsView(query with { Text = null }).Select(item => item with { Reason = "", Arguments = [], Metadata = new Dictionary<string, string>() }).ToArray()
+                : admin.AuditEventsView(query)
+            }));
         }
         catch (AuthorityDatabaseException)
         {
@@ -862,7 +885,12 @@ internal sealed partial class AdminApi
 
         try
         {
-            return Task.FromResult(new ApiResult(200, new { items = admin.AuditChangesView(query) }));
+            return Task.FromResult(new ApiResult(200, new
+            {
+                items = call.Session is null
+                ? admin.AuditChangesView(query with { Text = null }).Select(item => item with { Detail = "", Metadata = new Dictionary<string, string>() }).ToArray()
+                : admin.AuditChangesView(query)
+            }));
         }
         catch (AuthorityDatabaseException)
         {
@@ -930,7 +958,22 @@ internal sealed partial class AdminApi
             return new ApiResult(401, new ApiProblem(401, "session-required", "this needs an administrator session"));
         }
 
-        (AuthorizationView? view, AdminStart start) = await admin.BeginAuthorizationAsync(owner, op, args, call.Context.RequestAborted, inline);
+        string? loginTicket = null;
+        if (op == AdminService.OpUnlock && args.Remove("sign-in", out string? signIn) && signIn == "true")
+        {
+            if (!inline || owner is not string browser || admin.Sessions.BeginLogin(browser) is not { } login)
+                return new ApiResult(409, new ApiProblem(409, "operation-refused", "a browser sign-in could not be prepared"));
+            loginTicket = login.Ticket;
+            args["login-code"] = login.Code;
+        }
+
+        bool applyFromSession = body.TryGetProperty("applyFromSession", out JsonElement sessionOnly) && sessionOnly.GetBoolean();
+        (AuthorizationView? view, AdminStart start) = await admin.BeginAuthorizationAsync(owner, op, args, call.Context.RequestAborted, inline, applyFromSession);
+        if (loginTicket is not null)
+        {
+            if (view is not null) SetCookie(call.Context.Response, AdminSessions.LoginCookie, loginTicket);
+            else admin.Sessions.Forget(loginTicket, call.Browser);
+        }
 
         return view is not null ? new ApiResult(201, Dto(view)) : new ApiResult(start.Status, FromStart(start));
     }

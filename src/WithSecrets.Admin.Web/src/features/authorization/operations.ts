@@ -57,6 +57,7 @@ export type OperationDef = {
   promptOnOpen?: boolean
   /** The name of the final button: what the tap does, in two or three words. */
   confirmLabel?: string
+  applyFromSession?: boolean
   /** Discard any state held for this specific operation when its dialog closes. */
   onClose?: () => void
   /** Validates the form and gives the exact operation, or the errors by field name. */
@@ -95,16 +96,31 @@ function simple(key: string, title: string, operation: OperationName, summary: s
 
 // ---- the authority ----
 
-export const unlock = (): OperationDef =>
-  simple('unlock', 'Unlock the authority', 'unlock', 'Unlock the authority so that secret requests can be served again.', 'The authority is unlocked.', {
-    confirmLabel: 'Unlock',
-  })
+export const unlock = (signIn = false): OperationDef => ({
+  key: 'unlock',
+  title: signIn ? 'Unlock and sign in' : 'Unlock the authority',
+  confirmLabel: signIn ? 'Unlock and sign in' : 'Unlock',
+  prepare: () => ({ operation: 'unlock', parameters: { ...(signIn ? { 'sign-in': true } : {}) },
+    summary: signIn ? 'Unlock the authority and open Admin in this browser.' : 'Unlock the authority so that secret requests can be served again.',
+    done: signIn ? 'The authority is unlocked and you are signed in.' : 'The authority is unlocked.' }),
+})
 
-export const lock = (): OperationDef =>
+export const lock = (applyFromSession = false): OperationDef =>
   simple('lock', 'Lock the authority', 'lock', 'Lock the authority now. Secret requests stop and every session ends.', 'The authority is locked.', {
     danger: true,
     confirmLabel: 'Lock',
     warning: 'This ends every session, including this one.',
+    applyFromSession,
+  })
+
+export const lockEditing = (): OperationDef =>
+  simple('session-lock-editing', 'Lock editing', 'session-lock-editing', 'Require a passkey before making more changes in this session.', 'Editing is locked.', {
+    applyFromSession: true, confirmLabel: 'Lock editing',
+  })
+
+export const resumeEditing = (): OperationDef =>
+  simple('session-resume-editing', 'Resume editing', 'session-resume-editing', 'Use an admin passkey to resume editing.', 'Editing is unlocked.', {
+    confirmLabel: 'Resume editing',
   })
 
 export const rotateAuthorityKey = (): OperationDef =>
@@ -143,7 +159,7 @@ export const setAuditRetention = (current: number, max: number): OperationDef =>
 })
 
 export const setSessionTimeouts = (idle: number, absolute: number, maxIdle: number, maxAbsolute: number): OperationDef => {
-  const idleField: FieldDef = { name: 'idle', label: 'Sign out when idle (minutes)', kind: 'number', hint: 'A session ends after this long without use.', required: true, min: 1, max: maxIdle }
+  const idleField: FieldDef = { name: 'idle', label: 'Lock editing after inactivity (minutes)', kind: 'number', hint: 'Enter 0 for Never.', required: true, min: 0, max: maxIdle }
   const absoluteField: FieldDef = { name: 'absolute', label: 'Sign out after (minutes)', kind: 'number', hint: 'A session ends after this long, however busy it is.', required: true, min: 1, max: maxAbsolute }
 
   return {
@@ -160,8 +176,8 @@ export const setSessionTimeouts = (idle: number, absolute: number, maxIdle: numb
       return {
         operation: 'set-session-timeouts',
         parameters: { idle: idleMinutes, absolute: absoluteMinutes },
-        summary: `End a session after ${idleMinutes} minutes without use, or ${absoluteMinutes} minutes at most.`,
-        done: `Sessions now end after ${idleMinutes} minutes without use, or ${absoluteMinutes} minutes at most.`,
+        summary: `Editing ${idleMinutes === 0 ? 'stays unlocked until the session ends' : `locks after ${idleMinutes} idle minutes`}. The session ends after ${absoluteMinutes} minutes.`,
+        done: 'Session timeouts updated.',
       }
     },
   }
@@ -335,8 +351,9 @@ function grantFacts(grant: Grant): ReadonlyArray<readonly [string, string]> {
   ]
 }
 
-export const revokeGrant = (grant: Grant): OperationDef => ({
+export const revokeGrant = (grant: Grant, applyFromSession = false): OperationDef => ({
   key: 'grant-revoke',
+  applyFromSession,
   title: 'Revoke this grant',
   about: grantFacts(grant),
   danger: true,
@@ -433,6 +450,7 @@ export const createPairingInvitation = (): OperationDef =>
 
 export const revokePairingInvitation = (invitation: Invitation): OperationDef => ({
   key: 'pairing-revoke',
+  applyFromSession: true,
   title: 'Revoke this invitation',
   about: [
     ['Invitation', invitation.id],

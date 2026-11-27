@@ -58,10 +58,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Who is signed in (a read-only session) and how a sign-in in progress stands. Read-only: it claims nothing and sets no cookie; a session is recognized only with its cookie AND its own secret (X-Admin-Token). */
+        /** Who is signed in, whether editing is locked, and how sign-in stands. It claims nothing, records no activity and sets no cookie. */
         get: operations["getSession"];
         put?: never;
-        /** Start a sign-in: answers the link of the one-use passkey page whose tap (user verification) starts a read-only session for this browser. Then GET /session until the login is ready, then POST /session/claim. */
+        /** Start a sign-in: answers the link of the one-use passkey page whose tap (user verification) starts an admin or approvals session for this browser. Then GET /session until the login is ready, then POST /session/claim. */
         post: operations["startSession"];
         /** Sign out: ends the session now. */
         delete: operations["endSession"];
@@ -116,6 +116,23 @@ export interface paths {
         put?: never;
         /** Claim the session of the sign-in this browser began, once its tap was verified. The answer carries the session's own secret (antiForgery), once: keep it in the page and send it as X-Admin-Token with every request. */
         post: operations["claimSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/session/activity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Record a deliberate interaction in an active admin session. A locked session stays locked. */
+        post: operations["recordSessionActivity"];
         delete?: never;
         options?: never;
         head?: never;
@@ -342,7 +359,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** The settings of the pages this machine serves: the longest grant time, the address, the port and the time limit (read-only session). */
+        /** The settings of the pages this machine serves: the longest grant time, the address, the port and the time limit (local metadata). */
         get: operations["getPageSettings"];
         put?: never;
         post?: never;
@@ -952,7 +969,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Prepare an operation-bound WebAuthn challenge for the SPA. This makes no change; submit its assertion to /authorizations/{id}/proof. */
+        /** Prepare a WebAuthn challenge or apply an eligible routine change confirmed in an active admin session. */
         post: operations["createInlineAuthorization"];
         delete?: never;
         options?: never;
@@ -1603,6 +1620,7 @@ export interface components {
         };
         Session: {
             authenticated: boolean;
+            editingLocked: boolean;
             /** @description Deprecated display alias for admin-scope sessions; use identity and scope. */
             admin: string | null;
             /** @description The trusted enrolled passkey identity that signed in. */
@@ -1928,7 +1946,7 @@ export interface components {
             /** @description Carry this in the `authorization` member of the one mutation it was made for. */
             id: string;
             /** @enum {string} */
-            operation: "unlock" | "lock" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-log-level" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
+            operation: "unlock" | "lock" | "session-lock-editing" | "session-resume-editing" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-log-level" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
             /** @enum {string} */
             state: "pending" | "verified" | "refused" | "consumed" | "expired";
             detail: string | null;
@@ -1956,9 +1974,9 @@ export interface components {
         InlineAuthorization: {
             id: string;
             /** @enum {string} */
-            operation: "unlock" | "lock" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-log-level" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
+            operation: "unlock" | "lock" | "session-lock-editing" | "session-resume-editing" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-log-level" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
             /** @enum {string} */
-            state: "pending";
+            state: "pending" | "consumed";
             detail: string | null;
             link: string | null;
             sentence: string;
@@ -1969,7 +1987,7 @@ export interface components {
             expires: string;
             lifetimeSeconds: number;
             result: components["schemas"]["AuthorizationResult"] | null;
-            proof: components["schemas"]["ProofStart"];
+            proof: components["schemas"]["ProofStart"] | null;
             prfKey: string | null;
         };
         AuthorizationResult: {
@@ -1985,18 +2003,20 @@ export interface components {
             /** @description True when a new invitation's bundle was already given (or held for 5 minutes without being collected): it is never given again. */
             invitationGone: boolean;
         };
-        /** @description The operation and every parameter that the passkey will sign. The mutation that follows must repeat exactly these. */
+        /** @description An operation and its parameters. Sensitive operations require a fresh passkey assertion. */
         AuthorizationRequest: {
             /**
              * @description The operation to authorize.
              * @enum {string}
              */
-            operation: "unlock" | "lock" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-log-level" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
+            operation: "unlock" | "lock" | "session-lock-editing" | "session-resume-editing" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-log-level" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
             parameters?: {
                 config?: string;
             } & {
                 [key: string]: string | number | boolean;
             };
+            /** @description Apply a routine change with the active admin session. Inline requests only. */
+            applyFromSession?: boolean;
         };
         Invitation: {
             /** @description The invitation's identifier (not secret on its own: it is useless without the pairing code, which is never listed). */
@@ -2714,6 +2734,129 @@ export interface operations {
             };
         };
     };
+    recordSessionActivity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": Record<string, never>;
+            };
+        };
+        responses: {
+            /** @description Success. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Done"];
+                };
+            };
+            /** @description The request is not valid (invalid-request, invalid-json). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No browser session (session-required). */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such resource (not-found). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The operation does not apply, or the change failed (operation-refused, operation-failed). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is too large (payload-too-large). */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is not application/json (unsupported-media-type). */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The Host is not a loopback name (host-not-allowed). */
+            421: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
+            423: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests (too-many-requests). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request failed (internal-error). Nothing the response does not say was changed. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     listApprovals: {
         parameters: {
             query?: {
@@ -2934,7 +3077,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -3077,7 +3220,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -3189,7 +3332,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -3243,15 +3386,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SecretList"];
-                };
-            };
-            /** @description No browser session (session-required). */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
@@ -3380,7 +3514,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -3509,7 +3643,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -3642,7 +3776,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -3745,7 +3879,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -3870,7 +4004,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -4002,7 +4136,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -4047,15 +4181,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PageSettings"];
-                };
-            };
-            /** @description No browser session (session-required). */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
@@ -4190,7 +4315,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -4322,7 +4447,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -4425,7 +4550,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -4470,15 +4595,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MachineList"];
-                };
-            };
-            /** @description No browser session (session-required). */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
@@ -4532,15 +4648,6 @@ export interface operations {
             };
             /** @description The request is not valid (invalid-request, invalid-json). */
             400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description No browser session (session-required). */
-            401: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -4615,15 +4722,6 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No browser session (session-required). */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
             /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
             403: {
                 headers: {
@@ -4680,15 +4778,6 @@ export interface operations {
                     "application/json": components["schemas"]["GrantList"];
                 };
             };
-            /** @description No browser session (session-required). */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
             /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
             403: {
                 headers: {
@@ -4740,15 +4829,6 @@ export interface operations {
             };
             /** @description The request is not valid (invalid-request, invalid-json). */
             400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description No browser session (session-required). */
-            401: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -4916,15 +4996,6 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No browser session (session-required). */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
             /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
             403: {
                 headers: {
@@ -5000,15 +5071,6 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No browser session (session-required). */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
             /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
             403: {
                 headers: {
@@ -5068,15 +5130,6 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No browser session (session-required). */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
             /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
             403: {
                 headers: {
@@ -5124,15 +5177,6 @@ export interface operations {
                     "application/json": components["schemas"]["Settings"];
                 };
             };
-            /** @description No browser session (session-required). */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
             /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
             403: {
                 headers: {
@@ -5178,15 +5222,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["InvitationList"];
-                };
-            };
-            /** @description No browser session (session-required). */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
@@ -5306,7 +5341,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -5351,15 +5386,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Passkeys"];
-                };
-            };
-            /** @description No browser session (session-required). */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
@@ -5488,7 +5514,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -5535,15 +5561,6 @@ export interface operations {
                     "application/json": components["schemas"]["ProviderList"];
                 };
             };
-            /** @description No browser session (session-required). */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
             /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
             403: {
                 headers: {
@@ -5564,6 +5581,15 @@ export interface operations {
             };
             /** @description The request failed (internal-error). Nothing the response does not say was changed. */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Provider administration is unavailable on this service (internal-error). */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -5674,7 +5700,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -5734,15 +5760,6 @@ export interface operations {
             };
             /** @description The request is not valid (invalid-request, invalid-json). */
             400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description No browser session (session-required). */
-            401: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -5898,7 +5915,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -5954,15 +5971,6 @@ export interface operations {
                     "application/json": components["schemas"]["ProviderTypeList"];
                 };
             };
-            /** @description No browser session (session-required). */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
             /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
             403: {
                 headers: {
@@ -5983,6 +5991,15 @@ export interface operations {
             };
             /** @description The request failed (internal-error). Nothing the response does not say was changed. */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Provider administration is unavailable on this service (internal-error). */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -6014,15 +6031,6 @@ export interface operations {
             };
             /** @description The request is not valid (invalid-request, invalid-json). */
             400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
-            /** @description No browser session (session-required). */
-            401: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -6066,6 +6074,15 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            /** @description Provider administration is unavailable on this service (internal-error). */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
         };
     };
     listMounts: {
@@ -6084,15 +6101,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MountList"];
-                };
-            };
-            /** @description No browser session (session-required). */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
             /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
@@ -6115,6 +6123,15 @@ export interface operations {
             };
             /** @description The request failed (internal-error). Nothing the response does not say was changed. */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Provider administration is unavailable on this service (internal-error). */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -6228,7 +6245,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -6295,15 +6312,6 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description No browser session (session-required). */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/problem+json": components["schemas"]["Problem"];
-                };
-            };
             /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
             403: {
                 headers: {
@@ -6333,6 +6341,15 @@ export interface operations {
             };
             /** @description The request failed (internal-error). Nothing the response does not say was changed. */
             500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Provider administration is unavailable on this service (internal-error). */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -6438,7 +6455,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -6572,7 +6589,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -6707,7 +6724,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -6863,7 +6880,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -7000,7 +7017,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -7112,7 +7129,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -7248,7 +7265,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -7436,7 +7453,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -7584,7 +7601,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -7725,7 +7742,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -7862,7 +7879,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -7994,7 +8011,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -8117,7 +8134,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -8249,7 +8266,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -8503,7 +8520,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -8620,7 +8637,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -8739,7 +8756,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -8780,7 +8797,7 @@ export interface operations {
                 "application/json": {
                     /** @description The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap. */
                     authorization: string;
-                    /** @description Minutes without use that end a session. */
+                    /** @description Minutes without activity that lock editing, or 0 for Never. */
                     idle: number;
                     /** @description Minutes after which a session ends however busy. */
                     absolute: number;
@@ -8860,7 +8877,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -8977,7 +8994,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -9094,7 +9111,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -9224,7 +9241,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -9352,7 +9369,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -9480,7 +9497,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -9608,7 +9625,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -9738,7 +9755,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -9868,7 +9885,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -10001,7 +10018,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -10129,7 +10146,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -10261,7 +10278,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -10393,7 +10410,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -10525,7 +10542,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -10653,7 +10670,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -10781,7 +10798,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -10907,7 +10924,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;
@@ -11044,7 +11061,7 @@ export interface operations {
                     "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description The authority is locked (authority-locked). */
+            /** @description The authority is locked or browser editing needs to resume (authority-locked, editing-locked). */
             423: {
                 headers: {
                     [name: string]: unknown;

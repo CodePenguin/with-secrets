@@ -62,11 +62,11 @@ public sealed partial class AdminService
     }
 
     /// <summary>When a session ends: the idle end (renewed by each use) and the absolute end.</summary>
-    internal (DateTimeOffset Idle, DateTimeOffset Absolute) SessionEnds(AdminSession session)
+    internal (DateTimeOffset? Idle, DateTimeOffset Absolute) SessionEnds(AdminSession session)
     {
         (int idle, int absolute) = _p.Store.SessionTimeouts();
 
-        return (session.LastSeen.AddMinutes(idle), session.Started.AddMinutes(absolute));
+        return (idle == 0 ? null : session.LastSeen.AddMinutes(idle), session.Started.AddMinutes(absolute));
     }
 
     private List<string> MachineActions(MachineRecord machine)

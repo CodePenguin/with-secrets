@@ -13,7 +13,7 @@ import { addPasskey, removePasskey } from '../authorization/operations'
 import { useStartOperation } from '../authorization/OperationProvider'
 
 function PasskeyRole({ passkey }: { passkey: Passkey }) {
-  return <Badge tone={passkey.admin ? 'ok' : 'neutral'}>{passkey.admin ? 'Admin' : 'Convenience'}</Badge>
+  return <Badge tone={passkey.admin ? 'ok' : 'neutral'}>{passkey.admin ? 'Admin' : 'Approval'}</Badge>
 }
 
 export function PasskeysPage() {
@@ -70,7 +70,7 @@ export function PasskeysPage() {
           ]} />
           <p>{selected.admin
             ? 'Admin passkeys can approve runs, manage grants, manage secrets and passkeys, change settings, and lock or unlock the service.'
-            : 'Convenience passkeys can approve runs and manage grants.'}</p>
+            : 'Approval passkeys can approve runs and manage grants.'}</p>
         </Dialog>
       ) : null}
     </>

@@ -677,7 +677,15 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
     /// machine; replace makes a new grant in place of a consumed once-only one (see <see cref="ReplaceGrant" />). The answer is signed and stored under the request id; a retry
     /// returns it. None of them touches the machine's security revision or any lease.
     /// </summary>
-    public GrantResponse AdminGrant(GrantAdminCommand command)
+    public GrantResponse AdminGrant(GrantAdminCommand command) => AdminGrant(command, null);
+
+    internal GrantResponse RevokeGrantFromSession(GrantAdminCommand command, VerifiedCredential admin)
+    {
+        if (command.Operation != GrantOps.Revoke || !admin.Admin) throw new UnauthorizedAccessException("an administrator session is required to revoke a grant");
+        return AdminGrant(command, admin);
+    }
+
+    private GrantResponse AdminGrant(GrantAdminCommand command, VerifiedCredential? sessionAdmin)
     {
         string digest = command.Digest();
         keys.Current();
@@ -758,7 +766,7 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
                 return new AuthorityStore.GrantPlan(RefuseIn(GrantReasons.NoTime), null, "", false);
 
             // Only an admin passkey's assertion over a page that says exactly this change to this grant (as it is now) changes it.
-            if (GrantEvidence.AdminProblem(Verifier, command, grant, now) is { } evidenceProblem)
+            if (sessionAdmin is null && GrantEvidence.AdminProblem(Verifier, command, grant, now) is { } evidenceProblem)
             {
                 return new AuthorityStore.GrantPlan(RefuseIn(command.Evidence is null ? GrantReasons.NoEvidence : GrantReasons.BadEvidence), "grant-denied", $"grant {grant.Id}: {evidenceProblem}", false);
             }
@@ -768,14 +776,17 @@ public sealed class LocalAuthority(AuthorityStore store, AuthorityKeyRing keys, 
                 return new AuthorityStore.GrantPlan(RefuseIn(GrantReasons.BadEvidence), "grant-denied", $"grant {grant.Id}: {rowProblem}", false);
             }
 
+            if (command.Operation == GrantOps.Revoke)
+            {
+                GrantRecord revoked = tx.Revoke(grant.Id);
+                VerifiedCredential? signer = sessionAdmin ?? Verifier?.Verify(command.Evidence!, 0).Credential;
+                return new AuthorityStore.GrantPlan(Answer(GrantOps.Revoked, GrantReasons.Ok, revoked.Info, revision), "grant-revoked", $"grant {grant.Id} by {command.Actor}", Key: signer);
+            }
+
             PlainEvidence adminEvidence = new(GrantEvidence.AdminKind, command.Evidence!, 0);
 
             switch (command.Operation)
             {
-                case GrantOps.Revoke:
-                    GrantRecord revoked = tx.Revoke(grant.Id);
-
-                    return new AuthorityStore.GrantPlan(Answer(GrantOps.Revoked, GrantReasons.Ok, revoked.Info, revision), "grant-revoked", $"grant {grant.Id} by {command.Actor}", Key: Verifier?.Verify(command.Evidence!, 0).Credential);
                 case GrantOps.Extend:
                     if (extendOnce)
                     {
