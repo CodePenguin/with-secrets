@@ -1,8 +1,8 @@
 name: release
 
 # Starts when a version tag is pushed (v0.1.0, v0.2.0-rc.1). The tag must name the version in Directory.Build.props. Each platform runs the .NET suite, then builds
-# and verifies its program exactly as scripts/publish.ps1 does; the programs and their checksums are attached to one GitHub release (a prerelease when the tag
-# has a hyphen). Tag only when the work is done: scripts/verify-all.ps1 passes locally, and the ci workflow is green on the commit.
+# and verifies the CLI and builds the desktop companion. The standalone CLI, desktop bundles, and checksums are attached to one GitHub release
+# (a prerelease when the tag has a hyphen). Tag only when scripts/verify-all.ps1 passes locally and CI is green on the commit.
 on:
   push:
     tags: [ "v*" ]
@@ -44,12 +44,16 @@ jobs:
       uses: actions/setup-node@v7
       with:
         node-version: 22
+    - uses: actions/setup-go@v7
+      with:
+        go-version-file: src/WithSecrets.Desktop/go.mod
+        cache-dependency-path: src/WithSecrets.Desktop/go.sum
     - name: Test
       run: dotnet run --project tests/WithSecrets.Tests
     - name: Publish and verify
       shell: pwsh
       run: scripts/publish.ps1 -Runtime ${{ matrix.runtime }}
-    - name: Package
+    - name: Package standalone CLI
       # The EXE is attached as it is; a tarball keeps the executable bit of the others (an uploaded artifact does not).
       shell: bash
       run: |
@@ -59,6 +63,19 @@ jobs:
         else
           tar -czf "release/with-secrets-${{ matrix.runtime }}.tar.gz" -C "artifacts/publish/${{ matrix.runtime }}" "${{ matrix.file }}"
         fi
+    - name: Build and package desktop bundle
+      shell: pwsh
+      run: |
+        $name = 'with-secrets-desktop-${{ matrix.runtime }}'
+        $bundle = Join-Path $env:RUNNER_TEMP $name
+        scripts/build-desktop.ps1 -Output $bundle
+        Copy-Item 'artifacts/publish/${{ matrix.runtime }}/${{ matrix.file }}', LICENSE, THIRD-PARTY-NOTICES.md $bundle
+        if ($IsWindows) {
+          Compress-Archive -LiteralPath $bundle -DestinationPath "release/$name.zip"
+        } else {
+          tar -czf "release/$name.tar.gz" -C $env:RUNNER_TEMP $name
+          if ($LASTEXITCODE -ne 0) { throw "Could not archive $name" }
+        }
     - name: Upload
       uses: actions/upload-artifact@v7
       with:

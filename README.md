@@ -35,7 +35,15 @@ Deny, a wrong proof, an error or no answer before the time limit all end the run
 
 You need an admin passkey with WebAuthn PRF for setup and unlock. You can then enroll a convenience passkey for approvals, grant changes, and adding or replacing secret values. The Secrets page saves up to 20 values with one tap.
 
-**From a release.** Download the file for your platform from the [releases page](https://github.com/CodePenguin/with-secrets/releases): `with-secrets-win-x64.exe`, `with-secrets-linux-x64.tar.gz` or `with-secrets-osx-arm64.tar.gz`, and check it against `SHA256SUMS`. It is one self-contained file with the admin app inside; nothing else to install.
+**From a release.** Download the asset for your platform from the [releases page](https://github.com/CodePenguin/with-secrets/releases) and verify it against `SHA256SUMS`.
+
+| Platform | Desktop companion and CLI | CLI only |
+| --- | --- | --- |
+| Windows x64 | `with-secrets-desktop-win-x64.zip` | `with-secrets-win-x64.exe` |
+| Linux x64 | `with-secrets-desktop-linux-x64.tar.gz` | `with-secrets-linux-x64.tar.gz` |
+| macOS Apple silicon | `with-secrets-desktop-osx-arm64.tar.gz` | `with-secrets-osx-arm64.tar.gz` |
+
+Extract the entire desktop bundle and keep its contents together. Open `with-secrets-desktop.exe` on Windows, run `./with-secrets-desktop` on Linux, or open `With Secrets.app` on macOS. The macOS app is ad hoc signed. The CLI includes the admin web app and can also run on its own.
 
 **From source.** You need the .NET 10 SDK and Node.js 22 or newer.
 
@@ -130,7 +138,7 @@ pwsh scripts/verify-all.ps1                             # all of the above plus 
 
 - **CI** (`.github/workflows/ci.yml`) builds and runs the .NET suite on Windows, Linux and macOS, runs the frontend checks, publishes and verifies the single file on each, and runs the browser tests on each.
 - **Browser tests** (`tests/WithSecrets.E2E`) drive the real pages in headless Chromium with a virtual passkey authenticator (including PRF). See [Browser tests](docs/reference.md#browser-tests).
-- **Releases** are made by pushing a tag `vX.Y.Z` that equals `Version` in `Directory.Build.props`; `.github/workflows/release.yml` tests, builds and verifies all three platforms and attaches them with checksums.
+- **Releases** are made by pushing a tag `vX.Y.Z` that equals `Version` in `Directory.Build.props`. The release workflow publishes standalone CLI assets and desktop bundles for all three platforms with checksums.
 
 Layout: `src/WithSecrets.Core` (logic, the approval page, the host and the authority), `src/WithSecrets` (the executable), `src/WithSecrets.Admin.Web` (the React admin app), `tests/`, `scripts/`, `docs/`.
 

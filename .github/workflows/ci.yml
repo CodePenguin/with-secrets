@@ -87,29 +87,8 @@ jobs:
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         go test ./...
     - name: Build standalone companion
-      run: |
-        $out = Join-Path $env:RUNNER_TEMP 'with-secrets-desktop'
-        New-Item -ItemType Directory -Path $out | Out-Null
-        if ($IsWindows) {
-          $binary = Join-Path $out 'with-secrets-desktop.exe'
-          go build -trimpath -ldflags '-s -w -H windowsgui' -o $binary .
-        } elseif ($IsMacOS) {
-          $bundle = Join-Path $out 'With Secrets.app'
-          $binary = Join-Path $bundle 'Contents/MacOS/with-secrets-desktop'
-          New-Item -ItemType Directory -Path (Split-Path $binary) -Force | Out-Null
-          Copy-Item Info.plist (Join-Path $bundle 'Contents/Info.plist')
-          go build -trimpath -ldflags '-s -w' -o $binary .
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          codesign --force --sign - $bundle
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          codesign --verify --strict $bundle
-        } else {
-          $binary = Join-Path $out 'with-secrets-desktop'
-          go build -trimpath -ldflags '-s -w' -o $binary .
-        }
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        Copy-Item README.md, THIRD-PARTY-NOTICES.txt $out
-        Get-Item $binary | Select-Object Name, Length
+      working-directory: .
+      run: scripts/build-desktop.ps1 -Output (Join-Path $env:RUNNER_TEMP 'with-secrets-desktop')
     - name: Archive the companion
       run: tar -czf "${{ runner.temp }}/with-secrets-desktop.tar.gz" -C "${{ runner.temp }}/with-secrets-desktop" .
     - uses: actions/upload-artifact@v7
