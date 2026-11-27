@@ -13,7 +13,7 @@ permissions:
 jobs:
   build:
     strategy:
-      fail-fast: true # one platform failing must not release the others
+      fail-fast: false # collect smoke-test results from every platform before publishing
       matrix:
         include:
         - { os: windows-latest, runtime: win-x64, file: with-secrets.exe }
@@ -76,6 +76,37 @@ jobs:
           tar -czf "release/$name.tar.gz" -C $env:RUNNER_TEMP $name
           if ($LASTEXITCODE -ne 0) { throw "Could not archive $name" }
         }
+    - name: Smoke-test the extracted desktop bundle
+      shell: pwsh
+      run: |
+        $name = 'with-secrets-desktop-${{ matrix.runtime }}'
+        $scratch = Join-Path $env:RUNNER_TEMP 'extracted-bundle'
+        New-Item -ItemType Directory -Path $scratch | Out-Null
+        if ($IsWindows) {
+          Expand-Archive -LiteralPath "release/$name.zip" -DestinationPath $scratch
+          $desktopFile = 'with-secrets-desktop.exe'
+        } else {
+          tar -xzf "release/$name.tar.gz" -C $scratch
+          if ($LASTEXITCODE -ne 0) { throw "Could not extract $name" }
+          $desktopFile = if ($IsMacOS) { 'With Secrets.app/Contents/MacOS/with-secrets-desktop' } else { 'with-secrets-desktop' }
+        }
+        $bundle = Join-Path $scratch $name
+        $cli = Join-Path $bundle '${{ matrix.file }}'
+        $desktop = Join-Path $bundle $desktopFile
+        foreach ($file in $cli, $desktop, (Join-Path $bundle 'LICENSE'), (Join-Path $bundle 'THIRD-PARTY-NOTICES.md'), (Join-Path $bundle 'THIRD-PARTY-NOTICES.txt')) {
+          if (!(Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing $file" }
+        }
+        if (!$IsWindows) {
+          $test = Get-Command test -CommandType Application -ErrorAction Stop | Select-Object -First 1
+          & $test.Source -x $desktop
+          if ($LASTEXITCODE -ne 0) { throw 'The desktop executable lost its executable bit' }
+        }
+        if ($IsMacOS) {
+          codesign --verify --strict (Join-Path $bundle 'With Secrets.app')
+          if ($LASTEXITCODE -ne 0) { throw 'The extracted macOS app signature is invalid' }
+        }
+        & $cli --self-check
+        if ($LASTEXITCODE -ne 0) { throw 'The bundled CLI self-check failed' }
     - name: Upload
       uses: actions/upload-artifact@v7
       with:
