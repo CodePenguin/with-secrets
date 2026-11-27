@@ -19,7 +19,7 @@ internal sealed record DiagnosticSettings(string Level)
 
     public bool Includes(string code) => Rank(DiagnosticCatalog.Describe(code).Severity) >= Rank(Level);
 
-    public static int Rank(string severity) => severity switch
+    private static int Rank(string severity) => severity switch
     {
         "error" => 3,
         "warning" => 2,
@@ -89,13 +89,11 @@ internal static class DiagnosticWire
     }
 }
 
-/// <summary>The host keeps its newest unsent warnings and removes them after the authority accepts the upload.</summary>
+/// <summary>The host keeps its newest unsent messages and removes them after the authority accepts the upload.</summary>
 internal sealed class DiagnosticOutbox(string path, TimeProvider clock)
 {
-    internal const int QueueBytes = 256 * 1024;
-    private const int RetentionHours = 72;
+    internal const int Capacity = 1000;
     private readonly Lock _gate = new();
-    private readonly Dictionary<string, DateTimeOffset> _reported = new(StringComparer.Ordinal);
     private DiagnosticSettings? _settings;
 
     internal DiagnosticSettings Settings
@@ -111,16 +109,10 @@ internal sealed class DiagnosticOutbox(string path, TimeProvider clock)
             {
                 DiagnosticSettings settings = CurrentSettings();
                 if (!settings.Includes(code)) return;
-                DateTimeOffset now = clock.GetUtcNow();
-                DateTimeOffset repeatSince = now.AddMinutes(-1);
-                if (_reported.TryGetValue(code, out DateTimeOffset last) && last > repeatSince) return;
                 List<DiagnosticEvent> pending = ReadPending();
-                if (pending.Any(item => item.Code == code && item.Time > repeatSince))
-                    return;
-                pending.Add(new DiagnosticEvent(Guid.NewGuid(), now, code));
-                Prune(pending, settings, now);
+                pending.Add(new DiagnosticEvent(Guid.NewGuid(), clock.GetUtcNow(), code));
+                pending.RemoveRange(0, Math.Max(0, pending.Count - Capacity));
                 DiagnosticFile.Write(path, pending);
-                _reported[code] = now;
             }
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
@@ -139,21 +131,12 @@ internal sealed class DiagnosticOutbox(string path, TimeProvider clock)
             {
                 try
                 {
-                    List<DiagnosticEvent> snapshot;
-                    try
+                    if (fetchSettings is not null)
                     {
-                        if (fetchSettings is not null)
-                        {
-                            DiagnosticSettings settings = await fetchSettings(stop);
-                            if (ApplySettings(settings)) onLevelChanged?.Invoke(settings);
-                        }
+                        DiagnosticSettings settings = await fetchSettings(stop);
+                        if (ApplySettings(settings)) onLevelChanged?.Invoke(settings);
                     }
-                    finally
-                    {
-                        // Expire queued events even when the authority is unreachable.
-                        snapshot = stop.IsCancellationRequested ? [] : PendingSnapshot();
-                    }
-                    await DrainAsync(snapshot, deliver, stop);
+                    await DrainAsync(PendingSnapshot(), deliver, stop);
                 }
                 catch (Exception error) when (error is not OutOfMemoryException)
                 {
@@ -173,7 +156,11 @@ internal sealed class DiagnosticOutbox(string path, TimeProvider clock)
         lock (_gate)
         {
             List<DiagnosticEvent> snapshot = ReadPending();
-            if (Prune(snapshot, CurrentSettings(), clock.GetUtcNow()))
+            int previousCount = snapshot.Count;
+            DiagnosticSettings settings = CurrentSettings();
+            snapshot.RemoveAll(item => !settings.Includes(item.Code));
+            snapshot.RemoveRange(0, Math.Max(0, snapshot.Count - Capacity));
+            if (snapshot.Count != previousCount)
                 DiagnosticFile.Write(path, snapshot);
             return snapshot;
         }
@@ -241,24 +228,6 @@ internal sealed class DiagnosticOutbox(string path, TimeProvider clock)
             _settings = settings;
             return true;
         }
-    }
-
-    private static bool Prune(List<DiagnosticEvent> pending, DiagnosticSettings settings, DateTimeOffset now)
-    {
-        DateTimeOffset cutoff = now.AddHours(-RetentionHours);
-        int removed = pending.RemoveAll(item => item.Time < cutoff || !settings.Includes(item.Code));
-        int size = JsonSerializer.SerializeToUtf8Bytes(pending, DiagnosticWire.Json).Length;
-        if (size <= QueueBytes) return removed > 0;
-
-        HashSet<Guid> evicted = [];
-        foreach (DiagnosticEvent item in pending.OrderBy(item => DiagnosticSettings.Rank(DiagnosticCatalog.Describe(item.Code).Severity)).ThenBy(item => item.Time))
-        {
-            evicted.Add(item.Id);
-            size -= JsonSerializer.SerializeToUtf8Bytes(item, DiagnosticWire.Json).Length + 1;
-            if (size <= QueueBytes) break;
-        }
-        pending.RemoveAll(item => evicted.Contains(item.Id));
-        return true;
     }
 }
 

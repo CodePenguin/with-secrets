@@ -24,8 +24,8 @@ internal static class MachineDiagnosticsTests
             original.Report(DiagnosticCatalog.AuthorityConnected);
             original.Report(DiagnosticCatalog.AuthorityPollCompleted);
             original.Report(DiagnosticCatalog.InvalidationFailed);
-            const int warningCount = 2 * DiagnosticWire.BatchLimit;
-            for (int index = 0; index < warningCount; index++)
+            const int warningCount = 4 * DiagnosticWire.BatchLimit;
+            for (int index = 0; index < warningCount / 2; index++)
             {
                 original.Report(DiagnosticCatalog.AuthorityLinkFailed);
                 original.Report(DiagnosticCatalog.AuthorityLinkFailed);
@@ -35,7 +35,7 @@ internal static class MachineDiagnosticsTests
             DiagnosticEvent[] expected = [.. DiagnosticFile.Read<DiagnosticEvent>(path)];
             check(expected.Length == warningCount + 1 && expected[0].Code == DiagnosticCatalog.InvalidationFailed && expected[0].Time == recorded
                 && expected.Skip(1).All(item => item.Code == DiagnosticCatalog.AuthorityLinkFailed),
-                "diagnostics: the default forwards errors and warnings, and coalesces repeats within a minute");
+                "diagnostics: the default forwards errors and warnings, including repeated messages");
 
             using (CancellationTokenSource stopOffline = new(TimeSpan.FromSeconds(5)))
             {
@@ -73,28 +73,31 @@ internal static class MachineDiagnosticsTests
                 "diagnostics: reconnect automatically sends the persisted batches and retries a lost acknowledgement without duplicates");
             check(DiagnosticFile.Read<DiagnosticEvent>(path).Count == 0, "diagnostics: acknowledged warnings are removed from the durable outbox");
 
-            DateTimeOffset now = clock.GetUtcNow();
-            DiagnosticEvent expired = new(Guid.NewGuid(), now.AddHours(-73), DiagnosticCatalog.InvalidationFailed);
-            DiagnosticEvent keep = new(Guid.NewGuid(), now.AddMinutes(-59), DiagnosticCatalog.InvalidationFailed);
-            List<DiagnosticEvent> oversized = [expired, keep];
-            oversized.AddRange(Enumerable.Range(0, 3000).Select(index =>
-                new DiagnosticEvent(Guid.NewGuid(), now.AddSeconds(-index), DiagnosticCatalog.AuthorityPollCompleted)));
-            DiagnosticFile.Write(path, oversized);
+            DateTimeOffset oldTime = clock.GetUtcNow().AddDays(-7);
+            DiagnosticEvent first = new(Guid.NewGuid(), oldTime, DiagnosticCatalog.InvalidationFailed);
+            List<DiagnosticEvent> full = [first];
+            full.AddRange(Enumerable.Range(1, DiagnosticOutbox.Capacity - 1).Select(_ =>
+                new DiagnosticEvent(Guid.NewGuid(), oldTime, DiagnosticCatalog.AuthorityLinkFailed)));
+            DiagnosticFile.Write(path, full);
+            restarted.Report(DiagnosticCatalog.CheckInFailed);
+            List<DiagnosticEvent> trimmed = DiagnosticFile.Read<DiagnosticEvent>(path, maxBytes: 1024 * 1024);
+            check(trimmed.Count == 1000 && trimmed.Take(trimmed.Count - 1).SequenceEqual(full.Skip(1))
+                && trimmed[^1].Code == DiagnosticCatalog.CheckInFailed,
+                "diagnostics: the newest 1,000 queued messages are retained in arrival order, with no age or severity preference");
+
             DiagnosticSettings debug = new("debug");
             DiagnosticSettings? applied = null;
-            using CancellationTokenSource stopBudget = new(TimeSpan.FromSeconds(5));
+            using CancellationTokenSource stopDisconnected = new(TimeSpan.FromSeconds(5));
             await restarted.RunAsync((_, _) =>
             {
-                stopBudget.Cancel();
+                stopDisconnected.Cancel();
                 throw new IOException("the connection is unavailable");
-            }, stopBudget.Token, _ => Task.FromResult(debug), level => applied = level);
-            List<DiagnosticEvent> trimmed = DiagnosticFile.Read<DiagnosticEvent>(path, DiagnosticOutbox.QueueBytes);
-            check(applied == debug && new FileInfo(path).Length <= DiagnosticOutbox.QueueBytes && trimmed.Contains(keep) && !trimmed.Contains(expired)
-                && trimmed.Count < oversized.Count && trimmed.Any(item => item.Code == DiagnosticCatalog.AuthorityPollCompleted),
-                "diagnostics: the disk budget retains errors ahead of debug entries and expires old entries");
+            }, stopDisconnected.Token, _ => Task.FromResult(debug), level => applied = level);
+            check(applied == debug && DiagnosticFile.Read<DiagnosticEvent>(path, maxBytes: 1024 * 1024).SequenceEqual(trimmed),
+                "diagnostics: queued messages remain eligible for upload after a week offline");
             DiagnosticOutbox configuredRestart = new(path, clock);
             configuredRestart.Report(DiagnosticCatalog.AuthorityConnected);
-            check(DiagnosticFile.Read<DiagnosticEvent>(path, DiagnosticOutbox.QueueBytes).Any(item => item.Code == DiagnosticCatalog.AuthorityConnected),
+            check(DiagnosticFile.Read<DiagnosticEvent>(path, maxBytes: 1024 * 1024).Any(item => item.Code == DiagnosticCatalog.AuthorityConnected),
                 "diagnostics: the machine log level is remembered across an offline restart");
         }
         finally
