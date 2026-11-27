@@ -835,7 +835,7 @@ internal static class ConvenienceKeyTests
         AuthorityStore store = app.Store;
         ProviderStore providers = app.Service.Providers!.Store;
         Manifest? manifest = TestState.Current(app.State);
-        string machines = string.Join(";", store.Machines().Select(machine => string.Join(",", machine.Fingerprint, machine.Status, machine.SecurityRevision, machine.FriendlyName, machine.HostName)));
+        string machines = string.Join(";", store.Machines().Select(machine => string.Join(",", machine.Fingerprint, machine.Status, machine.SecurityRevision, machine.FriendlyName, machine.HostName, store.DiagnosticsSettings(machine.Fingerprint).Level)));
         string hostConfig = File.Exists(app.Machine.Deployment.HostConfig.FilePath) ? File.ReadAllText(app.Machine.Deployment.HostConfig.FilePath) : "";
 
         return string.Join('|', machines, hostConfig, store.ActiveKey()?.Fingerprint, store.AuditRetentionDays(), store.SessionTimeouts(), string.Join(",", store.Grants().Select(row => row.Id + "/" + row.Status + "/" + row.Revision)),
@@ -890,6 +890,7 @@ internal static class ConvenienceKeyTests
             "machine-disable" or "machine-enable" or "machine-untrust" or "machine-host-change" => [("fingerprint", machine)],
             "machine-trust" => [("fingerprint", machine), ("confirm", fp)],
             "machine-rename" => [("fingerprint", machine), ("name", "renamed")],
+            AuthorityStore.SetMachineLogLevelOperation => [("fingerprint", machine), ("level", "debug")],
             "passkey-unenroll" => [("name", "phone")],
             "pairing-revoke" => [("id", invitation.Id)],
             "provider-add" => [("name", "vault-three"), ("type", "test"), ("config", """{"label":"three"}"""), ("max-stale-seconds", "60")],
