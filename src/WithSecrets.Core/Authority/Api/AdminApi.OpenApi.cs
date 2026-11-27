@@ -253,15 +253,23 @@ internal sealed partial class AdminApi
                 ("id", S.Str()),
                 ("time", S.Time()),
                 ("receivedAt", S.Time()),
-                ("severity", S.Str(values: ["warning"])),
+                ("severity", S.Str(values: DiagnosticSettings.Levels)),
                 ("component", S.Str()),
                 ("message", S.Str()),
             ]),
             ["MachineDiagnostics"] = S.Obj(
             [
                 ("machineName", S.Str()),
+                ("fingerprint", S.Str()),
+                ("settings", S.Ref("DiagnosticSettings")),
                 ("lastReceivedAt", S.Time(nullable: true)),
                 ("items", S.Arr(S.Ref("DiagnosticEntry"))),
+            ]),
+            ["DiagnosticSettings"] = S.Obj(
+            [
+                ("level", S.Str(values: DiagnosticSettings.Levels)),
+                ("queueKiB", S.Int(DiagnosticSettings.MinQueueKiB, DiagnosticSettings.MaxQueueKiB)),
+                ("retentionHours", S.Int(1, DiagnosticSettings.MaxRetentionHours)),
             ]),
             ["Grant"] = S.Obj(
             [

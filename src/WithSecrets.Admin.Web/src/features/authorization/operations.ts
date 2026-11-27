@@ -1,4 +1,5 @@
 import type { Grant, Invitation, Machine, OperationName, ParameterValue, Passkey, ProviderValidation } from '../../api/types'
+import type { components } from '../../api/schema'
 
 /**
  * Every administrative change the page can ask for, as data: what the person fills in, the exact operation and parameters the passkey will
@@ -258,6 +259,48 @@ export function renameMachine(machine: Machine): OperationDef {
         parameters: { fingerprint: machine.fingerprint, name },
         summary: `Rename machine ${machine.display} to "${name}" (display only).`,
         done: `Renamed machine ${machine.display} to "${name}".`,
+      }
+    },
+  }
+}
+
+type DiagnosticSettings = components['schemas']['DiagnosticSettings']
+
+export const diagnosticLevels: Record<DiagnosticSettings['level'], string> = {
+  error: 'Error',
+  warning: 'Warning',
+  information: 'Information',
+  debug: 'Debug',
+}
+
+export function setMachineDiagnostics(fingerprint: string, machineName: string, settings: DiagnosticSettings): OperationDef {
+  const queue: FieldDef = { name: 'queue-kib', label: 'Offline queue budget (KiB)', kind: 'number', min: 16, max: 1024, required: true }
+  const retention: FieldDef = { name: 'retention-hours', label: 'Unsent retention (hours)', kind: 'number', min: 1, max: 168, required: true }
+
+  return {
+    key: 'machine-diagnostics-settings',
+    title: 'Edit diagnostic forwarding',
+    about: [['Machine', machineName]],
+    fields: [
+      { name: 'level', label: 'Minimum severity', kind: 'select', required: true, options: Object.entries(diagnosticLevels).map(([value, label]) => ({ value, label })) },
+      queue,
+      retention,
+    ],
+    initial: { level: settings.level, [queue.name]: String(settings.queueKiB), [retention.name]: String(settings.retentionHours) },
+    confirmLabel: 'Save forwarding',
+    prepare: (values) => {
+      const errors: Record<string, string> = {}
+      const level = text(values, 'level')
+      const queueKiB = integer(values, queue, errors)
+      const retentionHours = integer(values, retention, errors)
+      if (!Object.hasOwn(diagnosticLevels, level)) errors.level = 'Choose a minimum severity.'
+      if (queueKiB === null || retentionHours === null || errors.level) return { errors }
+
+      return {
+        operation: 'machine-diagnostics-settings',
+        parameters: { fingerprint, level, [queue.name]: queueKiB, [retention.name]: retentionHours },
+        summary: `Forward ${level} and higher from ${machineName}. Keep unsent events for up to ${retentionHours} hours within a ${queueKiB} KiB budget.`,
+        done: `Saved diagnostic forwarding for ${machineName}.`,
       }
     },
   }

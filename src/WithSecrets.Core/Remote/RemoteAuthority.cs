@@ -774,6 +774,12 @@ public sealed class RemoteAuthority : IAuthority, IAuditSink, ILaunchAuthority, 
         await CallAsync(RemoteOps.DiagnosticUpload, "diagnostics:" + Guid.NewGuid().ToString("N"), body, cancel);
     }
 
+    internal async Task<DiagnosticSettings> GetDiagnosticsSettingsAsync(CancellationToken cancel)
+    {
+        string body = await CallAsync(RemoteOps.DiagnosticSettings, "diagnostic-settings:" + Guid.NewGuid().ToString("N"), RemoteWire.Empty, cancel);
+        return JsonSerializer.Deserialize<DiagnosticSettings>(body, DiagnosticWire.Json) ?? throw new RemoteTransportException("the authority returned no diagnostics settings");
+    }
+
     // ---- IAuditSink ----
 
     public async Task<AuditAck> UploadAsync(AuditBatch batch, CancellationToken cancel = default)

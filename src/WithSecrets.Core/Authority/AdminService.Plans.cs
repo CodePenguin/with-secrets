@@ -248,6 +248,28 @@ public sealed partial class AdminService
                         return null;
                     });
 
+            case AuthorityStore.SetDiagnosticsOperation:
+                (MachineRecord? diagnosticMachine, string? machineProblem) = ResolveMachine(Arg(args, "fingerprint"));
+                string level = Arg(args, "level") ?? "";
+                if (diagnosticMachine is null || !DiagnosticSettings.Levels.Contains(level, StringComparer.Ordinal)
+                    || !TryNumber(Arg(args, "queue-kib"), DiagnosticSettings.MinQueueKiB, DiagnosticSettings.MaxQueueKiB, out int queueKiB)
+                    || !TryNumber(Arg(args, "retention-hours"), 1, DiagnosticSettings.MaxRetentionHours, out int retentionHours))
+                {
+                    refusal = machineProblem ?? "give a diagnostics level, a queue budget of 16 to 1024 KiB and a retention window of 1 to 168 hours";
+                    status = 400;
+                    return null;
+                }
+
+                DiagnosticSettings diagnosticSettings = new(level, queueKiB, retentionHours);
+                string diagnosticFingerprint = diagnosticMachine.Fingerprint;
+                return new AdminPlan(AuthorityStore.SetDiagnosticsOperation,
+                    $"Forward {level} diagnostics and higher from machine {KeyIdentity.Display(diagnosticFingerprint)}. Keep up to {queueKiB} KiB of unsent diagnostics for {retentionHours} hours.",
+                    AuthorityStore.DiagnosticsSettingsParameters(diagnosticFingerprint, diagnosticSettings), a =>
+                    {
+                        _p.Store.SetDiagnosticsSettings(diagnosticFingerprint, diagnosticSettings, a.Admin!);
+                        return null;
+                    });
+
             case "set-session-timeouts":
                 if (!TryNumber(Arg(args, "idle"), 1, AuthorityStore.MaxSessionIdleMinutes, out int idle) || !TryNumber(Arg(args, "absolute"), 1, AuthorityStore.MaxSessionAbsoluteMinutes, out int absolute)
                     || AuthorityStore.SessionTimeoutsProblem(idle, absolute) is { } timeoutProblem)

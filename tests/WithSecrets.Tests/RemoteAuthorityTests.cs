@@ -602,8 +602,10 @@ internal static partial class RemoteAuthorityTests
         await remote.UploadDiagnosticsAsync([warning]);
         await remote.UploadDiagnosticsAsync([warning]);
         MachineDiagnosticsStore diagnostics = net.Authority.Deployment.Store.Diagnostics;
+        check(await remote.GetDiagnosticsSettingsAsync(CancellationToken.None) == DiagnosticSettings.Default, "remote: the authenticated host can fetch its default forwarding settings");
+        await remote.UploadDiagnosticsAsync([new DiagnosticEvent(Guid.NewGuid(), warning.Time, DiagnosticCatalog.AuthorityPollCompleted)]);
         check(diagnostics.View(host.Fingerprint).Items is [{ Id: var id }] && id == warning.Id && diagnostics.View(net.Authority.Fingerprint).Items.Count == 0,
-            "remote: diagnostic retries produce one entry under the authenticated machine's identity");
+            "remote: diagnostic retries produce one entry under the authenticated machine's identity, and events below the forwarding level are ignored");
         (int rejected, _, _, _) = await raw.Call(RemoteOps.DiagnosticUpload, "diagnostic-invalid", "{\"events\":[],\"fingerprint\":\"another-machine\"}");
         check(rejected == 400, "remote: diagnostic uploads cannot name another machine");
     }

@@ -85,8 +85,12 @@ public static class AppLog
     /// <summary>A diagnostic event: only seen with --debug.</summary>
     internal static void Debug(string template, params object?[] values) => Write(LogEventLevel.Debug, template, values);
 
+    internal static void Info(string template, params object?[] values) => Write(LogEventLevel.Information, template, values);
+
     /// <summary>Something went wrong that the person may be asked about later: always in the file.</summary>
     internal static void Warn(string template, params object?[] values) => Write(LogEventLevel.Warning, template, values);
+
+    internal static void Error(string template, params object?[] values) => Write(LogEventLevel.Error, template, values);
 
     /// <summary>The line as the terminal and the tests see it: the message with the program's prefix.</summary>
     internal static string Render(LogEvent logEvent) => Prefix + logEvent.RenderMessage(CultureInfo.InvariantCulture);

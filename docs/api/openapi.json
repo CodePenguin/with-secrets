@@ -3458,7 +3458,7 @@
     "/api/v1/machines/{fingerprint}/diagnostics": {
       "get": {
         "operationId": "getMachineDiagnostics",
-        "summary": "Recent diagnostic warnings received for one machine.",
+        "summary": "Recent diagnostics and forwarding settings for one machine.",
         "tags": [
           "machines"
         ],
@@ -10673,6 +10673,210 @@
         ]
       }
     },
+    "/api/v1/machines/{fingerprint}/diagnostics/settings": {
+      "put": {
+        "operationId": "setMachineDiagnosticsSettings",
+        "summary": "Set the machine\u0027s diagnostic forwarding level, queue budget and retention.",
+        "tags": [
+          "machines"
+        ],
+        "parameters": [
+          {
+            "name": "fingerprint",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 12,
+              "maxLength": 80,
+              "description": "The machine\u0027s fingerprint, or an unambiguous start of it (12 hex digits or more)."
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "authorization": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 64,
+                    "description": "The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap."
+                  },
+                  "level": {
+                    "type": "string",
+                    "enum": [
+                      "error",
+                      "warning",
+                      "information",
+                      "debug"
+                    ],
+                    "description": "The minimum severity forwarded by this machine."
+                  },
+                  "queue-kib": {
+                    "type": "integer",
+                    "minimum": 16,
+                    "maximum": 1024,
+                    "description": "Maximum size of the unsent diagnostics queue in KiB."
+                  },
+                  "retention-hours": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 168,
+                    "description": "How long unsent diagnostics can wait for delivery."
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "authorization",
+                  "level",
+                  "queue-kib",
+                  "retention-hours"
+                ]
+              }
+            }
+          }
+        },
+        "x-access": "authorization",
+        "x-operation": "machine-diagnostics-settings",
+        "description": "Set the machine\u0027s diagnostic forwarding level, queue budget and retention. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MutationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          },
+          {
+            "browserCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
     "/api/v1/machines/{fingerprint}/approve-host-change": {
       "post": {
         "operationId": "approveMachineHostChange",
@@ -13720,7 +13924,10 @@
           "severity": {
             "type": "string",
             "enum": [
-              "warning"
+              "error",
+              "warning",
+              "information",
+              "debug"
             ]
           },
           "component": {
@@ -13746,6 +13953,12 @@
           "machineName": {
             "type": "string"
           },
+          "fingerprint": {
+            "type": "string"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/DiagnosticSettings"
+          },
           "lastReceivedAt": {
             "type": [
               "string",
@@ -13763,8 +13976,40 @@
         "additionalProperties": false,
         "required": [
           "machineName",
+          "fingerprint",
+          "settings",
           "lastReceivedAt",
           "items"
+        ]
+      },
+      "DiagnosticSettings": {
+        "type": "object",
+        "properties": {
+          "level": {
+            "type": "string",
+            "enum": [
+              "error",
+              "warning",
+              "information",
+              "debug"
+            ]
+          },
+          "queueKiB": {
+            "type": "integer",
+            "minimum": 16,
+            "maximum": 1024
+          },
+          "retentionHours": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 168
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "level",
+          "queueKiB",
+          "retentionHours"
         ]
       },
       "Grant": {
@@ -14294,6 +14539,7 @@
               "machine-untrust",
               "machine-trust",
               "machine-rename",
+              "machine-diagnostics-settings",
               "machine-host-change",
               "grant-extend",
               "grant-renew",
@@ -14443,6 +14689,7 @@
               "machine-untrust",
               "machine-trust",
               "machine-rename",
+              "machine-diagnostics-settings",
               "machine-host-change",
               "grant-extend",
               "grant-renew",
@@ -14610,6 +14857,7 @@
               "machine-untrust",
               "machine-trust",
               "machine-rename",
+              "machine-diagnostics-settings",
               "machine-host-change",
               "grant-extend",
               "grant-renew",

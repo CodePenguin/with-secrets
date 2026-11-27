@@ -5,6 +5,7 @@ internal static class MachineDiagnosticsTests
     private sealed class RetryClock(DateTimeOffset now) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => now;
+        public void Advance(TimeSpan amount) => now += amount;
 
         public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
             => base.CreateTimer(callback, state, TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(20));
@@ -15,17 +16,26 @@ internal static class MachineDiagnosticsTests
         string root = Path.Combine(Path.GetTempPath(), "ws-diagnostics-" + Guid.NewGuid().ToString("N"));
         string path = Path.Combine(root, "outbox", "pending.json");
         const string fingerprint = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-        DateTimeOffset recorded = DateTimeOffset.UtcNow.AddMinutes(-5);
+        DateTimeOffset recorded = DateTimeOffset.UtcNow.AddHours(-2);
         RetryClock clock = new(recorded);
         try
         {
             DiagnosticOutbox original = new(path, clock);
-            for (int count = 0; count < DiagnosticOutbox.Capacity + 1; count++)
-                original.Report(count == 0 ? DiagnosticCatalog.CheckInFailed : DiagnosticCatalog.AuthorityLinkFailed);
+            original.Report(DiagnosticCatalog.AuthorityConnected);
+            original.Report(DiagnosticCatalog.AuthorityPollCompleted);
+            original.Report(DiagnosticCatalog.InvalidationFailed);
+            const int warningCount = 2 * DiagnosticWire.BatchLimit;
+            for (int index = 0; index < warningCount; index++)
+            {
+                original.Report(DiagnosticCatalog.AuthorityLinkFailed);
+                original.Report(DiagnosticCatalog.AuthorityLinkFailed);
+                clock.Advance(TimeSpan.FromMinutes(1));
+            }
 
             DiagnosticEvent[] expected = [.. DiagnosticFile.Read<DiagnosticEvent>(path)];
-            check(expected.Length == DiagnosticOutbox.Capacity && expected.All(item => item.Time == recorded && item.Code == DiagnosticCatalog.AuthorityLinkFailed),
-                "diagnostics: the persisted outbox keeps the newest warnings with their original timestamps");
+            check(expected.Length == warningCount + 1 && expected[0].Code == DiagnosticCatalog.InvalidationFailed && expected[0].Time == recorded
+                && expected.Skip(1).All(item => item.Code == DiagnosticCatalog.AuthorityLinkFailed),
+                "diagnostics: the default forwards errors and warnings, and coalesces repeats within a minute");
 
             using (CancellationTokenSource stopOffline = new(TimeSpan.FromSeconds(5)))
             {
@@ -57,11 +67,34 @@ internal static class MachineDiagnosticsTests
             }, stop.Token);
 
             MachineDiagnosticsView received = authority.View(fingerprint);
-            check(attempts == (DiagnosticOutbox.Capacity + DiagnosticWire.BatchLimit - 1) / DiagnosticWire.BatchLimit + 1
+            check(attempts == (expected.Length + DiagnosticWire.BatchLimit - 1) / DiagnosticWire.BatchLimit + 1
                 && received.Items.Reverse().Select(item => item.Id).SequenceEqual(expected.Select(item => item.Id))
-                && received.Items.All(item => item.Time == recorded && item.ReceivedAt > item.Time),
+                && received.Items.Reverse().Select(item => item.Time).SequenceEqual(expected.Select(item => item.Time)),
                 "diagnostics: reconnect automatically sends the persisted batches and retries a lost acknowledgement without duplicates");
             check(DiagnosticFile.Read<DiagnosticEvent>(path).Count == 0, "diagnostics: acknowledged warnings are removed from the durable outbox");
+
+            DateTimeOffset now = clock.GetUtcNow();
+            DiagnosticEvent expired = new(Guid.NewGuid(), now.AddHours(-73), DiagnosticCatalog.InvalidationFailed);
+            DiagnosticEvent keep = new(Guid.NewGuid(), now.AddMinutes(-59), DiagnosticCatalog.InvalidationFailed);
+            List<DiagnosticEvent> oversized = [expired, keep];
+            oversized.AddRange(Enumerable.Range(0, 250).Select(index =>
+                new DiagnosticEvent(Guid.NewGuid(), now.AddSeconds(-index), DiagnosticCatalog.AuthorityPollCompleted)));
+            DiagnosticFile.Write(path, oversized);
+            DiagnosticSettings budget = new("debug", DiagnosticSettings.MinQueueKiB, 72);
+            using CancellationTokenSource stopBudget = new(TimeSpan.FromSeconds(5));
+            await restarted.RunAsync((_, _) =>
+            {
+                stopBudget.Cancel();
+                throw new IOException("the connection is unavailable");
+            }, stopBudget.Token, _ => Task.FromResult(budget));
+            List<DiagnosticEvent> trimmed = DiagnosticFile.Read<DiagnosticEvent>(path);
+            check(new FileInfo(path).Length <= budget.QueueKiB * 1024 && trimmed.Contains(keep) && !trimmed.Contains(expired)
+                && trimmed.Count < oversized.Count && trimmed.Any(item => item.Code == DiagnosticCatalog.AuthorityPollCompleted),
+                "diagnostics: configuring debug and a smaller byte budget retains errors ahead of debug entries and expires old entries");
+            DiagnosticOutbox configuredRestart = new(path, clock);
+            configuredRestart.Report(DiagnosticCatalog.AuthorityConnected);
+            check(DiagnosticFile.Read<DiagnosticEvent>(path).Any(item => item.Code == DiagnosticCatalog.AuthorityConnected),
+                "diagnostics: an administrator's forwarding level is remembered across an offline restart");
         }
         finally
         {

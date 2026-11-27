@@ -9,20 +9,55 @@ internal sealed record ReceivedDiagnostic(DiagnosticEvent Event, DateTimeOffset 
 internal sealed record DiagnosticView(Guid Id, DateTimeOffset Time, DateTimeOffset ReceivedAt, string Severity, string Component, string Message);
 internal sealed record MachineDiagnosticsView(DateTimeOffset? LastReceivedAt, IReadOnlyList<DiagnosticView> Items);
 
+internal sealed record DiagnosticSettings(string Level, int QueueKiB, int RetentionHours)
+{
+    public const int MinQueueKiB = 16;
+    public const int MaxQueueKiB = 1024;
+    public const int MaxRetentionHours = 168;
+    public static readonly string[] Levels = ["error", "warning", "information", "debug"];
+    public static DiagnosticSettings Default { get; } = new("warning", 256, 72);
+
+    public bool Valid() => Levels.Contains(Level, StringComparer.Ordinal)
+        && QueueKiB is >= MinQueueKiB and <= MaxQueueKiB && RetentionHours is >= 1 and <= MaxRetentionHours;
+
+    public bool Includes(string code) => Rank(DiagnosticCatalog.Describe(code).Severity) >= Rank(Level);
+
+    public static int Rank(string severity) => severity switch
+    {
+        "error" => 3,
+        "warning" => 2,
+        "information" => 1,
+        "debug" => 0,
+        _ => -1,
+    };
+}
+
 internal static class DiagnosticCatalog
 {
     public const string CheckInFailed = "check-in-failed";
     public const string IdentityRenewalFailed = "identity-renewal-failed";
     public const string AuditEventsRejected = "audit-events-rejected";
     public const string AuthorityLinkFailed = "authority-link-failed";
+    public const string MachineEndpointFailed = "machine-endpoint-failed";
+    public const string InvalidationFailed = "invalidation-failed";
+    public const string LaunchFailed = "launch-failed";
+    public const string AuthorityConnected = "authority-connected";
+    public const string IdentityRenewed = "identity-renewed";
+    public const string AuthorityPollCompleted = "authority-poll-completed";
 
-    public static (string Component, string Message) Describe(string code) => code switch
+    public static (string Severity, string Component, string Message) Describe(string code) => code switch
     {
-        CheckInFailed => ("Connection", "The machine could not check in with its authority."),
-        IdentityRenewalFailed => ("Identity", "The machine could not renew its identity certificate."),
-        AuditEventsRejected => ("Audit", "The authority refused one or more audit events."),
-        AuthorityLinkFailed => ("Connection", "An operation could not reach its authority."),
-        _ => ("", ""),
+        CheckInFailed => ("warning", "Connection", "The machine could not check in with its authority."),
+        IdentityRenewalFailed => ("warning", "Identity", "The machine could not renew its identity certificate."),
+        AuditEventsRejected => ("warning", "Audit", "The authority refused one or more audit events."),
+        AuthorityLinkFailed => ("warning", "Connection", "The machine could not complete an operation with its authority."),
+        MachineEndpointFailed => ("error", "Connection", "The authority could not start its machine endpoint."),
+        InvalidationFailed => ("error", "Authorization", "The machine could not apply a change from its authority."),
+        LaunchFailed => ("error", "Launch", "A command launch failed inside the host service."),
+        AuthorityConnected => ("information", "Connection", "The machine checked in with its authority."),
+        IdentityRenewed => ("information", "Identity", "The machine renewed its identity certificate."),
+        AuthorityPollCompleted => ("debug", "Connection", "The machine completed a poll of its authority."),
+        _ => ("", "", ""),
     };
 
     public static bool Valid(DiagnosticEvent? item) =>
@@ -60,8 +95,9 @@ internal static class DiagnosticWire
 /// <summary>The host keeps its newest unsent warnings and removes them after the authority accepts the upload.</summary>
 internal sealed class DiagnosticOutbox(string path, TimeProvider clock)
 {
-    internal const int Capacity = 128;
     private readonly Lock _gate = new();
+    private readonly Dictionary<string, DateTimeOffset> _reported = new(StringComparer.Ordinal);
+    private DiagnosticSettings? _settings;
 
     public void Report(string code)
     {
@@ -69,11 +105,18 @@ internal sealed class DiagnosticOutbox(string path, TimeProvider clock)
         {
             lock (_gate)
             {
+                DiagnosticSettings settings = CurrentSettings();
+                if (!settings.Includes(code)) return;
+                DateTimeOffset now = clock.GetUtcNow();
+                DateTimeOffset repeatSince = now.AddMinutes(-1);
+                if (_reported.TryGetValue(code, out DateTimeOffset last) && last > repeatSince) return;
                 List<DiagnosticEvent> pending = ReadPending();
-                pending.Add(new DiagnosticEvent(Guid.NewGuid(), clock.GetUtcNow(), code));
-                if (pending.Count > Capacity)
-                    pending.RemoveRange(0, pending.Count - Capacity);
+                if (pending.Any(item => item.Code == code && item.Time > repeatSince))
+                    return;
+                pending.Add(new DiagnosticEvent(Guid.NewGuid(), now, code));
+                Prune(pending, settings, now);
                 DiagnosticFile.Write(path, pending);
+                _reported[code] = now;
             }
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
@@ -82,7 +125,8 @@ internal sealed class DiagnosticOutbox(string path, TimeProvider clock)
         }
     }
 
-    public async Task RunAsync(Func<DiagnosticEvent[], CancellationToken, Task> deliver, CancellationToken stop)
+    public async Task RunAsync(Func<DiagnosticEvent[], CancellationToken, Task> deliver, CancellationToken stop,
+        Func<CancellationToken, Task<DiagnosticSettings>>? fetchSettings = null)
     {
         try
         {
@@ -91,7 +135,17 @@ internal sealed class DiagnosticOutbox(string path, TimeProvider clock)
             {
                 try
                 {
-                    await DrainAsync(deliver, stop);
+                    List<DiagnosticEvent> snapshot;
+                    try
+                    {
+                        if (fetchSettings is not null) ApplySettings(await fetchSettings(stop));
+                    }
+                    finally
+                    {
+                        // Expire queued events even when the authority is unreachable.
+                        snapshot = stop.IsCancellationRequested ? [] : PendingSnapshot();
+                    }
+                    await DrainAsync(snapshot, deliver, stop);
                 }
                 catch (Exception error) when (error is not OutOfMemoryException)
                 {
@@ -106,11 +160,19 @@ internal sealed class DiagnosticOutbox(string path, TimeProvider clock)
         }
     }
 
-    private async Task DrainAsync(Func<DiagnosticEvent[], CancellationToken, Task> deliver, CancellationToken stop)
+    private List<DiagnosticEvent> PendingSnapshot()
     {
-        List<DiagnosticEvent> snapshot;
-        lock (_gate) snapshot = ReadPending();
+        lock (_gate)
+        {
+            List<DiagnosticEvent> snapshot = ReadPending();
+            if (Prune(snapshot, CurrentSettings(), clock.GetUtcNow()))
+                DiagnosticFile.Write(path, snapshot);
+            return snapshot;
+        }
+    }
 
+    private async Task DrainAsync(List<DiagnosticEvent> snapshot, Func<DiagnosticEvent[], CancellationToken, Task> deliver, CancellationToken stop)
+    {
         foreach (DiagnosticEvent[] batch in snapshot.Chunk(DiagnosticWire.BatchLimit))
         {
             stop.ThrowIfCancellationRequested();
@@ -130,13 +192,57 @@ internal sealed class DiagnosticOutbox(string path, TimeProvider clock)
     {
         try
         {
-            return DiagnosticFile.Read<DiagnosticEvent>(path).Where(DiagnosticCatalog.Valid).TakeLast(Capacity).ToList();
+            return DiagnosticFile.Read<DiagnosticEvent>(path, DiagnosticSettings.MaxQueueKiB * 1024).Where(DiagnosticCatalog.Valid).ToList();
         }
         catch (JsonException)
         {
             // A malformed snapshot cannot be replayed. The next warning can start a fresh queue.
             return [];
         }
+    }
+
+    private DiagnosticSettings CurrentSettings()
+    {
+        if (_settings is not null) return _settings;
+        try
+        {
+            DiagnosticSettings? saved = DiagnosticFile.Read<DiagnosticSettings>(path + ".settings").FirstOrDefault();
+            return _settings = saved is not null && saved.Valid() ? saved : DiagnosticSettings.Default;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return _settings = DiagnosticSettings.Default;
+        }
+    }
+
+    private void ApplySettings(DiagnosticSettings settings)
+    {
+        if (!settings.Valid()) throw new IOException("the authority returned invalid diagnostics settings");
+        lock (_gate)
+        {
+            if (settings == CurrentSettings()) return;
+            DiagnosticFile.Write<DiagnosticSettings>(path + ".settings", [settings]);
+            _settings = settings;
+        }
+    }
+
+    private static bool Prune(List<DiagnosticEvent> pending, DiagnosticSettings settings, DateTimeOffset now)
+    {
+        DateTimeOffset cutoff = now.AddHours(-settings.RetentionHours);
+        int removed = pending.RemoveAll(item => item.Time < cutoff || !settings.Includes(item.Code));
+        int budget = settings.QueueKiB * 1024;
+        int size = JsonSerializer.SerializeToUtf8Bytes(pending, DiagnosticWire.Json).Length;
+        if (size <= budget) return removed > 0;
+
+        HashSet<Guid> evicted = [];
+        foreach (DiagnosticEvent item in pending.OrderBy(item => DiagnosticSettings.Rank(DiagnosticCatalog.Describe(item.Code).Severity)).ThenBy(item => item.Time))
+        {
+            evicted.Add(item.Id);
+            size -= JsonSerializer.SerializeToUtf8Bytes(item, DiagnosticWire.Json).Length + 1;
+            if (size <= budget) break;
+        }
+        pending.RemoveAll(item => evicted.Contains(item.Id));
+        return true;
     }
 }
 
@@ -175,8 +281,8 @@ internal sealed class MachineDiagnosticsStore(string folder, TimeProvider clock)
         entries.Reverse();
         return new MachineDiagnosticsView(lastReceivedAt, [.. entries.Select(row =>
         {
-            (string component, string message) = DiagnosticCatalog.Describe(row.Event.Code);
-            return new DiagnosticView(row.Event.Id, row.Event.Time, row.ReceivedAt, "warning", component, message);
+            (string severity, string component, string message) = DiagnosticCatalog.Describe(row.Event.Code);
+            return new DiagnosticView(row.Event.Id, row.Event.Time, row.ReceivedAt, severity, component, message);
         })]);
     }
 
@@ -194,12 +300,12 @@ internal sealed class MachineDiagnosticsStore(string folder, TimeProvider clock)
 /// <summary>Private, bounded snapshots for the host outbox and authority history.</summary>
 internal static class DiagnosticFile
 {
-    public static List<T> Read<T>(string path)
+    public static List<T> Read<T>(string path, int maxBytes = 65536)
     {
         try
         {
             using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
-            if (stream.Length > 65536) throw new IOException("the machine diagnostics file is too large");
+            if (stream.Length > maxBytes) throw new IOException("the machine diagnostics file is too large");
             return JsonSerializer.Deserialize<List<T>>(stream, DiagnosticWire.Json) ?? [];
         }
         catch (Exception error) when (error is FileNotFoundException or DirectoryNotFoundException)

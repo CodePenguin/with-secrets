@@ -1,3 +1,6 @@
+using System.Globalization;
+using System.Text.Json;
+
 using Microsoft.Data.Sqlite;
 
 namespace WithSecrets;
@@ -91,6 +94,44 @@ public sealed partial class AuthorityStore
             Put(connection, transaction, AbsoluteSetting, absolute.ToString(System.Globalization.CultureInfo.InvariantCulture));
             Audit(connection, transaction, "session-timeouts-changed", null, null, actor, $"admin session timeouts: idle {idle} min, absolute {absolute} min", admin.Key);
 
+            return 0;
+        });
+    }
+
+    internal const string SetDiagnosticsOperation = "machine-diagnostics-settings";
+
+    internal DiagnosticSettings DiagnosticsSettings(string fingerprint) => Read(connection =>
+    {
+        if (connection is null) return DiagnosticSettings.Default;
+        object? stored = WithSecretsDatabase.Scalar(connection, null, "SELECT value FROM authority_settings WHERE name = $name",
+            ("$name", "diagnostics:" + fingerprint));
+        if (stored is not string json) return DiagnosticSettings.Default;
+        try
+        {
+            DiagnosticSettings? settings = JsonSerializer.Deserialize<DiagnosticSettings>(json, DiagnosticWire.Json);
+            return settings is not null && settings.Valid() ? settings : DiagnosticSettings.Default;
+        }
+        catch (JsonException)
+        {
+            return DiagnosticSettings.Default;
+        }
+    });
+
+    internal static IReadOnlyList<(string Name, string Value)> DiagnosticsSettingsParameters(string fingerprint, DiagnosticSettings settings) =>
+        [("machine", fingerprint), ("level", settings.Level), ("queue-kib", settings.QueueKiB.ToString(CultureInfo.InvariantCulture)),
+            ("retention-hours", settings.RetentionHours.ToString(CultureInfo.InvariantCulture))];
+
+    internal void SetDiagnosticsSettings(string fingerprint, DiagnosticSettings settings, VerifiedAdmin admin)
+    {
+        if (!settings.Valid()) throw new ArgumentException("invalid diagnostics settings", nameof(settings));
+        if (!admin.Consume(SetDiagnosticsOperation, AdminAuthorizer.Canonical(DiagnosticsSettingsParameters(fingerprint, settings))))
+            throw new UnauthorizedAccessException("the diagnostics settings change requires a fresh administrator passkey tap for exactly these values");
+
+        Write((connection, transaction) =>
+        {
+            Put(connection, transaction, "diagnostics:" + fingerprint, JsonSerializer.Serialize(settings, DiagnosticWire.Json));
+            Audit(connection, transaction, "diagnostics-settings-changed", fingerprint, null, admin.Actor,
+                $"diagnostics level {settings.Level}, queue {settings.QueueKiB} KiB, retention {settings.RetentionHours} hours", admin.Key);
             return 0;
         });
     }

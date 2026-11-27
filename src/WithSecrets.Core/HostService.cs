@@ -450,7 +450,7 @@ public sealed partial class HostService : IDisposable
                 }
 
                 service._auditLoop = Task.Run(() => service.Audit.RunAsync(options.AuditUploadInterval, options.AuditMaxBackoff, service._stop.Token));
-                service._diagnosticsLoop = Task.Run(() => service._diagnostics.RunAsync(service.DeliverDiagnosticsAsync, service._stop.Token));
+                service._diagnosticsLoop = Task.Run(() => service._diagnostics.RunAsync(service.DeliverDiagnosticsAsync, service._stop.Token, service.FetchDiagnosticsSettingsAsync));
 
                 return service;
             }
@@ -521,7 +521,8 @@ public sealed partial class HostService : IDisposable
             catch (Exception error) when (late && error is not OutOfMemoryException)
             {
                 // After the service started there is no caller to tell: the log says it (the type only), and the next restart tries again.
-                AppLog.Warn("the machine endpoint could not be started after the first approval ({Type}); restart the service", error.GetType().Name);
+                AppLog.Error("the machine endpoint could not be started after the first approval ({Type}); restart the service", error.GetType().Name);
+                _diagnostics.Report(DiagnosticCatalog.MachineEndpointFailed);
                 _launches?.Dispose();
                 _launches = null;
 
@@ -573,7 +574,8 @@ public sealed partial class HostService : IDisposable
         {
             if (_options.Deployment.RenewIdentityIfDueAsync(cancel).GetAwaiter().GetResult())
             {
-                AppLog.Warn("this machine's identity certificate was renewed (same key)");
+                AppLog.Info("this machine's identity certificate was renewed (same key)");
+                _diagnostics.Report(DiagnosticCatalog.IdentityRenewed);
             }
         }
         catch (Exception error) when (error is not OutOfMemoryException)
@@ -592,6 +594,7 @@ public sealed partial class HostService : IDisposable
             Volatile.Write(ref _ready, Authorization.ReconcileAsync(limit.Token).GetAwaiter().GetResult() != HostAuthorization.Reconciliation.Unreachable);
             if (Ready)
             {
+                _diagnostics.Report(DiagnosticCatalog.AuthorityConnected);
                 RenewIdentity(limit.Token);
             }
             else
@@ -606,11 +609,18 @@ public sealed partial class HostService : IDisposable
         }
     }
 
+    private Task<DiagnosticSettings> FetchDiagnosticsSettingsAsync(CancellationToken cancel) =>
+        _options.Deployment.Remote is { } remote
+            ? remote.GetDiagnosticsSettingsAsync(cancel)
+            : Task.FromResult(_options.Deployment.Store.DiagnosticsSettings(Authorization.Fingerprint));
+
     private Task DeliverDiagnosticsAsync(DiagnosticEvent[] events, CancellationToken cancel)
     {
         if (_options.Deployment.Remote is { } remote)
             return remote.UploadDiagnosticsAsync(events, cancel);
-        _options.Deployment.Store.Diagnostics.Record(Authorization.Fingerprint, events);
+        AuthorityStore store = _options.Deployment.Store;
+        DiagnosticSettings settings = store.DiagnosticsSettings(Authorization.Fingerprint);
+        store.Diagnostics.Record(Authorization.Fingerprint, [.. events.Where(item => settings.Includes(item.Code))]);
         return Task.CompletedTask;
     }
 
@@ -1008,10 +1018,12 @@ public sealed partial class HostService : IDisposable
 
                     Volatile.Write(ref _ready, true);
                     reconnected = false;
+                    _diagnostics.Report(DiagnosticCatalog.AuthorityConnected);
                     RenewIdentity(_stop.Token);
                 }
 
                 await Authorization.PollAsync(_stop.Token);
+                _diagnostics.Report(DiagnosticCatalog.AuthorityPollCompleted);
                 pause = floor;
             }
             catch (OperationCanceledException) when (_stop.IsCancellationRequested)
@@ -1074,7 +1086,8 @@ public sealed partial class HostService : IDisposable
                 }
                 catch (Exception error) when (error is not OperationCanceledException)
                 {
-                    AppLog.Warn("applying an invalidation failed: {Type}", error.GetType().Name);
+                    AppLog.Error("applying an invalidation failed: {Type}", error.GetType().Name);
+                    _diagnostics.Report(DiagnosticCatalog.InvalidationFailed);
                 }
             }
         }
@@ -1247,7 +1260,8 @@ public sealed partial class HostService : IDisposable
             }
             catch (Exception error) when (error is not OperationCanceledException)
             {
-                AppLog.Warn("applying an invalidation failed: {Type}", error.GetType().Name);
+                AppLog.Error("applying an invalidation failed: {Type}", error.GetType().Name);
+                _diagnostics.Report(DiagnosticCatalog.InvalidationFailed);
             }
 
             int revision = _options.Gate.Revision;
@@ -1427,7 +1441,9 @@ public sealed partial class HostService : IDisposable
         catch (Exception error)
         {
             // Fail closed: an error anywhere in a launch is a denial that says only that.
-            AppLog.Warn("launch failed: {Type}", error.GetType().Name);
+            AppLog.Error("launch failed: {Type}", error.GetType().Name);
+            if (error is not OperationCanceledException and not OutOfMemoryException)
+                _diagnostics.Report(DiagnosticCatalog.LaunchFailed);
             await stderr.WriteLineAsync("with-secrets: The user did not approve (internal error). Do not retry. Ask the user.");
 
             return (LaunchOutcome.Denied, RunCommand.Denied);
