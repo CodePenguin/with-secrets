@@ -317,6 +317,32 @@ internal static class ScenariosSpa
         s.NoProblems(c);
     }
 
+    public static async Task MachineDiagnostics(Host host, S s)
+    {
+        using Rig rig = new();
+        await using Ctx c = await Ctx.NewAsync(host);
+        await Flows.Configure(rig, c);
+        using SpaApp app = new(rig);
+        LocalDeployment deployment = rig.Machine.Deployment;
+
+        await Spa.SignIn(c, app, s);
+        await Spa.GoTo(c, "Machines", "Machines");
+        ILocator row = c.Page.GetByRole(AriaRole.Row).Filter(new() { HasText = KeyIdentity.Display(deployment.Fingerprint) });
+        await row.GetByRole(AriaRole.Button).ClickAsync();
+        await Spa.Dialog(c).GetByRole(AriaRole.Link, new() { Name = "View diagnostic logs" }).ClickAsync();
+        await c.Page.GetByText("No diagnostics have been received from this machine.").WaitForAsync();
+        s.Check(new Uri(c.Page.Url).AbsolutePath.EndsWith("/" + deployment.Fingerprint + "/diagnostics", StringComparison.Ordinal), "the machine details link opens an address for that machine's diagnostics");
+
+        deployment.Store.Diagnostics.Record(deployment.Fingerprint, [new DiagnosticEvent(Guid.NewGuid(), DateTimeOffset.UtcNow.AddMinutes(-1), DiagnosticCatalog.CheckInFailed)]);
+        await c.Page.ReloadAsync();
+        ILocator log = c.Page.GetByRole(AriaRole.Table, new() { Name = "Diagnostic log" });
+        await log.GetByRole(AriaRole.Cell, new() { Name = "The machine could not check in with its authority." }).WaitForAsync();
+        s.Check(await log.Locator("time[datetime]").CountAsync() == 2, "the diagnostic displays both the recorded and received times after reload");
+        await Spa.Axe(c, s, "machine diagnostics");
+        await c.Page.GetByRole(AriaRole.Link, new() { Name = "Back to machines" }).ClickAsync();
+        await c.Page.GetByRole(AriaRole.Heading, new() { Name = "Machines", Exact = true }).WaitForAsync();
+    }
+
     public static async Task ApproveMachine(Host host, S s)
     {
         using Rig rig = new();

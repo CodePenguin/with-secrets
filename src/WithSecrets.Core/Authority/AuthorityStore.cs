@@ -64,9 +64,11 @@ public sealed partial class AuthorityStore
     {
         Database = database;
         _clock = clock ?? TimeProvider.System;
+        Diagnostics = new MachineDiagnosticsStore(Path.Combine(Path.GetDirectoryName(database.FilePath)!, "machine-diagnostics"), _clock);
     }
 
     public WithSecretsDatabase Database { get; }
+    internal MachineDiagnosticsStore Diagnostics { get; }
     public GrantSealer? Sealer { get; set; }
     public string FilePath => Database.FilePath;
     public string FileLabel => Database.FileLabel;

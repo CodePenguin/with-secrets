@@ -6,6 +6,7 @@ export const keys = {
   status: ['status'] as const,
   session: ['session'] as const,
   machines: ['machines'] as const,
+  machineDiagnostics: (fingerprint: string) => ['machines', fingerprint, 'diagnostics'] as const,
   invitations: ['invitations'] as const,
   grants: ['grants'] as const,
   approvals: ['approvals'] as const,
@@ -78,6 +79,14 @@ export function useSession() {
 /** `poll`: ask again every so many milliseconds (the Machines view does, so a machine that has just paired appears by itself). */
 export function useMachines(enabled: boolean, poll: number | false = false) {
   return useQuery({ queryKey: keys.machines, queryFn: async () => (await api.get('/api/v1/machines')).items, enabled, refetchInterval: poll })
+}
+
+export function useMachineDiagnostics(fingerprint: string) {
+  return useQuery({
+    queryKey: keys.machineDiagnostics(fingerprint),
+    queryFn: () => api.get('/api/v1/machines/{fingerprint}/diagnostics', { path: { fingerprint } }),
+    refetchInterval: (query) => query.state.error instanceof ApiError && [400, 401, 403, 404].includes(query.state.error.status) ? false : 10_000,
+  })
 }
 
 export function useInvitations(enabled: boolean, poll: number | false = false) {

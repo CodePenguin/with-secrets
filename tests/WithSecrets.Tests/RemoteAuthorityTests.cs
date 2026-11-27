@@ -597,6 +597,15 @@ internal static partial class RemoteAuthorityTests
         using Raw raw = new(net.Url, net.Identity, host.Tls.Current);
         (int status, WireMessage? message, string text, _) = await raw.Call(RemoteOps.KeyTransitions, "kt-1", RemoteWire.WriteAfter(Other));
         check(status == 200 && message is { Ok: true } && !text.Contains("signature", StringComparison.OrdinalIgnoreCase) && text.StartsWith("{\"v\":1,", StringComparison.Ordinal), "wire: an ordinary request is plain JSON over TLS: no per-message envelope signature or encryption around it");
+
+        DiagnosticEvent warning = new(Guid.NewGuid(), DateTimeOffset.UtcNow.AddMinutes(-1), DiagnosticCatalog.CheckInFailed);
+        await remote.UploadDiagnosticsAsync([warning]);
+        await remote.UploadDiagnosticsAsync([warning]);
+        MachineDiagnosticsStore diagnostics = net.Authority.Deployment.Store.Diagnostics;
+        check(diagnostics.View(host.Fingerprint).Items is [{ Id: var id }] && id == warning.Id && diagnostics.View(net.Authority.Fingerprint).Items.Count == 0,
+            "remote: diagnostic retries produce one entry under the authenticated machine's identity");
+        (int rejected, _, _, _) = await raw.Call(RemoteOps.DiagnosticUpload, "diagnostic-invalid", "{\"events\":[],\"fingerprint\":\"another-machine\"}");
+        check(rejected == 400, "remote: diagnostic uploads cannot name another machine");
     }
 
     // ---------- the custom root, inbound and outbound ----------

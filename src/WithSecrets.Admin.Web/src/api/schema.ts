@@ -437,6 +437,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/machines/{fingerprint}/diagnostics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Recent diagnostic warnings received for one machine. */
+        get: operations["getMachineDiagnostics"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/grants": {
         parameters: {
             query?: never;
@@ -1739,6 +1756,23 @@ export interface components {
         };
         MachineList: {
             items: components["schemas"]["Machine"][];
+        };
+        DiagnosticEntry: {
+            id: string;
+            /** Format: date-time */
+            time: string;
+            /** Format: date-time */
+            receivedAt: string;
+            /** @enum {string} */
+            severity: "warning";
+            component: string;
+            message: string;
+        };
+        MachineDiagnostics: {
+            machineName: string;
+            /** Format: date-time */
+            lastReceivedAt: string | null;
+            items: components["schemas"]["DiagnosticEntry"][];
         };
         Grant: {
             id: string;
@@ -4471,6 +4505,82 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Machine"];
+                };
+            };
+            /** @description The request is not valid (invalid-request, invalid-json). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No browser session (session-required). */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such resource (not-found). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The Host is not a loopback name (host-not-allowed). */
+            421: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request failed (internal-error). Nothing the response does not say was changed. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    getMachineDiagnostics: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                fingerprint: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Success. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MachineDiagnostics"];
                 };
             };
             /** @description The request is not valid (invalid-request, invalid-json). */

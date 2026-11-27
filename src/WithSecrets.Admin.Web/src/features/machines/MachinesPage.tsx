@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useInvitations, useMachines, useSession } from '../../api/queries'
 import type { Invitation, Machine } from '../../api/types'
 import { Badge, Empty, Facts, PageHeader } from '../../components/Card'
@@ -93,6 +94,7 @@ function MachineDetails({ machine, start, onClose, canChange }: { machine: Machi
         ...(machine.pendingHostName ? ([['Reported host name', machine.pendingHostName]] as const) : []),
         ['Enrolled', <Time key="c" value={machine.created} />],
         ['Updated', <Time key="u" value={machine.updated} />],
+        ['Diagnostics', <Link key="diagnostics" to={`/machines/${encodeURIComponent(machine.fingerprint)}/diagnostics`}>View diagnostic logs</Link>],
       ]} />
       <div className={styles.fingerprint}>
         <strong>Fingerprint</strong>

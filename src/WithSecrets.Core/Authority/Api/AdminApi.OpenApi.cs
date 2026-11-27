@@ -248,6 +248,21 @@ internal sealed partial class AdminApi
                 ("copyWarning", new JsonObject { ["oneOf"] = new JsonArray(S.Ref("CopyWarning"), new JsonObject { ["type"] = "null" }) }),
             ]),
             ["MachineList"] = S.Obj([("items", S.Arr(S.Ref("Machine")))]),
+            ["DiagnosticEntry"] = S.Obj(
+            [
+                ("id", S.Str()),
+                ("time", S.Time()),
+                ("receivedAt", S.Time()),
+                ("severity", S.Str(values: ["warning"])),
+                ("component", S.Str()),
+                ("message", S.Str()),
+            ]),
+            ["MachineDiagnostics"] = S.Obj(
+            [
+                ("machineName", S.Str()),
+                ("lastReceivedAt", S.Time(nullable: true)),
+                ("items", S.Arr(S.Ref("DiagnosticEntry"))),
+            ]),
             ["Grant"] = S.Obj(
             [
                 ("id", S.Str()),

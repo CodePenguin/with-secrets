@@ -183,6 +183,7 @@ public sealed partial class HostService : IDisposable
         options.Deployment.Authority.Verifier ??= options.State is { } verifierState ? new ManifestApprovalVerifier(verifierState) : null;
         Authorization = options.Deployment.CreateAuthorization(options.Gate, options.Monotonic);
         TimeProvider authorityClock = options.Deployment.Clock ?? TimeProvider.System;
+        _diagnostics = new DiagnosticOutbox(authorityClock);
         Approvals = new ApprovalQueue(authorityClock, () => options.TimeLimit ?? ApprovalSettings.Load(options.State, out _).Timeout);
 
         // In remote mode the unused local authority stays disabled. Runs depend only on the remote authority's lock.
@@ -244,7 +245,10 @@ public sealed partial class HostService : IDisposable
 
         // The host's audit: events are signed with the machine key and committed to the outbox tables before a run decrypts anything; the uploader sends them on its own.
         HostAuditOutbox outbox = new(options.Deployment.Store.Database, options.Deployment.MachineKey, options.Deployment.Clock);
-        Audit = new HostAudit(outbox, new AuditUploader(outbox, () => options.Deployment.AuditSink, (ack, id, digest, cancel) => Authorization.VerifyAnswerAsync(ack, id, digest, cancel), Authorization.Fingerprint));
+        Audit = new HostAudit(outbox, new AuditUploader(outbox, () => options.Deployment.AuditSink, (ack, id, digest, cancel) => Authorization.VerifyAnswerAsync(ack, id, digest, cancel), Authorization.Fingerprint))
+        {
+            OnEventsRejected = () => _diagnostics.Report(DiagnosticCatalog.AuditEventsRejected),
+        };
 
         // The human commands' and the admin app's events (type admin) take the same road as a run's: signed with the machine key, committed to this outbox, sent by this uploader.
         options.State.Audit = new AdminAudit(() => Audit, options.State.Database);
@@ -324,6 +328,8 @@ public sealed partial class HostService : IDisposable
     }
 
     private Task _auditLoop = Task.CompletedTask;
+    private Task _diagnosticsLoop = Task.CompletedTask;
+    private readonly DiagnosticOutbox _diagnostics;
     private volatile MachineListener? _machineListener;
     private readonly Lock _machineLock = new();
     private AuthorityLaunchHandler? _launches;
@@ -434,6 +440,7 @@ public sealed partial class HostService : IDisposable
                     {
                         // Events the authority refused for good are kept apart and never resent: a person should know they exist.
                         AppLog.Warn("{Count} audit event(s) in the outbox were refused by the authority and are kept, not resent", refused);
+                        service._diagnostics.Report(DiagnosticCatalog.AuditEventsRejected);
                     }
                 }
                 catch (AuditOutboxException)
@@ -442,6 +449,7 @@ public sealed partial class HostService : IDisposable
                 }
 
                 service._auditLoop = Task.Run(() => service.Audit.RunAsync(options.AuditUploadInterval, options.AuditMaxBackoff, service._stop.Token));
+                service._diagnosticsLoop = Task.Run(() => service._diagnostics.RunAsync(service.DeliverDiagnosticsAsync, service._stop.Token));
 
                 return service;
             }
@@ -570,6 +578,7 @@ public sealed partial class HostService : IDisposable
         catch (Exception error) when (error is not OutOfMemoryException)
         {
             AppLog.Warn("renewing the identity certificate failed: {Type}", error.GetType().Name);
+            if (!cancel.IsCancellationRequested) _diagnostics.Report(DiagnosticCatalog.IdentityRenewalFailed);
         }
     }
 
@@ -584,11 +593,24 @@ public sealed partial class HostService : IDisposable
             {
                 RenewIdentity(limit.Token);
             }
+            else
+            {
+                _diagnostics.Report(DiagnosticCatalog.CheckInFailed);
+            }
         }
         catch (Exception error) when (error is not OutOfMemoryException)
         {
             AppLog.Warn("the startup check-in with the authority failed: {Type}", error.GetType().Name);
+            _diagnostics.Report(DiagnosticCatalog.CheckInFailed);
         }
+    }
+
+    private Task DeliverDiagnosticsAsync(DiagnosticEvent[] events, CancellationToken cancel)
+    {
+        if (_options.Deployment.Remote is { } remote)
+            return remote.UploadDiagnosticsAsync(events, cancel);
+        _options.Deployment.Store.Diagnostics.Record(Authorization.Fingerprint, events);
+        return Task.CompletedTask;
     }
 
     private static WebApplication Build(HostServiceOptions options, LocalEndpoint endpoint)
@@ -1006,6 +1028,7 @@ public sealed partial class HostService : IDisposable
                 }
 
                 AppLog.Warn("the authority link failed: {Type}", error is RemoteRefusedException refused ? "refused " + refused.Code : error.GetType().Name);
+                _diagnostics.Report(DiagnosticCatalog.AuthorityLinkFailed);
                 try
                 {
                     await Task.Delay(TimeSpan.FromTicks((long)(pause.Ticks * (0.5 + Random.Shared.NextDouble() / 2))), _stop.Token);
@@ -1441,8 +1464,8 @@ public sealed partial class HostService : IDisposable
         _stop.Cancel();
         try
         {
-            // Both loops can still be using the database after cancellation.
-            Task.WhenAll(_auditLoop, _pump).Wait(TimeSpan.FromSeconds(3));
+            // The background loops can still be using local state after cancellation.
+            Task.WhenAll(_auditLoop, _diagnosticsLoop, _pump).Wait(TimeSpan.FromSeconds(3));
         }
         catch (Exception error) when (error is AggregateException or OperationCanceledException)
         {
