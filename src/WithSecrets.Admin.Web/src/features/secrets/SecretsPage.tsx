@@ -58,12 +58,14 @@ export function SecretsPage() {
   const [value, setValue] = useState('')
   const [extraEntries, setExtraEntries] = useState<BatchEntry[]>([])
   const nextEntryId = useRef(1)
+  const focusEntry = useRef<number | null>(null)
   const [problem, setProblem] = useState<unknown>(null)
   const [done, setDone] = useState<string | null>(null)
   const [cancelled, setCancelled] = useState(false)
   const [busy, setBusy] = useState(false)
   const working = useRef(false)
   const formId = useId()
+  const folderHintId = useId()
 
   const names = secrets.data?.items ?? []
   const editor = draft ?? (prefill && secrets.data
@@ -80,7 +82,6 @@ export function SecretsPage() {
   const entered = entries.map(entry => entry.name)
   const nonEmptyNames = entered.filter(Boolean)
   const duplicate = new Set(nonEmptyNames).size < nonEmptyNames.length
-  const replacing = entries.some(entry => names.includes(entry.name)) && !moving
   const canSave = source
     ? !!name && !nameError && (moving ? canChange : value !== '')
     : !duplicate && entries.every(entry => entry.name && entry.value)
@@ -171,15 +172,41 @@ export function SecretsPage() {
     </>
   )
   const showEditor = canWrite && editor !== null
-
-  function updateEntry(id: number, changes: Partial<Pick<BatchEntry, 'name' | 'value'>>) {
-    setExtraEntries(current => current.map(entry => entry.id === id ? { ...entry, ...changes } : entry))
-  }
+  const draftRows = [{ id: 0, name: editor?.name ?? '', value }, ...extraEntries]
 
   function addEntry() {
     const id = nextEntryId.current++
+    focusEntry.current = id
     setExtraEntries(current => [...current, { id, name: '', value: '' }])
   }
+
+  function updateEntry(id: number, change: Partial<Pick<BatchEntry, 'name' | 'value'>>) {
+    setExtraEntries(current => current.map(row => row.id === id ? { ...row, ...change } : row))
+  }
+
+  function removeEntry(id: number) {
+    if (id === 0 && extraEntries[0]) {
+      const [first, ...rest] = extraEntries
+      focusEntry.current = 0
+      setDraft({ name: first.name, folder: '' })
+      setValue(first.value)
+      setExtraEntries(rest)
+      return
+    }
+
+    const index = draftRows.findIndex(row => row.id === id)
+    focusEntry.current = (draftRows[index + 1] ?? draftRows[index - 1])?.id ?? null
+    setExtraEntries(current => current.filter(entry => entry.id !== id))
+  }
+
+  const editorActions = (
+    <>
+      <Button disabled={busy} onClick={closeEditor}>Cancel</Button>
+      <Button variant="primary" type="submit" form={formId} disabled={busy || !canSave}>
+        {source ? 'Save changes' : extraEntries.length > 0 ? 'Save secrets' : 'Save secret'}
+      </Button>
+    </>
+  )
 
   return (
     <>
@@ -203,46 +230,71 @@ export function SecretsPage() {
         onCancel={() => {
           if (!working.current) closeEditor()
         }}
-        footer={
-          <>
-            <Button disabled={busy} onClick={closeEditor}>Cancel</Button>
-            <Button variant="primary" type="submit" form={formId} disabled={busy || !canSave}>
-              {source ? 'Save changes' : extraEntries.length > 0 ? 'Save secrets' : 'Save secret'}
+        footer={source ? editorActions : (
+          <div className={styles.batchActions}>
+            <Button className={styles.addEntry} disabled={busy || entries.length >= maxBatchSize} onClick={addEntry}>
+              <Icon name="plus" /> Add another secret
             </Button>
-          </>
-        }
+            {editorActions}
+          </div>
+        )}
       >
         <form id={formId} className={styles.form} onSubmit={(event) => {
           event.preventDefault()
           void save()
         }}>
-          <Field label="Name" hint={source ? undefined : 'Use / to add folders, for example apps/API_KEY.'} error={nameError} required>
-            {control => <input {...control} className={controlClass} value={editor.name} onChange={(event) => setDraft({ ...editor, name: event.target.value })} autoComplete="off" spellCheck={false} maxLength={200} readOnly={!!source && !canChange} disabled={busy} required />}
-          </Field>
           {source ? (
-            <Field label="Folder path" hint="Leave blank to use the root.">
-              {control => <input {...control} className={controlClass} value={editor.folder} onChange={(event) => setDraft({ ...editor, folder: event.target.value })} autoComplete="off" spellCheck={false} maxLength={200} readOnly={!canChange} disabled={busy} />}
-            </Field>
-          ) : null}
-          <Field label={source ? 'New value' : 'Value'} hint={moving ? 'Leave blank to keep the current value.' : undefined} required={!source}>
-            {control => <input {...control} className={controlClass} type="password" value={value} onChange={(event) => setValue(event.target.value)} autoComplete="off" spellCheck={false} maxLength={4096} disabled={busy} required={!source} />}
-          </Field>
-          {extraEntries.map((entry, index) => (
-            <fieldset key={entry.id} className={styles.entry} disabled={busy}>
-              <Field label={`Name ${index + 2}`} required>
-                {control => <input {...control} className={controlClass} value={entry.name} onChange={event => updateEntry(entry.id, { name: event.target.value })} autoComplete="off" spellCheck={false} maxLength={200} required />}
+            <>
+              <Field label="Name" error={nameError} required>
+                {control => <input {...control} className={controlClass} value={editor.name} onChange={(event) => setDraft({ ...editor, name: event.target.value })} autoComplete="off" spellCheck={false} maxLength={200} readOnly={!canChange} disabled={busy} required />}
               </Field>
-              <Field label={`Value ${index + 2}`} required>
-                {control => <input {...control} className={controlClass} type="password" value={entry.value} onChange={event => updateEntry(entry.id, { value: event.target.value })} autoComplete="off" spellCheck={false} maxLength={4096} required />}
+              <Field label="Folder path" hint="Leave blank to use the root.">
+                {control => <input {...control} className={controlClass} value={editor.folder} onChange={(event) => setDraft({ ...editor, folder: event.target.value })} autoComplete="off" spellCheck={false} maxLength={200} readOnly={!canChange} disabled={busy} />}
               </Field>
-              <Button type="button" onClick={() => setExtraEntries(current => current.filter(item => item.id !== entry.id))}>
-                Remove entry {index + 2}
-              </Button>
-            </fieldset>
-          ))}
+              <Field label="New value" hint={moving ? 'Leave blank to keep the current value.' : undefined}>
+                {control => <input {...control} className={controlClass} type="password" value={value} onChange={(event) => setValue(event.target.value)} autoComplete="off" spellCheck={false} maxLength={4096} disabled={busy} />}
+              </Field>
+            </>
+          ) : (
+            <>
+              <p id={folderHintId} className={styles.folderHint}>Use / to add folders, for example apps/API_KEY.</p>
+              <div className={styles.batchRows}>
+                {draftRows.map((entry, index) => (
+                  <fieldset key={entry.id} className={styles.entry} disabled={busy}>
+                    <Field label={index === 0 ? 'Name' : `Name ${index + 1}`}>
+                      {control => <input {...control} className={controlClass} value={entry.name}
+                        aria-describedby={folderHintId} autoComplete="off" spellCheck={false} maxLength={200} required
+                        ref={input => {
+                          if (input && focusEntry.current === entry.id) {
+                            focusEntry.current = null
+                            input.focus()
+                          }
+                        }}
+                        onChange={event => {
+                          const name = event.target.value
+                          if (entry.id === 0) setDraft({ ...editor, name })
+                          else updateEntry(entry.id, { name })
+                        }} />}
+                    </Field>
+                    <Field label={index === 0 ? 'Value' : `Value ${index + 1}`}>
+                      {control => <input {...control} className={controlClass} type="password" value={entry.value}
+                        autoComplete="off" spellCheck={false} maxLength={4096} required
+                        onChange={event => {
+                          const value = event.target.value
+                          if (entry.id === 0) setValue(value)
+                          else updateEntry(entry.id, { value })
+                        }} />}
+                    </Field>
+                    {draftRows.length > 1 ? (
+                      <Button variant="dangerOutline" className={styles.removeEntry} aria-label={`Remove entry ${index + 1}`} title="Remove entry"
+                        onClick={() => removeEntry(entry.id)}><Icon name="trash" /></Button>
+                    ) : null}
+                  </fieldset>
+                ))}
+              </div>
+            </>
+          )}
           {duplicate ? <p role="status">Enter each secret name once.</p> : null}
-          {replacing ? <p>Existing grants can use replacement values without asking again.</p> : null}
-          {!source ? <div><Button type="button" disabled={busy || entries.length >= maxBatchSize} onClick={addEntry}>Add another secret</Button></div> : null}
         </form>
         {feedback}
       </Dialog> : null}
