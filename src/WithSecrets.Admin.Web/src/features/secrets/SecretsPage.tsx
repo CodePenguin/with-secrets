@@ -224,8 +224,8 @@ export function SecretsPage() {
               {control => <input {...control} className={controlClass} value={editor.folder} onChange={(event) => setDraft({ ...editor, folder: event.target.value })} autoComplete="off" spellCheck={false} maxLength={200} readOnly={!canChange} disabled={busy} />}
             </Field>
           ) : null}
-          <Field label={source ? 'New value' : 'Value'} hint={moving ? 'Leave blank to keep the current value.' : undefined} required={!moving}>
-            {control => <input {...control} className={controlClass} type="password" value={value} onChange={(event) => setValue(event.target.value)} autoComplete="off" spellCheck={false} maxLength={4096} disabled={busy} required={!moving} />}
+          <Field label={source ? 'New value' : 'Value'} hint={moving ? 'Leave blank to keep the current value.' : undefined} required={!source}>
+            {control => <input {...control} className={controlClass} type="password" value={value} onChange={(event) => setValue(event.target.value)} autoComplete="off" spellCheck={false} maxLength={4096} disabled={busy} required={!source} />}
           </Field>
           {extraEntries.map((entry, index) => (
             <fieldset key={entry.id} className={styles.entry} disabled={busy}>
