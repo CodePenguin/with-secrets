@@ -275,12 +275,40 @@ public sealed class SecretStore(StateDatabase db, ISecretCipher? cipher = null, 
     /// </summary>
     internal string? TryApply(long expectedVersion, SignedManifest signed, IReadOnlyDictionary<string, string> rows, IReadOnlyCollection<string> removes, AdminEvent audit,
         Func<SqliteConnection, SqliteTransaction, string?>? alsoInTransaction = null)
+        => TryApply(rows, removes, audit, (connection, transaction) => db.TryReplace(connection, transaction, expectedVersion, signed), alsoInTransaction);
+
+    internal string? TrySet(long expectedVersion, SignedSecretWrite signed, IReadOnlyDictionary<string, string> rows, AdminEvent audit)
+        => TryApply(rows, [], audit, (connection, transaction) =>
+        {
+            Manifest? current = db.CurrentManifest(connection, transaction);
+            if (current is null || current.Version != expectedVersion)
+            {
+                return "the state changed while the page was open; nothing was saved";
+            }
+
+            if (signed.Text != SignedSecretWrite.Prepare(current, rows) || signed.Verify(current) is not { } next)
+            {
+                return "the secret write does not verify; nothing was saved";
+            }
+
+            if (Problem(current, AllRows(connection, transaction)) is { } mismatch)
+            {
+                return "the secret store failed verification (" + mismatch + "); nothing was saved";
+            }
+
+            WithSecretsDatabase.Execute(connection, transaction, "INSERT INTO secret_writes (version, text, bind, proof) VALUES ($version, $text, $bind, $proof)",
+                ("$version", next.Version), ("$text", signed.Text), ("$bind", System.Buffers.Text.Base64Url.EncodeToString(signed.Bind)), ("$proof", signed.Proof));
+            return null;
+        });
+
+    private string? TryApply(IReadOnlyDictionary<string, string> rows, IReadOnlyCollection<string> removes, AdminEvent audit,
+        Func<SqliteConnection, SqliteTransaction, string?> writeState, Func<SqliteConnection, SqliteTransaction, string?>? alsoInTransaction = null)
     {
         try
         {
             return db.Write<string?>((connection, transaction) =>
             {
-                if (db.TryReplace(connection, transaction, expectedVersion, signed) is { } problem)
+                if (writeState(connection, transaction) is { } problem)
                 {
                     throw new Abort(problem);
                 }

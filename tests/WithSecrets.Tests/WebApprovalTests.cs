@@ -2239,7 +2239,7 @@ internal static partial class WebApprovalTests
     // ---- Setting and removing secrets in the admin app (SecretFlows, SecretEntry.Session, SecretCrypto).
 
     /// <summary>The browser's side of the encryption, with .NET crypto: ECDH P-256, HKDF-SHA-256, AES-256-GCM with the tag appended.</summary>
-    private static (byte[] Epk, byte[] Ct) BrowserEncrypt(byte[] serverKey, byte[] bind, byte[] iv, byte[] associated, byte[] plaintext)
+    internal static (byte[] Epk, byte[] Ct) BrowserEncrypt(byte[] serverKey, byte[] bind, byte[] iv, byte[] associated, byte[] plaintext)
     {
         using ECDiffieHellman mine = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
         ECParameters theirs = new()
@@ -2458,7 +2458,7 @@ internal static partial class WebApprovalTests
         }
 
         byte[] signedCt = twist == Twist.SignOtherCt ? [.. ct, 0] : ct;
-        string signedManifest = twist == Twist.SignOtherManifest ? manifest.Replace("\"v\":", "\"v\":1", StringComparison.Ordinal) : manifest;
+        string signedManifest = twist == Twist.SignOtherManifest ? manifest + " " : manifest;
         byte[] challenge = Manifest.Challenge([.. bind, .. SHA256.HashData(signedCt)], signedManifest);
         Dictionary<string, string> body = JsonSerializer.Deserialize<Dictionary<string, string>>(key.Assert(challenge, FlowOrigin, "localhost", TestState.NextCount()))!;
         foreach ((string name, string value) in sealedBody)
@@ -2926,7 +2926,8 @@ internal static partial class WebApprovalTests
                 check(data.Count == 2 && data["A_NEW"] == ValueA && data["B_OLD"] == ValueB, "secrets: the values read back from the store, verified against the signed hashes");
                 Manifest after = TestState.Current(store.Database)!;
                 check(after.Version == before.Version + 1 && after.Store == before.Store && after.Vault == before.Vault && after.Secrets.Keys.SequenceEqual(good) && after.Secrets["B_OLD"] != before.Secrets["B_OLD"], "secrets: one new manifest (v+1) with the same store key and vault, both hashes, the replaced one changed");
-                check(run.SealStatus == 200 && JsonDocument.Parse(run.SealReply).RootElement.GetProperty("manifest").GetString() == TestState.Current(store.Database)!.Canonical(), "secrets: the manifest /seal answered is the one that is stored");
+                check(run.SealStatus == 200 && JsonDocument.Parse(run.SealReply).RootElement.GetProperty("manifest").GetString() ==
+                    SignedSecretWrite.Prepare(before, store.Snapshot().Rows), "secrets: the sealed batch commits exactly the signed hashes");
                 check(run.SaveStatus == 200 && run.SaveReply == "{\"ok\":true,\"stored\":[\"A_NEW\",\"B_OLD\"]}", "secrets: the save reply has only the names (" + run.SaveReply + ")");
                 check(run.Entry is { Fields: [{ Name: "A_NEW", Replace: false }, { Name: "B_OLD", Replace: true }] } && run.Entry.Text.Contains("A_NEW (new)", StringComparison.Ordinal) && run.Entry.Text.Contains("B_OLD (replace)", StringComparison.Ordinal), "secrets: the entry says new and replace");
                 check(run.Entry is not null && Base64Url.DecodeFromChars(run.Entry.PublicKey) is { Length: 65 } point && point[0] == 0x04, "secrets: the entry's key is a 65-byte uncompressed point");
@@ -3065,20 +3066,52 @@ internal static partial class WebApprovalTests
                 check(run.Result is { Code: not 0 } && Stored(store)["B_OLD"] == OldB && !Stored(store).ContainsKey("A_NEW"), "secrets: a state that changed while the entry was open stores nothing (" + run.Result?.Detail + ")");
             }
 
-            // A key that is not an admin cannot store or remove secrets.
+            // A convenience key can add and replace values. Removal still requires an admin.
             {
                 using TestAuthenticator tablet = TestAuthenticator.ES256();
-                (PasskeyStore two, SecretStore store) = Fresh(new Dictionary<string, string> { ["A_NEW"] = ValueA });
+                (PasskeyStore two, SecretStore store) = Fresh(oldData);
                 check(two.Add(tablet.Record("localhost", "tablet")), "secrets: an admin and a second key are enrolled");
                 long version = TestState.Current(store.Database)!.Version;
                 EntryRun set = SetRun(two, store, good, tablet, goodValues);
-                check(set.Result is { Code: RunCommand.Denied } && set.SaveStatus == 403 && TestState.Current(store.Database)!.Version == version, "secrets: a set approved by a non-admin key is denied and stores nothing (" + set.Result?.Detail + ")");
+                Dictionary<string, string> saved = Stored(store);
+                version++;
+                check(set.Result is { Code: 0 } && set.SaveStatus == 200 && TestState.Current(store.Database)!.Version == version
+                    && saved["A_NEW"] == ValueA && saved["B_OLD"] == ValueB, "secrets: a convenience key adds and replaces values in one tap");
                 check(set.Entry is not null && !set.Entry.Payload.GetRawText().Contains("allowCredentials", StringComparison.Ordinal) && !set.Entry.Payload.GetRawText().Contains(TestAuthenticator.Encode(tablet.CredentialId), StringComparison.Ordinal), "secrets: the entry names no credential (the server decides who may sign)");
                 using TestAuthenticator stranger = TestAuthenticator.ES256();
                 EntryRun unknownSet = SetRun(two, store, good, stranger, goodValues);
                 check(unknownSet.Result is { Code: RunCommand.Denied } && unknownSet.SaveStatus == 403 && TestState.Current(store.Database)!.Version == version, "secrets: a set signed by a credential that is not in the manifest is denied and stores nothing (" + unknownSet.Result?.Detail + ")");
                 EntryRun removed = RemoveRun(two, store, ["A_NEW"], tablet, true);
                 check(removed.Result is { Code: RunCommand.Denied } && removed.SaveStatus == 403 && Stored(store).ContainsKey("A_NEW") && TestState.Current(store.Database)!.Version == version, "secrets: a removal approved by a non-admin key is denied and removes nothing (" + removed.Result?.Detail + ")");
+                EntryRun moved = SetRun(two, store, ["MOVED"], tablet, "{}", source: "B_OLD");
+                check(moved.SaveStatus == 403, "secrets: a convenience passkey cannot sign a move");
+                EntryRun edited = SetRun(two, store, ["B_OLD"], tablet, Values(("B_OLD", OldB)), source: "B_OLD");
+                check(edited.SaveStatus == 200 && Stored(store)["B_OLD"] == OldB, "secrets: a convenience passkey can update a value from Edit secret");
+                saved = Stored(store);
+
+                string tabletId = TestAuthenticator.Encode(tablet.CredentialId);
+                Manifest beforeRemoval = TestState.Current(store.Database)!;
+                SignedManifest removal = TestState.Sign(laptop, beforeRemoval.WithoutKey(tabletId).Canonical());
+                check(PasskeyRegistration.Commit(store.Database, removal, () => ApprovalDecision.Allow()).Approved
+                    && Stored(new SecretStore(new StateDatabase(store.Database.FilePath))).SequenceEqual(saved),
+                    "secrets: removing the writer preserves its accepted values in the new admin-signed manifest");
+                EntryRun unenrolled = SetRun(two, store, good, tablet, goodValues);
+                check(unenrolled.SaveStatus == 403, "secrets: a removed convenience key cannot sign another batch");
+            }
+
+            {
+                (PasskeyStore _, SecretStore initial) = Fresh(oldData);
+                string file = initial.Database.FilePath;
+                ManifestTests.Execute(file, "DROP TABLE secret_writes; PRAGMA user_version = 1;");
+                StateDatabase upgraded = new(file);
+                SecretStore store = new(upgraded);
+                check(Stored(store)["B_OLD"] == OldB, "secrets: an existing database upgrades without changing values");
+                PasskeyStore passkeys = new(upgraded);
+                check(SetRun(passkeys, store, ["A_NEW"], laptop, Values(("A_NEW", ValueA))).SaveStatus == 200
+                    && SetRun(passkeys, store, ["B_OLD"], laptop, Values(("B_OLD", ValueB))).SaveStatus == 200,
+                    "secrets: consecutive signed batches verify against their predecessors");
+                ManifestTests.Execute(file, "DELETE FROM secret_writes WHERE version = (SELECT MIN(version) FROM secret_writes);");
+                check(!new StateDatabase(file).TryManifest(out _, out _), "secrets: dropping a batch from the middle fails state verification");
             }
 
             // Nothing enrolled, or a with-secrets.db that cannot be read: refused before anything starts.

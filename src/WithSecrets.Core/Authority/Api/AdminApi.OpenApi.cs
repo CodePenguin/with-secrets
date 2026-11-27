@@ -119,7 +119,7 @@ internal sealed partial class AdminApi
                 ("admin", S.Str(nullable: true, description: "Deprecated display alias for admin-scope sessions; use identity and scope.")),
                 ("identity", S.Str(nullable: true, description: "The trusted enrolled passkey identity that signed in.")),
                 ("scope", S.Str(values: ["admin", "approval"], nullable: true)),
-                ("capabilities", S.Arr(S.Str(values: [SessionCapabilities.ApprovalsRead, SessionCapabilities.ApprovalsDecide, SessionCapabilities.AdminRead, SessionCapabilities.AdminDecide, SessionCapabilities.GrantsDecide]))),
+                ("capabilities", S.Arr(S.Str(values: [SessionCapabilities.ApprovalsRead, SessionCapabilities.ApprovalsDecide, SessionCapabilities.AdminRead, SessionCapabilities.AdminDecide, SessionCapabilities.GrantsDecide, SessionCapabilities.SecretsWrite]))),
                 ("started", S.Time(nullable: true)),
                 ("idleExpires", S.Time(nullable: true)),
                 ("absoluteExpires", S.Time(nullable: true)),

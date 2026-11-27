@@ -7,8 +7,8 @@ namespace WithSecrets;
 /// Proof by passkey: the person signs the request's binding with a key that was enrolled for the page's host name. Only keys
 /// stored for that host (the rpId) may approve, and the key is chosen by the id in the response. <paramref name="readCode" />
 /// reads the confirmation code that enrollment shows on the page; it returns null when nothing can be read. With
-/// <paramref name="adminOnly" /> only admin keys may prove (for every change to the state); otherwise every enrolled key
-/// may (for runs). <paramref name="staysAdmin" /> narrows that to the admin keys that are still admins in a new state (see
+/// <paramref name="adminOnly" /> only admin keys may prove; otherwise every enrolled key may.
+/// <paramref name="staysAdmin" /> narrows that to the admin keys that are still admins in a new state (see
 /// <see cref="Signing" />).
 /// </summary>
 public sealed class PasskeyMethod(PasskeyStore store, ApprovalSettings settings, Func<string?>? readCode = null, bool adminOnly = false, Manifest? staysAdmin = null) : IProofMethod

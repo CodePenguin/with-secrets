@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Text.Json;
 
 using Microsoft.Data.Sqlite;
+
 using static WithSecrets.WithSecretsDatabase;
 
 namespace WithSecrets;
@@ -135,7 +136,13 @@ public sealed class StateDatabase
 
         try
         {
-            return ReadManifest(connection, transaction);
+            if (transaction is not null)
+            {
+                return ReadManifest(connection, transaction);
+            }
+
+            using SqliteTransaction snapshot = connection.BeginTransaction(deferred: true);
+            return ReadManifest(connection, snapshot);
         }
         catch (SqliteException failure) when (failure.SqliteErrorCode is not (5 or 6))
         {
@@ -181,7 +188,8 @@ public sealed class StateDatabase
         Dictionary<string, long> counts = SignCounts(connection, transaction);
         if (rows.Count == 0)
         {
-            if (counts.Count > 0 || Scalar(connection, transaction, "SELECT COUNT(*) FROM secrets") is not 0L)
+            if (counts.Count > 0 || Scalar(connection, transaction, "SELECT COUNT(*) FROM secrets") is not 0L
+                || Scalar(connection, transaction, "SELECT COUNT(*) FROM secret_writes") is not 0L)
             {
                 throw Failed("keys or secrets without a manifest");
             }
@@ -210,6 +218,20 @@ public sealed class StateDatabase
         if (counts.Any(item => item.Value is < 0 or > uint.MaxValue || !manifest.Keys.Any(key => key.Id == item.Key)))
         {
             throw Failed("a sign count that does not belong to an enrolled key");
+        }
+
+        using SqliteCommand writes = Command(connection, transaction, "SELECT version, text, bind, proof FROM secret_writes ORDER BY version");
+        using SqliteDataReader entries = writes.ExecuteReader();
+        while (entries.Read())
+        {
+            string bind = entries.GetString(2);
+            if (entries.GetInt64(0) != manifest.Version + 1 || !Base64Url.IsValid(bind))
+            {
+                throw Failed("a secret write is out of order or has an invalid bind");
+            }
+
+            SignedSecretWrite write = new(entries.GetString(1), Base64Url.DecodeFromChars(bind), entries.GetString(3));
+            manifest = write.Verify(manifest) ?? throw Failed("a secret write does not verify");
         }
 
         return manifest;
@@ -260,7 +282,7 @@ public sealed class StateDatabase
         using JsonDocument proof = JsonDocument.Parse(next.Proof);
         JsonElement root = proof.RootElement;
         string Field(string name) => root.GetProperty(name).GetString() ?? throw new FormatException(name);
-        Execute(connection, transaction, "DELETE FROM manifest");
+        Execute(connection, transaction, "DELETE FROM manifest; DELETE FROM secret_writes;");
         Execute(connection, transaction,
             "INSERT INTO manifest (id, version, text, bind, credential_id, authenticator_data, client_data, signature) VALUES (1, $version, $text, $bind, $id, $ad, $cd, $sig)",
             ("$version", manifest.Version), ("$text", next.Text), ("$bind", Base64Url.EncodeToString(next.Bind)), ("$id", Field("id")),
@@ -303,7 +325,7 @@ public sealed class StateDatabase
             return false;
         }
 
-        Execute(connection, transaction, "DELETE FROM manifest; DELETE FROM sign_counts; DELETE FROM secrets;");
+        Execute(connection, transaction, "DELETE FROM manifest; DELETE FROM sign_counts; DELETE FROM secrets; DELETE FROM secret_writes;");
         Execute(connection, transaction, "INSERT INTO manifest (id, version, text, bind, credential_id, authenticator_data, client_data, signature) VALUES (1, $version, $text, $bind, $id, $ad, $cd, $sig)",
             ("$version", recovered.Version), ("$text", recovered.Text), ("$bind", recovered.Bind), ("$id", recovered.CredentialId),
             ("$ad", recovered.AuthenticatorData), ("$cd", recovered.ClientData), ("$sig", recovered.Signature));

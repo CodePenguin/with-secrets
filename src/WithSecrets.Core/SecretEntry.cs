@@ -15,9 +15,8 @@ public sealed record SecretChange(int Code, string Detail)
 /// <summary>
 /// The rules and the server side of entering secret values in the admin web app (see <see cref="SecretFlows" />): the names, the text
 /// the passkey signs, and the <see cref="Session" /> that takes the values the page sends sealed to the entry's key, checks them, encrypts each
-/// value to the store's public key and answers with the next manifest. The Save tap asks the passkey for one assertion over
-/// SHA-256(bind || SHA-256(ct) || SHA-256(manifest)) (see <see cref="SecretCrypto.ManifestBind" />), which covers both the values sent and
-/// the hashes of the new rows. The program checks the proof, then stores the rows and the signed manifest in one transaction with the audit row.
+/// value to the store's public key and answers with the batch to sign. The Save tap covers both the submitted values and
+/// the stored ciphertext hashes. The batch, its assertion, the ciphertexts and the audit entry are committed together.
 /// </summary>
 public static class SecretEntry
 {
@@ -65,12 +64,19 @@ public static class SecretEntry
     {
         List<(string Name, bool Replace)> fields = [.. names.Select(name => (name, stored.Contains(name)))];
         string text = "Store these secrets: " + string.Join(", ", fields.Select(field => field.Name + (field.Replace ? " (replace)" : " (new)"))) + ".";
+        if (fields.Any(field => field.Replace))
+        {
+            text += "\nExisting grants can use replacement values without asking again.";
+        }
+
         return WithNameWarnings(text, names, stored, method);
     }
 
     internal static string EditText(string source, string destination, HashSet<string> stored, IProofMethod method)
     {
-        string text = source == destination ? $"Replace the value of {source}." : $"Move {source} to {destination}. Keep its value unless a replacement is supplied.";
+        string text = source == destination
+            ? $"Replace the value of {source}. Existing grants can use replacement values without asking again."
+            : $"Move {source} to {destination}. Keep its value unless a replacement is supplied.";
         return WithNameWarnings(text, [destination], stored, method);
     }
 
@@ -131,8 +137,8 @@ public static class SecretEntry
 
         private readonly TaskCompletionSource<SecretChange> _decision = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        // By base64url SHA-256 of the page's ct: the next manifest and the store rows made from it. No value is kept.
-        private readonly Dictionary<string, (string Manifest, Dictionary<string, string> Rows)> _sealed = new(StringComparer.Ordinal);
+        // By base64url SHA-256 of the page's ct: the batch to sign and the store rows made from it. No plaintext is kept.
+        private readonly Dictionary<string, (string Text, Dictionary<string, string> Rows)> _sealed = new(StringComparer.Ordinal);
         private readonly Queue<string> _order = new();
         private int _seals;
         private string? _origin;
@@ -210,7 +216,7 @@ public static class SecretEntry
 
         /// <summary>
         /// Called with the lock held, while the person types: decrypts and checks the values, encrypts each to the store key
-        /// and answers with the next manifest (names, the store key and hashes: nothing secret). A refusal says why (names only)
+        /// and answers with the batch to sign (names and hashes). A refusal says why (names only)
         /// and does not end the page: the person may still be typing.
         /// </summary>
         private OneShotResponse Seal(byte[] bind, string body)
@@ -237,9 +243,9 @@ public static class SecretEntry
             // The same ct sealed again (a retried request) gets the first answer: encryption is randomized, so a new manifest
             // would not match a challenge the page may already have made from the first one.
             string key = Key(Base64Url.DecodeFromChars(members["ct"]));
-            if (_sealed.TryGetValue(key, out (string Manifest, Dictionary<string, string> Rows) earlier))
+            if (_sealed.TryGetValue(key, out var earlier))
             {
-                return Sealed(earlier.Manifest);
+                return Sealed(earlier.Text);
             }
 
             Dictionary<string, string> rows = new(StringComparer.Ordinal);
@@ -248,7 +254,9 @@ public static class SecretEntry
                 rows[name] = values.Count == 0 ? edit!.Ciphertext : store.Encrypt(values[name], storeKey);
             }
 
-            string text = SecretStore.Next(manifest, storeKey, rows, _removes).Canonical();
+            string text = _removes.Length == 0
+                ? SignedSecretWrite.Prepare(manifest, rows)
+                : SecretStore.Next(manifest, storeKey, rows, _removes).Canonical();
             _sealed[key] = (text, rows);
             _order.Enqueue(key);
             while (_order.Count > Kept)
@@ -259,9 +267,9 @@ public static class SecretEntry
             return Sealed(text);
         }
 
-        private static OneShotResponse Sealed(string manifestText)
+        private static OneShotResponse Sealed(string text)
         {
-            return new OneShotResponse(200, "application/json", JsonSerializer.Serialize(new { ok = true, manifest = manifestText }));
+            return new OneShotResponse(200, "application/json", JsonSerializer.Serialize(new { ok = true, manifest = text }));
         }
 
         private static OneShotResponse Refusal(string why) => new(400, "application/json", JsonSerializer.Serialize(new { ok = false, error = why }));
@@ -311,9 +319,9 @@ public static class SecretEntry
                 return Invalid;
             }
 
-            // Only values that went through /seal can be saved: the manifest the passkey signed is the one made from them. Values
+            // Only values that went through /seal can be saved: the batch the passkey signed is the one made from them. Values
             // that were never sealed are checked again, so the answer says why they could not be.
-            if (!_sealed.TryGetValue(Key(ct), out (string Manifest, Dictionary<string, string> Rows) prepared))
+            if (!_sealed.TryGetValue(Key(ct), out var prepared))
             {
                 (_, string? problem) = Open(bind, members);
                 _decision.TrySetResult(Denied((problem ?? "the values were not prepared on the page") + "; nothing was stored"));
@@ -321,8 +329,7 @@ public static class SecretEntry
                 return Invalid;
             }
 
-            // The passkey signed SHA-256(bind || SHA-256(ct) || SHA-256(manifest)): exactly these values on this page, and the
-            // new state with the hashes of exactly these rows.
+            // The passkey signed SHA-256(bind || SHA-256(ct) || SHA-256(batch)): the values on this page and the ciphertext hashes.
             byte[] manifestBind = SecretCrypto.ManifestBind(bind, ct);
             string assertion = JsonSerializer.Serialize(new Dictionary<string, string>
             {
@@ -334,7 +341,7 @@ public static class SecretEntry
             ProofResult result;
             try
             {
-                result = method.Verify(new ProofContext(Manifest.Challenge(manifestBind, prepared.Manifest), origin), assertion);
+                result = method.Verify(new ProofContext(Manifest.Challenge(manifestBind, prepared.Text), origin), assertion);
             }
             catch (Exception)
             {
@@ -348,10 +355,11 @@ public static class SecretEntry
                 return Refused;
             }
 
-            SignedManifest signed = new(prepared.Manifest, manifestBind, assertion);
-            AdminEvent change = AdminEvent.Secrets(edit is null ? "secrets-set" : "secrets-edited", [.. _removes, .. names],
+            AdminEvent change = AdminEvent.Secrets(edit is null ? SecretFlows.SetCommand : "secrets-edited", [.. _removes, .. names],
                 result.Detail, result.Credential?.Name ?? AdminAudit.KeyName(result.Detail), result.Credential);
-            string? problemWriting = store.TryApply(manifest.Version, signed, prepared.Rows, _removes, change);
+            string? problemWriting = _removes.Length == 0
+                ? store.TrySet(manifest.Version, new SignedSecretWrite(prepared.Text, manifestBind, assertion), prepared.Rows, change)
+                : store.TryApply(manifest.Version, new SignedManifest(prepared.Text, manifestBind, assertion), prepared.Rows, _removes, change);
             if (problemWriting is not null)
             {
                 VerifiedFailure = result.Credential;

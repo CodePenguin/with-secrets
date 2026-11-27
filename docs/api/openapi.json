@@ -1641,7 +1641,7 @@
     "/api/v1/secrets/entries": {
       "post": {
         "operationId": "startSecretEntry",
-        "summary": "Prepare to store secrets or edit one stored secret when a source is supplied. A move can keep its value by sealing an empty object. Stores nothing.",
+        "summary": "Start a batch of up to 20 values or edit a single stored secret. Requires secrets.write. Moving a secret between names requires an admin passkey and can keep the value by sealing an empty object.",
         "tags": [
           "secrets"
         ],
@@ -1811,7 +1811,7 @@
     "/api/v1/secrets/entries/{id}/seal": {
       "post": {
         "operationId": "sealSecretEntry",
-        "summary": "Send the values, sealed to the entry\u0027s public key. The service checks them and answers the next state the passkey will sign. Stores nothing.",
+        "summary": "Check the sealed values and return the batch the passkey will sign. Requires a session with secrets.write.",
         "tags": [
           "secrets"
         ],
@@ -1845,7 +1845,7 @@
                   },
                   "ct": {
                     "type": "string",
-                    "maxLength": 49152
+                    "maxLength": 677344
                   }
                 },
                 "additionalProperties": false,
@@ -1996,7 +1996,7 @@
     "/api/v1/secrets/entries/{id}/save": {
       "post": {
         "operationId": "saveSecretEntry",
-        "summary": "Store the sealed values with one admin passkey assertion over them and the next state.",
+        "summary": "Store the batch with one enrolled passkey assertion, or move a secret with an admin assertion. Requires a session with secrets.write.",
         "tags": [
           "secrets"
         ],
@@ -2030,7 +2030,7 @@
                   },
                   "ct": {
                     "type": "string",
-                    "maxLength": 49152
+                    "maxLength": 677344
                   },
                   "id": {
                     "type": "string",
@@ -2201,7 +2201,7 @@
     "/api/v1/secrets/entries/{id}": {
       "delete": {
         "operationId": "cancelSecretEntry",
-        "summary": "Cancel an entry that has not been saved.",
+        "summary": "Cancel an entry before saving. Requires a session with secrets.write.",
         "tags": [
           "secrets"
         ],
@@ -12840,7 +12840,8 @@
                 "approvals.decide",
                 "admin.read",
                 "admin.decide",
-                "grants.decide"
+                "grants.decide",
+                "secrets.write"
               ]
             }
           },

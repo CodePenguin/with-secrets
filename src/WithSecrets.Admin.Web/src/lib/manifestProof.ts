@@ -14,7 +14,7 @@ export function failure(error: unknown): unknown {
   return new ApiError(0, 'passkey-failed', 'Passkey not used', 'The passkey could not be used. Nothing was changed.')
 }
 
-/** One admin passkey assertion over `challenge`, for the request the service started. */
+/** One passkey assertion over `challenge`, for the request the service started. */
 export async function assert(started: Started, challenge: (bind: Uint8Array<ArrayBuffer>) => Promise<Uint8Array<ArrayBuffer>>) {
   const payload = started.payload as { bind?: unknown; rpId?: unknown; timeout?: unknown }
   if (typeof payload.bind !== 'string' || typeof payload.rpId !== 'string' || typeof payload.timeout !== 'number') {

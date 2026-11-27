@@ -346,8 +346,8 @@ internal static class ApprovalQueueTests
         check(deniedQueue.GetDetail("req-deny", _ => null)?.Status == ApprovalStatuses.Denied,
             "approvals: denial becomes terminal only after authority commit");
 
-        check(SessionCapabilities.For(SessionScope.Approval).SequenceEqual([SessionCapabilities.ApprovalsRead, SessionCapabilities.ApprovalsDecide, SessionCapabilities.AdminRead, SessionCapabilities.GrantsDecide]),
-            "sessions: approval scope receives approvals, read and grant capabilities, never admin.decide");
+        check(SessionCapabilities.For(SessionScope.Approval).SequenceEqual([SessionCapabilities.ApprovalsRead, SessionCapabilities.ApprovalsDecide, SessionCapabilities.AdminRead, SessionCapabilities.GrantsDecide, SessionCapabilities.SecretsWrite]),
+            "sessions: approval scope receives approvals, read, grant and secret write capabilities");
         check(SessionCapabilities.For(SessionScope.Admin).Contains(SessionCapabilities.AdminDecide)
             && SessionCapabilities.For(SessionScope.Admin).Contains(SessionCapabilities.ApprovalsDecide),
             "sessions: admin scope retains admin and Approvals capabilities");

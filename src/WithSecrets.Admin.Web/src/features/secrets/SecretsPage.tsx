@@ -19,8 +19,10 @@ import { SecretFolders } from './SecretFolders'
 import styles from './SecretsPage.module.css'
 
 const secretsKey = ['secrets'] as const
+const maxBatchSize = 20
 
 type SecretDraft = { source?: string; name: string; folder: string }
+type BatchEntry = { id: number; name: string; value: string }
 
 function editDraft(path: string): SecretDraft {
   const separator = path.lastIndexOf('/')
@@ -44,6 +46,7 @@ export function SecretsPage() {
   const session = useSession()
   const status = useStatus()
   const canChange = session.data?.capabilities.includes('admin.decide') === true
+  const canWrite = session.data?.capabilities.includes('secrets.write') === true
   const showMounts = status.data?.capabilities?.providers === true && session.data?.capabilities.includes('admin.read') === true
   const mounts = useAllMounts(showMounts)
   const providers = useProviders(showMounts && canChange && status.data?.locked === false)
@@ -53,6 +56,8 @@ export function SecretsPage() {
   const [prefill, setPrefill] = useState(() => search.get('name'))
   const [draft, setDraft] = useState<SecretDraft | null>(null)
   const [value, setValue] = useState('')
+  const [extraEntries, setExtraEntries] = useState<BatchEntry[]>([])
+  const nextEntryId = useRef(1)
   const [problem, setProblem] = useState<unknown>(null)
   const [done, setDone] = useState<string | null>(null)
   const [cancelled, setCancelled] = useState(false)
@@ -68,14 +73,23 @@ export function SecretsPage() {
   const name = editor?.name.trim() ?? ''
   const folder = editor?.folder.trim().replace(/\/$/, '') ?? ''
   const destination = folder ? folder + '/' + name : name
+  const moving = !!source && destination !== source
   const nameError = source && name.includes('/') ? 'Enter the folder separately.' :
-    destination !== source && names.includes(destination) ? 'A secret already exists at this path.' : undefined
-  const canSave = !!name && !nameError && (value !== '' || (!!source && destination !== source))
+    moving && names.includes(destination) ? 'A secret already exists at this path.' : undefined
+  const entries = [{ name: destination, value }, ...extraEntries.map(entry => ({ name: entry.name.trim(), value: entry.value }))]
+  const entered = entries.map(entry => entry.name)
+  const nonEmptyNames = entered.filter(Boolean)
+  const duplicate = new Set(nonEmptyNames).size < nonEmptyNames.length
+  const replacing = entries.some(entry => names.includes(entry.name)) && !moving
+  const canSave = source
+    ? !!name && !nameError && (moving ? canChange : value !== '')
+    : !duplicate && entries.every(entry => entry.name && entry.value)
 
   function openEditor(next: SecretDraft) {
     setPrefill(null)
     setDraft(next)
     setValue('')
+    setExtraEntries([])
     setProblem(null)
     setCancelled(false)
   }
@@ -84,6 +98,7 @@ export function SecretsPage() {
     setPrefill(null)
     setDraft(null)
     setValue('')
+    setExtraEntries([])
     setProblem(null)
     setCancelled(false)
   }
@@ -112,13 +127,14 @@ export function SecretsPage() {
   async function save() {
     if (!canSave) return
     await run(async () => {
-      const started = await api.post('/api/v1/secrets/entries', { body: { names: [destination], source } })
+      const started = await api.post('/api/v1/secrets/entries', { body: { names: entered, source } })
       try {
-        if (!source && started.fields.some(field => field.replace)) {
-          throw new ApiError(409, 'secret-exists', 'A secret already exists', 'Open Edit secret on its row to change it.')
+        if (!source && started.fields.some(field => field.replace !== names.includes(field.name))) {
+          throw new ApiError(409, 'secret-list-changed', 'Secret list changed', 'Review which names will be replaced, then save again.')
         }
         const bind = fromBase64Url((started.payload as { bind: string }).bind)
-        const sealed = await sealSecrets(value === '' ? {} : { [destination]: value }, bind, fromBase64Url(started.publicKey))
+        const values = Object.fromEntries(entries.filter(entry => entry.value !== '').map(entry => [entry.name, entry.value]))
+        const sealed = await sealSecrets(values, bind, fromBase64Url(started.publicKey))
         const reply = await api.post('/api/v1/secrets/entries/{id}/seal', { path: { id: started.id }, body: { epk: sealed.epk, iv: sealed.iv, ct: sealed.ct } })
         const proof = await assert(started, (b) => storeChallenge(b, sealed.sealed, reply.manifest))
         await api.post('/api/v1/secrets/entries/{id}/save', { path: { id: started.id }, body: { epk: sealed.epk, iv: sealed.iv, ct: sealed.ct, ...proof } })
@@ -128,7 +144,7 @@ export function SecretsPage() {
       }
       closeEditor()
 
-      return 'Saved ' + destination + '.'
+      return 'Saved ' + entered.join(', ') + '.'
     })
   }
 
@@ -154,7 +170,16 @@ export function SecretsPage() {
       {cancelled ? <p role="status">Passkey prompt cancelled. Nothing was changed.</p> : null}
     </>
   )
-  const showEditor = canChange && editor !== null
+  const showEditor = canWrite && editor !== null
+
+  function updateEntry(id: number, changes: Partial<Pick<BatchEntry, 'name' | 'value'>>) {
+    setExtraEntries(current => current.map(entry => entry.id === id ? { ...entry, ...changes } : entry))
+  }
+
+  function addEntry() {
+    const id = nextEntryId.current++
+    setExtraEntries(current => [...current, { id, name: '', value: '' }])
+  }
 
   return (
     <>
@@ -167,7 +192,7 @@ export function SecretsPage() {
             start(mountFromSecrets(mountable, folderPrefixes(names, mounts.data ?? [])))
           }}><Icon name="mount" /> Mount provider</Button>
         ) : null}
-        {canChange ? (
+        {canWrite ? (
           <Button variant="primary" disabled={busy} aria-haspopup="dialog" onClick={() => openEditor({ name: '', folder: '' })}>
             <Icon name="plus" /> Add secret
           </Button>
@@ -182,7 +207,7 @@ export function SecretsPage() {
           <>
             <Button disabled={busy} onClick={closeEditor}>Cancel</Button>
             <Button variant="primary" type="submit" form={formId} disabled={busy || !canSave}>
-              {source ? 'Save changes' : 'Save secret'}
+              {source ? 'Save changes' : extraEntries.length > 0 ? 'Save secrets' : 'Save secret'}
             </Button>
           </>
         }
@@ -192,16 +217,32 @@ export function SecretsPage() {
           void save()
         }}>
           <Field label="Name" hint={source ? undefined : 'Use / to add folders, for example apps/API_KEY.'} error={nameError} required>
-            {control => <input {...control} className={controlClass} value={editor.name} onChange={(event) => setDraft({ ...editor, name: event.target.value })} autoComplete="off" spellCheck={false} maxLength={200} disabled={busy} required />}
+            {control => <input {...control} className={controlClass} value={editor.name} onChange={(event) => setDraft({ ...editor, name: event.target.value })} autoComplete="off" spellCheck={false} maxLength={200} readOnly={!!source && !canChange} disabled={busy} required />}
           </Field>
           {source ? (
             <Field label="Folder path" hint="Leave blank to use the root.">
-              {control => <input {...control} className={controlClass} value={editor.folder} onChange={(event) => setDraft({ ...editor, folder: event.target.value })} autoComplete="off" spellCheck={false} maxLength={200} disabled={busy} />}
+              {control => <input {...control} className={controlClass} value={editor.folder} onChange={(event) => setDraft({ ...editor, folder: event.target.value })} autoComplete="off" spellCheck={false} maxLength={200} readOnly={!canChange} disabled={busy} />}
             </Field>
           ) : null}
-          <Field label={source ? 'New value' : 'Value'} hint={source ? 'Leave blank to keep the current value.' : undefined} required={!source}>
+          <Field label={source ? 'New value' : 'Value'} hint={moving ? 'Leave blank to keep the current value.' : undefined} required={!source}>
             {control => <input {...control} className={controlClass} type="password" value={value} onChange={(event) => setValue(event.target.value)} autoComplete="off" spellCheck={false} maxLength={4096} disabled={busy} required={!source} />}
           </Field>
+          {extraEntries.map((entry, index) => (
+            <fieldset key={entry.id} className={styles.entry} disabled={busy}>
+              <Field label={`Name ${index + 2}`} required>
+                {control => <input {...control} className={controlClass} value={entry.name} onChange={event => updateEntry(entry.id, { name: event.target.value })} autoComplete="off" spellCheck={false} maxLength={200} required />}
+              </Field>
+              <Field label={`Value ${index + 2}`} required>
+                {control => <input {...control} className={controlClass} type="password" value={entry.value} onChange={event => updateEntry(entry.id, { value: event.target.value })} autoComplete="off" spellCheck={false} maxLength={4096} required />}
+              </Field>
+              <Button type="button" onClick={() => setExtraEntries(current => current.filter(item => item.id !== entry.id))}>
+                Remove entry {index + 2}
+              </Button>
+            </fieldset>
+          ))}
+          {duplicate ? <p role="status">Enter each secret name once.</p> : null}
+          {replacing ? <p>Existing grants can use replacement values without asking again.</p> : null}
+          {!source ? <div><Button type="button" disabled={busy || entries.length >= maxBatchSize} onClick={addEntry}>Add another secret</Button></div> : null}
         </form>
         {feedback}
       </Dialog> : null}
@@ -215,7 +256,7 @@ export function SecretsPage() {
         <SecretFolders
           names={names}
           mounts={showMounts ? mounts.data ?? [] : []}
-          edit={canChange ? path => openEditor(editDraft(path)) : undefined}
+          edit={canWrite ? path => openEditor(editDraft(path)) : undefined}
           remove={canChange ? path => void remove(path) : undefined}
           busy={busy}
           loading={!secrets.data || (showMounts && !mounts.data)}
