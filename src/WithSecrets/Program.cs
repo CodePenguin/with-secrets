@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.IO.Pipes;
 using System.Text;
+
 using WithSecrets.Bitwarden;
 using WithSecrets.LastPass;
 using WithSecrets.OnePassword;
@@ -85,6 +86,12 @@ internal static partial class Program
         if (args is ["--lastpass-refresh-helper", string channel])
         {
             return await RunLastPassRefreshHelper(channel);
+        }
+
+        if (args is ["--watch-companion"])
+        {
+            using StreamWriter snapshots = new(Console.OpenStandardOutput(), new UTF8Encoding(false));
+            return await CompanionWatch.RunAsync(ServiceTrust.From(HostConfigFile.InFolder(StorePath())), snapshots, Console.Error);
         }
 
         bool quickStart = args is ["--quick-start-worker", ..];
