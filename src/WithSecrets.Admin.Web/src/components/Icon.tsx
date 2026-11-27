@@ -1,20 +1,24 @@
-import { ArrowRight, Check, Folder, KeyRound, Link2, Lock, LockOpen, Plus } from 'lucide-react'
+import { ArrowRight, Check, ChevronRight, Folder, FolderInput, KeyRound, Link2, Lock, LockOpen, Pencil, Plus, Trash2 } from 'lucide-react'
 import styles from './Icon.module.css'
 
 const icons = {
   key: KeyRound,
   folder: Folder,
+  mount: FolderInput,
   lock: Lock,
   unlock: LockOpen,
   check: Check,
   plus: Plus,
+  edit: Pencil,
+  trash: Trash2,
   link: Link2,
   arrow: ArrowRight,
+  chevron: ChevronRight,
 } as const
 
 export type IconName = keyof typeof icons
 
-/** A small decorative picture. It is hidden from screen readers: the words next to it say the same thing. */
+/** A decorative icon. Its surrounding label names the action. */
 export function Icon({ name }: { name: IconName }) {
   const Picture = icons[name]
   return <Picture size="1em" strokeWidth={2} aria-hidden="true" focusable="false" className={styles.icon} />

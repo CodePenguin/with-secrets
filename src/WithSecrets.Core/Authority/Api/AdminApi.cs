@@ -906,7 +906,7 @@ internal sealed partial class AdminApi
                     return new ApiResult(400, new ApiProblem(400, "invalid-request", "the operation " + op + " takes " + (allowed.Length == 0 ? "no parameters" : "only the parameters " + string.Join(", ", allowed)) + ""));
                 }
 
-                if (ApiValidator.Validate(parameter.Value, ParameterSchema(parameter.Name), []) is { } invalid)
+                if (ApiValidator.Validate(parameter.Value, ParameterSchema(parameter.Name, op), []) is { } invalid)
                 {
                     return new ApiResult(400, new ApiProblem(400, "invalid-request", "parameters." + invalid["body.".Length..]));
                 }

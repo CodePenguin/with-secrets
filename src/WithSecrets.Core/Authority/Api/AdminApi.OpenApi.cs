@@ -103,6 +103,7 @@ internal sealed partial class AdminApi
             ]),
             ["SealedProviderConfiguration"] = S.Obj([("config", ParameterSchema("config"))]),
             ["ProviderValidation"] = S.Obj([("ok", S.Bool()), ("issues", S.Arr(S.Ref("ProviderValidationIssue")))]),
+            ["ProviderMountOptions"] = S.Arr(S.Obj([("path", S.Str()), ("name", S.Str())])),
             ["MountRefresh"] = S.Obj([("complete", S.Bool()), ("added", S.Int(min: 0)), ("removed", S.Int(min: 0)), ("changed", S.Int(min: 0))]),
             ["ProviderValueRefresh"] = S.Obj(
             [
@@ -145,6 +146,7 @@ internal sealed partial class AdminApi
                 ("program", S.Str()),
                 ("reason", S.Str()),
                 ("secretNames", S.Arr(S.Str())),
+                ("scriptName", S.Str(nullable: true)),
             ]),
             ["ApprovalQueue"] = S.Obj(
             [
@@ -268,6 +270,7 @@ internal sealed partial class AdminApi
                 ("replaces", S.Str(nullable: true, description: "The id of the used once-only grant this grant was made from.")),
                 ("actions", S.Arr(S.Str(values: grantActions))),
                 ("verified", S.Bool("The grant seal verifies and the signing passkey is still authorized.")),
+                ("repeatTimes", S.Arr(S.Int(1, ReuseOffer.Always))),
             ]),
             ["GrantList"] = S.Obj([("items", S.Arr(S.Ref("Grant")))]),
             ["GrantReview"] = S.Obj([("state", S.Str(values: ["open", "locked", "none"])), ("text", S.Str(nullable: true)), ("verified", S.Bool())]),

@@ -524,7 +524,7 @@ internal sealed class Ctx : IAsyncDisposable
     {
         "a-first-run-setup" => "First-time setup: create the authority's initial passkey and recovery code.",
         "a2-first-run-security" => "Setup security checks: see what happens when a passkey prompt is cancelled, refused, or interrupted. For everyday setup, open the Quick Start demo.",
-        "b-spa-secrets" => "Add a secret, approve a run that uses it, then replace and remove the secret.",
+        "b-spa-secrets" => "Add a secret, approve a run that uses it, then move, replace, and remove the secret.",
         "b-set-remove" => "Secret management: add a secret, verify it can be used, then remove it.",
         "c-run-approval" => "Secret use: review a command's request, approve it, and see that its output is redacted.",
         "c2-run-code-changes" => "Command review: identify environment changes that could load code or redirect network traffic.",
@@ -547,10 +547,10 @@ internal sealed class Ctx : IAsyncDisposable
         "i7-spa-refused-without-authorization" => "See what happens when you leave an approval without confirming it with a passkey.",
         "i8-spa-accept-host-name" => "Machine identity: review and accept a machine's friendly name.",
         "i9-spa-reload-between-tap-and-result" => "Reloading before confirmation keeps the request pending. Reloading after an approved change preserves the result.",
-        "i10-spa-providers" => "Set up Bitwarden Secrets Manager, edit its configuration, and manage a mount.",
-        "i11-provider-1password" => "Set up 1Password with a service-account token.",
-        "i12-provider-vault" => "Set up HashiCorp Vault with a token for the authority’s configured Vault server.",
-        "i13-provider-lastpass" => "Set up LastPass with an account email and region.",
+        "i10a-provider-bitwarden" => "Set up Bitwarden Secrets Manager, edit its configuration, and manage a mount.",
+        "i10b-provider-1password" => "Set up 1Password with a service-account token.",
+        "i10c-provider-vault" => "Set up HashiCorp Vault with a token for the authority’s configured Vault server.",
+        "i10d-provider-lastpass" => "Set up LastPass with an account email and region.",
         "j1-spa-accessibility" => "Accessibility: check keyboard navigation, focus management, and responsive layout.",
         "k1-spa-pair-machine" => "Machine pairing: create a one-time invitation, pair another host, then review its trust request.",
         _ => "End-to-end scenario: follow the browser workflow and verify its security outcome."

@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { entry, mount, signedIn, status } from '../../test/fakeApi'
+import { entry, mount, provider, signedIn, status } from '../../test/fakeApi'
 import { renderApp } from '../../test/render'
 
 afterEach(() => {
@@ -12,59 +12,131 @@ describe('Secrets page', () => {
   it('lists the stored names and shows no values', async () => {
     signedIn({ 'GET /api/v1/secrets': { body: { items: ['DB_URL', 'API_KEY'] } } })
     renderApp('/secrets')
-    expect(await screen.findByRole('heading', { name: 'DB_URL' })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: 'API_KEY' })).toBeTruthy()
-    expect(screen.getAllByRole('button', { name: /^Remove/ })).toHaveLength(2)
+    const tree = within(await screen.findByRole('list', { name: 'Secrets' }))
+    expect(tree.getByText('DB_URL')).toBeVisible()
+    expect(tree.getByText('API_KEY')).toBeVisible()
+    expect(tree.getAllByRole('button', { name: /^Remove/ })).toHaveLength(2)
+    expect(screen.getAllByRole('heading')).toEqual([screen.getByRole('heading', { name: 'Secrets', level: 1 })])
   })
 
   it('says so when nothing is stored', async () => {
     signedIn({ 'GET /api/v1/secrets': { body: { items: [] } } })
     renderApp('/secrets')
-    expect(await screen.findByText('No secret is stored.')).toBeTruthy()
+    expect(await screen.findByText('Add a secret or a mount secret provider.')).toBeTruthy()
   })
 
-  it('browses local and mounted secrets by path without offering to remove provider entries', async () => {
+  it('puts manual and mounted secrets that share a path in one folder', async () => {
     const mounted = mount({ logicalPath: 'team' })
+    const nested = mount({ id: 'nested-mount', logicalPath: 'team/ops/staging' })
+    let showMounts = () => {}
+    const pendingMounts = new Promise<void>(resolve => { showMounts = resolve })
     const api = signedIn({
       'GET /api/v1/status': { body: status({ capabilities: { providers: true } }) },
-      'GET /api/v1/secrets': { body: { items: ['apps/API_KEY', 'team/ops/TOKEN'] } },
-      'GET /api/v1/mounts': { body: [mounted] },
+      'GET /api/v1/providers': { body: [] },
+      'GET /api/v1/secrets': { body: { items: ['ROOT_KEY', 'team/ops/API_KEY'] } },
+      'GET /api/v1/mounts': async () => {
+        await pendingMounts
+        return { body: [mounted, nested] }
+      },
       [`GET /api/v1/mounts/${mounted.id}/entries`]: { body: [entry({ logicalPath: 'team/ops/TOKEN' })] },
+      [`GET /api/v1/mounts/${nested.id}/entries`]: { body: [entry({ logicalPath: 'team/ops/staging/BUILD_KEY' })] },
     })
     renderApp('/secrets')
-    expect(await screen.findByText('Local')).toBeVisible()
-    await userEvent.click(screen.getByText('apps', { exact: true }))
-    expect(screen.getByRole('heading', { name: 'API_KEY' })).toBeVisible()
-    expect(screen.getByText('apps/API_KEY', { exact: true })).toBeVisible()
-    expect(screen.getByRole('button', { name: 'Remove secret apps/API_KEY' })).toBeVisible()
     expect(api.count(`GET /api/v1/mounts/${mounted.id}/entries`)).toBe(0)
-    const providers = within(await screen.findByRole('list', { name: 'Provider mounts' }))
-    await userEvent.click(providers.getByText('team/', { exact: true }))
-    await userEvent.click(await providers.findByText('ops', { exact: true }))
-    expect(providers.getByRole('heading', { name: 'TOKEN' })).toBeVisible()
-    expect(providers.queryByRole('button', { name: /^Remove/ })).not.toBeInTheDocument()
+    const tree = within(await screen.findByRole('list', { name: 'Secrets' }))
+    expect(tree.getByText('ROOT_KEY', { exact: true })).toBeVisible()
+    expect(tree.queryByText('Local', { exact: true })).not.toBeInTheDocument()
+    await userEvent.click(await tree.findByText('team', { exact: true }))
+    await userEvent.click(tree.getByText('ops', { exact: true }))
+    showMounts()
+    expect(await tree.findByText('TOKEN', { exact: true })).toBeVisible()
+    expect(tree.getByText('team/ops/API_KEY', { exact: true })).toBeVisible()
+    expect(tree.getByRole('button', { name: 'Remove secret team/ops/API_KEY' })).toBeVisible()
+    expect(tree.queryByRole('button', { name: 'Remove secret team/ops/TOKEN' })).not.toBeInTheDocument()
+    expect(api.count(`GET /api/v1/mounts/${nested.id}/entries`)).toBe(0)
+    await userEvent.click(tree.getByText('staging', { exact: true }))
+    expect(await tree.findByText('BUILD_KEY', { exact: true })).toBeVisible()
+    expect(tree.getAllByText('ops', { exact: true })).toHaveLength(1)
   })
 
-  it('prefills the name from the link and offers Replace for a stored name', async () => {
+  it('opens an existing secret for editing from a prefilled link', async () => {
     signedIn({ 'GET /api/v1/secrets': { body: { items: ['DB_URL'] } } })
     renderApp('/secrets?name=DB_URL')
-    const name = (await screen.findByLabelText('Name')) as HTMLInputElement
+    const form = within(await screen.findByRole('dialog', { name: 'Edit secret' }))
+    const name = form.getByLabelText(/^Name/) as HTMLInputElement
     expect(name.value).toBe('DB_URL')
-    await userEvent.type(screen.getByLabelText('Value'), 'x')
-    expect(await screen.findByRole('button', { name: 'Replace secret' })).toBeTruthy()
+    expect(form.getByLabelText('New value')).toHaveValue('')
+    expect(form.getByRole('button', { name: 'Save changes' })).toBeDisabled()
   })
 
-  it('keeps Save disabled until both fields are filled, and never echoes the value', async () => {
+  it('edits the name and folder without requiring a replacement value', async () => {
+    signedIn({ 'GET /api/v1/secrets': { body: { items: ['apps/DB_URL', 'apps/TAKEN'] } } })
+    renderApp('/secrets')
+    await userEvent.click(await screen.findByText('apps', { exact: true }))
+    await userEvent.click(screen.getByRole('button', { name: 'Edit secret apps/DB_URL' }))
+    const form = within(await screen.findByRole('dialog', { name: 'Edit secret' }))
+    expect(form.getByLabelText('Folder path')).toHaveValue('apps')
+    expect(form.getByLabelText('New value')).toHaveAttribute('type', 'password')
+    const name = form.getByLabelText(/^Name/)
+    const save = form.getByRole('button', { name: 'Save changes' })
+    await userEvent.clear(name)
+    await userEvent.type(name, 'TAKEN')
+    expect(form.getByText('A secret already exists at this path.')).toBeVisible()
+    expect(save).toBeDisabled()
+    await userEvent.type(name, '_NEW')
+    expect(form.getByLabelText('New value')).toHaveValue('')
+    expect(save).toBeEnabled()
+  })
+
+  it('mounts a selected provider from Secrets with suggestions from the tree', async () => {
+    const first = provider({ name: 'Team Vault', type: 'vault', actions: ['add-mount'] })
+    const second = provider({ id: 'second-provider', name: 'Build Vault', type: 'vault', actions: ['add-mount'] })
+    const api = signedIn({
+      'GET /api/v1/status': { body: status({ capabilities: { providers: true } }) },
+      'GET /api/v1/providers': { body: [first, second] },
+      'GET /api/v1/mounts': { body: [] },
+      'GET /api/v1/secrets': { body: { items: ['apps/API_KEY'] } },
+      'POST /api/v1/providers/validate': { body: { ok: true, issues: [] } },
+    })
+    renderApp('/secrets')
+    await userEvent.click(await screen.findByRole('button', { name: 'Mount provider' }))
+    const dialog = within(await screen.findByRole('dialog', { name: 'Mount provider' }))
+    await userEvent.selectOptions(dialog.getByLabelText(/^Provider/), 'Team Vault')
+    const path = dialog.getByLabelText(/^Logical path/)
+    const suggestions = document.getElementById(path.getAttribute('list') ?? '')
+    expect(suggestions?.querySelector('option')?.value).toBe('apps/')
+    await userEvent.type(path, 'apps/build')
+    await userEvent.type(dialog.getByLabelText('Provider path'), 'old-root/')
+    await userEvent.selectOptions(dialog.getByLabelText(/^Provider \(/), 'Build Vault')
+    expect(dialog.getByLabelText('Provider path')).toHaveValue('')
+    await userEvent.click(dialog.getByRole('button', { name: 'Continue' }))
+    await waitFor(() => expect(api.count('POST /api/v1/authorizations/inline')).toBe(1))
+    expect(api.calls.find(call => call.path === '/api/v1/authorizations/inline')?.body?.parameters).toMatchObject({
+      instance: second.id, path: 'apps/build', base: '',
+    })
+  })
+
+  it('opens the form on demand and discards the draft when cancelled', async () => {
     signedIn({ 'GET /api/v1/secrets': { body: { items: [] } } })
     renderApp('/secrets')
-    const save = (await screen.findByRole('button', { name: 'Save secret' })) as HTMLButtonElement
-    expect(save.disabled).toBe(true)
-    await userEvent.type(screen.getByLabelText('Name'), 'NEW_ONE')
-    expect(save.disabled).toBe(true)
-    const value = screen.getByLabelText('Value') as HTMLInputElement
+    const add = await screen.findByRole('button', { name: 'Add secret' })
+    expect(screen.queryByLabelText(/^Value/)).not.toBeInTheDocument()
+    await userEvent.click(add)
+    const form = within(await screen.findByRole('dialog', { name: 'Add secret' }))
+    const save = form.getByRole('button', { name: 'Save secret' })
+    expect(save).toBeDisabled()
+    await userEvent.type(form.getByLabelText(/^Name/), 'NEW_ONE')
+    expect(save).toBeDisabled()
+    const value = form.getByLabelText(/^Value/)
     await userEvent.type(value, 'hunter2')
-    expect(save.disabled).toBe(false)
-    expect(value.type).toBe('password')
+    expect(save).toBeEnabled()
+    expect(value).toHaveAttribute('type', 'password')
+    await userEvent.click(form.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    await userEvent.click(add)
+    const reopened = within(await screen.findByRole('dialog', { name: 'Add secret' }))
+    expect(reopened.getByLabelText(/^Name/)).toHaveValue('')
+    expect(reopened.getByLabelText(/^Value/)).toHaveValue('')
   })
 
   it('cancels the pending removal when the passkey is not used', async () => {

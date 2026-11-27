@@ -100,6 +100,7 @@ export const grant = (extra: Partial<Grant> = {}): Grant => ({
   replaces: null,
   actions: ['extend', 'revoke'],
   verified: true,
+  repeatTimes: [],
   ...extra,
 })
 
@@ -213,6 +214,7 @@ export const approvalItem = (extra: Partial<ApprovalQueueItem> = {}): ApprovalQu
   status: 'pending',
   submittedAt: '2026-11-09T10:00:00Z',
   expiresAt: '2026-11-09T10:05:00Z',
+  scriptName: null,
   machine: { fingerprint: 'ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12', friendlyName: 'build box', hostName: 'build-host' },
   program: 'deploy.cmd',
   reason: 'ship the release',

@@ -2390,11 +2390,11 @@ internal static partial class WebApprovalTests
     /// seal (as they are typed), take the manifest it returns, then sign SHA-256(bind || SHA-256(ct) || SHA-256(manifest)) and post the
     /// save. One thing is wrong when asked. <paramref name="between" /> runs after the entry started and before anything is sent.
     /// </summary>
-    internal static EntryRun SetRun(PasskeyStore passkeys, SecretStore store, IReadOnlyList<string> names, TestAuthenticator key, string plaintext, Twist twist = Twist.None, Action? between = null)
+    internal static EntryRun SetRun(PasskeyStore passkeys, SecretStore store, IReadOnlyList<string> names, TestAuthenticator key, string plaintext, Twist twist = Twist.None, Action? between = null, string? source = null)
     {
         EntryRun run = new();
-        SecretFlows flows = NewFlows(passkeys, store);
-        (SecretEntryDto? entry, string? problem) = flows.StartSet(names, "s1", FlowOrigin);
+        using SecretFlows flows = NewFlows(passkeys, store);
+        (SecretEntryDto? entry, string? problem) = flows.StartSet(names, "s1", FlowOrigin, source);
         if (entry is null)
         {
             run.Result = new SecretChange(problem!.Contains("failed verification", StringComparison.Ordinal) || problem.StartsWith("cannot use the secret store", StringComparison.Ordinal) ? RunCommand.StoreError : RunCommand.Denied, problem);
@@ -2933,6 +2933,45 @@ internal static partial class WebApprovalTests
                 check(TestAudit.TryRead(store.Database, 100, null, out IReadOnlyList<AuditRow> rows, out _) && rows.Count(row => row.Event == "secrets-set") == 1
                     && rows.Single(row => row.Event == "secrets-set") is { } line && line.Secrets.SequenceEqual(good) && line.Detail == "admin passkey laptop verified" && line.KeyName == "laptop", "secrets: one audit row with the names, the detail and the key");
                 check(run.AgainGone, "secrets: after the outcome, /seal and a second /save find no entry");
+            }
+
+            // Editing can move an encrypted value as-is or supply a replacement in the same change.
+            {
+                (PasskeyStore passkeys, SecretStore store) = Fresh(new Dictionary<string, string> { ["B_OLD"] = OldB, ["TAKEN"] = ValueA });
+                const string moved = "apps/staging/B_NEW";
+                Manifest before = TestState.Current(store.Database)!;
+                EntryRun collision = SetRun(passkeys, store, ["TAKEN"], laptop, "{}", source: "B_OLD");
+                EntryRun unchanged = SetRun(passkeys, store, ["B_OLD"], laptop, "{}", source: "B_OLD");
+                check(collision.Entry is null && unchanged.SealStatus == 400 && TestState.Current(store.Database)!.Version == before.Version,
+                    "editing neither overwrites a different secret nor accepts a save without changes");
+                EntryRun cancelled = SetRun(passkeys, store, [moved], laptop, "{}", Twist.Cancel, source: "B_OLD");
+                check(cancelled.Cancelled && store.ListNames().Contains("B_OLD"), "a cancelled move keeps the original path");
+
+                EntryRun move = SetRun(passkeys, store, [moved], laptop, "{}", source: "B_OLD");
+                Manifest after = TestState.Current(store.Database)!;
+                check(move.Result is { Code: 0 } && after.Version == before.Version + 1 && !after.Secrets.ContainsKey("B_OLD")
+                    && after.Secrets[moved] == before.Secrets["B_OLD"] && Stored(store)[moved] == OldB,
+                    "moving a secret preserves its exact stored ciphertext and commits the new path in one version");
+
+                const string replaced = "apps/B_FINAL";
+                EntryRun replacement = SetRun(passkeys, store, [replaced], laptop, Values((replaced, ValueB)), source: moved);
+                check(replacement.Result is { Code: 0 } && !store.ListNames().Contains(moved) && Stored(store)[replaced] == ValueB
+                    && !move.Seen.Concat(replacement.Seen).Any(text => text.Contains(OldB, StringComparison.Ordinal) || text.Contains(ValueB, StringComparison.Ordinal)),
+                    "moving and replacing a value is atomic and does not echo either value");
+            }
+
+            {
+                (PasskeyStore passkeys, SecretStore store) = Fresh(new Dictionary<string, string> { ["B_OLD"] = OldB, ["DOTENV_PRIVATE_KEY"] = ValueA });
+                EntryRun privateKey = SetRun(passkeys, store, ["EXPORTED"], laptop, "{}", source: "DOTENV_PRIVATE_KEY");
+                check(privateKey.SealStatus == 400 && store.ListNames().Contains("DOTENV_PRIVATE_KEY"),
+                    "a metadata-only move cannot turn an existing dotenvx key into a secret a command can request");
+                EntryRun move = SetRun(passkeys, store, ["NEW_PATH"], laptop, "{}", between: () =>
+                {
+                    _ = SetRun(passkeys, store, ["NEW_PATH"], laptop, Values(("NEW_PATH", ValueB)));
+                }, source: "B_OLD");
+                Dictionary<string, string> current = Stored(store);
+                check(move.Result is { Code: not 0 } && current["B_OLD"] == OldB && current["NEW_PATH"] == ValueB,
+                    "a move prepared before a conflicting save leaves both the original secret and the newly occupied path intact");
             }
 
             // Boundaries: 6 and 4096 characters are accepted.

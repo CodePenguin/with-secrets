@@ -267,8 +267,23 @@ export function removeProvider(provider: Provider): OperationDef {
   }
 }
 
-export function addMount(provider: Provider): OperationDef {
+export function addMount(provider: Provider): OperationDef & { fields: FieldDef[] } {
   const interactive = provider.type === lastPassRefresh
+  const browseBitwarden = provider.type === bitwarden
+  const mountOptions = (parentPath?: string) => ({
+    key: ['mount-options', provider.id, provider.revision, parentPath],
+    load: async (signal: AbortSignal) => {
+      const options = await api.post('/api/v1/providers/{id}/mount-options', {
+        path: { id: provider.id }, body: parentPath ? { parentPath } : {}, signal,
+      })
+      const counts = new Map<string, number>()
+      for (const { name } of options) counts.set(name, (counts.get(name) ?? 0) + 1)
+      return options.map(({ path, name }) => ({
+        value: path, label: counts.get(name) === 1 ? name : `${name} (${path.split('/').at(-1)})`,
+      }))
+    },
+  })
+
   return {
     key: 'mount-add',
     title: 'Add mount',
@@ -280,13 +295,16 @@ export function addMount(provider: Provider): OperationDef {
       { name: 'itemField', label: 'LastPass field', kind: 'select',
         options: Object.entries(lastPassFields).map(([value, label]) => ({ value, label })) },
     ] : [
-      { name: 'kind', label: 'Mount kind', kind: 'select', options: [{ value: 'tree', label: 'Tree' }, { value: 'single', label: 'Single secret' }] },
+      { name: 'kind', label: 'Mount kind', kind: 'select', options: [{ value: 'tree', label: browseBitwarden ? 'Entire project' : 'Tree' }, { value: 'single', label: 'Single secret' }] },
+      ...(browseBitwarden ? [
+        { name: 'project', label: 'Project', kind: 'select', required: true, loadOptions: () => mountOptions(), clearOnChange: ['secret'] },
+        { name: 'secret', label: 'Secret', kind: 'select', required: true, loadOptions: values => mountOptions(text(values, 'project')),
+          visible: values => text(values, 'kind') === 'single' && !!text(values, 'project') },
+      ] satisfies FieldDef[] : []),
       { name: 'path', label: 'Logical path', kind: 'text', required: true, maxLength: 200 },
-      { name: 'base', label: 'Provider path', kind: 'text', maxLength: 300, hint: provider.type === bitwarden
-        ? 'Use a lowercase project UUID for a tree mount. For a single secret, append /S_ followed by the lowercase secret UUID without hyphens.'
-        : provider.type === vault
+      ...(!browseBitwarden ? [{ name: 'base', label: 'Provider path', kind: 'text', maxLength: 300, hint: provider.type === vault
           ? 'Use a document path for its fields, end a folder path with /, or leave it blank for the KV mount root. For a single secret, use document/field.'
-          : 'For a tree mount, leave blank to use the provider root.' },
+          : 'For a tree mount, leave blank to use the provider root.' }] satisfies FieldDef[] : []),
     ],
     initial: interactive ? { kind: 'single', itemField: 'F_70617373776F7264' } : { kind: 'tree' },
     prepare(values) {
@@ -295,17 +313,54 @@ export function addMount(provider: Provider): OperationDef {
       const path = text(values, 'path')
       const id = text(values, 'itemId')
       const field = text(values, 'itemField')
-      const base = interactive ? `${id}/${field}` : text(values, 'base')
+      let base = interactive ? `${id}/${field}` : text(values, 'base')
+      if (browseBitwarden) {
+        const project = text(values, 'project')
+        const secret = text(values, 'secret')
+        base = kind === 'single' ? secret : project
+        if (!project) errors.project = 'Choose a Bitwarden project.'
+        else if (kind === 'single' && !secret.startsWith(project + '/')) errors.secret = 'Choose a secret from this project.'
+      }
       if (interactive && !/^[1-9][0-9]{0,31}$/.test(id)) errors.itemId = 'Enter the numeric LastPass item ID.'
       if (interactive && !Object.hasOwn(lastPassFields, field)) errors.itemField = 'Choose a LastPass field.'
       if (kind !== 'tree' && kind !== 'single') errors.kind = 'Choose a mount kind.'
       if (!path || path.length > 200) errors.path = 'Enter a logical path of 1 to 200 characters.'
-      if (kind === 'single' && !base) errors.base = 'Enter the provider path to the secret.'
+      if (!browseBitwarden && kind === 'single' && !base) errors.base = 'Enter the provider path to the secret.'
       if (Object.keys(errors).length) return { errors }
 
       return { operation: 'mount-add', parameters: { instance: provider.id, kind, path, base }, summary: `Mount ${provider.name} at ${path}.`, done: `Added mount ${path}.` }
     },
-    validate: ({ parameters }, signal) => api.post('/api/v1/providers/validate', { body: { instance: provider.id, mountBase: String(parameters.base), mountKind: parameters.kind === 'single' ? 'single' : 'tree' }, signal }),
+    validate: validateMount,
+  }
+}
+
+const validateMount: NonNullable<OperationDef['validate']> = ({ parameters }, signal) =>
+  api.post('/api/v1/providers/validate', { body: {
+    instance: String(parameters.instance),
+    mountBase: String(parameters.base),
+    mountKind: parameters.kind === 'single' ? 'single' : 'tree',
+  }, signal })
+
+export function mountFromSecrets(providers: readonly Provider[], folders: readonly string[]): OperationDef {
+  const mounts = new Map(providers.map(provider => [provider.id, addMount(provider)]))
+  const providerField: FieldDef = {
+    name: 'provider', label: 'Provider', kind: 'select', required: true,
+    options: [{ value: '', label: 'Choose a provider' }, ...providers.map(provider => ({ value: provider.id, label: provider.name }))],
+    clearOnChange: ['project', 'secret', 'base', 'itemId'],
+  }
+  return {
+    key: 'mount-add',
+    title: 'Mount provider',
+    confirmLabel: 'Add mount',
+    initial: { provider: providers.length === 1 ? providers[0]!.id : '', kind: 'tree', itemField: 'F_70617373776F7264' },
+    fields: values => [
+      providerField,
+      ...(mounts.get(text(values, 'provider'))?.fields.map(field => field.name === 'path' && folders.length
+        ? { ...field, hint: 'Use an existing folder as a starting point, or enter a new path.', suggestions: folders }
+        : field) ?? []),
+    ],
+    prepare: values => mounts.get(text(values, 'provider'))?.prepare(values) ?? { errors: { provider: 'Choose a provider.' } },
+    validate: validateMount,
   }
 }
 

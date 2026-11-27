@@ -176,9 +176,9 @@ export function ApprovalDialog({ requestId, onClose }: { requestId: string; onCl
       await api.post('/api/v1/approvals/{requestId}/approve', { path: { requestId }, body })
       // Back to the list the person came from, with what happened said at the top: no extra click to get there.
       const who = detail?.review ? (detail.review.machine.friendlyName ?? detail.review.machine.hostName) : 'the machine'
+      // Every approval records a grant. A used one-time grant can be made reusable from the list.
+      await queryClient.invalidateQueries({ queryKey: keys.grants })
       if (minutes > 0) {
-        // The list this opens must show the new grant, not what it held before.
-        await queryClient.invalidateQueries({ queryKey: keys.grants })
         navigate('/access', { state: flash(allowOnce ? `Approved. ${who} can run it now and again ${minutes === ALWAYS ? 'at any time' : 'for ' + timeLabel(minutes)}.` : `Grant created for ${who}.`) })
       } else {
         navigate('/access', { state: flash(`Approved. ${who} can run it now.`) })

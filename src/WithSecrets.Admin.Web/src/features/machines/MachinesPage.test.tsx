@@ -31,17 +31,20 @@ describe('machines: pairing is part of the view', () => {
     expect(screen.queryByRole('link', { name: 'Pairing' })).toBeNull()
   })
 
-  it('shows a machine that paired as a card to check and approve, with its name filled in from the host name', async () => {
+  it('shows invitations first and opens a pending machine to check its identity and approve it', async () => {
     const user = userEvent.setup()
     signedIn()
     renderApp('/machines')
     const section = await screen.findByRole('region', { name: /paired and is waiting/i })
-    expect(within(section).getByRole('heading', { name: 'build-host' })).toBeInTheDocument()
+    expect(screen.getAllByRole('heading', { level: 2 })[0]).toHaveTextContent('Invitations')
+    expect(within(section).getByText('build-host')).toBeVisible()
     expect(within(section).getByText('ab12 cd34 ef56 ab12')).toBeInTheDocument()
     expect(screen.getAllByText('ab12 cd34 ef56 ab12')).toHaveLength(1)
     expect(await violations(document.body)).toEqual([])
 
-    await user.click(within(section).getByRole('button', { name: /^approve/i }))
+    await user.click(within(section).getByRole('button', { name: /View machine/ }))
+    const details = await screen.findByRole('dialog', { name: 'build-host' })
+    await user.click(within(details).getByRole('button', { name: /^approve/i }))
     const dialog = await screen.findByRole('dialog')
     // Prepared with the host name as the name; Change details shows it for editing.
     await user.click(await within(dialog).findByRole('button', { name: 'Change details' }))
@@ -56,12 +59,13 @@ describe('machines: pairing is part of the view', () => {
       'POST /api/v1/authorizations/inline': { status: 201, body: authorization({ operation: 'pairing-revoke', link: null, proof: { mode: 'webauthn', payload: JSON.stringify({ bind: 'AQ', rpId: 'localhost', timeout: 60000 }) }, parameters: [{ name: 'id', value: 'inv-0001' }] }) },
     })
     renderApp('/machines')
-    const list = await screen.findByRole('list', { name: 'Invitations' })
+    const list = await screen.findByRole('table', { name: 'Invitations' })
     expect(within(list).getByText('pending')).toBeInTheDocument()
     expect(document.body.textContent).not.toContain(BUNDLE)
     expect(JSON.stringify({ ...sessionStorage, ...localStorage })).not.toContain(BUNDLE)
 
-    await user.click(within(list).getByRole('button', { name: /revoke/i }))
+    await user.click(within(list).getByRole('button', { name: /View invitation/ }))
+    await user.click(within(await screen.findByRole('dialog', { name: 'Pairing invitation' })).getByRole('button', { name: 'Revoke invitation' }))
     const dialog = await screen.findByRole('dialog')
     expect(await within(dialog).findByRole('button', { name: 'Revoke invitation' })).toBeInTheDocument()
     expect(opened).not.toHaveBeenCalled()
@@ -124,7 +128,7 @@ describe('machines: recoverable errors', () => {
     expect(await screen.findByText(/The machines could not be listed/)).toBeInTheDocument()
     expect(screen.queryByText('No machine has enrolled yet.')).toBeNull()
     await user.click(screen.getByRole('button', { name: /try again loading machines/i }))
-    expect(await screen.findByRole('heading', { name: 'build-host' })).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: /build-host.*View machine/ })).toBeInTheDocument()
   })
 
   it('shows an invitation-list error with a retry instead of an empty list', async () => {
@@ -155,7 +159,7 @@ describe('machines: fingerprint inspection and copy', () => {
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
     signedIn()
     renderApp('/machines')
-    await screen.findByRole('heading', { name: 'build-host' })
+    await user.click(await screen.findByRole('button', { name: /build-host.*View machine/ }))
 
     await user.click(screen.getByRole('button', { name: /copy full fingerprint for build-host/i }))
 
@@ -172,7 +176,8 @@ describe('machines: fingerprint inspection and copy', () => {
     })
     signedIn()
     renderApp('/machines')
-    const card = (await screen.findByRole('heading', { name: 'build-host' })).closest('li') as HTMLElement
+    await user.click(await screen.findByRole('button', { name: /build-host.*View machine/ }))
+    const card = await screen.findByRole('dialog', { name: 'build-host' })
 
     await user.click(within(card).getByText('Show full fingerprint'))
     expect(within(card).getByText(machine().fingerprint)).toBeInTheDocument()

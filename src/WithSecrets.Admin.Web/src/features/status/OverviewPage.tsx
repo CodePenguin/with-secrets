@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom'
 import { useApprovals, useGrants, useMachines, useSession, useStatus } from '../../api/queries'
-import { Card, Facts, PageHeader } from '../../components/Card'
+import { Card, PageHeader } from '../../components/Card'
 import { Button } from '../../components/Button'
 import { Icon } from '../../components/Icon'
 import { Loading, Notice, ProblemAlert } from '../../components/Feedback'
@@ -53,14 +53,6 @@ export function OverviewPage() {
         </Notice>
       ) : null}
 
-      <Card title="Authority">
-        <Facts
-          items={[
-            ['Version', s.version],
-          ]}
-        />
-      </Card>
-
       <Card title="Needs your attention">
         {machines.isError ? (
           <>
@@ -73,7 +65,7 @@ export function OverviewPage() {
             </p>
           </>
         ) : null}
-        {machines.data && (waiting || pending || changed) ? (
+        {waiting || pending || changed ? (
           <ul>
             {waiting ? (
               <li>

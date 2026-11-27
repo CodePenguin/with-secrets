@@ -7,7 +7,7 @@ namespace WithSecrets.Bitwarden;
 /// <summary>Read-only Bitwarden Secrets Manager integration. Credentials are resolved on the authority.</summary>
 public sealed class BitwardenAdapter(string executablePath, Func<string, string?> decryptConfiguration,
     Func<CancellationToken> unlockedSession)
-    : ProviderAdapter<BitwardenConfiguration>
+    : ProviderAdapter<BitwardenConfiguration>, IProviderMountBrowser
 {
     public const string ProviderType = "bitwarden";
     public const string AdapterVersion = "1.0";
@@ -87,7 +87,7 @@ public sealed class BitwardenAdapter(string executablePath, Func<string, string?
         if (path.Length > 2 || !TryProject(path[0], out Guid project)
             || (path.Length == 2 && !TrySecret(path[1], out secret)))
         {
-            return [new("Use a Bitwarden project UUID, optionally followed by /S_ and a 32-digit secret UUID.",
+            return [new("Choose a Bitwarden project and, for a single secret mount, a secret from that project.",
                 ValidationSeverity.Error, "basePath")];
         }
 
@@ -311,21 +311,55 @@ public sealed class BitwardenAdapter(string executablePath, Func<string, string?
         }
     }
 
+    public async Task<IReadOnlyList<ProviderMountOption>> BrowseMountOptionsAsync(string? parentPath, CancellationToken cancellationToken)
+    {
+        BitwardenCli cli = Open(Active().Configuration, cancellationToken);
+        if (parentPath is null)
+        {
+            return await cli.ReadJsonAsync(["project", "list"], root => root.EnumerateArray()
+                .Select(row => new ProviderMountOption(ReadId(row, "id").ToString("D"), ReadName(row, "name")))
+                .OrderBy(option => option.Name, StringComparer.OrdinalIgnoreCase).ThenBy(option => option.Path, StringComparer.Ordinal)
+                .ToArray(), cancellationToken).ConfigureAwait(false);
+        }
+
+        if (!TryProject(parentPath, out Guid project))
+        {
+            throw new ProviderAdapterException(ProviderErrorKind.InvalidConfiguration, "Invalid Bitwarden project.");
+        }
+
+        return await ListProjectAsync(cli, project, rows => rows
+            .Select(row => new ProviderMountOption(SecretInfo(project, row.Id).ExternalSecretId, ReadName(row.Json, "key")))
+            .OrderBy(option => option.Name, StringComparer.OrdinalIgnoreCase).ThenBy(option => option.Path, StringComparer.Ordinal)
+            .ToArray(), cancellationToken).ConfigureAwait(false);
+    }
+
     private static Task<ProviderSecretInfo[]> ListProjectAsync(BitwardenCli cli, Guid project, CancellationToken cancellationToken)
+        => ListProjectAsync(cli, project, rows => rows.Select(row => SecretInfo(project, row.Id))
+            .OrderBy(secret => secret.Path, StringComparer.Ordinal).ToArray(), cancellationToken);
+
+    private static Task<T> ListProjectAsync<T>(BitwardenCli cli, Guid project, Func<IEnumerable<(Guid Id, JsonElement Json)>, T> select,
+        CancellationToken cancellationToken)
         => cli.ReadJsonAsync(["secret", "list", project.ToString("D")], root =>
         {
             var ids = new HashSet<Guid>();
+            var rows = new List<(Guid Id, JsonElement Json)>();
             foreach (JsonElement row in root.EnumerateArray())
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (!ReadProjects(row).Contains(project) || !ids.Add(ReadId(row, "id")))
+                Guid id = ReadId(row, "id");
+                if (!ReadProjects(row).Contains(project) || !ids.Add(id))
                 {
                     throw BitwardenCli.InvalidResponse();
                 }
+
+                rows.Add((id, row));
             }
 
-            return ids.Select(id => SecretInfo(project, id)).OrderBy(secret => secret.Path, StringComparer.Ordinal).ToArray();
+            return select(rows);
         }, cancellationToken);
+
+    private static string ReadName(JsonElement row, string property)
+        => row.GetProperty(property).GetString() is { } name && !string.IsNullOrWhiteSpace(name) ? name : throw BitwardenCli.InvalidResponse();
 
     private static ProviderSecretInfo SecretInfo(Guid project, Guid secret)
     {

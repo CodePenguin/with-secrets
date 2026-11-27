@@ -1,5 +1,5 @@
-import { useEffect, useEffectEvent, useId, useReducer, useRef, useState, type FormEvent } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
+import { useEffect, useEffectEvent, useId, useReducer, useRef, useState, type ComponentProps, type FormEvent } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiError, api, setPendingAuthorization, type PendingAuthorization } from '../../api/client'
 import type { Authorization, AuthorizationResult, ProviderValidation } from '../../api/types'
 import { Button, ButtonLink } from '../../components/Button'
@@ -10,12 +10,36 @@ import { Notice, ProblemAlert, useAnnounce } from '../../components/Feedback'
 import { fromBase64Url, prfOutput, sealPrf, toBase64Url, type SealedPrf } from '../../lib/passkey'
 import { BundleOnce } from '../pairing/BundleOnce'
 import { usePollInterval } from './poll'
-import type { FormValues, OperationDef, Prepared } from './operations'
+import type { FieldDef, FormValues, OperationDef, Prepared } from './operations'
 import styles from './OperationDialog.module.css'
 
 /** What a waiting dialog knows of its authorization: after a reload only the id (the rest is read from the service). */
 type Waiting = { id: string; operation: string; summary: string; done: string; link: string | null; parameters: ReadonlyArray<{ name: string; value: string }> | null; proof: { mode: string; payload: string } | null; prfKey: string | null }
 type InlineProofBody = { proof: string; prf?: SealedPrf }
+
+function LoadedSelect({ source, label, input }: {
+  source: ReturnType<NonNullable<FieldDef['loadOptions']>>
+  label: string
+  input: ComponentProps<'select'>
+}) {
+  const options = useQuery({ queryKey: source.key, queryFn: ({ signal }) => source.load(signal), retry: false })
+  const placeholder = options.isPending ? 'Loading…' : options.isError ? 'Could not load options' :
+    options.data?.length ? `Choose a ${label.toLowerCase()}` : 'No options available'
+  return (
+    <>
+      <select {...input} disabled={input.disabled || !options.data?.length} aria-busy={options.isPending}>
+        <option value="">{placeholder}</option>
+        {options.data?.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+      </select>
+      {options.isError ? (
+        <>
+          <ProblemAlert error={options.error} title={`Could not load ${label.toLowerCase()}s`} />
+          <Button type="button" variant="secondary" disabled={options.isFetching} onClick={() => { void options.refetch() }}>Try again</Button>
+        </>
+      ) : null}
+    </>
+  )
+}
 
 type State =
   | { phase: 'form'; errors: Record<string, string> }
@@ -123,7 +147,7 @@ export function OperationDialog({ def, resume, onClose, onApplied }: Props) {
   const announce = useAnnounce()
   const pollMs = usePollInterval()
   const formId = useId()
-  const hasFields = (def?.fields?.length ?? 0) > 0 || def?.fieldGroup !== undefined
+  const hasFields = typeof def?.fields === 'function' || (def?.fields?.length ?? 0) > 0 || def?.fieldGroup !== undefined
   // What the dialog asks for as it opens, when nothing needs typing (or the initial values are already valid): it starts in 'asking', never showing a button that is about to be pressed for the person.
   const [auto] = useState<Prepared | null>(() => {
     if (resume || !def || def.validate || (hasFields && !def.autoPrepare)) return null
@@ -159,6 +183,7 @@ export function OperationDialog({ def, resume, onClose, onApplied }: Props) {
   const proofAttempted = useRef(false)
   const retainedProof = useRef<{ id: string; body: InlineProofBody } | null>(null)
   const autoStarted = useRef(false)
+  const promptedOnOpen = useRef(false)
 
   useEffect(() => {
     mounted.current = true
@@ -196,6 +221,13 @@ export function OperationDialog({ def, resume, onClose, onApplied }: Props) {
     setPromptCancelled(false)
   }, [waitingId])
 
+  const promptForChoice = useEffectEvent((ready: Waiting) => { void confirmInline(ready) })
+  useEffect(() => {
+    if (!def?.promptOnOpen || !waiting?.proof || promptedOnOpen.current) return
+    promptedOnOpen.current = true
+    promptForChoice(waiting)
+  }, [def?.promptOnOpen, waiting])
+
   // Checking cannot go on unspoken forever: after a bounded time the page offers a safe way out while it keeps reconciling.
   useEffect(() => {
     if (state.phase !== 'waiting' || progress !== 'checking') return
@@ -218,7 +250,7 @@ export function OperationDialog({ def, resume, onClose, onApplied }: Props) {
       setProgress('idle')
       setPendingAuthorization(null)
       void queryClient.invalidateQueries()
-      if (action.type === 'done' && action.result.outcome === 'applied' && waitingOperation &&
+      if (action.type === 'done' && action.result.outcome === 'applied' && !action.result.invitation && !action.result.invitationGone && waitingOperation &&
           showApplied(waitingOperation, action.result.detail ?? action.summary)) return
       dispatch(action)
     }
@@ -283,7 +315,7 @@ export function OperationDialog({ def, resume, onClose, onApplied }: Props) {
     const message: Partial<Record<State['phase'], string>> = {
       asking: 'Asking the service for an authorization.',
       waiting: 'Waiting for your passkey tap.',
-      done: 'Done. ' + (state.phase === 'done' ? state.summary : ''),
+      done: state.phase === 'done' ? state.summary : '',
       failed: 'The change was not made.',
       uncertain: 'The outcome could not be confirmed.',
     }
@@ -471,12 +503,17 @@ export function OperationDialog({ def, resume, onClose, onApplied }: Props) {
     onClose()
   }
 
-  function editField(field: string, value: string | boolean) {
-    setDraft((current) => ({ ...current, [field]: value }))
+  function editField(field: string, value: string | boolean, clear: readonly string[] = []) {
+    setDraft((current) => {
+      const next = { ...current, [field]: value }
+      for (const dependent of clear) delete next[dependent]
+      return next
+    })
     setValidation(null)
     setValidationError(null)
     setAcceptWarnings(false)
     dispatch({ type: 'edited', field })
+    for (const dependent of clear) dispatch({ type: 'edited', field: dependent })
   }
 
   async function submitForm(event: FormEvent) {
@@ -529,7 +566,8 @@ export function OperationDialog({ def, resume, onClose, onApplied }: Props) {
   let body
   let footer
   if (state.phase === 'form' && def) {
-    const fields = (definitions: NonNullable<OperationDef['fields']>, autofocus = false) =>
+    const formFields = typeof def.fields === 'function' ? def.fields(draft) : def.fields ?? []
+    const fields = (definitions: FieldDef[], autofocus = false) =>
       definitions.filter((field) => field.visible?.(draft) ?? true).map((field, index) => (
           <Field key={field.name} label={field.label} hint={field.hint} error={state.errors[field.name]} required={field.required}>
             {(control) => {
@@ -542,13 +580,23 @@ export function OperationDialog({ def, resume, onClose, onApplied }: Props) {
                 className: controlClass,
                 disabled: validating,
                 value: String(draft[field.name] ?? ''),
-                onChange: (event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => editField(field.name, event.target.value),
+                onChange: (event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => editField(field.name, event.target.value, field.clearOnChange),
               }
               if (field.kind === 'select') {
+                if (field.loadOptions) return <LoadedSelect source={field.loadOptions(draft)} label={field.label} input={input} />
                 return <select {...input}>{field.options?.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select>
               }
               if (field.kind === 'textarea') {
                 return <textarea {...input} rows={5} maxLength={field.maxLength} autoComplete="off" spellCheck={false} />
+              }
+              if (field.suggestions?.length) {
+                const list = control.id + '-options'
+                return (
+                  <>
+                    <input {...input} type="text" list={list} maxLength={field.maxLength} autoComplete="off" spellCheck={false} />
+                    <datalist id={list}>{field.suggestions.map(option => <option key={option} value={option} />)}</datalist>
+                  </>
+                )
               }
               // eslint-disable-next-line jsx-a11y/no-autofocus -- the first field of a modal form
               return <input {...input} type={field.kind === 'password' ? 'password' : 'text'} inputMode={field.kind === 'number' ? 'numeric' : undefined} maxLength={field.maxLength} autoComplete="off" spellCheck={false} autoFocus={autofocus && index === 0} />
@@ -560,12 +608,12 @@ export function OperationDialog({ def, resume, onClose, onApplied }: Props) {
         {def.intro ? <p>{def.intro}</p> : null}
         {def.about ? <Facts items={def.about} /> : null}
         {def.warning ? <Notice kind="warning">{def.warning}</Notice> : null}
-        {fields(def.fields ?? [], true)}
+        {fields(formFields, true)}
         {def.fieldGroup && (def.fieldGroup.visible?.(draft) ?? true) ? (
           <fieldset className={styles.fieldGroup}>
             <legend>{def.fieldGroup.label}</legend>
             <p>{def.fieldGroup.hint}</p>
-            <div className={styles.fieldGroupRow}>{fields(def.fieldGroup.fields, !def.fields?.length)}</div>
+            <div className={styles.fieldGroupRow}>{fields(def.fieldGroup.fields, !formFields.length)}</div>
           </fieldset>
         ) : null}
         {validationError ? <ProblemAlert error={validationError} title="Validation could not finish" /> : null}
@@ -706,7 +754,7 @@ export function OperationDialog({ def, resume, onClose, onApplied }: Props) {
     const next = safeLink(state.result.link)
     body = (
       <>
-        <Notice kind="ok" title="Done">
+        <Notice kind="ok">
           {state.result.detail ?? state.summary}
         </Notice>
         {state.result.invitation ? <BundleOnce invitation={state.result.invitation} /> : null}
@@ -792,7 +840,7 @@ export function OperationDialog({ def, resume, onClose, onApplied }: Props) {
                     ? 'Waiting for your passkey.'
                     : 'Waiting for your passkey tap.'
               : state.phase === 'done'
-                ? 'Done.'
+                ? ''
                 : state.phase === 'failed'
                   ? 'The change was not made.'
                   : state.phase === 'uncertain'

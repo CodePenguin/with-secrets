@@ -17,7 +17,8 @@ describe('provider operations', () => {
     expect(duration.prepare({ hours: '25' })).toHaveProperty('errors.hours')
     expect(duration.prepare({ hours: '24', minutes: '1' })).toHaveProperty('errors.hours')
     expect(removeProvider(instance).prepare({})).toMatchObject({ operation: 'provider-remove', parameters: { id: instance.id, revision: '2' } })
-    expect(addMount(instance).prepare({ kind: 'tree', path: 'team', base: '' })).toMatchObject({ operation: 'mount-add', parameters: { instance: instance.id, kind: 'tree', path: 'team', base: '' } })
+    const project = '11111111-1111-4111-8111-111111111111'
+    expect(addMount(instance).prepare({ kind: 'tree', path: 'team', project })).toMatchObject({ operation: 'mount-add', parameters: { instance: instance.id, kind: 'tree', path: 'team', base: project } })
     expect(removeMount(mounted).prepare({})).toMatchObject({ operation: 'mount-remove', parameters: { id: mounted.id } })
   })
 })

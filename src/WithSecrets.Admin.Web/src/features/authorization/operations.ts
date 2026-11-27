@@ -6,11 +6,19 @@ import type { Grant, Invitation, Machine, OperationName, ParameterValue, Passkey
  * all of it; nothing here is a security control.
  */
 
+export type SelectOption = { value: string; label: string }
+
 export type FieldDef = {
   name: string
   label: string
   kind: 'text' | 'password' | 'number' | 'checkbox' | 'select' | 'textarea'
-  options?: ReadonlyArray<{ value: string; label: string }>
+  options?: ReadonlyArray<SelectOption>
+  loadOptions?: (values: FormValues) => {
+    key: readonly unknown[]
+    load: (signal: AbortSignal) => Promise<SelectOption[]>
+  }
+  clearOnChange?: readonly string[]
+  suggestions?: readonly string[]
   hint?: string
   required?: boolean
   min?: number
@@ -39,11 +47,13 @@ export type OperationDef = {
   /** A warning shown before the person continues. */
   warning?: string
   danger?: boolean
-  fields?: FieldDef[]
+  fields?: FieldDef[] | ((values: FormValues) => FieldDef[])
   fieldGroup?: { label: string; hint: string; fields: FieldDef[]; visible?: (values: FormValues) => boolean }
   initial?: FormValues
   /** Ask for the passkey challenge as soon as the dialog opens, with the initial values (the person may still change them). */
   autoPrepare?: boolean
+  /** A preceding duration-menu selection already supplied the confirmation gesture for the passkey prompt. */
+  promptOnOpen?: boolean
   /** The name of the final button: what the tap does, in two or three words. */
   confirmLabel?: string
   /** Discard any state held for this specific operation when its dialog closes. */
@@ -311,7 +321,8 @@ export function changeGrantEnd(grant: Grant, verb: 'extend' | 'renew' | 'replace
 
   return {
     key: 'grant-' + verb,
-    title: verb === 'extend' ? 'Extend this grant' : verb === 'renew' ? 'Renew this grant' : 'Make a grant from this',
+    title: verb === 'extend' ? 'Extend this grant' : verb === 'renew' ? 'Renew this grant' : 'Allow repeat runs',
+    confirmLabel: verb === 'replace' ? 'Create grant' : undefined,
     about: grantFacts(grant),
     fields: [minutes, indefinite],
     initial: { minutes: '60', indefinite: false },

@@ -565,7 +565,7 @@ public sealed partial class AdminService
     /// </summary>
     internal static string? GrantProblem(string verb, GrantRecord grant, DateTimeOffset now, AuthorityStore? store = null)
     {
-        if (verb == "replace")
+        if (verb == "replace" || verb == "extend" && grant.Status == "consumed")
         {
             if (grant.Status != "consumed" || grant.Usage != GrantUsage.Once)
             {
@@ -585,9 +585,9 @@ public sealed partial class AdminService
             return store.ActiveGrantForScope(grant.Fingerprint, grant.ScopeKey) is { } active ? $"an active grant ({active.Id}) already covers this command; extend or renew that one instead" : null;
         }
 
-        if (grant.Status == "consumed" && verb is "extend" or "renew")
+        if (grant.Status == "consumed" && verb == "renew")
         {
-            return "this grant was used once; make a new grant from it instead";
+            return "this grant was used once; extend it to allow repeat runs";
         }
 
         if (grant.Status != "active")
@@ -653,13 +653,15 @@ public sealed partial class AdminService
         }
 
         bool timed = verb is "extend" or "renew" or "replace";
+        bool extendOnce = verb == "extend" && grant.Status == "consumed";
+        int maxMinutes = extendOnce ? ReuseSettings.MaxMinutes : ReuseSettings.MaxAdminMinutes;
         bool indefinite = Arg(args, "indefinite") == "true";
         int? minutes = null;
         if (timed)
         {
-            if (indefinite == (Arg(args, "minutes") is { Length: > 0 }) || (!indefinite && !TryNumber(Arg(args, "minutes"), 1, ReuseSettings.MaxAdminMinutes, out int parsedMinutes)))
+            if (indefinite == (Arg(args, "minutes") is { Length: > 0 }) || (!indefinite && !TryNumber(Arg(args, "minutes"), 1, maxMinutes, out _)))
             {
-                refusal = $"give a time (1 to {ReuseSettings.MaxAdminMinutes} minutes) or no end, not both";
+                refusal = $"give a time (1 to {maxMinutes} minutes) or no end, not both";
                 status = 400;
 
                 return null;
@@ -671,14 +673,22 @@ public sealed partial class AdminService
             }
         }
 
+        if (extendOnce && !ReuseSettings.Load(new StateDatabase(_p.Store.Database)).Allows(indefinite ? ReuseOffer.Always : minutes!.Value))
+        {
+            refusal = "choose one of the offered durations for repeat runs";
+            status = 400;
+            return null;
+        }
+
         // What the page shows is exact: the new end is fixed here (counted from the present end, or from now) and is what the authority applies.
-        DateTimeOffset? newEnd = verb == "revoke" || indefinite ? null : verb == "extend" ? grant.Expires!.Value.AddMinutes(minutes!.Value) : now.AddMinutes(minutes!.Value);
+        DateTimeOffset? newEnd = verb == "revoke" || indefinite ? null : verb == "extend" && !extendOnce ? grant.Expires!.Value.AddMinutes(minutes!.Value) : now.AddMinutes(minutes!.Value);
         MachineRecord? machine = _p.Store.Find(grant.Fingerprint);
         bool replace = verb == "replace";
         // A replacement's id is fixed here, so the page (which the passkey signs) names exactly the grant that will exist, and the authority makes no other.
         string? newGrantId = replace ? GrantOps.NewGrantId() : null;
         string change = verb switch
         {
+            "extend" when extendOnce => indefinite ? "allow repeat runs using this grant with no end" : $"allow repeat runs using this grant for {minutes} minutes from now",
             "extend" => indefinite ? "extend this grant so that it has no end" : $"extend this grant by {minutes} minutes from its present end",
             "renew" => indefinite ? "renew this ended grant so that it has no end" : $"renew this ended grant for {minutes} minutes from now",
             "replace" => (indefinite ? "make a new grant with no end" : $"make a new grant for {minutes} minutes from now") + $" ({newGrantId}) in place of this once-only grant that was used: the same machine, program, folder and secrets; it covers every run of that command, with no tap, until it ends",

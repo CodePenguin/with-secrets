@@ -242,7 +242,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Start entering values for these secret names: answers the text the passkey will sign, the passkey request and the public key the values are sealed to in the browser. Stores nothing. */
+        /** Prepare to store secrets or edit one stored secret when a source is supplied. A move can keep its value by sealing an empty object. Stores nothing. */
         post: operations["startSecretEntry"];
         delete?: never;
         options?: never;
@@ -774,6 +774,23 @@ export interface paths {
         put?: never;
         /** Validate a proposed provider configuration or mount path. */
         post: operations["validateProvider"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/providers/{id}/mount-options": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** List names and paths available to mount. */
+        post: operations["browseProviderMountOptions"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1512,6 +1529,10 @@ export interface components {
             ok: boolean;
             issues: components["schemas"]["ProviderValidationIssue"][];
         };
+        ProviderMountOptions: {
+            path: string;
+            name: string;
+        }[];
         MountRefresh: {
             complete: boolean;
             added: number;
@@ -1594,6 +1615,7 @@ export interface components {
             program: string;
             reason: string;
             secretNames: string[];
+            scriptName: string | null;
         };
         ApprovalQueue: {
             items: components["schemas"]["ApprovalQueueItem"][];
@@ -1751,6 +1773,7 @@ export interface components {
             actions: ("extend" | "renew" | "revoke" | "replace")[];
             /** @description The grant seal verifies and the signing passkey is still authorized. */
             verified: boolean;
+            repeatTimes: number[];
         };
         GrantList: {
             items: components["schemas"]["Grant"][];
@@ -3214,6 +3237,7 @@ export interface operations {
             content: {
                 "application/json": {
                     names: string[];
+                    source?: string;
                 };
             };
         };
@@ -6744,6 +6768,143 @@ export interface operations {
             };
         };
     };
+    browseProviderMountOptions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /** @description The provider path the mount reads (for a tree mount it may be empty: the provider's root). */
+                    parentPath?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Success. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderMountOptions"];
+                };
+            };
+            /** @description The request is not valid (invalid-request, invalid-json). */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No browser session (session-required). */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No such resource (not-found). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The operation does not apply, or the change failed (operation-refused, operation-failed). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is too large (payload-too-large). */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The body is not application/json (unsupported-media-type). */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The Host is not a loopback name (host-not-allowed). */
+            421: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The authority is locked (authority-locked). */
+            423: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests (too-many-requests). */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request failed (internal-error). Nothing the response does not say was changed. */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Provider administration is unavailable on this service (internal-error). */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     refreshMount: {
         parameters: {
             query?: never;
@@ -9745,7 +9906,7 @@ export interface operations {
                 "application/json": {
                     /** @description The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap. */
                     authorization: string;
-                    /** @description Minutes to add to (extend) or to grant from now (renew). */
+                    /** @description Minutes to add to an active grant or to grant from now. */
                     minutes?: number;
                     /** @description True for a grant with no end (instead of minutes). */
                     indefinite?: boolean;
@@ -9877,7 +10038,7 @@ export interface operations {
                 "application/json": {
                     /** @description The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap. */
                     authorization: string;
-                    /** @description Minutes to add to (extend) or to grant from now (renew). */
+                    /** @description Minutes to add to an active grant or to grant from now. */
                     minutes?: number;
                     /** @description True for a grant with no end (instead of minutes). */
                     indefinite?: boolean;
@@ -10009,7 +10170,7 @@ export interface operations {
                 "application/json": {
                     /** @description The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap. */
                     authorization: string;
-                    /** @description Minutes to add to (extend) or to grant from now (renew). */
+                    /** @description Minutes to add to an active grant or to grant from now. */
                     minutes?: number;
                     /** @description True for a grant with no end (instead of minutes). */
                     indefinite?: boolean;

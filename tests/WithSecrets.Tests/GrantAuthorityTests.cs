@@ -295,6 +295,7 @@ internal static class GrantAuthorityTests
             await LockDuringApproval(check, parent);
             await OnceGrants(check, parent);
             await LifetimePolicy(check, parent);
+            await ExtendOnceGrants(check, parent);
             await ReplaceGrants(check, parent);
             await GrantEnds(check, parent);
             await ThroughTheService(check, parent);
@@ -1217,7 +1218,7 @@ internal static class GrantAuthorityTests
         check(fx.Admin(GrantOps.Revoke, bounded) is { Outcome: GrantOps.Revoked }, "lifetime: the grant is revoked");
         check(fx.Admin(GrantOps.Extend, bounded, 5) is { ReasonCode: GrantReasons.NotActive } && fx.Admin(GrantOps.Renew, bounded, 5) is { ReasonCode: GrantReasons.NotActive }, "lifetime: extend and renew of a revoked grant are refused grant-not-active");
 
-        // A consumed once-only grant is neither extended nor renewed, and the admin app offers it nothing.
+        // A consumed once-only grant cannot be extended when an existing grant already covers the scope.
         int revision = fx.Host.KnownRevision ?? 1;
         ApprovalDecision decision = ApprovalDecision.Allow("approved with passkey key-one", 0, fx.Sign(fx.UserKey, Fixture.ApproveText(S1, revision), 0));
         GrantApproval onceMade = await fx.Host.RecordOnceGrantAsync(fx.Req(), S1, decision, CancellationToken.None);
@@ -1226,9 +1227,31 @@ internal static class GrantAuthorityTests
         if (once is not null)
         {
             DateTimeOffset now = fx.Clock.GetUtcNow();
-            check(fx.Admin(GrantOps.Extend, once.Id, 5) is { Outcome: GrantOps.Denied, ReasonCode: GrantReasons.NotActive } && fx.Admin(GrantOps.Renew, once.Id, 5) is { Outcome: GrantOps.Denied, ReasonCode: GrantReasons.NotActive } && fx.Store.FindGrant(once.Id)!.Revision == once.Revision, "lifetime: extend and renew of a consumed once grant are refused grant-not-active, and change nothing");
-            check(AdminService.GrantProblem("extend", once, now) == "this grant was used once; make a new grant from it instead" && AdminService.GrantProblem("renew", once, now) == "this grant was used once; make a new grant from it instead", "lifetime: the admin app refuses extend and renew of a consumed grant with the sentence that says to make a new grant from it");
+            check(fx.Admin(GrantOps.Extend, once.Id, 60) is { Outcome: GrantOps.Denied, ReasonCode: GrantReasons.Exists } && fx.Admin(GrantOps.Renew, once.Id, 5) is { Outcome: GrantOps.Denied, ReasonCode: GrantReasons.NotActive } && fx.Store.FindGrant(once.Id)!.Revision == once.Revision, "lifetime: another grant blocks extending a used approval, and it cannot be renewed");
+            check(AdminService.GrantProblem("extend", once, now) is not null && AdminService.GrantProblem("renew", once, now) == "this grant was used once; extend it to allow repeat runs", "lifetime: the app requires verified evidence to extend an existing consumed grant and guides renewal toward extension");
         }
+    }
+
+    private static async Task ExtendOnceGrants(Action<bool, string> check, string parent)
+    {
+        using Fixture fx = new(parent);
+        await fx.Start();
+        GrantRecord once = (await fx.Once(S1))!;
+        DateTimeOffset now = fx.Clock.GetUtcNow();
+        GrantAdminCommand command = fx.Command(GrantOps.Extend, once.Id, 43200, endOverride: now.AddDays(30));
+        check(fx.Authority.AdminGrant(command with { Evidence = null }) is { ReasonCode: GrantReasons.NoEvidence }
+            && SameGrant(fx.Store.FindGrant(once.Id), once), "extending a used grant requires a signed assertion");
+        check(fx.Authority.AdminGrant(command with { Minutes = 1440 }) is { ReasonCode: GrantReasons.NoTime }
+            && SameGrant(fx.Store.FindGrant(once.Id), once), "the signed end cannot exceed the selected duration");
+        GrantResponse extended = fx.Authority.AdminGrant(command);
+        GrantRecord? current = fx.Store.FindGrant(once.Id);
+        check(extended is { Outcome: GrantOps.Extended } && current is { Usage: GrantUsage.Reusable, Status: "active", Revision: 2 }
+            && current.Expires == now.AddDays(30) && current.ScopeKey == once.ScopeKey && fx.Store.Grants().Count == 1
+            && fx.Store.Sealer!.Problem(current) is null, "a 30-day extension seals the original grant with the same id and scope");
+        GrantRecord other = (await fx.Once(S2))!;
+        check(fx.Admin(GrantOps.Extend, other.Id, indefinite: true) is { Outcome: GrantOps.Extended }
+            && fx.Store.FindGrant(other.Id) is { Usage: GrantUsage.Reusable, Expires: null, Revision: 2 },
+            "Always extends the existing grant with no end");
     }
 
     // ---- replace: a consumed once-only grant becomes a new reusable grant for exactly its scope (an admin's tap; the original is kept as it was) ----

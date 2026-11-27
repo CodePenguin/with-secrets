@@ -26,7 +26,7 @@ internal static class ScenariosPairing
         AuthorityStore store = rig.Machine.Deployment.Store;
         await Spa.SignIn(c, app, s);
         await Scenarios3.SeedSecret(rig, c, app);
-        await c.StartDemoAsync();
+        await Spa.StartDemoFromOverview(c);
         (_, long signsAfterSignIn) = await c.AuthOps();
 
         // 1. The administrator creates the invitation: the dialog, the tap, and the bundle once.
@@ -41,7 +41,7 @@ internal static class ScenariosPairing
         IPage invitationPage = await Spa.OpenPasskeyPage(c, s, dialog);
         s.Check(store.Invitations().Count == 0, "nothing is created while the tap is outstanding");
         string page = await Spa.TapAfterBack(c, s, invitationPage, null);
-        s.Check(page.Contains("Done", StringComparison.Ordinal) && page.Contains("one-time invitation", StringComparison.OrdinalIgnoreCase), "the SPA displays the service-confirmed one-time invitation: " + page);
+        s.Check(page.Contains("one-time invitation", StringComparison.OrdinalIgnoreCase), "the SPA displays the service-confirmed one-time invitation: " + page);
         ILocator box = dialog.Locator("textarea#pairing-bundle");
         await box.WaitForAsync(new() { Timeout = 20000 });
         string bundleText = await box.InputValueAsync();
@@ -56,7 +56,7 @@ internal static class ScenariosPairing
         s.Check(!(await c.Page.ContentAsync()).Contains(code, StringComparison.Ordinal) && !c.Page.Url.Contains(code, StringComparison.Ordinal), "after the dialog is closed the code is nowhere on the page or in its address");
         await c.Page.ReloadAsync();
         await Spa.Heading(c, "Machines").WaitForAsync();
-        s.Check(!(await c.Page.ContentAsync()).Contains(code, StringComparison.Ordinal) && (await c.Page.GetByRole(AriaRole.List, new() { Name = "Invitations" }).TextContentAsync() ?? "").Contains("pending", StringComparison.Ordinal), "after a reload the invitation is listed by status only; the bundle cannot be shown again");
+        s.Check(!(await c.Page.ContentAsync()).Contains(code, StringComparison.Ordinal) && (await c.Page.GetByRole(AriaRole.Table, new() { Name = "Invitations" }).TextContentAsync() ?? "").Contains("pending", StringComparison.Ordinal), "after a reload the invitation is listed by status only; the bundle cannot be shown again");
 
         // 2. A second host pairs (its own identity and folder).
         string folder = Path.Combine(rig.Folder, "paired-host");
@@ -76,27 +76,28 @@ internal static class ScenariosPairing
         s.Check(paired.Ok && paired.MachineFingerprint == fp && store.Find(fp) is { Status: MachineStatus.Pending, HostName: "paired-host" } && store.Invitation(bundle!.InvitationId) is { Status: "consumed" }, "the second host pairs: it is Pending at the authority with its host name and the invitation is consumed (" + (paired.Ok ? "paired" : paired.Message) + ")");
 
         // 3. The administrator sees it Pending with the fingerprint and host name and approves it (the existing operation, its own tap).
-        ILocator row = c.Page.GetByRole(AriaRole.Region, new() { Name = "A machine paired and is waiting for you" }).GetByRole(AriaRole.Listitem).Filter(new() { HasText = KeyIdentity.Display(fp) });
+        ILocator row = c.Page.GetByRole(AriaRole.Region, new() { Name = "A machine paired and is waiting for you" }).GetByRole(AriaRole.Row).Filter(new() { HasText = KeyIdentity.Display(fp) });
         await row.WaitForAsync(new() { Timeout = 45000 });
-        s.Check(await c.Page.GetByRole(AriaRole.Region, new() { Name = "A machine paired and is waiting for you" }).CountAsync() == 1, "the machine that paired appears by itself, as a card to check and approve");
+        s.Check(await c.Page.GetByRole(AriaRole.Region, new() { Name = "A machine paired and is waiting for you" }).CountAsync() == 1, "the machine that paired has a row in the waiting table");
         string rowText = await row.TextContentAsync() ?? "";
         s.Check(rowText.Contains("pending", StringComparison.Ordinal) && rowText.Contains("paired-host", StringComparison.Ordinal), "the machines view shows the paired machine Pending with its host name and fingerprint");
-        await c.DemoPressAsync(row.GetByRole(AriaRole.Button, new() { Name = "Approve" }), "The paired machine appears under Machines. Compare its host name and fingerprint with the second machine, then approve it.");
+        await c.DemoPressAsync(row.GetByRole(AriaRole.Button), "Invitations are at the top. The paired machine appears below. Open its row.");
+        await row.GetByRole(AriaRole.Button).ClickAsync();
+        await c.DemoPressAsync(dialog.GetByRole(AriaRole.Button, new() { Name = "Approve" }), "Compare the host name and fingerprint with the second machine, then choose Approve.");
         Spa.Clicks = 0;
-        await Spa.Click(row.GetByRole(AriaRole.Button, new() { Name = "Approve" }));
+        await Spa.Click(dialog.GetByRole(AriaRole.Button, new() { Name = "Approve" }));
         await dialog.WaitForAsync();
         await Spa.WaitForPasskeyStep(dialog);
         s.Check((await dialog.TextContentAsync() ?? "").Contains("as \"paired-host\"", StringComparison.Ordinal), "the machine is approved under its host name unless the person changes it");
         IPage approvePage = await Spa.OpenPasskeyPage(c, s, dialog);
         s.Check(store.Find(fp)!.Status == MachineStatus.Pending, "still Pending until the second tap");
         await Spa.TapAfterBack(c, s, approvePage, null);
-        await dialog.GetByText("Done").First.WaitForAsync(new() { Timeout = 20000 });
+        await Spa.PageFeedback(c).WaitForAsync(new() { Timeout = 20000 });
         s.Check(store.Find(fp) is { Status: MachineStatus.Trusted, FriendlyName: "paired-host" }, "the approval makes the host Trusted");
         (_, long signsAfterApprove) = await c.AuthOps();
         s.Check(Spa.Clicks == 2, "approving the paired machine took two clicks: Approve and confirm (" + Spa.Clicks + ")");
         s.Check(signsAfterApprove == signsAfterSignIn + 2, "creating the invitation and approving the machine were two passkey taps, one each");
-        await dialog.GetByRole(AriaRole.Button, new() { Name = "Close" }).ClickAsync();
-        await c.Page.GetByRole(AriaRole.Heading, new() { Name = "paired-host", Exact = true }).WaitForAsync();
+        await c.Page.GetByRole(AriaRole.Table, new() { Name = "Machines", Exact = true }).GetByText("paired-host", new() { Exact = true }).WaitForAsync();
         await c.DemoSnapAsync("The second machine is trusted and can now request access to secrets.");
 
         // 4. The host pins the authority key (M1) and asks the authority to run a command.
@@ -146,15 +147,21 @@ internal static class ScenariosPairing
             return (result, output.ToString(), all.ToString());
         }
 
+        string? reviewedPath = null;
+        async Task Decide(bool approve, string reason)
+        {
+            reviewedPath = await DecideOnApprovalsPage(c, s, approve, reason, reviewedPath);
+        }
+
         // 4a. A person denies the request on the Approvals page.
-        (LaunchEvent? denied, string deniedOutput, string deniedAll) = await Launch("e2e paired host", () => DecideOnApprovalsPage(c, s, approve: false, "e2e paired host"));
+        (LaunchEvent? denied, string deniedOutput, string deniedAll) = await Launch("e2e paired host", () => Decide(approve: false, "e2e paired host"));
         s.Check(denied is { Outcome: LaunchOutcome.Denied, ExitCode: RunCommand.Denied }
             && !deniedOutput.Contains(SecretValue, StringComparison.Ordinal)
             && deniedAll.Contains("user-denied", StringComparison.Ordinal),
             "the paired host's request reached the Approvals page and Deny ended it (nothing ran)");
 
         // 4b. A person approves a second request with their passkey. The unlocked authority delivers the secret for this run.
-        (LaunchEvent? approved, string approvedOutput, _) = await Launch("e2e paired host, approved", () => DecideOnApprovalsPage(c, s, approve: true, "e2e paired host, approved"));
+        (LaunchEvent? approved, string approvedOutput, _) = await Launch("e2e paired host, approved", () => Decide(approve: true, "e2e paired host, approved"));
         s.Check(approved is { Outcome: LaunchOutcome.Exited, ExitCode: 0 } && approvedOutput.Contains("remote-value=[REDACTED]", StringComparison.Ordinal) && !approvedOutput.Contains(SecretValue, StringComparison.Ordinal),
             "Approve on the Access screen, with one passkey tap, let the paired host's command run, its output redacted (" + approved?.Outcome + ", " + approved?.ExitCode + ", output: " + approvedOutput.Replace(SecretValue, "<secret>").Trim() + ")");
         s.Check(!(await c.Page.ContentAsync()).Contains(SecretValue, StringComparison.Ordinal), "the secret value is nowhere in the Approvals page");
@@ -189,19 +196,21 @@ internal static class ScenariosPairing
     }
 
     /// <summary>Decides the waiting request with this reason the way a person does: Access in the navigation, Review, then Deny or Approve once.</summary>
-    private static async Task DecideOnApprovalsPage(Ctx c, S s, bool approve, string reason)
+    private static async Task<string> DecideOnApprovalsPage(Ctx c, S s, bool approve, string reason, string? reviewedPath)
     {
         await Spa.GoTo(c, "Access", "Access");
-        // This request, by its reason: the list is polled, so a request that was decided a moment ago can still be listed, and Review for that one opens a request that is already over.
-        ILocator review = c.Page.GetByRole(AriaRole.Listitem).Filter(new() { HasText = reason }).GetByRole(AriaRole.Link, new() { Name = "Review" }).First;
+        var queue = c.Page.GetByRole(AriaRole.Table, new() { Name = "Run requests" });
+        string selector = reviewedPath is null ? "a" : "a:not([href='" + reviewedPath + "'])";
+        ILocator review = queue.Locator(selector).First;
         await review.WaitForAsync(new() { Timeout = 60000 });
-        await c.DemoPressAsync(review, "A request from the paired machine appears in Access. Choose Review.");
+        string path = (await review.GetAttributeAsync("href"))!;
+        await c.DemoPressAsync(review, "A request from the paired machine appears in Access. Select the command to review it.");
         await Spa.Shot(c, "approvals-list");
         await Spa.Axe(c, s, "approvals (a request is waiting)");
         await Spa.Click(review);
         await c.Page.GetByRole(AriaRole.Dialog, new() { Name = "Run request from" }).WaitForAsync(new() { Timeout = 20000 });
         string text = await c.Page.Locator("main").TextContentAsync() ?? "";
-        s.Check(text.Contains("E2E_SECRET", StringComparison.Ordinal) && text.Contains(Rig.ScriptFile("remote"), StringComparison.Ordinal) && text.Contains("echo remote-value", StringComparison.Ordinal), "the request page names the secret, the program and the script's contents before any decision");
+        s.Check(text.Contains("E2E_SECRET", StringComparison.Ordinal) && text.Contains(Rig.ScriptFile("remote"), StringComparison.Ordinal) && text.Contains("echo remote-value", StringComparison.Ordinal) && text.Contains(reason, StringComparison.Ordinal), "the request page names the secret, the program and the script's contents before any decision");
         await Spa.Shot(c, "approval-request");
         await Spa.Axe(c, s, "a run request");
         if (!approve)
@@ -210,7 +219,7 @@ internal static class ScenariosPairing
             await c.Page.GetByText("Denied.").First.WaitForAsync(new() { Timeout = 20000 });
             await c.DemoSnapAsync("The first request was denied. The paired machine’s command did not run.");
 
-            return;
+            return path;
         }
 
         ILocator approveButton = c.Page.GetByRole(AriaRole.Button, new() { Name = "Approve once", Exact = true });
@@ -221,5 +230,7 @@ internal static class ScenariosPairing
         await c.Page.GetByText("Approved.").First.WaitForAsync(new() { Timeout = 30000 });
         await c.DemoSnapAsync("The second request was approved. The paired machine ran the command with the requested secret.");
         s.Check(await c.PasskeyCalls() == before + 1, "Approve used the passkey exactly once");
+
+        return path;
     }
 }

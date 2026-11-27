@@ -1641,7 +1641,7 @@
     "/api/v1/secrets/entries": {
       "post": {
         "operationId": "startSecretEntry",
-        "summary": "Start entering values for these secret names: answers the text the passkey will sign, the passkey request and the public key the values are sealed to in the browser. Stores nothing.",
+        "summary": "Prepare to store secrets or edit one stored secret when a source is supplied. A move can keep its value by sealing an empty object. Stores nothing.",
         "tags": [
           "secrets"
         ],
@@ -1656,8 +1656,13 @@
                     "type": "array",
                     "items": {
                       "type": "string",
-                      "maxLength": 80
+                      "maxLength": 200
                     }
+                  },
+                  "source": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
                   }
                 },
                 "additionalProperties": false,
@@ -2346,7 +2351,7 @@
                     "type": "array",
                     "items": {
                       "type": "string",
-                      "maxLength": 80
+                      "maxLength": 200
                     }
                   }
                 },
@@ -6380,6 +6385,183 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ProviderValidation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is not valid (invalid-request, invalid-json).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Another origin is refused (origin-not-allowed); for a change also no Origin, no anti-forgery value, or no valid authorization (origin-required, anti-forgery, authorization-invalid, authorization-pending, authorization-refused, authorization-used, authorization-expired, authorization-mismatch).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No browser session (session-required).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such resource (not-found).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The operation does not apply, or the change failed (operation-refused, operation-failed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The authority is locked (authority-locked).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large (payload-too-large).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not application/json (unsupported-media-type).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "421": {
+            "description": "The Host is not a loopback name (host-not-allowed).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests (too-many-requests).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider administration is unavailable on this service (internal-error).",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The request failed (internal-error). Nothing the response does not say was changed.",
+            "content": {
+              "application/problem\u002Bjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": [],
+            "antiForgery": []
+          }
+        ]
+      }
+    },
+    "/api/v1/providers/{id}/mount-options": {
+      "post": {
+        "operationId": "browseProviderMountOptions",
+        "summary": "List names and paths available to mount.",
+        "tags": [
+          "providers"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "parentPath": {
+                    "type": "string",
+                    "maxLength": 300,
+                    "description": "The provider path the mount reads (for a tree mount it may be empty: the provider\u0027s root)."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-access": "session",
+        "responses": {
+          "200": {
+            "description": "Success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderMountOptions"
                 }
               }
             }
@@ -10605,8 +10787,8 @@
                   "minutes": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 1440,
-                    "description": "Minutes to add to (extend) or to grant from now (renew)."
+                    "maximum": 43200,
+                    "description": "Minutes to add to an active grant or to grant from now."
                   },
                   "indefinite": {
                     "type": "boolean",
@@ -10795,7 +10977,7 @@
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 1440,
-                    "description": "Minutes to add to (extend) or to grant from now (renew)."
+                    "description": "Minutes to add to an active grant or to grant from now."
                   },
                   "indefinite": {
                     "type": "boolean",
@@ -10984,7 +11166,7 @@
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 1440,
-                    "description": "Minutes to add to (extend) or to grant from now (renew)."
+                    "description": "Minutes to add to an active grant or to grant from now."
                   },
                   "indefinite": {
                     "type": "boolean",
@@ -12469,6 +12651,25 @@
           "issues"
         ]
       },
+      "ProviderMountOptions": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "path",
+            "name"
+          ]
+        }
+      },
       "MountRefresh": {
         "type": "object",
         "properties": {
@@ -12807,6 +13008,12 @@
             "items": {
               "type": "string"
             }
+          },
+          "scriptName": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "additionalProperties": false,
@@ -12818,7 +13025,8 @@
           "machine",
           "program",
           "reason",
-          "secretNames"
+          "secretNames",
+          "scriptName"
         ]
       },
       "ApprovalQueue": {
@@ -13492,6 +13700,14 @@
           "verified": {
             "type": "boolean",
             "description": "The grant seal verifies and the signing passkey is still authorized."
+          },
+          "repeatTimes": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000
+            }
           }
         },
         "additionalProperties": false,
@@ -13515,7 +13731,8 @@
           "consumed",
           "replaces",
           "actions",
-          "verified"
+          "verified",
+          "repeatTimes"
         ]
       },
       "GrantList": {

@@ -100,11 +100,16 @@ internal sealed class SecretFlows(SecretStore store, AdminAudit audit, Func<IPro
     }
 
     /// <summary>Starts an entry of values for these names. Nothing is stored until the passkey tap.</summary>
-    public (SecretEntryDto? Entry, string? Problem) StartSet(IReadOnlyList<string> names, string sessionId, string origin)
+    public (SecretEntryDto? Entry, string? Problem) StartSet(IReadOnlyList<string> names, string sessionId, string origin, string? source = null)
     {
         if (SecretEntry.CheckNames(names) is { } refused)
         {
             return (null, refused.Detail);
+        }
+
+        if (source is not null && (names.Count != 1 || !SecretNames.IsValid(source)))
+        {
+            return (null, "an edit needs one valid source and one destination");
         }
 
         IProofMethod? method = AdminMethod();
@@ -115,7 +120,26 @@ internal sealed class SecretFlows(SecretStore store, AdminAudit audit, Func<IPro
 
         try
         {
-            (Manifest? manifest, IReadOnlyList<string> storedNames) = store.Current();
+            Manifest? manifest;
+            HashSet<string> stored;
+            SecretEntry.Edit? edit = null;
+            if (source is null)
+            {
+                (manifest, IReadOnlyList<string> storedNames) = store.Current();
+                stored = [.. storedNames];
+            }
+            else
+            {
+                (manifest, Dictionary<string, string> rows) = store.ReadRows([source]);
+                stored = [.. manifest!.Secrets.Keys];
+                if (source != names[0] && stored.Contains(names[0]))
+                {
+                    return (null, "a secret already exists at " + names[0]);
+                }
+
+                edit = new SecretEntry.Edit(source, rows[source]);
+            }
+
             if (manifest is null)
             {
                 return (null, PasskeyRegistration.NothingEnrolled);
@@ -126,17 +150,16 @@ internal sealed class SecretFlows(SecretStore store, AdminAudit audit, Func<IPro
                 return (null, "the state has no secret store key; set up again with: with-secrets admin");
             }
 
-            HashSet<string> stored = [.. storedNames];
-            string text = SecretEntry.SetText(names, stored, method);
+            string text = edit is null ? SecretEntry.SetText(names, stored, method) : SecretEntry.EditText(edit.Source, names[0], stored, method);
             string nonce = Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(16));
             byte[] bind = RequestBinding.Compute(nonce, text);
             ProofStart start = method.Start(new ProofContext(bind, origin));
             (byte[] serverKey, string publicKey) = SecretCrypto.NewServerKey();
-            SecretEntry.Session session = new(method, store, manifest, manifest.Store, [.. names], serverKey);
+            SecretEntry.Session session = new(method, store, manifest, manifest.Store, [.. names], serverKey, edit);
             session.Open(origin, bind);
             string id = NewId();
             DateTimeOffset expires = clock.GetUtcNow() + Lifetime;
-            if (!Add(new SetFlow(id, sessionId, expires, [.. names], session)))
+            if (!Add(new SetFlow(id, sessionId, expires, source is not null && source != names[0] ? [source, names[0]] : [.. names], session)))
             {
                 session.Close();
 

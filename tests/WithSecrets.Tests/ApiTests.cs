@@ -870,7 +870,7 @@ internal static class ApiTests
         }
 
         DateTimeOffset now = app.Clock.GetUtcNow();
-        check(admin.GrantView(once, now).Actions.SequenceEqual(["replace"]), "grant replace: the grants view offers a consumed once-only grant exactly replace (" + string.Join(",", admin.GrantView(once, now).Actions) + ")");
+        check(admin.GrantView(once, now).Actions.SequenceEqual(["extend"]), "grant replace: the grants view offers a consumed once-only grant exactly extend (" + string.Join(",", admin.GrantView(once, now).Actions) + ")");
         GrantRecord planted = once with { Id = "g-planted0002", Evidence = null };
         check(admin.GrantView(planted, now).Actions.Count == 0, "grant replace: a consumed row without a person's assertion is offered nothing");
         check(admin.GrantView(once, now).Verified && !admin.GrantView(planted, now).Verified, "grant view: a sealed row is verified, a planted copy under another id is not");
@@ -919,7 +919,7 @@ internal static class ApiTests
             && shown.Parameters.Any(item => item.Name == "grant" && item.Value == once.Id) && shown.Parameters.Any(item => item.Name == "new-end"), "grant replace: the page (which the passkey signs) names the original, the new grant's id, its usage and its end");
         check(GrantAuthorityTests.SameGrant(app.Store.FindGrant(once.Id), once) && admin.GrantView(once, app.Clock.GetUtcNow()).Actions.Count == 0 && AdminService.GrantProblem("replace", once, app.Clock.GetUtcNow(), app.Store) is { } covered && covered.Contains(newId, StringComparison.Ordinal),
             "grant replace: the original is unchanged (consumed) and no longer offered replace while the new grant covers its scope, as the authority refuses it (grant-exists)");
-        check(admin.GrantView(other, app.Clock.GetUtcNow()).Actions.SequenceEqual(["replace"]), "grant replace: a used once-only grant of another scope is still offered replace");
+        check(admin.GrantView(other, app.Clock.GetUtcNow()).Actions.SequenceEqual(["extend"]), "grant replace: a used once-only grant of another scope is still offered extend");
         check(app.Store.Audit().Any(entry => entry.Event == "grant-replaced" && entry.Detail.Contains("replaces " + once.Id + " by admin passkey laptop; 60 min", StringComparison.Ordinal)), "grant replace: the authority audit names the admin key that tapped");
 
         // The session alone (no tap) changes nothing, and its authorization satisfies no mutation.
@@ -973,9 +973,10 @@ internal static class ApiTests
         {
             JsonElement row = doc.RootElement.GetProperty("items").EnumerateArray().First(item => item.GetProperty("id").GetString() == other.Id);
             check(row.GetProperty("usage").GetString() == "once" && row.GetProperty("status").GetString() == "consumed" && row.GetProperty("consumed").ValueKind == JsonValueKind.String
-                && row.GetProperty("replaces").ValueKind == JsonValueKind.Null && row.GetProperty("actions").EnumerateArray().Select(item => item.GetString()).SequenceEqual(["replace"])
+                && row.GetProperty("replaces").ValueKind == JsonValueKind.Null && row.GetProperty("actions").EnumerateArray().Select(item => item.GetString()).SequenceEqual(["extend"])
+                && row.GetProperty("repeatTimes").EnumerateArray().Select(item => item.GetInt32()).SequenceEqual(new ReuseOffer(ReuseSettings.DefaultMaxMinutes).WithAlways)
                 && row.GetProperty("ends").GetString() == "used " + CanonicalJson.Time(other.Consumed!.Value),
-                "grant replace: GET /grants shows usage once, status consumed, a consumed time, ends \"used <time>\", and the action replace");
+                "grants API: a used grant offers extension with the approval durations");
             JsonElement replacedRow = doc.RootElement.GetProperty("items").EnumerateArray().First(item => item.GetProperty("id").GetString() == once.Id);
             check(replacedRow.GetProperty("actions").GetArrayLength() == 0, "grant replace: GET /grants offers no action for the used grant whose scope the new grant covers");
         }
