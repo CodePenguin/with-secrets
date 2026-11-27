@@ -9,16 +9,13 @@ internal sealed record ReceivedDiagnostic(DiagnosticEvent Event, DateTimeOffset 
 internal sealed record DiagnosticView(Guid Id, DateTimeOffset Time, DateTimeOffset ReceivedAt, string Severity, string Component, string Message);
 internal sealed record MachineDiagnosticsView(DateTimeOffset? LastReceivedAt, IReadOnlyList<DiagnosticView> Items);
 
-internal sealed record DiagnosticSettings(string Level, int QueueKiB, int RetentionHours)
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Skip)]
+internal sealed record DiagnosticSettings(string Level)
 {
-    public const int MinQueueKiB = 16;
-    public const int MaxQueueKiB = 1024;
-    public const int MaxRetentionHours = 168;
     public static readonly string[] Levels = ["error", "warning", "information", "debug"];
-    public static DiagnosticSettings Default { get; } = new("warning", 256, 72);
+    public static DiagnosticSettings Default { get; } = new("warning");
 
-    public bool Valid() => Levels.Contains(Level, StringComparer.Ordinal)
-        && QueueKiB is >= MinQueueKiB and <= MaxQueueKiB && RetentionHours is >= 1 and <= MaxRetentionHours;
+    public bool Valid() => Levels.Contains(Level, StringComparer.Ordinal);
 
     public bool Includes(string code) => Rank(DiagnosticCatalog.Describe(code).Severity) >= Rank(Level);
 
@@ -95,9 +92,16 @@ internal static class DiagnosticWire
 /// <summary>The host keeps its newest unsent warnings and removes them after the authority accepts the upload.</summary>
 internal sealed class DiagnosticOutbox(string path, TimeProvider clock)
 {
+    internal const int QueueBytes = 256 * 1024;
+    private const int RetentionHours = 72;
     private readonly Lock _gate = new();
     private readonly Dictionary<string, DateTimeOffset> _reported = new(StringComparer.Ordinal);
     private DiagnosticSettings? _settings;
+
+    internal DiagnosticSettings Settings
+    {
+        get { lock (_gate) return CurrentSettings(); }
+    }
 
     public void Report(string code)
     {
@@ -126,7 +130,7 @@ internal sealed class DiagnosticOutbox(string path, TimeProvider clock)
     }
 
     public async Task RunAsync(Func<DiagnosticEvent[], CancellationToken, Task> deliver, CancellationToken stop,
-        Func<CancellationToken, Task<DiagnosticSettings>>? fetchSettings = null)
+        Func<CancellationToken, Task<DiagnosticSettings>>? fetchSettings = null, Action<DiagnosticSettings>? onLevelChanged = null)
     {
         try
         {
@@ -138,7 +142,11 @@ internal sealed class DiagnosticOutbox(string path, TimeProvider clock)
                     List<DiagnosticEvent> snapshot;
                     try
                     {
-                        if (fetchSettings is not null) ApplySettings(await fetchSettings(stop));
+                        if (fetchSettings is not null)
+                        {
+                            DiagnosticSettings settings = await fetchSettings(stop);
+                            if (ApplySettings(settings)) onLevelChanged?.Invoke(settings);
+                        }
                     }
                     finally
                     {
@@ -192,7 +200,8 @@ internal sealed class DiagnosticOutbox(string path, TimeProvider clock)
     {
         try
         {
-            return DiagnosticFile.Read<DiagnosticEvent>(path, DiagnosticSettings.MaxQueueKiB * 1024).Where(DiagnosticCatalog.Valid).ToList();
+            // Read prior development snapshots up to their former limit so they can be trimmed in place.
+            return DiagnosticFile.Read<DiagnosticEvent>(path, 1024 * 1024).Where(DiagnosticCatalog.Valid).ToList();
         }
         catch (JsonException)
         {
@@ -215,31 +224,38 @@ internal sealed class DiagnosticOutbox(string path, TimeProvider clock)
         }
     }
 
-    private void ApplySettings(DiagnosticSettings settings)
+    private bool ApplySettings(DiagnosticSettings settings)
     {
         if (!settings.Valid()) throw new IOException("the authority returned invalid diagnostics settings");
         lock (_gate)
         {
-            if (settings == CurrentSettings()) return;
-            DiagnosticFile.Write<DiagnosticSettings>(path + ".settings", [settings]);
+            if (settings == CurrentSettings()) return false;
+            try
+            {
+                DiagnosticFile.Write<DiagnosticSettings>(path + ".settings", [settings]);
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                AppLog.Warn("the machine log level could not be saved for restart: {Type}", error.GetType().Name);
+            }
             _settings = settings;
+            return true;
         }
     }
 
     private static bool Prune(List<DiagnosticEvent> pending, DiagnosticSettings settings, DateTimeOffset now)
     {
-        DateTimeOffset cutoff = now.AddHours(-settings.RetentionHours);
+        DateTimeOffset cutoff = now.AddHours(-RetentionHours);
         int removed = pending.RemoveAll(item => item.Time < cutoff || !settings.Includes(item.Code));
-        int budget = settings.QueueKiB * 1024;
         int size = JsonSerializer.SerializeToUtf8Bytes(pending, DiagnosticWire.Json).Length;
-        if (size <= budget) return removed > 0;
+        if (size <= QueueBytes) return removed > 0;
 
         HashSet<Guid> evicted = [];
         foreach (DiagnosticEvent item in pending.OrderBy(item => DiagnosticSettings.Rank(DiagnosticCatalog.Describe(item.Code).Severity)).ThenBy(item => item.Time))
         {
             evicted.Add(item.Id);
             size -= JsonSerializer.SerializeToUtf8Bytes(item, DiagnosticWire.Json).Length + 1;
-            if (size <= budget) break;
+            if (size <= QueueBytes) break;
         }
         pending.RemoveAll(item => evicted.Contains(item.Id));
         return true;

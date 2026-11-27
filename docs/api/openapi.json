@@ -3458,7 +3458,7 @@
     "/api/v1/machines/{fingerprint}/diagnostics": {
       "get": {
         "operationId": "getMachineDiagnostics",
-        "summary": "Recent diagnostics and forwarding settings for one machine.",
+        "summary": "Recent diagnostics and the log level for one machine.",
         "tags": [
           "machines"
         ],
@@ -10673,10 +10673,10 @@
         ]
       }
     },
-    "/api/v1/machines/{fingerprint}/diagnostics/settings": {
+    "/api/v1/machines/{fingerprint}/diagnostics/log-level": {
       "put": {
-        "operationId": "setMachineDiagnosticsSettings",
-        "summary": "Set the machine\u0027s diagnostic forwarding level, queue budget and retention.",
+        "operationId": "setMachineLogLevel",
+        "summary": "Set the machine\u0027s log level for local logs and diagnostics.",
         "tags": [
           "machines"
         ],
@@ -10714,35 +10714,21 @@
                       "information",
                       "debug"
                     ],
-                    "description": "The minimum severity forwarded by this machine."
-                  },
-                  "queue-kib": {
-                    "type": "integer",
-                    "minimum": 16,
-                    "maximum": 1024,
-                    "description": "Maximum size of the unsent diagnostics queue in KiB."
-                  },
-                  "retention-hours": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 168,
-                    "description": "How long unsent diagnostics can wait for delivery."
+                    "description": "The minimum severity for the machine\u0027s local logs and diagnostics."
                   }
                 },
                 "additionalProperties": false,
                 "required": [
                   "authorization",
-                  "level",
-                  "queue-kib",
-                  "retention-hours"
+                  "level"
                 ]
               }
             }
           }
         },
         "x-access": "authorization",
-        "x-operation": "machine-diagnostics-settings",
-        "description": "Set the machine\u0027s diagnostic forwarding level, queue budget and retention. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
+        "x-operation": "machine-log-level",
+        "description": "Set the machine\u0027s log level for local logs and diagnostics. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.",
         "responses": {
           "200": {
             "description": "Success.",
@@ -13956,8 +13942,14 @@
           "fingerprint": {
             "type": "string"
           },
-          "settings": {
-            "$ref": "#/components/schemas/DiagnosticSettings"
+          "logLevel": {
+            "type": "string",
+            "enum": [
+              "error",
+              "warning",
+              "information",
+              "debug"
+            ]
           },
           "lastReceivedAt": {
             "type": [
@@ -13977,39 +13969,9 @@
         "required": [
           "machineName",
           "fingerprint",
-          "settings",
+          "logLevel",
           "lastReceivedAt",
           "items"
-        ]
-      },
-      "DiagnosticSettings": {
-        "type": "object",
-        "properties": {
-          "level": {
-            "type": "string",
-            "enum": [
-              "error",
-              "warning",
-              "information",
-              "debug"
-            ]
-          },
-          "queueKiB": {
-            "type": "integer",
-            "minimum": 16,
-            "maximum": 1024
-          },
-          "retentionHours": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 168
-          }
-        },
-        "additionalProperties": false,
-        "required": [
-          "level",
-          "queueKiB",
-          "retentionHours"
         ]
       },
       "Grant": {
@@ -14539,7 +14501,7 @@
               "machine-untrust",
               "machine-trust",
               "machine-rename",
-              "machine-diagnostics-settings",
+              "machine-log-level",
               "machine-host-change",
               "grant-extend",
               "grant-renew",
@@ -14689,7 +14651,7 @@
               "machine-untrust",
               "machine-trust",
               "machine-rename",
-              "machine-diagnostics-settings",
+              "machine-log-level",
               "machine-host-change",
               "grant-extend",
               "grant-renew",
@@ -14857,7 +14819,7 @@
               "machine-untrust",
               "machine-trust",
               "machine-rename",
-              "machine-diagnostics-settings",
+              "machine-log-level",
               "machine-host-change",
               "grant-extend",
               "grant-renew",

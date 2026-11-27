@@ -264,43 +264,34 @@ export function renameMachine(machine: Machine): OperationDef {
   }
 }
 
-type DiagnosticSettings = components['schemas']['DiagnosticSettings']
+type MachineLogLevel = components['schemas']['MachineDiagnostics']['logLevel']
 
-export const diagnosticLevels: Record<DiagnosticSettings['level'], string> = {
+export const diagnosticLevels: Record<MachineLogLevel, string> = {
   error: 'Error',
   warning: 'Warning',
   information: 'Information',
   debug: 'Debug',
 }
 
-export function setMachineDiagnostics(fingerprint: string, machineName: string, settings: DiagnosticSettings): OperationDef {
-  const queue: FieldDef = { name: 'queue-kib', label: 'Offline queue budget (KiB)', kind: 'number', min: 16, max: 1024, required: true }
-  const retention: FieldDef = { name: 'retention-hours', label: 'Unsent retention (hours)', kind: 'number', min: 1, max: 168, required: true }
-
+export function setMachineLogLevel(fingerprint: string, machineName: string, logLevel: MachineLogLevel): OperationDef {
   return {
-    key: 'machine-diagnostics-settings',
-    title: 'Edit diagnostic forwarding',
+    key: 'machine-log-level',
+    title: 'Change log level',
     about: [['Machine', machineName]],
     fields: [
-      { name: 'level', label: 'Minimum severity', kind: 'select', required: true, options: Object.entries(diagnosticLevels).map(([value, label]) => ({ value, label })) },
-      queue,
-      retention,
+      { name: 'level', label: 'Log level', kind: 'select', required: true, options: Object.entries(diagnosticLevels).map(([value, label]) => ({ value, label })) },
     ],
-    initial: { level: settings.level, [queue.name]: String(settings.queueKiB), [retention.name]: String(settings.retentionHours) },
-    confirmLabel: 'Save forwarding',
+    initial: { level: logLevel },
+    confirmLabel: 'Save log level',
     prepare: (values) => {
-      const errors: Record<string, string> = {}
       const level = text(values, 'level')
-      const queueKiB = integer(values, queue, errors)
-      const retentionHours = integer(values, retention, errors)
-      if (!Object.hasOwn(diagnosticLevels, level)) errors.level = 'Choose a minimum severity.'
-      if (queueKiB === null || retentionHours === null || errors.level) return { errors }
+      if (!Object.hasOwn(diagnosticLevels, level)) return { errors: { level: 'Choose a log level.' } }
 
       return {
-        operation: 'machine-diagnostics-settings',
-        parameters: { fingerprint, level, [queue.name]: queueKiB, [retention.name]: retentionHours },
-        summary: `Forward ${level} and higher from ${machineName}. Keep unsent events for up to ${retentionHours} hours within a ${queueKiB} KiB budget.`,
-        done: `Saved diagnostic forwarding for ${machineName}.`,
+        operation: 'machine-log-level',
+        parameters: { fingerprint, level },
+        summary: `Set the log level for ${machineName} to ${diagnosticLevels[level as MachineLogLevel]}. This applies to local logs and diagnostics sent to Admin.`,
+        done: `Updated the log level for ${machineName}.`,
       }
     },
   }

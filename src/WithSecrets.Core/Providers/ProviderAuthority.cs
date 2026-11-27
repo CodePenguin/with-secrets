@@ -313,7 +313,7 @@ public sealed class ProviderAuthority : IDisposable
     }
 
     /// <summary>
-    /// The provider code's and the adapters' <see cref="ILogger" />: warnings and above to the log file, the rest as Debug. Only the rendered message is written (the
+    /// The provider code's and the adapters' <see cref="ILogger" /> use the machine's local log level. Only the rendered message is written (the
     /// provider code's templates carry ids, kinds and exception type names); the exception object itself is never logged.
     /// </summary>
     private sealed class AppLogLogger : ILogger
@@ -324,14 +324,22 @@ public sealed class ProviderAuthority : IDisposable
 
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
         {
+            if (logLevel == LogLevel.None) return;
             string text = formatter(state, null);
-            if (logLevel >= LogLevel.Warning)
+            switch (logLevel)
             {
-                AppLog.Warn("provider: {Message}", text);
-            }
-            else
-            {
-                AppLog.Debug("provider: {Message}", text);
+                case LogLevel.Error or LogLevel.Critical:
+                    AppLog.Error("provider: {Message}", text);
+                    break;
+                case LogLevel.Warning:
+                    AppLog.Warn("provider: {Message}", text);
+                    break;
+                case LogLevel.Information:
+                    AppLog.Info("provider: {Message}", text);
+                    break;
+                default:
+                    AppLog.Debug("provider: {Message}", text);
+                    break;
             }
         }
     }

@@ -248,22 +248,20 @@ public sealed partial class AdminService
                         return null;
                     });
 
-            case AuthorityStore.SetDiagnosticsOperation:
+            case AuthorityStore.SetMachineLogLevelOperation:
                 (MachineRecord? diagnosticMachine, string? machineProblem) = ResolveMachine(Arg(args, "fingerprint"));
                 string level = Arg(args, "level") ?? "";
-                if (diagnosticMachine is null || !DiagnosticSettings.Levels.Contains(level, StringComparer.Ordinal)
-                    || !TryNumber(Arg(args, "queue-kib"), DiagnosticSettings.MinQueueKiB, DiagnosticSettings.MaxQueueKiB, out int queueKiB)
-                    || !TryNumber(Arg(args, "retention-hours"), 1, DiagnosticSettings.MaxRetentionHours, out int retentionHours))
+                if (diagnosticMachine is null || !DiagnosticSettings.Levels.Contains(level, StringComparer.Ordinal))
                 {
-                    refusal = machineProblem ?? "give a diagnostics level, a queue budget of 16 to 1024 KiB and a retention window of 1 to 168 hours";
+                    refusal = machineProblem ?? "choose Error, Warning, Information, or Debug";
                     status = 400;
                     return null;
                 }
 
-                DiagnosticSettings diagnosticSettings = new(level, queueKiB, retentionHours);
+                DiagnosticSettings diagnosticSettings = new(level);
                 string diagnosticFingerprint = diagnosticMachine.Fingerprint;
-                return new AdminPlan(AuthorityStore.SetDiagnosticsOperation,
-                    $"Forward {level} diagnostics and higher from machine {KeyIdentity.Display(diagnosticFingerprint)}. Keep up to {queueKiB} KiB of unsent diagnostics for {retentionHours} hours.",
+                return new AdminPlan(AuthorityStore.SetMachineLogLevelOperation,
+                    $"Set the log level of machine {KeyIdentity.Display(diagnosticFingerprint)} to {level}. This applies to local logs and diagnostics sent to Admin.",
                     AuthorityStore.DiagnosticsSettingsParameters(diagnosticFingerprint, diagnosticSettings), a =>
                     {
                         _p.Store.SetDiagnosticsSettings(diagnosticFingerprint, diagnosticSettings, a.Admin!);

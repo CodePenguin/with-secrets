@@ -444,7 +444,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Recent diagnostics and forwarding settings for one machine. */
+        /** Recent diagnostics and the log level for one machine. */
         get: operations["getMachineDiagnostics"];
         put?: never;
         post?: never;
@@ -1235,7 +1235,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/machines/{fingerprint}/diagnostics/settings": {
+    "/api/v1/machines/{fingerprint}/diagnostics/log-level": {
         parameters: {
             query?: never;
             header?: never;
@@ -1244,10 +1244,10 @@ export interface paths {
         };
         get?: never;
         /**
-         * Set the machine's diagnostic forwarding level, queue budget and retention.
-         * @description Set the machine's diagnostic forwarding level, queue budget and retention. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
+         * Set the machine's log level for local logs and diagnostics.
+         * @description Set the machine's log level for local logs and diagnostics. Needs a session with admin.decide (lock and unlock may use a browser before sign-in), the anti-forgery header, a same-origin request and an authorization that was made for exactly this operation and these parameters, tapped with user verification, unspent and not older than 120 seconds. Any other authorization, a repeated one or a session alone is refused with 403.
          */
-        put: operations["setMachineDiagnosticsSettings"];
+        put: operations["setMachineLogLevel"];
         post?: never;
         delete?: never;
         options?: never;
@@ -1791,16 +1791,11 @@ export interface components {
         MachineDiagnostics: {
             machineName: string;
             fingerprint: string;
-            settings: components["schemas"]["DiagnosticSettings"];
+            /** @enum {string} */
+            logLevel: "error" | "warning" | "information" | "debug";
             /** Format: date-time */
             lastReceivedAt: string | null;
             items: components["schemas"]["DiagnosticEntry"][];
-        };
-        DiagnosticSettings: {
-            /** @enum {string} */
-            level: "error" | "warning" | "information" | "debug";
-            queueKiB: number;
-            retentionHours: number;
         };
         Grant: {
             id: string;
@@ -1933,7 +1928,7 @@ export interface components {
             /** @description Carry this in the `authorization` member of the one mutation it was made for. */
             id: string;
             /** @enum {string} */
-            operation: "unlock" | "lock" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-diagnostics-settings" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
+            operation: "unlock" | "lock" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-log-level" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
             /** @enum {string} */
             state: "pending" | "verified" | "refused" | "consumed" | "expired";
             detail: string | null;
@@ -1961,7 +1956,7 @@ export interface components {
         InlineAuthorization: {
             id: string;
             /** @enum {string} */
-            operation: "unlock" | "lock" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-diagnostics-settings" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
+            operation: "unlock" | "lock" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-log-level" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
             /** @enum {string} */
             state: "pending";
             detail: string | null;
@@ -1996,7 +1991,7 @@ export interface components {
              * @description The operation to authorize.
              * @enum {string}
              */
-            operation: "unlock" | "lock" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-diagnostics-settings" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
+            operation: "unlock" | "lock" | "set-audit-retention" | "set-session-timeouts" | "authority-key-rotate" | "authority-key-recover" | "machine-approve" | "machine-disable" | "machine-enable" | "machine-untrust" | "machine-trust" | "machine-rename" | "machine-log-level" | "machine-host-change" | "grant-extend" | "grant-renew" | "grant-replace" | "grant-revoke" | "passkey-enroll" | "store-key-rotate" | "passkey-unenroll" | "pairing-create" | "pairing-revoke" | "provider-add" | "provider-config" | "provider-max-stale" | "provider-refresh-values" | "provider-remove" | "mount-add" | "mount-remove";
             parameters?: {
                 config?: string;
             } & {
@@ -9902,7 +9897,7 @@ export interface operations {
             };
         };
     };
-    setMachineDiagnosticsSettings: {
+    setMachineLogLevel: {
         parameters: {
             query?: never;
             header?: never;
@@ -9917,14 +9912,10 @@ export interface operations {
                     /** @description The id of the authorization made for exactly this operation and these parameters (POST /api/v1/authorizations), after its passkey tap. */
                     authorization: string;
                     /**
-                     * @description The minimum severity forwarded by this machine.
+                     * @description The minimum severity for the machine's local logs and diagnostics.
                      * @enum {string}
                      */
                     level: "error" | "warning" | "information" | "debug";
-                    /** @description Maximum size of the unsent diagnostics queue in KiB. */
-                    "queue-kib": number;
-                    /** @description How long unsent diagnostics can wait for delivery. */
-                    "retention-hours": number;
                 };
             };
         };

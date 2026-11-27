@@ -7,7 +7,7 @@ import { Loading, ProblemAlert } from '../../components/Feedback'
 import { Time } from '../../lib/format'
 import { usePageTitle } from '../../lib/usePageTitle'
 import { useStartOperation } from '../authorization/OperationProvider'
-import { diagnosticLevels, setMachineDiagnostics } from '../authorization/operations'
+import { diagnosticLevels, setMachineLogLevel } from '../authorization/operations'
 
 export function MachineDiagnosticsPage() {
   usePageTitle('Machine diagnostics')
@@ -27,12 +27,10 @@ export function MachineDiagnosticsPage() {
         <>
           <Card title={data.machineName}>
             <Facts items={[
-              ['Minimum severity', diagnosticLevels[data.settings.level]],
-              ['Offline queue budget', `${data.settings.queueKiB} KiB`],
-              ['Unsent retention', `${data.settings.retentionHours} hours`],
+              ['Log level', diagnosticLevels[data.logLevel]],
               ['Last received', data.lastReceivedAt ? <Time key="last" value={data.lastReceivedAt} /> : 'No entries received'],
             ]} />
-            {canChange ? <Button onClick={() => start(setMachineDiagnostics(data.fingerprint, data.machineName, data.settings))}>Edit forwarding</Button> : null}
+            {canChange ? <Button onClick={() => start(setMachineLogLevel(data.fingerprint, data.machineName, data.logLevel))}>Change log level</Button> : null}
           </Card>
           {data.items.length ? (
             <DetailsTable label="Diagnostic log" columns={['Recorded', 'Received', 'Severity', 'Component', 'Message']}>

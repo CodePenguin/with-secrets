@@ -15,6 +15,7 @@ namespace WithSecrets;
 /// <item>--debug or WITH_SECRETS_DEBUG=1: Debug events go to the terminal (through <see cref="TerminalPrompt.Noise" />, written as
 /// they arrive) and, with everything above, to the file.</item>
 /// </list>
+/// A running host service uses its machine log level as the minimum for both its local logs and its structured diagnostics.
 /// The file is %USERPROFILE%\.with-secrets\logs\with-secrets-YYYYMMDD.log: daily, 1 MB per file, 7 files kept. A file that cannot
 /// be opened or written never fails a command.
 /// <para>
@@ -36,6 +37,7 @@ public static class AppLog
     private const string Prefix = "with-secrets: ";
 
     private static readonly Lock Gate = new();
+    private static readonly LoggingLevelSwitch OutputLevel = new(LogEventLevel.Warning);
     private static Logger? _logger;
 
     /// <summary>For tests: where the log file goes (the user's .with-secrets\logs when null).</summary>
@@ -62,12 +64,21 @@ public static class AppLog
         Logger? old;
         lock (Gate)
         {
+            OutputLevel.MinimumLevel = debug ? LogEventLevel.Debug : LogEventLevel.Warning;
             old = _logger;
             _logger = created;
         }
 
         old?.Dispose();
     }
+
+    internal static void SetMachineLogLevel(DiagnosticSettings settings) => OutputLevel.MinimumLevel = settings.Level switch
+    {
+        "error" => LogEventLevel.Error,
+        "information" => LogEventLevel.Information,
+        "debug" => LogEventLevel.Debug,
+        _ => LogEventLevel.Warning,
+    };
 
     /// <summary>Ends logging (flushes the file). Events after this go nowhere until <see cref="Configure" />.</summary>
     public static void Close()
@@ -82,12 +93,12 @@ public static class AppLog
         old?.Dispose();
     }
 
-    /// <summary>A diagnostic event: only seen with --debug.</summary>
+    /// <summary>A diagnostic event at Debug level.</summary>
     internal static void Debug(string template, params object?[] values) => Write(LogEventLevel.Debug, template, values);
 
     internal static void Info(string template, params object?[] values) => Write(LogEventLevel.Information, template, values);
 
-    /// <summary>Something went wrong that the person may be asked about later: always in the file.</summary>
+    /// <summary>Something went wrong that the person may be asked about later.</summary>
     internal static void Warn(string template, params object?[] values) => Write(LogEventLevel.Warning, template, values);
 
     internal static void Error(string template, params object?[] values) => Write(LogEventLevel.Error, template, values);
@@ -136,14 +147,14 @@ public static class AppLog
         LoggerConfiguration config = new LoggerConfiguration().MinimumLevel.Debug().WriteTo.Sink(new TapSink());
         if (debug)
         {
-            config.WriteTo.Sink(new TerminalSink(), LogEventLevel.Debug);
+            config.WriteTo.Sink(new TerminalSink(), levelSwitch: OutputLevel);
         }
 
         if (withFile)
         {
             config.WriteTo.File(
                 Path.Combine(LogFolder ?? DefaultFolder, FileName),
-                restrictedToMinimumLevel: debug ? LogEventLevel.Debug : LogEventLevel.Warning,
+                levelSwitch: OutputLevel,
                 outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz} [{Level:u3}] {Message:l}{NewLine}",
                 formatProvider: CultureInfo.InvariantCulture,
                 fileSizeLimitBytes: FileSizeLimit,

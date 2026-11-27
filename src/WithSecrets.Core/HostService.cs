@@ -185,6 +185,7 @@ public sealed partial class HostService : IDisposable
         TimeProvider authorityClock = options.Deployment.Clock ?? TimeProvider.System;
         string diagnosticPath = Path.Combine(Path.GetDirectoryName(options.Deployment.Store.FilePath)!, "diagnostic-outbox", Authorization.Fingerprint + ".json");
         _diagnostics = new DiagnosticOutbox(diagnosticPath, authorityClock);
+        AppLog.SetMachineLogLevel(_diagnostics.Settings);
         Approvals = new ApprovalQueue(authorityClock, () => options.TimeLimit ?? ApprovalSettings.Load(options.State, out _).Timeout);
 
         // In remote mode the unused local authority stays disabled. Runs depend only on the remote authority's lock.
@@ -450,7 +451,8 @@ public sealed partial class HostService : IDisposable
                 }
 
                 service._auditLoop = Task.Run(() => service.Audit.RunAsync(options.AuditUploadInterval, options.AuditMaxBackoff, service._stop.Token));
-                service._diagnosticsLoop = Task.Run(() => service._diagnostics.RunAsync(service.DeliverDiagnosticsAsync, service._stop.Token, service.FetchDiagnosticsSettingsAsync));
+                service._diagnosticsLoop = Task.Run(() => service._diagnostics.RunAsync(service.DeliverDiagnosticsAsync, service._stop.Token,
+                    service.FetchDiagnosticsSettingsAsync, AppLog.SetMachineLogLevel));
 
                 return service;
             }
@@ -594,6 +596,7 @@ public sealed partial class HostService : IDisposable
             Volatile.Write(ref _ready, Authorization.ReconcileAsync(limit.Token).GetAwaiter().GetResult() != HostAuthorization.Reconciliation.Unreachable);
             if (Ready)
             {
+                AppLog.Info("the machine checked in with its authority");
                 _diagnostics.Report(DiagnosticCatalog.AuthorityConnected);
                 RenewIdentity(limit.Token);
             }
@@ -1018,11 +1021,13 @@ public sealed partial class HostService : IDisposable
 
                     Volatile.Write(ref _ready, true);
                     reconnected = false;
+                    AppLog.Info("the machine checked in with its authority");
                     _diagnostics.Report(DiagnosticCatalog.AuthorityConnected);
                     RenewIdentity(_stop.Token);
                 }
 
                 await Authorization.PollAsync(_stop.Token);
+                AppLog.Debug("the machine completed a poll of its authority");
                 _diagnostics.Report(DiagnosticCatalog.AuthorityPollCompleted);
                 pause = floor;
             }

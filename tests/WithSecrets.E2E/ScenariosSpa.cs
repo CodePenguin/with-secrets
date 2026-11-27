@@ -344,18 +344,17 @@ internal static class ScenariosSpa
             .GetByRole(AriaRole.Cell, new() { Name = "Error" }).IsVisibleAsync(), "an error has its own severity in the diagnostic log");
         await Spa.Axe(c, s, "machine diagnostics");
 
-        await c.Page.GetByRole(AriaRole.Button, new() { Name = "Edit forwarding" }).ClickAsync();
+        await c.Page.GetByRole(AriaRole.Button, new() { Name = "Change log level" }).ClickAsync();
         ILocator settings = Spa.Dialog(c);
-        await settings.GetByLabel("Minimum severity").SelectOptionAsync("debug");
-        await settings.GetByLabel("Offline queue budget (KiB)").FillAsync("128");
-        await settings.GetByLabel("Unsent retention (hours)").FillAsync("24");
+        await settings.GetByLabel("Log level").SelectOptionAsync("debug");
+        s.Check(await settings.GetByRole(AriaRole.Spinbutton).CountAsync() == 0, "the log level is the only diagnostic setting exposed");
         IPage passkey = await Spa.OpenPasskeyPage(c, s, settings);
-        s.Check(deployment.Store.DiagnosticsSettings(deployment.Fingerprint) == DiagnosticSettings.Default, "forwarding stays unchanged until the passkey tap");
+        s.Check(deployment.Store.DiagnosticsSettings(deployment.Fingerprint) == DiagnosticSettings.Default, "the log level stays unchanged until the passkey tap");
         await Spa.TapAfterBack(c, s, passkey, null);
         await Spa.PageFeedback(c).WaitForAsync(new() { Timeout = 20000 });
-        s.Check(deployment.Store.DiagnosticsSettings(deployment.Fingerprint) == new DiagnosticSettings("debug", 128, 24),
-            "the passkey authorizes the selected severity, byte budget and retention");
-        await c.Page.GetByText("128 KiB", new() { Exact = true }).WaitForAsync();
+        s.Check(deployment.Store.DiagnosticsSettings(deployment.Fingerprint) == new DiagnosticSettings("debug"),
+            "the passkey authorizes the selected log level");
+        await c.Page.GetByText("Debug", new() { Exact = true }).WaitForAsync();
 
         await c.Page.GetByRole(AriaRole.Link, new() { Name = "Back to machines" }).ClickAsync();
         await c.Page.GetByRole(AriaRole.Heading, new() { Name = "Machines", Exact = true }).WaitForAsync();

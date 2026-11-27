@@ -77,24 +77,25 @@ internal static class MachineDiagnosticsTests
             DiagnosticEvent expired = new(Guid.NewGuid(), now.AddHours(-73), DiagnosticCatalog.InvalidationFailed);
             DiagnosticEvent keep = new(Guid.NewGuid(), now.AddMinutes(-59), DiagnosticCatalog.InvalidationFailed);
             List<DiagnosticEvent> oversized = [expired, keep];
-            oversized.AddRange(Enumerable.Range(0, 250).Select(index =>
+            oversized.AddRange(Enumerable.Range(0, 3000).Select(index =>
                 new DiagnosticEvent(Guid.NewGuid(), now.AddSeconds(-index), DiagnosticCatalog.AuthorityPollCompleted)));
             DiagnosticFile.Write(path, oversized);
-            DiagnosticSettings budget = new("debug", DiagnosticSettings.MinQueueKiB, 72);
+            DiagnosticSettings debug = new("debug");
+            DiagnosticSettings? applied = null;
             using CancellationTokenSource stopBudget = new(TimeSpan.FromSeconds(5));
             await restarted.RunAsync((_, _) =>
             {
                 stopBudget.Cancel();
                 throw new IOException("the connection is unavailable");
-            }, stopBudget.Token, _ => Task.FromResult(budget));
-            List<DiagnosticEvent> trimmed = DiagnosticFile.Read<DiagnosticEvent>(path);
-            check(new FileInfo(path).Length <= budget.QueueKiB * 1024 && trimmed.Contains(keep) && !trimmed.Contains(expired)
+            }, stopBudget.Token, _ => Task.FromResult(debug), level => applied = level);
+            List<DiagnosticEvent> trimmed = DiagnosticFile.Read<DiagnosticEvent>(path, DiagnosticOutbox.QueueBytes);
+            check(applied == debug && new FileInfo(path).Length <= DiagnosticOutbox.QueueBytes && trimmed.Contains(keep) && !trimmed.Contains(expired)
                 && trimmed.Count < oversized.Count && trimmed.Any(item => item.Code == DiagnosticCatalog.AuthorityPollCompleted),
-                "diagnostics: configuring debug and a smaller byte budget retains errors ahead of debug entries and expires old entries");
+                "diagnostics: the disk budget retains errors ahead of debug entries and expires old entries");
             DiagnosticOutbox configuredRestart = new(path, clock);
             configuredRestart.Report(DiagnosticCatalog.AuthorityConnected);
-            check(DiagnosticFile.Read<DiagnosticEvent>(path).Any(item => item.Code == DiagnosticCatalog.AuthorityConnected),
-                "diagnostics: an administrator's forwarding level is remembered across an offline restart");
+            check(DiagnosticFile.Read<DiagnosticEvent>(path, DiagnosticOutbox.QueueBytes).Any(item => item.Code == DiagnosticCatalog.AuthorityConnected),
+                "diagnostics: the machine log level is remembered across an offline restart");
         }
         finally
         {

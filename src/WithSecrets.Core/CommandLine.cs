@@ -142,7 +142,7 @@ public static class CliArgs
         --port N (1 to 65535) with --recover or a run makes that call's web page listen on port N instead of the port setting (random free
         port if the setting is 0). It is not saved. If N is in use the call fails. Use it to forward the page over ssh: ssh -L N:localhost:N host.
 
-        --debug (with any command, before --) shows diagnostic lines on the terminal (connections, requests, proof sizes and verdicts) and writes them to the log file; WITH_SECRETS_DEBUG=1 does the same for every call. Normally the terminal shows none of them. Warnings and errors always go to the log file, %USERPROFILE%\.with-secrets\logs\with-secrets-YYYYMMDD.log (1 MB per file, 7 files kept). The log holds route words, sizes, seconds and error type names, never a value, a code, a key or a link.
+        --debug (with any command, before --) enables diagnostic output on the terminal and sets the initial log level to Debug. WITH_SECRETS_DEBUG=1 does the same. A running service uses the machine's Log level in Admin for local logs and diagnostics sent to Admin. The default log level is Warning. Logs are written to %USERPROFILE%\.with-secrets\logs\with-secrets-YYYYMMDD.log (1 MB per file, 7 files kept). They hold route words, sizes, seconds and error type names, never a value, a code, a key or a link.
 
         --self-check (alone) is the release check: it starts a throwaway service (software keys, a temporary folder, a free loopback port; no user state, no Windows key), asks it for the administration web app and the API, and prints one JSON line with the backend version, the frontend version and the embedded files. Exit code 0 only when the web app is embedded, served from the one origin, and its version is the backend's.
 
@@ -349,7 +349,7 @@ public static class CliArgs
 
         Option<bool> recover = new("--recover") { Description = "When every passkey is lost: type the recovery code on a web page, make a new passkey and new keys, and carry the secrets over. The old file is renamed, never deleted (real terminal)." };
         Option<string?> port = new("--port") { Description = "Where the one-use web page listens for this call, 1 to 65535, in place of the port setting (nothing is saved). If it is in use, the call fails. For ssh -L.", HelpName = "N" };
-        Option<bool> debug = new("--debug") { Description = "With any command: show diagnostic lines on the terminal and write them to the log file (WITH_SECRETS_DEBUG=1 does it for every call). Warnings always go to the log file." };
+        Option<bool> debug = new("--debug") { Description = "Enable diagnostic output on the terminal and set the initial log level to Debug (also WITH_SECRETS_DEBUG=1). A running service uses its machine Log level." };
         Option<string[]> secrets = new("--secrets")
         {
             Description = "Names of the secrets to give the program, separated by commas. Write every name. There is no option for all secrets.",

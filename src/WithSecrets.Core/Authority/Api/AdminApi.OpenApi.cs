@@ -261,15 +261,9 @@ internal sealed partial class AdminApi
             [
                 ("machineName", S.Str()),
                 ("fingerprint", S.Str()),
-                ("settings", S.Ref("DiagnosticSettings")),
+                ("logLevel", S.Str(values: DiagnosticSettings.Levels)),
                 ("lastReceivedAt", S.Time(nullable: true)),
                 ("items", S.Arr(S.Ref("DiagnosticEntry"))),
-            ]),
-            ["DiagnosticSettings"] = S.Obj(
-            [
-                ("level", S.Str(values: DiagnosticSettings.Levels)),
-                ("queueKiB", S.Int(DiagnosticSettings.MinQueueKiB, DiagnosticSettings.MaxQueueKiB)),
-                ("retentionHours", S.Int(1, DiagnosticSettings.MaxRetentionHours)),
             ]),
             ["Grant"] = S.Obj(
             [

@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text.Json;
 
 using Microsoft.Data.Sqlite;
@@ -98,7 +97,7 @@ public sealed partial class AuthorityStore
         });
     }
 
-    internal const string SetDiagnosticsOperation = "machine-diagnostics-settings";
+    internal const string SetMachineLogLevelOperation = "machine-log-level";
 
     internal DiagnosticSettings DiagnosticsSettings(string fingerprint) => Read(connection =>
     {
@@ -118,20 +117,18 @@ public sealed partial class AuthorityStore
     });
 
     internal static IReadOnlyList<(string Name, string Value)> DiagnosticsSettingsParameters(string fingerprint, DiagnosticSettings settings) =>
-        [("machine", fingerprint), ("level", settings.Level), ("queue-kib", settings.QueueKiB.ToString(CultureInfo.InvariantCulture)),
-            ("retention-hours", settings.RetentionHours.ToString(CultureInfo.InvariantCulture))];
+        [("machine", fingerprint), ("level", settings.Level)];
 
     internal void SetDiagnosticsSettings(string fingerprint, DiagnosticSettings settings, VerifiedAdmin admin)
     {
-        if (!settings.Valid()) throw new ArgumentException("invalid diagnostics settings", nameof(settings));
-        if (!admin.Consume(SetDiagnosticsOperation, AdminAuthorizer.Canonical(DiagnosticsSettingsParameters(fingerprint, settings))))
-            throw new UnauthorizedAccessException("the diagnostics settings change requires a fresh administrator passkey tap for exactly these values");
+        if (!settings.Valid()) throw new ArgumentException("invalid machine log level", nameof(settings));
+        if (!admin.Consume(SetMachineLogLevelOperation, AdminAuthorizer.Canonical(DiagnosticsSettingsParameters(fingerprint, settings))))
+            throw new UnauthorizedAccessException("changing the machine log level requires a fresh administrator passkey tap");
 
         Write((connection, transaction) =>
         {
             Put(connection, transaction, "diagnostics:" + fingerprint, JsonSerializer.Serialize(settings, DiagnosticWire.Json));
-            Audit(connection, transaction, "diagnostics-settings-changed", fingerprint, null, admin.Actor,
-                $"diagnostics level {settings.Level}, queue {settings.QueueKiB} KiB, retention {settings.RetentionHours} hours", admin.Key);
+            Audit(connection, transaction, "machine-log-level-changed", fingerprint, null, admin.Actor, $"log level {settings.Level}", admin.Key);
             return 0;
         });
     }
