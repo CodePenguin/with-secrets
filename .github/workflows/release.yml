@@ -13,7 +13,7 @@ permissions:
 jobs:
   build:
     strategy:
-      fail-fast: true # one platform failing must not release the others
+      fail-fast: false # collect smoke-test results from every platform before publishing
       matrix:
         include:
         - { os: windows-latest, runtime: win-x64, file: with-secrets.exe }
@@ -97,7 +97,8 @@ jobs:
           if (!(Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing $file" }
         }
         if (!$IsWindows) {
-          /usr/bin/test -x $desktop
+          $test = Get-Command test -CommandType Application -ErrorAction Stop
+          & $test.Source -x $desktop
           if ($LASTEXITCODE -ne 0) { throw 'The desktop executable lost its executable bit' }
         }
         if ($IsMacOS) {

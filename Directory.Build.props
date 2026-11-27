@@ -7,6 +7,6 @@
         <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
         <InvariantGlobalization>true</InvariantGlobalization>
         <!-- The one version of the program: the backend (reported at /api/v1/status) and the administration web application (built with it) always match. -->
-        <Version>0.1.0-rc.1</Version>
+        <Version>0.1.0-rc.2</Version>
     </PropertyGroup>
 </Project>
