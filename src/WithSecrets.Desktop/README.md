@@ -1,8 +1,8 @@
 # With Secrets desktop companion
 
-The companion connects to the local service and starts it automatically on a configured installation if it is stopped. A lock badge means the authority is locked. An attention badge means setup is required or the service needs attention. Choose **Open Admin to unlock** to unlock with your passkey. Quitting the companion leaves an established service running.
+The companion connects to the local service and starts it automatically on a configured installation if it is stopped. A lock badge means the authority is locked. An attention badge means setup is required or the service needs attention. Choose **Open Admin to unlock** to unlock with your passkey. If the tray says **Local device approval required**, unlock first, then open **Machines** from the tray and approve this device. The tray menu displays service startup errors. Quitting the companion leaves an established service running.
 
-On a fresh installation, choose **Set up With Secrets** in the tray menu. Compare the six-digit code on the setup page with the tray menu, then choose **Verify code** in the tray. Compare the device fingerprint there and finish setup in the browser. A pending run request produces a generic OS notification. Clicking it opens that request for review and passkey approval.
+On a fresh installation, choose **Set up With Secrets** in the tray menu. Compare the six-digit code on the setup page with the tray menu, then choose **Verify code** in the tray. Compare the device fingerprint there and finish setup in the browser. A pending run request produces a generic OS notification. Clicking it opens that request for review and passkey approval. The **Run request notifications** choice carries over when you reopen the tray.
 
 Build from this directory with Go 1.27.4 or later. The output does not require Go or .NET to be installed. It runs beside a compatible, self-contained With Secrets executable. For development, pass `-service` with the path to that executable. Include `THIRD-PARTY-NOTICES.txt` with distributed builds.
 

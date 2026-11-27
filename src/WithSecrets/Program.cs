@@ -438,7 +438,8 @@ internal static partial class Program
             if (quickStart)
             {
                 int setup = CommandWiring.Setup(state, null, service, Console.Out.WriteLine, ReadQuickStartCode,
-                    desktopSetup ? code => Console.Out.WriteLine("quick-start:desktop-code:" + code) : null);
+                    desktopSetup ? code => Console.Out.WriteLine("quick-start:desktop-code:" + code) : null,
+                    desktopSetup ? () => Task.Run(Console.ReadLine) : null);
                 Console.Out.WriteLine(QuickStartResult + setup.ToString(CultureInfo.InvariantCulture));
                 if (setup != 0) return setup;
             }

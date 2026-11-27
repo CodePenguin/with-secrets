@@ -22,6 +22,10 @@ func TestMain(m *testing.M) {
 			fmt.Println(`{"adminPort":8765,"locked":true,"remote":false,"requestIds":[]}`)
 			os.Exit(0)
 		case "service":
+			if os.Getenv("WITH_SECRETS_DESKTOP_TEST_START_ERROR") == "yes" {
+				fmt.Fprintln(os.Stderr, "with-secrets: the admin port is already in use")
+				os.Exit(1)
+			}
 			if os.WriteFile(marker, []byte("started"), 0600) != nil {
 				os.Exit(1)
 			}
@@ -33,13 +37,41 @@ func TestMain(m *testing.M) {
 			fmt.Println("quick-start:read-code")
 			input := bufio.NewScanner(os.Stdin)
 			if !input.Scan() || input.Text() != "012345" {
+				fmt.Println("quick-start:result:1")
 				os.Exit(1)
+			}
+			if os.Getenv("WITH_SECRETS_DESKTOP_TEST_COMMIT") == "yes" {
+				// A final assertion is already committing when the companion asks to cancel.
+				if input.Scan() || os.WriteFile(marker, []byte("committed"), 0600) != nil {
+					os.Exit(1)
+				}
 			}
 			fmt.Println("quick-start:result:0")
 			os.Exit(0)
 		}
 	}
 	os.Exit(m.Run())
+}
+
+func TestStartupFailureReportsServiceDiagnostic(t *testing.T) {
+	t.Setenv("WITH_SECRETS_DESKTOP_TEST_MARKER", filepath.Join(t.TempDir(), "service"))
+	t.Setenv("WITH_SECRETS_DESKTOP_TEST_START_ERROR", "yes")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, errText := startService(executable)
+	if errText != "" {
+		t.Fatal(errText)
+	}
+	select {
+	case got := <-result:
+		if got != "with-secrets: the admin port is already in use" {
+			t.Fatalf("unexpected startup diagnostic: %q", got)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("service startup failure was not reported")
+	}
 }
 
 func TestWatchStartsStoppedService(t *testing.T) {
@@ -107,6 +139,43 @@ func TestSetupWaitsForExplicitConfirmation(t *testing.T) {
 	}
 	if got := next(); !got.finished || !got.success {
 		t.Fatalf("setup did not finish successfully: %+v", got)
+	}
+}
+
+func TestSetupCancellationDoesNotKillAnInFlightCommit(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "committed")
+	t.Setenv("WITH_SECRETS_DESKTOP_TEST_MARKER", marker)
+	t.Setenv("WITH_SECRETS_DESKTOP_TEST_COMMIT", "yes")
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, finish := context.WithTimeout(context.Background(), 10*time.Second)
+	defer finish()
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	updates := make(chan setupUpdate)
+	confirm := make(chan struct{}, 1)
+	go runSetup(parent, ctx, executable, updates, confirm)
+	next := func() setupUpdate {
+		select {
+		case update := <-updates:
+			return update
+		case <-parent.Done():
+			t.Fatal("did not receive a setup update")
+			return setupUpdate{}
+		}
+	}
+	next()
+	next()
+	confirm <- struct{}{}
+	next()
+	cancel()
+	if result := next(); !result.finished || !result.success {
+		t.Fatal("cancel interrupted the committed setup")
+	}
+	if state, err := os.ReadFile(marker); err != nil || string(state) != "committed" {
+		t.Fatalf("setup did not complete the commit: %v", err)
 	}
 }
 

@@ -19,6 +19,7 @@ internal sealed class QuickStartRegistration(HostService service)
     public string Url => Origin + Path;
     public string Fingerprint => service.QuickStartFingerprint;
     public string DeviceName => service.QuickStartDeviceName;
+    public Func<Task>? WaitForCancellation { get; init; }
 
     public IDisposable Open(Func<string, string, string, OneShotResponse> handle) => service.OpenQuickStartRoute(this, handle);
 

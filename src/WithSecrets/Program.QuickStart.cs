@@ -18,14 +18,30 @@ internal static partial class Program
     {
         string folder = StorePath();
         HostConfigFile configFile = HostConfigFile.InFolder(folder);
-        if (configFile.Load() is { Config: null, Problem: null } &&
-            StateDatabase.InFolder(folder).TryManifest(out Manifest? manifest, out _) && manifest is null)
+        ServiceTrust trust = ServiceTrust.From(configFile);
+        if (trust is { PinnedFingerprint: null, Problem: null } && configFile.Load() is { Problem: null } local &&
+            local.Config?.Remote is null && StateDatabase.InFolder(folder).TryManifest(out Manifest? manifest, out _))
         {
-            await output.WriteLineAsync("{\"setupRequired\":true}");
-            return 0;
+            if (manifest is null && local.Config is null)
+            {
+                await output.WriteLineAsync("{\"setupRequired\":true}");
+                return 0;
+            }
+
+            if (manifest is not null)
+            {
+                // A committed setup can be missing its authority pin. The existing private
+                // machine key still authenticates a status-only connection to its service.
+                LinuxHardening.HardenProcess();
+                if (LocalDeployment.ExistingMachineFingerprint(folder) is { } existingFingerprint &&
+                    (local.Config is null || local.Config.MachineFingerprint == existingFingerprint))
+                {
+                    trust = new ServiceTrust(existingFingerprint);
+                }
+            }
         }
 
-        return await CompanionWatch.RunAsync(ServiceTrust.From(configFile), output, Console.Error);
+        return await CompanionWatch.RunAsync(trust, output, Console.Error);
     }
 
     /// <summary>The person owns this terminal. The child owns the local service and the browser flow, and remains running after setup.</summary>
