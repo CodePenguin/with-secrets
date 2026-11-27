@@ -45,10 +45,8 @@ internal static class SecretCrypto
     }
 
     /// <summary>
-    /// The bind of the manifest the set page signs: the page's bind followed by SHA-256(ct). The one passkey assertion is over
-    /// <see cref="Manifest.Challenge" /> of this and the manifest text, that is SHA-256(bind || SHA-256(ct) || SHA-256(manifest)),
-    /// so it covers both the values the page sent and the hashes of the ciphertexts the program made from them. The manifest
-    /// is stored with this bind, so it verifies at every read like any other.
+    /// The binding for a secret write: the entry binding followed by SHA-256(ct). The assertion covers this binding and the
+    /// batch text through <see cref="Manifest.Challenge" />, binding both the values the browser sent and the stored hashes.
     /// </summary>
     public static byte[] ManifestBind(byte[] bind, byte[] ct)
     {

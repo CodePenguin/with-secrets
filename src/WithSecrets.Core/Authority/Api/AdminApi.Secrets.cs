@@ -7,8 +7,9 @@ namespace WithSecrets;
 /// <summary>Entering and removing secrets in the administration app (see <see cref="SecretFlows" />).</summary>
 internal sealed partial class AdminApi
 {
-    /// <summary>A sealed value of one secret is at most 4096 characters; the sealed payload and its assertion fit in this.</summary>
-    private const int SecretBodyLimit = 49152;
+    // Allow six JSON bytes per UTF-16 code unit before base64url, plus names, the envelope and the assertion.
+    private const int SecretNamesBodyLimit = 8192;
+    private const int SecretBodyLimit = SecretEntry.MaxNames * (SecretEntry.MaxValueLength * 6 + 210) * 4 / 3 + 16384;
 
     private static JsonObject SecretNamesBody() => S.Obj([("names", S.Arr(S.Str(max: SecretNames.MaxNameLength)))]);
 
@@ -44,7 +45,7 @@ internal sealed partial class AdminApi
         refusal = null;
         if (call.Session is null)
         {
-            refusal = new ApiResult(401, new ApiProblem(401, "session-required", "this needs an administrator session; sign in with a passkey"));
+            refusal = new ApiResult(401, new ApiProblem(401, "session-required", "this needs a browser session; sign in with a passkey"));
 
             return false;
         }
@@ -116,7 +117,14 @@ internal sealed partial class AdminApi
 
         JsonElement body = call.Body!.Value;
         string? source = body.TryGetProperty("source", out JsonElement from) ? from.GetString() : null;
-        (SecretEntryDto? entry, string? problem) = flows.StartSet(NamesOf(body), sessionId, call.Context.Request.Headers.Origin.ToString(), source);
+        List<string> names = NamesOf(body);
+        if (source is not null && names.Count == 1 && source != names[0]
+            && !SessionCapabilities.For(call.Session!.Scope).Contains(SessionCapabilities.AdminDecide))
+        {
+            return Task.FromResult(new ApiResult(403, new ApiProblem(403, "scope-required", "moving a secret requires an admin session")));
+        }
+
+        (SecretEntryDto? entry, string? problem) = flows.StartSet(names, sessionId, call.Context.Request.Headers.Origin.ToString(), source);
 
         return Task.FromResult(entry is not null ? new ApiResult(201, entry) : SecretProblem(400, problem!));
     }

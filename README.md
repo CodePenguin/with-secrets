@@ -33,7 +33,7 @@ Deny, a wrong proof, an error or no answer before the time limit all end the run
 
 ## Install
 
-You need an admin passkey with WebAuthn PRF for setup and unlock. You can then enroll a convenience passkey for approvals and grant changes.
+You need an admin passkey with WebAuthn PRF for setup and unlock. You can then enroll a convenience passkey for approvals, grant changes, and adding or replacing secret values. The Secrets page saves up to 20 values with one tap.
 
 **From a release.** Download the file for your platform from the [releases page](https://github.com/CodePenguin/with-secrets/releases): `with-secrets-win-x64.exe`, `with-secrets-linux-x64.tar.gz` or `with-secrets-osx-arm64.tar.gz`, and check it against `SHA256SUMS`. It is one self-contained file with the admin app inside; nothing else to install.
 

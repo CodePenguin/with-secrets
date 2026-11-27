@@ -70,7 +70,7 @@ The table describes the current CLI/browser/child-process flow, not the future l
 | Browser -> CLI | POST `proof`, `deny`, `seal`, `save`, `create`, `sign`, `code` (body max 1 MB, 15 s body timeout) | passkey assertion or attestation, reuse minutes, PRF output, typed secret values, recovery code | See rows below. First outcome of a step is final, later requests get 404 |
 | Browser <-> passkey | WebAuthn in the browser | challenge, assertion, PRF eval of the slot salt | Each prompt starts in its own tap (iOS rule). RP ID is the page host, passkey ignores ports |
 | PRF output, browser -> CLI | inside the proof POST | 32 bytes sealed: fresh ECDH P-256 key, HKDF-SHA-256 (salt = bind, info `with-secrets/v1 prf`), AES-256-GCM (bind as AAD) to the page's own server key | Sealed to a key that lives for that page only. A passive observer (tunnel that ends TLS) sees ciphertext. An active man in the middle who replaces the page key is not stopped (reference.md) |
-| Secret values, browser -> service | `seal` POSTs while typing (max 500 per page) | each value sealed the same way (own HKDF info `with-secrets/v1 secrets`) | Page server key per page. The Save tap signs `SHA-256(bind \|\| SHA-256(ct) \|\| SHA-256(manifest))` |
+| Secret values, browser -> service | `seal` POST on Save | The batch is sealed to the entry key with HKDF info `with-secrets/v1 secrets` | The Save tap signs `SHA-256(bind \|\| SHA-256(ct) \|\| SHA-256(batch))` |
 | Recovery code, browser -> CLI | `--recover` code page | code sealed to the page key | Never in terminal, log, audit or `with-secrets.db`. A typed code is not origin-bound: compare the printed admin fingerprint first |
 | Lost reply | page resends the same body (3 tries: 8 s, 8 s, 20 s; `deny` one try of 20 s) | same bytes | Steps that lead on (`proof`, `create`, `sign`, `code`) keep one reply per verified body (SHA-256 of body, fixed-time compare), in memory until the command ends. No second page, no second code. Other steps (`save`, `seal`, `deny`): a resend after the outcome gets 404 and the page says the program already finished |
 | CLI and service <-> `with-secrets.db` | SQLite, WAL, `synchronous=FULL`, one transaction per write (a change and its audit event in the same one); inside a process every writer first takes the one writer gate of the file (`WithSecretsDatabase.Write`), so writers of one process never meet in SQLite's busy handler; between processes the 5 s busy timeout decides; the first creation of the file is serialized between processes by an operating-system lock on `with-secrets.db.lock` beside it (a persistent file that is never removed: `flock` on Linux and macOS, the share mode on Windows; released by the system when a process ends; refused, not worked around, when the file is not a private regular file of this user or the lock does not exclude) | manifest, ciphertext rows, sign counts, authority, provider and outbox rows | Manifest signature checked before use (exit 4). Writes check the version they replace |
@@ -146,7 +146,7 @@ Facts that follow from this: `with-secrets.db` alone cannot decrypt anything, ne
 
 ## 5. Signed state
 
-The manifest is one row in `with-secrets.db`, as canonical JSON, signed by an admin passkey.
+The manifest is one row in `with-secrets.db`, as canonical JSON, signed by an admin passkey. The service verifies later signed secret batches in version order to get the effective secret hashes.
 
 | Item | Detail |
 | --- | --- |
@@ -208,19 +208,17 @@ sequenceDiagram
     participant B as Browser + passkey
     C->>C: gate, rows match signed hashes
     C->>T: link of the admin web app
-    P->>B: open link, type values
-    loop while typing
-        B->>C: POST seal (values sealed to page key)
-        C->>C: decrypt, check, encrypt to store public key
-        C->>B: next manifest (names and hashes only)
-    end
-    Note over B: TAP 1 admin signs SHA-256(bind, SHA-256(ct), SHA-256(manifest))
+    P->>B: open link, enter up to 20 values, choose Save
+    B->>C: POST seal (values sealed to page key)
+    C->>C: decrypt, check, encrypt to store public key
+    C->>B: batch tied to preceding state (names and hashes)
+    Note over B: TAP 1 enrolled passkey signs SHA-256(bind, SHA-256(ct), SHA-256(batch))
     B->>C: POST save (assertion)
-    C->>C: verify, then one transaction: rows, manifest, audit
+    C->>C: verify, then one transaction for ciphertext rows, signed batch and audit
     C->>B: Stored NAMES
 ```
 
-No PRF and no master key: storing a secret only needs the store public key. Removing a secret is a tap signing the next manifest without those hashes.
+An enrolled passkey can sign additions and replacements while the authority is unlocked. The batch changes ciphertext hashes only. The next admin-signed manifest includes the accepted hashes and replaces the batch history. Removing a secret requires that admin tap.
 
 ### 6.3 Run approval
 

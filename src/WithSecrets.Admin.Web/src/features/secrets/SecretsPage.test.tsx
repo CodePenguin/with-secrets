@@ -1,7 +1,9 @@
+import { webcrypto } from 'node:crypto'
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { entry, mount, provider, signedIn, status } from '../../test/fakeApi'
+import { entry, mount, provider, session, signedIn, status } from '../../test/fakeApi'
+import { toBase64Url } from '../../lib/passkey'
 import { renderApp } from '../../test/render'
 
 afterEach(() => {
@@ -137,6 +139,41 @@ describe('Secrets page', () => {
     const reopened = within(await screen.findByRole('dialog', { name: 'Add secret' }))
     expect(reopened.getByLabelText(/^Name/)).toHaveValue('')
     expect(reopened.getByLabelText(/^Value/)).toHaveValue('')
+  })
+
+  it('saves an addition and replacement together with one convenience passkey prompt', async () => {
+    vi.stubGlobal('crypto', webcrypto)
+    const key = await webcrypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits'])
+    const publicKey = toBase64Url(await webcrypto.subtle.exportKey('raw', key.publicKey))
+    const api = signedIn({
+      'GET /api/v1/session': { body: session({ scope: 'approval', capabilities: ['admin.read', 'secrets.write'] }) },
+      'GET /api/v1/secrets': { body: { items: ['DB_URL'] } },
+      'POST /api/v1/secrets/entries': { status: 201, body: {
+        id: 'entry-123', publicKey, payload: { bind: 'AQ', rpId: 'localhost', timeout: 60000 },
+        fields: [{ name: 'DB_URL', replace: true }, { name: 'API_KEY', replace: false }],
+      } },
+      'POST /api/v1/secrets/entries/entry-123/seal': { body: { ok: true, manifest: 'signed batch text' } },
+      'POST /api/v1/secrets/entries/entry-123/save': { body: { ok: true } },
+    })
+    const bytes = new Uint8Array([1]).buffer
+    const assert = vi.fn().mockResolvedValue({ rawId: bytes, response: { authenticatorData: bytes, clientDataJSON: bytes, signature: bytes } })
+    vi.stubGlobal('navigator', { ...navigator, credentials: { get: assert } })
+    renderApp('/secrets')
+    await userEvent.click(await screen.findByRole('button', { name: 'Add secret' }))
+    const dialog = within(await screen.findByRole('dialog', { name: 'Add secret' }))
+    await userEvent.type(dialog.getByLabelText(/^Name/), 'DB_URL')
+    await screen.findByText('Existing grants can use replacement values without asking again.')
+    expect(screen.queryByRole('button', { name: 'Remove secret DB_URL' })).not.toBeInTheDocument()
+    await userEvent.type(dialog.getByLabelText(/^Value/), 'db-password')
+    await userEvent.click(screen.getByRole('button', { name: 'Add another secret' }))
+    await userEvent.type(screen.getByLabelText('Name 2'), 'API_KEY')
+    await userEvent.type(screen.getByLabelText('Value 2'), 'api-token')
+    await userEvent.click(screen.getByRole('button', { name: 'Save secrets' }))
+    expect(await screen.findByText('Saved DB_URL, API_KEY.')).toBeVisible()
+    expect(assert).toHaveBeenCalledTimes(1)
+    expect(api.calls.find(call => call.path === '/api/v1/secrets/entries')?.body).toEqual({ names: ['DB_URL', 'API_KEY'] })
+    expect(api.count('POST /api/v1/secrets/entries/entry-123/save')).toBe(1)
+    expect(JSON.stringify(api.calls)).not.toMatch(/db-password|api-token/)
   })
 
   it('cancels the pending removal when the passkey is not used', async () => {

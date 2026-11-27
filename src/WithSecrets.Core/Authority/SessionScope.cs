@@ -18,11 +18,12 @@ public static class SessionCapabilities
     public const string AdminRead = "admin.read";
     public const string AdminDecide = "admin.decide";
     public const string GrantsDecide = "grants.decide";
+    public const string SecretsWrite = "secrets.write";
 
     public static IReadOnlyList<string> For(SessionScope scope) => scope switch
     {
-        SessionScope.Admin => [AdminRead, AdminDecide, ApprovalsRead, ApprovalsDecide, GrantsDecide],
-        SessionScope.Approval => [ApprovalsRead, ApprovalsDecide, AdminRead, GrantsDecide],
+        SessionScope.Admin => [AdminRead, AdminDecide, ApprovalsRead, ApprovalsDecide, GrantsDecide, SecretsWrite],
+        SessionScope.Approval => [ApprovalsRead, ApprovalsDecide, AdminRead, GrantsDecide, SecretsWrite],
         _ => [],
     };
 

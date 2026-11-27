@@ -54,7 +54,7 @@ export const session = (extra: Partial<Session> = {}): Session => ({
   admin: 'admin key',
   identity: null,
   scope: 'admin',
-  capabilities: ['approvals.read', 'approvals.decide', 'admin.read', 'grants.decide', 'admin.decide'],
+  capabilities: ['approvals.read', 'approvals.decide', 'admin.read', 'grants.decide', 'admin.decide', 'secrets.write'],
   started: '2026-11-09T10:00:00Z',
   idleExpires: '2026-11-09T10:15:00Z',
   absoluteExpires: '2026-11-09T18:00:00Z',

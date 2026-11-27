@@ -242,7 +242,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Prepare to store secrets or edit one stored secret when a source is supplied. A move can keep its value by sealing an empty object. Stores nothing. */
+        /** Start a batch of up to 20 values or edit a single stored secret. Requires secrets.write. Moving a secret between names requires an admin passkey and can keep the value by sealing an empty object. */
         post: operations["startSecretEntry"];
         delete?: never;
         options?: never;
@@ -259,7 +259,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Send the values, sealed to the entry's public key. The service checks them and answers the next state the passkey will sign. Stores nothing. */
+        /** Check the sealed values and return the batch the passkey will sign. Requires a session with secrets.write. */
         post: operations["sealSecretEntry"];
         delete?: never;
         options?: never;
@@ -276,7 +276,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Store the sealed values with one admin passkey assertion over them and the next state. */
+        /** Store the batch with one enrolled passkey assertion, or move a secret with an admin assertion. Requires a session with secrets.write. */
         post: operations["saveSecretEntry"];
         delete?: never;
         options?: never;
@@ -294,7 +294,7 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /** Cancel an entry that has not been saved. */
+        /** Cancel an entry before saving. Requires a session with secrets.write. */
         delete: operations["cancelSecretEntry"];
         options?: never;
         head?: never;
@@ -1572,7 +1572,7 @@ export interface components {
             identity: string | null;
             /** @enum {string|null} */
             scope: "admin" | "approval" | null;
-            capabilities: ("approvals.read" | "approvals.decide" | "admin.read" | "admin.decide" | "grants.decide")[];
+            capabilities: ("approvals.read" | "approvals.decide" | "admin.read" | "admin.decide" | "grants.decide" | "secrets.write")[];
             /** Format: date-time */
             started: string | null;
             /** Format: date-time */

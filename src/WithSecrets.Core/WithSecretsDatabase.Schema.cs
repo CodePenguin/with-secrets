@@ -81,5 +81,10 @@ public sealed partial class WithSecretsDatabase
             id INTEGER PRIMARY KEY AUTOINCREMENT, machine TEXT NOT NULL, sequence INTEGER NOT NULL, event_id TEXT NOT NULL UNIQUE, json TEXT NOT NULL, created TEXT NOT NULL,
             state TEXT NOT NULL, reason TEXT);
         CREATE INDEX outbox_events_upload ON outbox_events (machine, state, id);
+""" + "\n" + SecretWritesSchema;
+
+    private const string SecretWritesSchema = """
+        CREATE TABLE secret_writes (
+            version INTEGER PRIMARY KEY NOT NULL, text TEXT NOT NULL, bind TEXT NOT NULL, proof TEXT NOT NULL);
         """;
 }
