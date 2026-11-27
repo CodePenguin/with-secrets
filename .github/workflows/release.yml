@@ -97,7 +97,7 @@ jobs:
           if (!(Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing $file" }
         }
         if (!$IsWindows) {
-          $test = Get-Command test -CommandType Application -ErrorAction Stop
+          $test = Get-Command test -CommandType Application -ErrorAction Stop | Select-Object -First 1
           & $test.Source -x $desktop
           if ($LASTEXITCODE -ne 0) { throw 'The desktop executable lost its executable bit' }
         }
