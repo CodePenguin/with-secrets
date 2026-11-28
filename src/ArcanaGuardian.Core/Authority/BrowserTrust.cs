@@ -22,6 +22,7 @@ internal interface IBrowserTrust
     bool Contains(TrustTarget target, X509Certificate2 certificate, string path);
     void Install(TrustTarget target, X509Certificate2 certificate, string path, bool permitPrompt, TextWriter output);
     void Remove(TrustTarget target, X509Certificate2 certificate, string path, bool permitPrompt, TextWriter output);
+    bool IsMachineWideTrusted(X509Certificate2 certificate) => false;
 }
 
 internal sealed class BrowserTrust : IBrowserTrust
@@ -101,6 +102,19 @@ internal sealed class BrowserTrust : IBrowserTrust
             Nss(target, "-D", "-n", Nickname(certificate));
             if (NssEntry(target, certificate).Present) throw new BrowserCertificateException("NSS still contains the exact obsolete browser certificate.");
         }
+    }
+
+    [SupportedOSPlatform("windows")]
+    public bool IsMachineWideTrusted(X509Certificate2 certificate)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return false;
+        }
+
+        using var root = new X509Store(StoreName.Root, StoreLocation.LocalMachine);
+        root.Open(OpenFlags.ReadOnly);
+        return WindowsEntries(root, certificate).Any();
     }
 
     [SupportedOSPlatform("windows")]

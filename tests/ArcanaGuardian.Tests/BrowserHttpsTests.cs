@@ -1,6 +1,8 @@
 using System.Net;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Text.Json.Nodes;
 
 namespace ArcanaGuardian.Tests;
 
@@ -69,7 +71,7 @@ internal static class BrowserHttpsTests
                 trust.Installed.SetEquals([originalId, replacementId]),
                 "browser HTTPS: replacement uses a fresh key, with original pending cleanup");
             trust.FailRemove = false;
-            trust.Installed.Add("unrelated");
+            trust.Unrelated.Add("unrelated");
             Run("setup");
             check(trust.Installed.SetEquals([replacementId, "unrelated"]),
                 "browser HTTPS: retry removes only recorded obsolete trust without replacing the active leaf");
@@ -86,7 +88,7 @@ internal static class BrowserHttpsTests
             check(Refused(() => BrowserCertificate.Validate(replacement, DateTimeOffset.UtcNow.AddYears(11))),
                 "browser HTTPS: expired certificate rejected");
 
-            await ListenerAsync(folder, replacement, original, check);
+            await ListenerAsync(folder, trust, replacement, original, check);
             Run("remove");
             Run("remove");
             check(trust.Installed.SetEquals(["unrelated"]) && Refused(() => Open(certificates)),
@@ -101,7 +103,205 @@ internal static class BrowserHttpsTests
         }
     }
 
-    private static async Task ListenerAsync(string folder, X509Certificate2 leaf, X509Certificate2 old, Action<bool, string> check)
+    internal static void RunTrustRemediation(Action<bool, string> check)
+    {
+        string folder = Directory.CreateTempSubdirectory("ws-browser-trust-test-").FullName;
+        var trust = new TestTrust();
+        var certificates = new BrowserCertificates(folder, trust);
+        void Run(string action, TextWriter? output = null) =>
+            certificates.Run(action, false, null, null, output ?? TextWriter.Null);
+
+        try
+        {
+            Run("setup");
+            using var active = certificates.Open();
+            string digest = BrowserCertificate.Digest(active);
+            TrustTarget primary = JournalTargets(folder)[0];
+            var extra = new TrustTarget("chromium", Path.Combine(folder, "second-profile"));
+            InjectTarget(folder, extra);
+
+            trust.FailInstallTarget = extra.ToString();
+            check(Refused(() => Run("setup")),
+                "browser HTTPS: a partially failed multi-target install is reported");
+            using (var incomplete = new StringWriter())
+            {
+                Run("status", incomplete);
+                check(incomplete.ToString().Contains("Setup incomplete", StringComparison.Ordinal),
+                    "browser HTTPS: status marks the interrupted target set incomplete");
+            }
+            using (var stillActive = certificates.Open())
+            {
+                check(BrowserCertificate.Digest(stillActive) == digest,
+                    "browser HTTPS: partial install never replaces the active certificate");
+            }
+
+            using (var status = new StringWriter())
+            {
+                Run("status", status);
+                check(status.ToString().Contains("install confirmed", StringComparison.Ordinal) &&
+                    status.ToString().Contains("install not confirmed", StringComparison.Ordinal),
+                    "browser HTTPS: status distinguishes confirmed from intended-only trust targets");
+            }
+
+            trust.FailInstallTarget = null;
+            Run("setup");
+            check(trust.Contains(primary, active, CertificatePath(folder, active)) &&
+                trust.Contains(extra, active, CertificatePath(folder, active)),
+                "browser HTTPS: retry confirms every target idempotently");
+            using (var status = new StringWriter())
+            {
+                Run("status", status);
+                check(!status.ToString().Contains("Setup incomplete", StringComparison.Ordinal),
+                    "browser HTTPS: status is complete only after all trust installs succeed");
+            }
+
+            trust.Withdraw(extra, active);
+            using (var stillTrusted = certificates.Open())
+            {
+                check(BrowserCertificate.Digest(stillTrusted) == digest,
+                    "browser HTTPS: one unavailable browser profile does not disable the authority");
+            }
+
+            trust.Withdraw(primary, active);
+            string trustFailure = Message(() => Open(certificates));
+            check(trustFailure.Contains("trust target currently trusts", StringComparison.Ordinal) &&
+                !trustFailure.Contains("integrity checks", StringComparison.Ordinal),
+                "browser HTTPS: external trust removal fails closed with a trust-specific diagnostic");
+            check(Refused(() => { using var lease = certificates.OpenListener(); }),
+                "browser HTTPS: the listener lease also refuses externally untrusted certificates");
+
+            Run("setup");
+            check(!Refused(() => Open(certificates)), "browser HTTPS: setup restores withdrawn trust");
+
+            trust.UnavailableTargets.Add(extra.ToString());
+            using (var unavailableOptional = certificates.Open())
+            {
+                check(BrowserCertificate.Digest(unavailableOptional) == digest,
+                    "browser HTTPS: an unavailable optional target does not disable the authority");
+            }
+
+            trust.UnavailableTargets.Add(primary.ToString());
+            check(Message(() => Open(certificates)).Contains("Trust checks reported", StringComparison.Ordinal),
+                "browser HTTPS: unavailable trust targets are reported when no target can be verified");
+            trust.UnavailableTargets.Clear();
+
+            string path = CertificatePath(folder, active);
+            File.WriteAllText(path, "invalid certificate");
+            check(Message(() => Open(certificates)).Contains("integrity checks", StringComparison.Ordinal),
+                "browser HTTPS: malformed certificate integrity failure is distinct from trust unavailability");
+            File.Delete(path);
+            check(Message(() => Open(certificates)).Contains("integrity checks", StringComparison.Ordinal),
+                "browser HTTPS: missing recorded certificate integrity failure is distinct from trust unavailability");
+            Run("setup");
+
+            trust.Unrelated.Add("unrelated-certificate");
+            trust.MachineWideDigest = digest;
+            check(Refused(() => Run("remove")),
+                "browser HTTPS: cleanup refuses when the exact certificate remains machine-wide trusted");
+            check(JsonNode.Parse(File.ReadAllText(Path.Combine(folder, "browser-https", "state.json")))!
+                    .AsObject()["Retired"]!.AsArray().Count == 1,
+                "browser HTTPS: blocked machine-wide cleanup retains retry information");
+            trust.MachineWideDigest = null;
+            Run("remove");
+            check(trust.Installed.SetEquals(["unrelated-certificate"]),
+                "browser HTTPS: retried cleanup removes only exact registered trust and preserves unrelated trust");
+            string browserDirectory = Path.Combine(folder, "browser-https");
+            check(Directory.GetFiles(browserDirectory, "*.cer").Length == 0 &&
+                Directory.GetFiles(browserDirectory, "*.key").Length == 0,
+                "browser HTTPS: exact certificate DER and private key are removed after cleanup");
+        }
+        finally
+        {
+            trust.FailInstall = trust.FailRemove = false;
+            trust.MachineWideDigest = null;
+            try { Run("remove"); } catch { }
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(folder, true);
+        }
+    }
+
+    internal static void RunRemoteListenerSeparation(Action<bool, string> check)
+    {
+        string folder = Directory.CreateTempSubdirectory("ws-browser-remote-test-").FullName;
+        try
+        {
+            using var machine = new SoftwareSigningKey();
+            using var authority = new SoftwareSigningKey();
+            using var deployment = LocalDeployment.Create(folder, machine, _ => authority, "browser-https-remote");
+            var state = StateDatabase.InFolder(folder);
+            string fingerprint = MachineCertificates.FingerprintOf(deployment.IdentityCertificate)!;
+            var remote = new RemoteAuthority(
+                new RemoteAuthorityConfig("https://127.0.0.1:1/", fingerprint, deployment.IdentityCertificate),
+                deployment.Tls,
+                deployment.HostConfig)
+            {
+                Retries = 1,
+                RetryPause = TimeSpan.FromMilliseconds(10),
+            };
+            deployment.UseRemote(remote);
+
+            using var service = HostService.Start(new HostServiceOptions
+            {
+                State = state,
+                Store = new SecretStore(state),
+                Deployment = deployment,
+                CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(),
+                Port = 0,
+            });
+            bool browserTcp = service.BrowserListenerAddresses.Any(address =>
+                Uri.TryCreate(address, UriKind.Absolute, out Uri? uri) &&
+                (uri.Scheme == "https" || uri.Host is "127.0.0.1" or "[::1]" or "localhost"));
+            check(!browserTcp && service.Port == 0,
+                "browser HTTPS: a non-authority host exposes no browser TCP listener (" +
+                string.Join(", ", service.BrowserListenerAddresses) + ")");
+            check(Refused(() => HostService.Start(new HostServiceOptions
+            {
+                State = state,
+                Store = new SecretStore(state),
+                Deployment = deployment,
+                Port = 0,
+            })),
+                "browser HTTPS: a remote host without local IPC cannot start");
+
+            var flag = typeof(HostServiceOptions).GetProperty("HttpBrowserFixture",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            check(flag?.SetMethod is { IsAssembly: true, IsPublic: false },
+                "browser HTTPS: the HTTP browser fixture is an internal test-only option");
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(folder, true);
+        }
+    }
+
+    private static string CertificatePath(string folder, X509Certificate2 certificate)
+    {
+        string directory = Path.Combine(folder, "browser-https");
+        return Directory.GetFiles(directory, "*.cer").Single(path =>
+            X509CertificateLoader.LoadCertificate(File.ReadAllBytes(path)).RawData.SequenceEqual(certificate.RawData));
+    }
+
+    private static TrustTarget[] JournalTargets(string folder)
+    {
+        var json = JsonNode.Parse(File.ReadAllText(Path.Combine(folder, "browser-https", "state.json")))!.AsObject();
+        return [.. json["Active"]!["Targets"]!.AsArray().Select(item =>
+            new TrustTarget((string)item!["Kind"]!, (string)item!["Path"]!))];
+    }
+
+    private static void InjectTarget(string folder, TrustTarget target)
+    {
+        string path = Path.Combine(folder, "browser-https", "state.json");
+        var json = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+        json["Active"]!["Targets"]!.AsArray().Add(new JsonObject
+        {
+            ["Kind"] = target.Kind,
+            ["Path"] = target.Path,
+        });
+        File.WriteAllText(path, json.ToJsonString());
+    }
+
+    private static async Task ListenerAsync(string folder, TestTrust trust, X509Certificate2 leaf, X509Certificate2 old, Action<bool, string> check)
     {
         using var machine = new SoftwareSigningKey();
         using var authority = new SoftwareSigningKey();
@@ -115,7 +315,14 @@ internal static class BrowserHttpsTests
             "browser HTTPS: machine mTLS rejects the browser certificate as an identity or a leaf");
 
         // The ordinary host startup opens the persisted browser certificate and leases its state.
-        using var service = HostService.Start(new HostServiceOptions { State = state, Store = new SecretStore(state), Deployment = deployment, Port = 0 });
+        using var service = HostService.Start(new HostServiceOptions
+        {
+            State = state,
+            Store = new SecretStore(state),
+            Deployment = deployment,
+            Port = 0,
+            BrowserCertificatesFixture = new BrowserCertificates(folder, trust),
+        });
         check(service.BrowserListenerAddresses.All(address => new Uri(address).IsLoopback &&
             new Uri(address).Scheme == "https") && service.BrowserListenerAddresses.Count > 0,
             "browser HTTPS: production listener is TLS-only on loopback");
@@ -171,25 +378,74 @@ internal static class BrowserHttpsTests
         }
     }
 
+    private static string Message(Action operation)
+    {
+        try
+        {
+            operation();
+            return "";
+        }
+        catch (Exception error) when (BrowserCertificates.IsLifecycleError(error))
+        {
+            return error.Message;
+        }
+    }
+
     private sealed class TestTrust : IBrowserTrust
     {
-        public HashSet<string> Installed { get; } = [];
-        public bool FailInstall { get; set; }
-        public bool FailRemove { get; set; }
+        private readonly Dictionary<string, HashSet<string>> _byTarget = [];
 
-        public bool Contains(TrustTarget target, X509Certificate2 certificate, string path) =>
-            Installed.Contains(BrowserCertificate.Digest(certificate));
+        public HashSet<string> Unrelated { get; } = [];
+        public bool FailInstall { get; set; }
+        public string? FailInstallTarget { get; set; }
+        public bool FailRemove { get; set; }
+        public HashSet<string> UnavailableTargets { get; } = [];
+        public string? MachineWideDigest { get; set; }
+
+        public HashSet<string> Installed => [.. _byTarget.Values.SelectMany(entries => entries).Concat(Unrelated)];
+
+        public bool Contains(TrustTarget target, X509Certificate2 certificate, string path)
+        {
+            if (UnavailableTargets.Contains(target.ToString()))
+            {
+                throw new IOException("simulated unavailable trust target " + target);
+            }
+
+            return _byTarget.TryGetValue(target.ToString(), out var entries) &&
+                entries.Contains(BrowserCertificate.Digest(certificate));
+        }
 
         public void Install(TrustTarget target, X509Certificate2 certificate, string path, bool permitPrompt, TextWriter output)
         {
-            if (FailInstall) throw new IOException("simulated interrupted trust installation");
-            Installed.Add(BrowserCertificate.Digest(certificate));
+            if (FailInstall || FailInstallTarget == target.ToString())
+            {
+                throw new IOException("simulated interrupted trust installation in " + target);
+            }
+
+            Entry(target).Add(BrowserCertificate.Digest(certificate));
         }
 
         public void Remove(TrustTarget target, X509Certificate2 certificate, string path, bool permitPrompt, TextWriter output)
         {
             if (FailRemove) throw new IOException("simulated interrupted trust cleanup");
-            Installed.Remove(BrowserCertificate.Digest(certificate));
+            Entry(target).Remove(BrowserCertificate.Digest(certificate));
+        }
+
+        public void Withdraw(TrustTarget target, X509Certificate2 certificate) =>
+            Entry(target).Remove(BrowserCertificate.Digest(certificate));
+
+        public bool IsMachineWideTrusted(X509Certificate2 certificate) =>
+            MachineWideDigest == BrowserCertificate.Digest(certificate);
+
+        private HashSet<string> Entry(TrustTarget target)
+        {
+            if (!_byTarget.TryGetValue(target.ToString(), out var entries))
+            {
+                entries = [];
+                _byTarget[target.ToString()] = entries;
+            }
+
+            return entries;
         }
     }
 }

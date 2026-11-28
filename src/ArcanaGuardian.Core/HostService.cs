@@ -72,6 +72,7 @@ public sealed class HostServiceOptions
 
     internal bool HttpBrowserFixture { get; init; }
     internal X509Certificate2? BrowserCertificateFixture { get; init; }
+    internal BrowserCertificates? BrowserCertificatesFixture { get; init; }
 
     /// <summary>The endpoint the command line connects to besides the loopback port (the program passes <see cref="LocalEndpoint.ForCommandLine" />). Null leaves only the loopback port.</summary>
     public LocalEndpoint? CommandLineEndpoint { get; init; }
@@ -431,7 +432,7 @@ public sealed partial class HostService : IDisposable
         }
 
         BrowserCertificateLease? owned = hasBrowser && !options.HttpBrowserFixture && options.BrowserCertificateFixture is null
-            ? new BrowserCertificates(Path.GetDirectoryName(options.State.FilePath)!).OpenListener() : null;
+            ? (options.BrowserCertificatesFixture ?? new BrowserCertificates(Path.GetDirectoryName(options.State.FilePath)!)).OpenListener() : null;
         try
         {
             var service = StartCore(options, hasBrowser, owned?.Certificate ?? options.BrowserCertificateFixture);

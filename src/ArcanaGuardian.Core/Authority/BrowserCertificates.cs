@@ -24,6 +24,8 @@ public sealed class BrowserCertificates
 
     public X509Certificate2 Open()
     {
+        Journal state;
+        X509Certificate2 leaf;
         try
         {
             if (!Directory.Exists(_directory))
@@ -32,16 +34,60 @@ public sealed class BrowserCertificates
             }
 
             CheckDirectory(create: false);
-            var state = Read();
-            return OpenGeneration(state.Active ?? throw new CryptographicException("no browser certificate is active"),
+            state = Read();
+            leaf = OpenGeneration(state.Active ?? throw new CryptographicException("no browser certificate is active"),
                 DateTimeOffset.UtcNow);
         }
         catch (Exception error) when (IsLifecycleError(error))
         {
-            throw new BrowserCertificateException("Browser HTTPS cannot start: " + Detail(error) +
-                ". Run 'using-secrets certificate status', then 'using-secrets certificate setup' or 'using-secrets certificate replace'.",
+            throw new BrowserCertificateException("Browser HTTPS cannot start: the recorded certificate or state failed integrity checks: " +
+                Detail(error) + ". Run 'using-secrets certificate status', then 'using-secrets certificate setup' or 'using-secrets certificate replace'.",
                 error);
         }
+
+        try
+        {
+            VerifyRecordedTrust(state.Active!, leaf);
+        }
+        catch (Exception error) when (IsLifecycleError(error))
+        {
+            leaf.Dispose();
+            throw new BrowserCertificateException("Browser HTTPS cannot start: the recorded certificate is intact, but no configured browser trust " +
+                "target currently trusts that exact certificate. " + Detail(error) +
+                ". Run 'using-secrets certificate status' and retry setup for the affected profile. Trust was not changed and no confirmation was requested.",
+                error);
+        }
+        catch
+        {
+            leaf.Dispose();
+            throw;
+        }
+
+        return leaf;
+    }
+
+    private void VerifyRecordedTrust(Generation active, X509Certificate2 leaf)
+    {
+        if (active.Targets.Length == 0)
+        {
+            throw new BrowserCertificateException("the active certificate has no recorded browser trust targets");
+        }
+
+        var unavailable = new List<string>();
+        foreach (TrustTarget target in active.Targets)
+        {
+            try
+            {
+                if (_trust.Contains(target, leaf, CertificatePath(active))) return;
+            }
+            catch (Exception error) when (IsLifecycleError(error))
+            {
+                unavailable.Add(target + ": " + Detail(error));
+            }
+        }
+
+        string detail = unavailable.Count == 0 ? "" : " Trust checks reported: " + string.Join("; ", unavailable) + ".";
+        throw new BrowserCertificateException("no recorded browser trust target confirms this exact certificate." + detail);
     }
 
     internal BrowserCertificateLease OpenListener()
@@ -112,11 +158,13 @@ public sealed class BrowserCertificates
         var state = Read();
         if (action == "remove")
         {
+            var known = state.Retired.Select(generation => generation.Id).ToHashSet();
+            var obsolete = new[] { state.Active, state.Pending }.OfType<Generation>().Where(generation => !known.Contains(generation.Id));
             state = state with
             {
                 Active = null,
                 Pending = null,
-                Retired = [.. state.Retired, .. new[] { state.Active, state.Pending }.OfType<Generation>()],
+                Retired = [.. state.Retired, .. obsolete],
             };
             Save(state);
             CleanRetired(state, permitPrompt, output);
@@ -189,11 +237,28 @@ public sealed class BrowserCertificates
         }
 
         bool pending = state.Pending?.Id == candidate.Id;
-        state = pending ? state with { Pending = candidate } : state with { Active = candidate };
-        Save(state); // A retry can identify the exact certificate and every store after any interruption.
+        void Persist(Generation value)
+        {
+            candidate = value;
+            state = pending ? state with { Pending = value } : state with { Active = value };
+            Save(state); // A retry can identify the exact certificate and every store after any interruption.
+        }
+
+        Persist(candidate);
+        var confirmed = new HashSet<TrustTarget>(ConfirmedTargets(candidate));
         foreach (TrustTarget target in candidate.Targets)
         {
+            if (_trust.Contains(target, publicLeaf, CertificatePath(candidate)))
+            {
+                // Trust may have been installed by an earlier interrupted command or set manually.
+                confirmed.Add(target);
+                Persist(candidate with { Confirmed = [.. confirmed] });
+                continue;
+            }
+
             _trust.Install(target, publicLeaf, CertificatePath(candidate), permitPrompt, output);
+            confirmed.Add(target);
+            Persist(candidate with { Confirmed = [.. confirmed] });
         }
 
         if (pending)
@@ -257,9 +322,27 @@ public sealed class BrowserCertificates
         {
             using var leaf = ReadPublic(generation, DateTimeOffset.UtcNow, checkTime: false);
             output.WriteLine("Expires UTC: " + leaf.NotAfter.ToUniversalTime().ToString("O"));
+            var confirmed = new HashSet<TrustTarget>(ConfirmedTargets(generation));
+            bool complete = generation.Targets.Length != 0;
             foreach (TrustTarget target in generation.Targets)
             {
-                output.WriteLine(target + ": " + (_trust.Contains(target, leaf, CertificatePath(generation)) ? "trusted" : "not trusted"));
+                try
+                {
+                    bool trusted = _trust.Contains(target, leaf, CertificatePath(generation));
+                    complete &= trusted;
+                    output.WriteLine(target + ": " + (trusted ? "trusted" : "not trusted") +
+                        (confirmed.Contains(target) ? " (install confirmed)" : " (install not confirmed)"));
+                }
+                catch (Exception error) when (IsLifecycleError(error))
+                {
+                    complete = false;
+                    output.WriteLine(target + ": trust check unavailable: " + Detail(error));
+                }
+            }
+
+            if (!complete)
+            {
+                output.WriteLine("Setup incomplete: retry 'using-secrets certificate setup' for the affected target.");
             }
         }
         catch (Exception error) when (IsLifecycleError(error))
@@ -272,17 +355,38 @@ public sealed class BrowserCertificates
     {
         foreach (Generation retired in state.Retired)
         {
-            if (retired.Targets.Length != 0)
+            TrustTarget[] removeTargets = CleanupTargets(retired);
+            if (removeTargets.Length != 0)
             {
                 using var leaf = ReadRecordedPublic(retired);
-                foreach (TrustTarget target in retired.Targets)
+                try
+                {
+                    if (removeTargets.Any(target => target.Kind == "windows") && _trust.IsMachineWideTrusted(leaf))
+                    {
+                        throw new BrowserCertificateException("This exact retired browser certificate is also trusted in LocalMachine Root. " +
+                            "Remove it manually from Trusted Root Certification Authorities on the Local Computer store, then retry cleanup. " +
+                            "using-secrets did not change machine-wide trust. SHA-256: " + retired.Digest);
+                    }
+                }
+                catch (BrowserCertificateException)
+                {
+                    throw;
+                }
+                catch (Exception error) when (IsLifecycleError(error))
+                {
+                    throw new BrowserCertificateException("Could not check LocalMachine Root for the exact retired browser certificate. " +
+                        "Verify the Local Computer Trusted Root store yourself, then retry cleanup. using-secrets did not change machine-wide trust. " +
+                        "SHA-256: " + retired.Digest, error);
+                }
+
+                foreach (TrustTarget target in removeTargets)
                 {
                     _trust.Remove(target, leaf, CertificatePath(retired), permitPrompt, output);
                 }
             }
 
             // Persist successful trust removal before deleting the DER needed to verify it.
-            var cleared = retired with { Targets = [] };
+            var cleared = retired with { Targets = [], Confirmed = [] };
             state = state with { Retired = [.. state.Retired.Select(item => item.Id == retired.Id ? cleared : item)] };
             Save(state);
             DeleteKey(retired);
@@ -453,14 +557,22 @@ public sealed class BrowserCertificates
         if (!File.Exists(JournalPath)) return new(null, null, []);
         var state = JsonSerializer.Deserialize<Journal>(BoundedRead(JournalPath, 65536));
         if (state?.Retired is null) throw new BrowserCertificateException("The browser certificate journal is invalid.");
+        state = state with
+        {
+            Active = state.Active is { } active ? Normalize(active) : null,
+            Pending = state.Pending is { } pending ? Normalize(pending) : null,
+            Retired = [.. state.Retired.Select(Normalize)],
+        };
         var seen = new HashSet<Guid>();
         foreach (Generation item in new[] { state.Active, state.Pending }.OfType<Generation>().Concat(state.Retired))
         {
             if (item is null || item.Id == Guid.Empty || !seen.Add(item.Id) || item.Targets is null ||
+                item.Confirmed is null ||
                 (item.Digest is null && (item == state.Active || item.Targets.Length != 0 || item.Der is not null)) ||
                 (item.Digest is not null && item.Der is not { Length: > 0 and <= 4096 }) ||
                 (item.Digest is { } digest && (digest.Length != 64 || !digest.All(char.IsAsciiHexDigit))) ||
-                item.Targets.Any(target => target is null || !target.IsValid()))
+                item.Targets.Any(target => target is null || !target.IsValid()) ||
+                item.Confirmed.Any(target => target is null || !target.IsValid() || !item.Targets.Contains(target)))
             {
                 throw new BrowserCertificateException("The browser certificate journal is invalid.");
             }
@@ -468,6 +580,16 @@ public sealed class BrowserCertificates
 
         return state;
     }
+
+    private static Generation Normalize(Generation generation) => generation with
+    {
+        Confirmed = [.. (generation.Confirmed ?? []).Distinct()],
+    };
+
+    private static TrustTarget[] ConfirmedTargets(Generation generation) => generation.Confirmed ?? [];
+
+    private static TrustTarget[] CleanupTargets(Generation generation) =>
+        generation.Confirmed is { Length: > 0 } confirmed ? confirmed : generation.Targets;
 
     private void Save(Journal state) => WriteAtomically(JournalPath, JsonSerializer.SerializeToUtf8Bytes(state));
 
@@ -501,7 +623,7 @@ public sealed class BrowserCertificates
     public static string Detail(Exception error) => error is JsonException or System.Formats.Asn1.AsnContentException
         ? "the browser certificate state or encoding is malformed" : error.Message;
 
-    private sealed record Generation(Guid Id, string? Digest, byte[]? Der, TrustTarget[] Targets);
+    private sealed record Generation(Guid Id, string? Digest, byte[]? Der, TrustTarget[] Targets, TrustTarget[]? Confirmed = null);
     private sealed record Journal(Generation? Active, Generation? Pending, Generation[] Retired);
 }
 

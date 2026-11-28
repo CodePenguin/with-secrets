@@ -463,6 +463,8 @@ internal static class Program
         if (Wants("BrowserHttps"))
         {
             BrowserHttpsTests.Run(Check).GetAwaiter().GetResult();
+            BrowserHttpsTests.RunTrustRemediation(Check);
+            BrowserHttpsTests.RunRemoteListenerSeparation(Check);
         }
 
         if (Wants("ClientTls"))
