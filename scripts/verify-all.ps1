@@ -4,17 +4,17 @@
 
 .DESCRIPTION
     Stages, in order:
-      1. build        dotnet build with-secrets.slnx --no-incremental; must end with 0 warnings and 0 errors (warnings are errors in this repository)
-      2. dotnet-tests the whole .NET suite (tests\WithSecrets.Tests); must report 0 failed
-      3. frontend     npm run verify in src\WithSecrets.Admin.Web (client is current, typecheck, lint, unit and accessibility tests)
+      1. build        dotnet build arcana-guardian.slnx --no-incremental; must end with 0 warnings and 0 errors (warnings are errors in this repository)
+      2. dotnet-tests the whole .NET suite (tests\ArcanaGuardian.Tests); must report 0 failed
+      3. frontend     npm run verify in src\ArcanaGuardian.Admin.Web (client is current, typecheck, lint, unit and accessibility tests)
       4. publish      scripts\publish.ps1 (single self-contained program for this platform) and scripts\verify-publish.ps1
-      5. e2e          rebuilds tests\WithSecrets.E2E, then runs the real-browser scenarios; must end with ALL PASSED
+      5. e2e          rebuilds tests\ArcanaGuardian.E2E, then runs the real-browser scenarios; must end with ALL PASSED
 
     Each stage's full output goes to artifacts\verify-all\<stage>.log (git ignores artifacts); the console shows one result line per stage and, for a
     failed stage, the lines that start with FAIL (test names and public detail only; the tests print no secret, key, code or value). The script stops at the
     first failed stage unless -KeepGoing is given, and exits 0 only when every stage that ran passed.
 
-    Needs the .NET 10 SDK and Node.js 22 or newer. It changes nothing outside the repository (tests use temporary folders, never ~/.with-secrets).
+    Needs the .NET 10 SDK and Node.js 22 or newer. It changes nothing outside the repository (tests use temporary folders, never ~/.ArcanaGuardian).
 #>
 [CmdletBinding()]
 param(
@@ -59,14 +59,14 @@ Push-Location $repo
 try {
     $stages = @(
         @{ Name = 'build'
-           Command = { dotnet build with-secrets.slnx --no-incremental }
+           Command = { dotnet build arcana-guardian.slnx --no-incremental }
            Judge = { param($exit, $text)
                if ($exit -ne 0) { return "exit $exit" }
                if ($text -notmatch '\b0 Warning\(s\)') { return 'warnings are not 0' }
                if ($text -notmatch '\b0 Error\(s\)') { return 'errors are not 0' }
                'ok' } },
         @{ Name = 'dotnet-tests'
-           Command = { dotnet run --project tests\WithSecrets.Tests }
+           Command = { dotnet run --project tests\ArcanaGuardian.Tests }
            Judge = { param($exit, $text)
                $m = [regex]::Matches($text, '(\d+) passed, (\d+) failed')
                if ($m.Count -eq 0) { return 'no result line' }
@@ -75,7 +75,7 @@ try {
                if ($exit -ne 0) { return "exit $exit" }
                'ok' } },
         @{ Name = 'frontend'
-           Command = { Push-Location (Join-Path $repo 'src\WithSecrets.Admin.Web'); try { npm run verify } finally { Pop-Location } }
+           Command = { Push-Location (Join-Path $repo 'src\ArcanaGuardian.Admin.Web'); try { npm run verify } finally { Pop-Location } }
            Judge = { param($exit, $text) if ($exit -ne 0) { "exit $exit" } else { 'ok' } } },
         @{ Name = 'publish'
            Command = { & (Join-Path $repo 'scripts\publish.ps1') }
@@ -84,7 +84,7 @@ try {
                if ($text -notmatch 'Published and verified') { return 'the artifact was not verified' }
                'ok' } },
         @{ Name = 'e2e'
-           Command = { dotnet build tests\WithSecrets.E2E; if ($LASTEXITCODE -eq 0) { dotnet run --project tests\WithSecrets.E2E } }
+           Command = { dotnet build tests\ArcanaGuardian.E2E; if ($LASTEXITCODE -eq 0) { dotnet run --project tests\ArcanaGuardian.E2E } }
            Judge = { param($exit, $text)
                if ($exit -ne 0) { return "exit $exit" }
                if ($text -notmatch 'ALL PASSED') { return 'not all scenarios passed' }

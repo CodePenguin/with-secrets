@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <!-- Browser end-to-end spike: a plain console runner. Not in the slnx (needs a Chromium download). Run with `dotnet run`. -->
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <RootNamespace>ArcanaGuardian.E2E</RootNamespace>
+    </PropertyGroup>
+    <ItemGroup>
+        <ProjectReference Include="..\..\src\ArcanaGuardian.Core\ArcanaGuardian.Core.csproj"/>
+        <ProjectReference Include="..\..\src\ArcanaGuardian.Bitwarden\ArcanaGuardian.Bitwarden.csproj"/>
+        <ProjectReference Include="..\..\src\ArcanaGuardian.LastPass\ArcanaGuardian.LastPass.csproj"/>
+        <ProjectReference Include="..\..\src\ArcanaGuardian.OnePassword\ArcanaGuardian.OnePassword.csproj"/>
+        <ProjectReference Include="..\..\src\ArcanaGuardian.Vault\ArcanaGuardian.Vault.csproj"/>
+        <PackageReference Include="Microsoft.Playwright" Version="1.64.1" />
+    </ItemGroup>
+</Project>

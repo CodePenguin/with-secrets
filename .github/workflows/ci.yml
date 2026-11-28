@@ -32,10 +32,10 @@ jobs:
       with:
         node-version: 22 # the .NET build builds the administration web application; pinned so runner images cannot drift
     - name: Build
-      run: dotnet build with-secrets.slnx
+      run: dotnet build arcana-guardian.slnx
     - name: Test
       # The runner prints "N passed, M failed" and exits non-zero when anything failed.
-      run: dotnet run --no-build --project tests/WithSecrets.Tests
+      run: dotnet run --no-build --project tests/ArcanaGuardian.Tests
 
   frontend:
     # The web application's own checks do not depend on the OS: api contract is current, typecheck, lint, unit and accessibility tests.
@@ -49,12 +49,12 @@ jobs:
       with:
         node-version: 22
         cache: npm
-        cache-dependency-path: src/WithSecrets.Admin.Web/package-lock.json
+        cache-dependency-path: src/ArcanaGuardian.Admin.Web/package-lock.json
     - name: Install
-      working-directory: src/WithSecrets.Admin.Web
+      working-directory: src/ArcanaGuardian.Admin.Web
       run: npm ci
     - name: Verify
-      working-directory: src/WithSecrets.Admin.Web
+      working-directory: src/ArcanaGuardian.Admin.Web
       run: npm run verify
 
   desktop-companion:
@@ -71,14 +71,14 @@ jobs:
       CGO_ENABLED: ${{ matrix.cgo }}
     defaults:
       run:
-        working-directory: src/WithSecrets.Desktop
+        working-directory: src/ArcanaGuardian.Desktop
         shell: pwsh
     steps:
     - uses: actions/checkout@v7
     - uses: actions/setup-go@v7
       with:
-        go-version-file: src/WithSecrets.Desktop/go.mod
-        cache-dependency-path: src/WithSecrets.Desktop/go.sum
+        go-version-file: src/ArcanaGuardian.Desktop/go.mod
+        cache-dependency-path: src/ArcanaGuardian.Desktop/go.sum
     - name: Format, lint, and test
       run: |
         $unformatted = gofmt -l .
@@ -88,13 +88,13 @@ jobs:
         go test ./...
     - name: Build standalone companion
       working-directory: .
-      run: scripts/build-desktop.ps1 -Output (Join-Path $env:RUNNER_TEMP 'with-secrets-desktop')
+      run: scripts/build-desktop.ps1 -Output (Join-Path $env:RUNNER_TEMP 'arcana-guardian-desktop')
     - name: Archive the companion
-      run: tar -czf "${{ runner.temp }}/with-secrets-desktop.tar.gz" -C "${{ runner.temp }}/with-secrets-desktop" .
+      run: tar -czf "${{ runner.temp }}/arcana-guardian-desktop.tar.gz" -C "${{ runner.temp }}/arcana-guardian-desktop" .
     - uses: actions/upload-artifact@v7
       with:
-        name: with-secrets-desktop-${{ matrix.runtime }}
-        path: ${{ runner.temp }}/with-secrets-desktop.tar.gz
+        name: arcana-guardian-desktop-${{ matrix.runtime }}
+        path: ${{ runner.temp }}/arcana-guardian-desktop.tar.gz
         if-no-files-found: error
 
   publish:
@@ -103,9 +103,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-        - { os: windows-latest, runtime: win-x64, file: with-secrets.exe }
-        - { os: ubuntu-latest, runtime: linux-x64, file: with-secrets }
-        - { os: macos-latest, runtime: osx-arm64, file: with-secrets }
+        - { os: windows-latest, runtime: win-x64, file: using-secrets.exe }
+        - { os: ubuntu-latest, runtime: linux-x64, file: using-secrets }
+        - { os: macos-latest, runtime: osx-arm64, file: using-secrets }
 
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -128,7 +128,7 @@ jobs:
     - name: Upload the program
       uses: actions/upload-artifact@v7
       with:
-        name: with-secrets-${{ matrix.runtime }}
+        name: using-secrets-${{ matrix.runtime }}
         path: artifacts/publish/${{ matrix.runtime }}/${{ matrix.file }}
         if-no-files-found: error
 
@@ -155,10 +155,10 @@ jobs:
       with:
         node-version: 22
     - name: Build
-      run: dotnet build tests/WithSecrets.E2E
+      run: dotnet build tests/ArcanaGuardian.E2E
     - name: Install Chromium
       shell: pwsh
-      run: tests/WithSecrets.E2E/bin/Debug/net10.0/playwright.ps1 install ${{ runner.os == 'Linux' && '--with-deps' || '' }} chromium
+      run: tests/ArcanaGuardian.E2E/bin/Debug/net10.0/playwright.ps1 install ${{ runner.os == 'Linux' && '--with-deps' || '' }} chromium
     - name: Scenarios
       # Ends with ALL PASSED and exits non-zero when a scenario failed.
-      run: dotnet run --no-build --project tests/WithSecrets.E2E
+      run: dotnet run --no-build --project tests/ArcanaGuardian.E2E

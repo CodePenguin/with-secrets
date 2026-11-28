@@ -1,6 +1,6 @@
 # Third-party notices
 
-`with-secrets` uses the components below. Each is used under its own license, which is reproduced here as that license requires. The `with-secrets` code itself is under the license in `LICENSE`.
+`using-secrets` uses the components below. Each is used under its own license, which is reproduced here as that license requires. The `using-secrets` code itself is under the license in `LICENSE`.
 
 ## Microsoft IdentityModel
 

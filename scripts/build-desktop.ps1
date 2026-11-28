@@ -8,16 +8,16 @@ $ErrorActionPreference = 'Stop'
 $Output = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Output)
 $windows = $PSVersionTable.PSEdition -eq 'Desktop' -or $IsWindows
 $linkerFlags = if ($windows) { '-s -w -H windowsgui' } else { '-s -w' }
-$binary = if ($windows) { 'with-secrets-desktop.exe' } else { 'with-secrets-desktop' }
+$binary = if ($windows) { 'arcana-guardian-desktop.exe' } else { 'arcana-guardian-desktop' }
 $previousCgo = $env:CGO_ENABLED
 
-Push-Location (Join-Path $PSScriptRoot '../src/WithSecrets.Desktop')
+Push-Location (Join-Path $PSScriptRoot '../src/ArcanaGuardian.Desktop')
 try {
     $env:CGO_ENABLED = if ($IsMacOS) { '1' } else { '0' }
     $binary = Join-Path $Output $binary
     if ($IsMacOS) {
-        $bundle = Join-Path $Output 'With Secrets.app'
-        $binary = Join-Path $bundle 'Contents/MacOS/with-secrets-desktop'
+        $bundle = Join-Path $Output 'Arcana Guardian.app'
+        $binary = Join-Path $bundle 'Contents/MacOS/arcana-guardian-desktop'
         New-Item -ItemType Directory -Path (Split-Path $binary) -Force | Out-Null
         Copy-Item Info.plist (Join-Path $bundle 'Contents/Info.plist')
     } else {
