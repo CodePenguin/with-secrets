@@ -15,7 +15,7 @@ internal sealed class QuickStartRegistration(HostService service)
 
     public string Code { get; } = RandomNumberGenerator.GetInt32(0, 1_000_000).ToString("D6", CultureInfo.InvariantCulture);
     public string Path { get; } = Prefix + Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(24));
-    public string Origin => $"http://localhost:{service.Port}";
+    public string Origin => service.BrowserOrigin;
     public string Url => Origin + Path;
     public string Fingerprint => service.QuickStartFingerprint;
     public string DeviceName => service.QuickStartDeviceName;
@@ -75,7 +75,7 @@ public sealed partial class HostService
         HttpResponse response = context.Response;
         QuickStartRoute? route = Volatile.Read(ref _quickStart);
         if (route is null || (path != route.Registration.Path && !path.StartsWith(route.Registration.Path + "/", StringComparison.Ordinal))
-            || $"http://{request.Host.Value}" != route.Registration.Origin)
+            || $"{request.Scheme}://{request.Host.Value}" != route.Registration.Origin)
         {
             await Refuse(response, 404, "not found");
             return true;

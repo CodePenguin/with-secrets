@@ -22,13 +22,16 @@ var setupCode = regexp.MustCompile(`^[0-9]{6}$`)
 
 func setupLink(link string) bool {
 	address, err := url.Parse(link)
-	if err != nil {
+	if err != nil || address.Scheme != "https" || address.Hostname() != browserHost ||
+		address.User != nil || address.RawQuery != "" || address.Fragment != "" || address.ForceQuery ||
+		!setupPath.MatchString(address.EscapedPath()) {
 		return false
 	}
+	if address.Host == browserHost {
+		return true
+	}
 	port, err := strconv.Atoi(address.Port())
-	return err == nil && port > 0 && port < 65536 && address.Scheme == "http" &&
-		address.Hostname() == "localhost" && address.User == nil && address.RawQuery == "" &&
-		address.Fragment == "" && !address.ForceQuery && setupPath.MatchString(address.EscapedPath())
+	return err == nil && port > 0 && port < 65536
 }
 
 func runSetup(parent, ctx context.Context, service string, updates chan<- setupUpdate, confirm <-chan struct{}) {

@@ -460,6 +460,11 @@ internal static class Program
             RemoteAuthorityTests.Run(Check).GetAwaiter().GetResult();
         }
 
+        if (Wants("BrowserHttps"))
+        {
+            BrowserHttpsTests.Run(Check).GetAwaiter().GetResult();
+        }
+
         if (Wants("ClientTls"))
         {
             ClientTlsProbeTests.Run(Check).GetAwaiter().GetResult();

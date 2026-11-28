@@ -26,6 +26,11 @@ public sealed record ApprovalSettings(string? BaseUrl, int Port, TimeSpan Timeou
     /// </summary>
     public string PageOrigin(int boundPort)
     {
+        if (BaseUrl == "https://" + BrowserAddress.Host)
+        {
+            return BrowserAddress.Origin(boundPort);
+        }
+
         if (BaseUrl is not null && Uri.TryCreate(BaseUrl, UriKind.Absolute, out Uri? uri))
         {
             string host = uri.HostNameType == UriHostNameType.IPv6 ? uri.Host : uri.IdnHost;

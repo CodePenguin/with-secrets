@@ -2,6 +2,7 @@ using System.Buffers.Text;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 
 using Microsoft.AspNetCore.Builder;
@@ -137,18 +138,21 @@ internal sealed class OneShotServer : IDisposable
 
     private static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds(2);
 
-    private readonly WebApplication _app;
+    private readonly WebApplication? _app;
+    private readonly BrowserPageRouter? _router;
     private readonly List<PageRoute> _routes = [];
-    private readonly Socket _ipv4;
+    private readonly Socket? _ipv4;
     private readonly Socket? _ipv6;
+    private readonly X509Certificate2? _certificate;
     private int _disposed;
 
     /// <summary>
     /// Starts listening on 127.0.0.1:port and [::1]:port (0 picks a free port). Throws when either address cannot be held,
     /// except that a host without IPv6 gets 127.0.0.1 only. The handler gets the method, the suffix ("" for the page) and the body.
     /// </summary>
-    public OneShotServer(string prefix, int port, Func<string, string, string, OneShotResponse> handle)
+    public OneShotServer(string prefix, int port, Func<string, string, string, OneShotResponse> handle, X509Certificate2? certificate = null)
     {
+        _certificate = certificate;
         First = Add(prefix, handle);
 
         // IPv4 first, which picks the port when it is 0; then IPv6 on that same port.
@@ -194,10 +198,11 @@ internal sealed class OneShotServer : IDisposable
             _app.StartAsync().GetAwaiter().GetResult();
 
             ICollection<string> addresses = _app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()?.Addresses ?? [];
-            HashSet<string> expected = ["http://127.0.0.1:" + chosen];
+            string scheme = _certificate is null ? "http://" : "https://";
+            HashSet<string> expected = [scheme + "127.0.0.1:" + chosen];
             if (_ipv6 is not null)
             {
-                expected.Add("http://[::1]:" + chosen);
+                expected.Add(scheme + "[::1]:" + chosen);
             }
 
             if (!expected.SetEquals(addresses) || addresses.Count != expected.Count)
@@ -211,6 +216,16 @@ internal sealed class OneShotServer : IDisposable
             throw;
         }
     }
+
+    internal OneShotServer(string prefix, BrowserPageRouter router, Func<string, string, string, OneShotResponse> handle)
+    {
+        _router = router;
+        Port = router.Port;
+        First = Add(prefix, handle);
+        router.Add(this);
+    }
+
+    internal bool HasPage(string path) => Resolve(path).Route is not null;
 
     private WebApplication Build(int chosen)
     {
@@ -256,6 +271,7 @@ internal sealed class OneShotServer : IDisposable
 
             return next(context);
         });
+        if (_certificate is not null) listen.UseHttps(_certificate);
     }
 
     public int Port { get; }
@@ -313,6 +329,9 @@ internal sealed class OneShotServer : IDisposable
             route.End();
         }
 
+        _router?.Remove(this);
+        if (_app is null) return;
+
         try
         {
             using CancellationTokenSource stop = new(StopTimeout);
@@ -327,7 +346,7 @@ internal sealed class OneShotServer : IDisposable
             _app.DisposeAsync().AsTask().GetAwaiter().GetResult();
 
             // Kestrel closes the sockets it used; these calls close them if it never got that far.
-            _ipv4.Dispose();
+            _ipv4?.Dispose();
             _ipv6?.Dispose();
         }
     }
@@ -391,8 +410,19 @@ internal sealed class OneShotServer : IDisposable
         return socket ?? throw new InvalidOperationException("The approval page asked for an address it does not own.");
     }
 
-    private async Task Serve(HttpContext context)
+    internal async Task Serve(HttpContext context)
     {
+        if ((_certificate is not null || _router is not null) && (!context.Request.IsHttps ||
+            !string.Equals(context.Request.Host.Host, BrowserAddress.Host, StringComparison.OrdinalIgnoreCase) ||
+            (context.Request.Host.Port ?? 443) != Port ||
+            (HttpMethods.IsPost(context.Request.Method) || context.Request.Headers.ContainsKey("Origin")) &&
+                (context.Request.Headers.Origin.Count != 1 ||
+                    !string.Equals(context.Request.Headers.Origin[0], BrowserAddress.Origin(Port), StringComparison.Ordinal))))
+        {
+            context.Response.StatusCode = 421;
+            return;
+        }
+
         OneShotResponse response;
         (PageRoute? route, string? suffix) = Resolve(context.Request.Path.Value ?? "");
         if (route is null || suffix is null)
@@ -413,7 +443,7 @@ internal sealed class OneShotServer : IDisposable
 
             // A POST to a step other than deny is a proof (or another signed step): it is logged when it arrives and when it ends.
             bool tracked = context.Request.Method == "POST" && suffix is not ("" or "deny" or "seal");
-            string label = suffix == "proof" ? "proof" : "step " + new string(suffix.Where(char.IsAsciiLetterOrDigit).Take(12).ToArray());
+            string label = suffix == "proof" ? "proof" : "step " + new string([.. suffix.Where(char.IsAsciiLetterOrDigit).Take(12)]);
             string? body = null;
             bool timedOut = false;
             using CancellationTokenSource limit = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);

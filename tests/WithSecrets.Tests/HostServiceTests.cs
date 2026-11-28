@@ -119,6 +119,7 @@ internal static class HostServiceTests
             Approvers = [];
             Service = HostService.Start(new HostServiceOptions
             {
+                HttpBrowserFixture = true,
                 CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(),
                 Lock = startLocked ? null : AuthorityLock.UnlockedForTests(),
                 AdminAskerFactory = adminAskers,
@@ -1026,7 +1027,7 @@ internal static class HostServiceTests
                 throw new InvalidOperationException(problem);
             }
 
-            using HostService service = HostService.Start(new HostServiceOptions { CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), Lock = AuthorityLock.UnlockedForTests(), State = db, Store = store, Deployment = machine.Deployment, Port = 0, TimeLimit = TimeSpan.FromSeconds(30), ApproverFactory = (settings, announce) => CommandWiring.RunApprover(db, settings, announce) });
+            using HostService service = HostService.Start(new HostServiceOptions { HttpBrowserFixture = true, CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), Lock = AuthorityLock.UnlockedForTests(), State = db, Store = store, Deployment = machine.Deployment, Port = 0, TimeLimit = TimeSpan.FromSeconds(30), ApproverFactory = (settings, announce) => CommandWiring.RunApprover(db, settings, announce) });
             SecretStoreTests.OpenKeys(service, db);
             using HttpClient client = new(service.Endpoint.CreateHandler()) { Timeout = TimeSpan.FromSeconds(60) };
             DateTimeOffset now = DateTimeOffset.UtcNow;
@@ -1242,7 +1243,7 @@ internal static class HostServiceTests
             SecretStore store = new(db, new CountingCipher());
             SecretStoreTests.Put(store, new Dictionary<string, string> { ["TOKEN"] = Value });
             using TestMachine machine = new(Path.GetDirectoryName(db.FilePath)!);
-            using HostService service = HostService.Start(new HostServiceOptions { CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), Lock = AuthorityLock.UnlockedForTests(), State = db, Store = store, Deployment = machine.Deployment, Port = 0, TimeLimit = TimeSpan.FromSeconds(60), ApproverFactory = (settings, announce) => CommandWiring.RunApprover(db, settings, announce) });
+            using HostService service = HostService.Start(new HostServiceOptions { HttpBrowserFixture = true, CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), Lock = AuthorityLock.UnlockedForTests(), State = db, Store = store, Deployment = machine.Deployment, Port = 0, TimeLimit = TimeSpan.FromSeconds(60), ApproverFactory = (settings, announce) => CommandWiring.RunApprover(db, settings, announce) });
             using HttpClient client = new(service.Endpoint.CreateHandler()) { Timeout = TimeSpan.FromSeconds(60) };
             string program = OperatingSystem.IsWindows() ? "p.cmd" : "p.sh";
             File.WriteAllText(Path.Combine(folder, "work", program), OperatingSystem.IsWindows() ? "@echo off\r\necho hi\r\n" : "#!/bin/sh\necho hi\n");

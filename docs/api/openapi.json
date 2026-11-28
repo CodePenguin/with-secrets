@@ -8,7 +8,7 @@
   "servers": [
     {
       "url": "/",
-      "description": "The service\u0027s own origin (http://localhost:PORT)."
+      "description": "The service\u0027s own origin (https://with-secrets.localhost:PORT)."
     }
   ],
   "tags": [
@@ -3134,13 +3134,13 @@
                       "null"
                     ],
                     "maxLength": 2048,
-                    "description": "The address of the pages, or null for http://localhost."
+                    "description": "Reserved. Use null when the authority serves its canonical HTTPS origin."
                   },
                   "port": {
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 65535,
-                    "description": "The port the pages listen on; 0 picks a free one."
+                    "description": "Reserved for browser HTTPS. Use 0; the service determines its browser port."
                   },
                   "timeoutMinutes": {
                     "type": "integer",
@@ -12656,13 +12656,13 @@
               "null"
             ],
             "maxLength": 2048,
-            "description": "The address of the pages, or null for http://localhost."
+            "description": "Reserved. Use null when the authority serves its canonical HTTPS origin."
           },
           "port": {
             "type": "integer",
             "minimum": 0,
             "maximum": 65535,
-            "description": "The port the pages listen on; 0 picks a free one."
+            "description": "Reserved for browser HTTPS. Use 0; the service determines its browser port."
           },
           "timeoutMinutes": {
             "type": "integer",

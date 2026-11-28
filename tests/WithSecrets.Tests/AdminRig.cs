@@ -218,6 +218,7 @@ internal sealed class AdminApp : IDisposable
         Service?.Dispose();
         Service = HostService.Start(new HostServiceOptions
         {
+            HttpBrowserFixture = true,
             CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(),
             Lock = unlocked ? AuthorityLock.UnlockedForTests() : null,
             State = State,

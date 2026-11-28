@@ -792,16 +792,27 @@ public sealed class StatePasskeyAdmin(StateDatabase state) : IPasskeyAdmin
     internal Func<Microsoft.Data.Sqlite.SqliteConnection, Microsoft.Data.Sqlite.SqliteTransaction, string, string, string?>? RekeyReview { get; init; }
 
     internal Action? AfterStoreChange { get; init; }
+    internal BrowserPageRouter? BrowserPages { get; init; }
+
+    private ApprovalSettings Settings()
+    {
+        var settings = ApprovalSettings.Load(state, out _);
+        return BrowserPages is { } router
+            ? settings with { BaseUrl = BrowserAddress.Origin(router.Port), Port = router.Port }
+            : settings;
+    }
+
+    private IDisposable UsePages() => PageFlow.Enter(router: BrowserPages);
 
     private Enrollment Make(Action<string> announce, Func<string?>? stopReason = null)
     {
-        ApprovalSettings settings = ApprovalSettings.Load(state, out _);
+        ApprovalSettings settings = Settings();
         Func<string?> reader = CommandWiring.CodeReader("Press Ctrl+C to cancel.");
         // A code typed after the request ended (or the authority locked) counts as no code, so the new passkey is not stored.
         Func<string?> guarded = () => stopReason?.Invoke() is not null ? null : reader() is { } code && stopReason?.Invoke() is null ? code : null;
         (EnrollmentTarget primary, EnrollmentTarget local) = CommandWiring.Targets(state, settings, announce, guarded);
 
-        return new Enrollment(primary, local, announce, state.Audit) { StopReason = stopReason };
+        return new Enrollment(primary, BrowserPages is null ? local : primary, announce, state.Audit) { StopReason = stopReason };
     }
 
     /// <summary>
@@ -824,13 +835,18 @@ public sealed class StatePasskeyAdmin(StateDatabase state) : IPasskeyAdmin
 
     public IReadOnlyList<EnrolledEntry> List() => Make(_ => { }).List();
 
-    public ApprovalDecision Enroll(Action<string> announce, Func<string?> stopReason) => Watch(() => Make(announce, stopReason).Enroll(), stopReason);
+    public ApprovalDecision Enroll(Action<string> announce, Func<string?> stopReason) => Watch(() =>
+    {
+        using var pages = UsePages();
+        return Make(announce, stopReason).Enroll();
+    }, stopReason);
 
     // The worker can finish after Watch returns. Reconcile the held keys from the worker so a late commit is covered too.
     private ApprovalDecision WatchStoreChange(Func<ApprovalDecision> flow, Func<string?> stopReason) => Watch(() =>
     {
         try
         {
+            using var pages = UsePages();
             return flow();
         }
         finally
@@ -844,9 +860,9 @@ public sealed class StatePasskeyAdmin(StateDatabase state) : IPasskeyAdmin
 
     public ApprovalDecision RotateStoreKey(Action<string> announce, Func<string?> stopReason) => WatchStoreChange(() =>
     {
-        ApprovalSettings settings = ApprovalSettings.Load(state, out _);
+        ApprovalSettings settings = Settings();
         (EnrollmentTarget primary, EnrollmentTarget local) = CommandWiring.Targets(state, settings, announce, null);
-        ConfigChange change = new KeyRotation(state, new SecretStore(state), primary, local, announce) { StopReason = stopReason, RekeyReview = RekeyReview }.Run();
+        ConfigChange change = new KeyRotation(state, new SecretStore(state), primary, BrowserPages is null ? local : primary, announce) { StopReason = stopReason, RekeyReview = RekeyReview }.Run();
 
         return change.Done ? ApprovalDecision.Allow(change.Detail) : ApprovalDecision.Deny(change.Detail);
     }, stopReason);

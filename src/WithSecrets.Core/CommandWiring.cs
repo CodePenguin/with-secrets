@@ -18,7 +18,13 @@ public static class CommandWiring
     {
         Action<string> announce = output ?? TerminalPrompt.Line;
         Func<string?> readCode = input ?? CodeReader("Press Ctrl+C to cancel.");
-        (EnrollmentTarget primary, EnrollmentTarget local) = Targets(state, ToolSettings.Defaults.Approval.WithPort(port), announce, readCode);
+        ApprovalSettings settings = ToolSettings.Defaults.Approval.WithPort(port);
+        if (service is { } browser && browser.BrowserOrigin.StartsWith("https://", StringComparison.Ordinal))
+        {
+            settings = settings with { BaseUrl = browser.BrowserOrigin, Port = browser.Port };
+        }
+
+        (EnrollmentTarget primary, EnrollmentTarget local) = Targets(state, settings, announce, readCode);
         ConfigChange change = new FirstRunPage(state, primary, local, announce, readCode)
         {
             Service = service,
@@ -36,11 +42,20 @@ public static class CommandWiring
     /// </summary>
     public static int Recover(StateDatabase state, int? port)
     {
-        ToolSettings settings = ToolSettings.Load(state, out _);
+        using BrowserCertificateLease tls = new BrowserCertificates(Path.GetDirectoryName(state.FilePath)!).OpenListener();
+        using IDisposable flow = PageFlow.Enter(tls.Certificate);
+        return RecoverCore(state, port, https: true);
+    }
+
+    internal static int RecoverCore(StateDatabase state, int? port, bool https)
+    {
+        ApprovalSettings settings = ToolSettings.Load(state, out _).Approval.WithPort(port);
+        if (https) settings = settings with { BaseUrl = "https://" + BrowserAddress.Host };
+
         Action<string> announce = TerminalPrompt.Line;
         Func<string?> readCode = CodeReader("Press Ctrl+C to cancel.");
-        (EnrollmentTarget primary, EnrollmentTarget local) = Targets(state, settings.Approval.WithPort(port), announce, readCode);
-        ConfigChange change = new StoreRecovery(state, primary, local, announce, readCode).Run();
+        (EnrollmentTarget primary, EnrollmentTarget local) = Targets(state, settings, announce, readCode);
+        ConfigChange change = new StoreRecovery(state, primary, https ? primary : local, announce, readCode).Run();
         TerminalPrompt.Final(change.Done ? change.Detail : "with-secrets: " + change.Detail);
 
         return change.Code;

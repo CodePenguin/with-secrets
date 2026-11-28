@@ -59,7 +59,7 @@ It is not on NuGet yet.
 
 Do these in your own terminal, never in the agent's.
 
-1. **Open Quick Start.** Run `with-secrets admin`. It starts the local service in the background and prints the setup link and this device’s fingerprint.
+1. **Set up local HTTPS and open Quick Start.** Run `with-secrets certificate setup` using the instructions for your [browser and OS](docs/operations.md#browser-https-certificate), then run `with-secrets admin`. It starts the local service in the background and prints the setup link and this device’s fingerprint.
 2. **Verify device.** Type the code from the page in your terminal, compare the full fingerprint on both screens, then choose **Fingerprint matches. Continue**.
 3. **Create passkey and finish setup.** Name and create the passkey. Choose **Confirm setup and unlock** to trust the device and sign in. Save the recovery code from the **Finish setup** screen.
 
@@ -91,6 +91,7 @@ The program receives `STRIPE_KEY` and `GITHUB_TOKEN` as environment variables, a
 | `with-secrets [--secrets A,B] --reason TEXT -- PROGRAM [ARGS]` | Run a program with the named secrets, after approval |
 | `with-secrets approve ...` | Same arguments; on approval make a grant instead of running |
 | `with-secrets --needs` | Show what the project asks for; names only |
+| `with-secrets certificate setup` | Set up the exact local browser HTTPS leaf |
 | `with-secrets admin` | First-time setup, then print the admin app's link |
 | `with-secrets service` | Run the host service |
 | `with-secrets pair` | Pair this machine with a remote authority |

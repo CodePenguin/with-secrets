@@ -21,7 +21,7 @@ public static class AdminAppCommand
             return RunCommand.Usage;
         }
 
-        string link = $"http://localhost:{port}/admin";
+        string link = BrowserAddress.Origin(port.Value) + "/admin";
         // The service is asked through the command line's endpoint (who it is, whether it runs); the port is only where the browser finds the app.
         try
         {
@@ -40,7 +40,7 @@ public static class AdminAppCommand
             // First run: this machine is not approved yet, so no identity is pinned and the program on the port cannot be checked. The link is public and carries nothing; it is offered
             // as unverified (and not opened), and the person compares the fingerprint the service printed in its own window before approving anything.
             (string firstStatus, int? firstPort) = await StatusAsync(client, endpoint);
-            link = firstPort is { } reportedFirst ? $"http://localhost:{reportedFirst}/admin" : link;
+            link = firstPort is { } reportedFirst ? BrowserAddress.Origin(reportedFirst) + "/admin" : link;
             await output.WriteLineAsync("Admin web app: " + link);
             await output.WriteLineAsync("Service: " + firstStatus);
             await output.WriteLineAsync("Not verified: this machine is not approved yet, so no identity is pinned and the program on the port cannot be checked. Open the link only if the service you started printed this port, and compare its fingerprint with the one shown in the app before you approve.");
@@ -59,10 +59,16 @@ public static class AdminAppCommand
         }
 
         (string status, int? reportedPort) = refused is null ? await StatusAsync(client, endpoint) : ("not running (start it with: with-secrets service)", null);
+        if (reportedPort is null && status == "running, using a remote authority")
+        {
+            await output.WriteLineAsync("Service: " + status + ". Open the administration app on the authority.");
+            return 0;
+        }
+
         if (reportedPort is { } servicePort)
         {
             // The port the running service says its admin web app is on wins over the one this command resolved: a wrong --port or WITH_SECRETS_PORT would print a dead link.
-            link = $"http://localhost:{servicePort}/admin";
+            link = BrowserAddress.Origin(servicePort) + "/admin";
         }
 
         await output.WriteLineAsync("Admin web app: " + link);

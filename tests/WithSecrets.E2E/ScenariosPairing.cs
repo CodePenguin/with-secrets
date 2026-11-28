@@ -1,5 +1,6 @@
 using System.Net.Http.Headers;
 using System.Text;
+
 using Microsoft.Playwright;
 
 namespace WithSecrets.E2E;
@@ -108,7 +109,7 @@ internal static class ScenariosPairing
 
         string script = rig.WriteScript("remote", "remote-value", runnable: true);
         StateDatabase hostState = StateDatabase.InFolder(folder);
-        using HostService hostService = HostService.Start(new HostServiceOptions { CommandLineEndpoint = E2EEndpoint.Make(), Lock = AuthorityLock.UnlockedForTests(), State = hostState, Store = new SecretStore(hostState), Deployment = hostDeployment, Port = 0, TimeLimit = TimeSpan.FromSeconds(60) });
+        using HostService hostService = HostService.Start(new HostServiceOptions { HttpBrowserFixture = true, CommandLineEndpoint = E2EEndpoint.Make(), Lock = AuthorityLock.UnlockedForTests(), State = hostState, Store = new SecretStore(hostState), Deployment = hostDeployment, Port = 0, TimeLimit = TimeSpan.FromSeconds(60) });
         Dictionary<string, string> environment = Environment.GetEnvironmentVariables().Cast<System.Collections.DictionaryEntry>().ToDictionary(entry => (string)entry.Key, entry => (string)(entry.Value ?? ""), StringComparer.OrdinalIgnoreCase);
         using HttpClient http = new(hostService.Endpoint.CreateHandler()) { Timeout = TimeSpan.FromSeconds(120) };
 
@@ -188,7 +189,7 @@ internal static class ScenariosPairing
         s.Check(audit.Any(entry => entry.Event == "pairing-invitation-created") && audit.Any(entry => entry.Event == "pairing-invitation-consumed") && audit.Any(entry => entry.Event == "machine-approve"), "the audit holds the creation, the consumption and the approval");
         s.NoProblems(c);
     }
- 
+
     private static void RequireAuthorityOrigin(IPage page, SpaApp app)
     {
         if (new Uri(page.Url).GetLeftPart(UriPartial.Authority) != new Uri(app.Url).GetLeftPart(UriPartial.Authority))
