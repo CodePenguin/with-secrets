@@ -12,9 +12,10 @@ The earlier spike covers the browser trust matrix, including rejection of a chil
 | Windows installed Chrome 158.0.8127.38 | PASS | Disposable production HTTPS scenario passed 58 checks with the same manual fingerprint confirmations. Both exact leaves were absent from CurrentUser Root afterward, no `arcana-guardian-browser` CNG keys remained, and no Arcana Guardian leaf appeared in LocalMachine Root. |
 | Windows installed Firefox | NOT TESTED | Firefox was not found in the standard Windows install locations. The Playwright Firefox TLS and WSL rows above describe separate environments. Production Firefox WebAuthn remains unverified. |
 | Ubuntu/WSL Firefox 157.0, Playwright build 1555 | PASS (TLS) | A new Firefox process loaded the production SPA as a secure context after NSS installation and again after leaf replacement. The disposable NSS database was empty after cleanup. Production Firefox WebAuthn remains unverified. |
-| Windows browser or Windows client against a WSL authority | OUT OF SCOPE | The intended production authority runs on Windows, with the local Windows browser using browser TLS and WSL clients using machine mTLS to that Windows authority. WSL is not a browser-facing authority host. |
 | macOS Safari and Chromium | NOT TESTED | No macOS environment was available. Treat the documented login-keychain steps as unverified. |
 | Hardware and synchronized passkeys, managed browser policy | NOT TESTED | Production Chromium verification used disposable virtual authenticators. |
+
+The review export listed a Windows browser accessing a WSL-hosted authority as additional verification. That topology is not a supported product path, so it is excluded from this matrix. The intended paths are a Windows authority with a local Windows browser, and a WSL client using machine mTLS to the Windows host service. A Linux browser against a Linux or WSL authority is development coverage only.
 
 On this Windows session the direct `CurrentUser Root` write did not display an OS confirmation dialog. The production scenario therefore uses `--wait-for-confirmation`: it prints the exact SHA-1, waits for a human to check the user certificate store, and only then continues. Cleanup uses the same gate before removing the exact initial and replacement leaves. No validation bypass or machine-wide trust change was used.
 
