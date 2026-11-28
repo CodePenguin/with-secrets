@@ -1,17 +1,54 @@
 # Disposable local HTTPS leaf spike
 
-Run with .NET 10: `dotnet run --project spikes/LocalHttpsLeaf`. No production state or automatic trust changes. Each run generates a new certificate. Use a disposable OS account/browser profile or VM; do not use production passkeys. Keep the process running throughout the test.
+Run from the repository root with .NET 10.
 
-1. Before trust, open https://with-secrets.localhost:18765/ and confirm certificate rejection. Never bypass warnings.
-2. Import only the printed public leaf into the browser's applicable trust store. Windows: try CurrentUser TrustedPeople first, then (if unsupported) CurrentUser Root in the disposable account. Record which store works. Linux Firefox/NSS and macOS: use native explicit certificate trust UI; record exact trust settings. Do not enable arbitrary CA trust without recording it.
-3. Open the correct URL again; require normal trusted connection, secure context, and no warning.
-4. Open https://localhost:18765/; require hostname rejection.
-5. Open https://localhost:18766/; require rejection of the child signed by the trusted non-CA leaf. This endpoint has a matching SAN and is intentionally invalid as a chain. If accepted, the trust configuration fails the security requirement.
-6. On the correct URL register and authenticate a disposable passkey. This tests browser API behavior only, not server-side assertion verification.
-7. Remove the exact imported certificate (printed SHA1/SHA256), remove the disposable passkey, restart browser if needed, and verify correct URL is rejected again before stopping the process.
+```powershell
+dotnet run --project spikes/LocalHttpsLeaf
+```
 
-Windows cleanup example for Root: `Remove-Item Cert:\CurrentUser\Root\<printed SHA1>` (substitute actual thumbprint); use TrustedPeople instead if that was the store used. Never remove unrelated certificates.
+Each run creates a fresh ECDSA P-256 leaf, starts loopback-only listeners and prints the public DER file path and fingerprints after the wire checks pass. Keep the server running while comparing trust stores. Stop it with Ctrl+C to remove the public file and release the temporary TLS keys. The server does not install trust by default. Use a disposable account or VM for OS-level trust changes and a disposable browser profile and authenticator.
 
-Record OS, browser/version, trust store, each result, and error codes. Test Edge/Chrome/Firefox on Windows, Chrome/Firefox on Linux, Safari/Chrome/Firefox on macOS. No certificate warning overrides or browser flags disabling validation. WSL browser trust belongs to the browser host.
+| URL | Purpose |
+| --- | --- |
+| `https://with-secrets.localhost:18765/` | Exact ten-year leaf |
+| `https://localhost:18765/` | Same leaf, incorrect hostname |
+| `https://localhost:18766/` | Valid localhost certificate signed by the non-CA leaf |
+| `https://with-secrets.localhost:18767/` | Same subject and SAN, different key |
+| `https://localhost:18768/` | Same subject and key, different SAN that matches this URL |
+| `http://localhost:18769/` | Localhost WebAuthn comparison |
 
-Spike only: Windows uses temporary user key storage for Schannel compatibility, not production nonexportable CNG storage. No production code changes. Remove this directory before merging any eventual implementation.
+The wire probe captures the certificate presented by each listener and rejects the connection. It verifies the child's signature independently and compares the exact child against an in-memory CA control with the same issuer name and signing key. The control CA never enters a browser or OS trust store. The page verifies registration and authentication in memory using the repository's WebAuthn verifier and one-use server challenges. No production state or passkeys are involved.
+
+## Windows browser runner
+
+```powershell
+dotnet build spikes/LocalHttpsLeaf -p:BuildAdminWeb=false
+pwsh -File spikes/LocalHttpsLeaf/bin/Debug/net10.0/playwright.ps1 install firefox
+dotnet run --no-build --project spikes/LocalHttpsLeaf -- --browser-tests
+```
+
+The runner uses the installed Edge and Chrome channels and Playwright's Firefox. Optionally specify browser names `msedge chrome firefox` and `--store=TrustedPeople` or `--store=Root`. For Firefox registration and authentication, set `SPIKE_GECKODRIVER` to the path to GeckoDriver 0.37 or later and `SPIKE_FIREFOX_BINARY` to the full path to Firefox 152 or later. The runner checks TLS through Playwright and uses a separate GeckoDriver session with a virtual authenticator to verify Firefox's ceremony. Only the disposable GeckoDriver profile selects Firefox's software authenticator. Without GeckoDriver it records that ceremony as blocked.
+
+The runner installs only the public leaf into CurrentUser TrustedPeople and then CurrentUser Root. Each phase verifies absence from both stores before moving on. Approve Windows Root confirmation dialogs only after verifying the SHA-1 fingerprint printed by the runner. Never click through a browser certificate warning. After unexpected termination, inspect both stores and remove only the exact printed leaf. A browser profile does not isolate CurrentUser trust.
+
+```powershell
+Remove-Item -LiteralPath "Cert:\CurrentUser\Root\<printed SHA-1>"
+```
+
+## Linux and WSL
+
+Use NSS `certutil` from `libnss3-tools` or your distribution's equivalent and install Playwright Chromium and Firefox. Pass the NSS tool's path, optionally followed by `chromium` and/or `firefox`. Use `firefox-anchor` to separately test explicit profile-local SSL anchor trust (`C,,`) for the same non-CA leaf. The runner uses per-browser temporary profiles and NSS databases, imports the leaf as an SSL peer with `P,,`, removes it and checks browser rejection again. For Firefox WebAuthn, set the same GeckoDriver environment variables as on Windows.
+
+```sh
+dotnet run --project spikes/LocalHttpsLeaf -p:BuildAdminWeb=false -- --linux-browser-tests /usr/bin/certutil
+```
+
+To reuse an already running server from Linux, pass `--linux-client <absolute-public-DER-path> <NSS-certutil-path>` and any browser modes.
+
+For WSL-hosted Kestrel with a Windows browser, start the server with the default command in WSL and make the printed public DER file available to Windows. With native Windows listeners stopped, run the Windows client against that file. It verifies the forwarded listener presents the exact certificate and checks the required leaf profile before modifying CurrentUser trust.
+
+```powershell
+dotnet run --no-build --project spikes/LocalHttpsLeaf -- --windows-client <absolute-public-DER-path> msedge chrome firefox
+```
+
+Use `--diagnostics-only` to verify the wire certificate profile and child controls without changing a trust store. Browser runs print each outcome and the exact error reported by browser automation. A recorded FAIL is an experimental result, so the CLI can complete successfully while reporting failures in the acceptance criteria.
