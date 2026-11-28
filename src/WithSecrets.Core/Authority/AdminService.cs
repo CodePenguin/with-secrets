@@ -15,7 +15,7 @@ public sealed record AdminCaller(AdminSession? Session);
 /// <summary>What the service needs to run the administration of the authority.</summary>
 public sealed record AdminServiceParts(AuthorityStore Store, AuthorityLock Lock, AdminAuthorizer Authorizer, Func<Action<string>, IAdminAsker> Askers, Action OnUnlocked, int Port,
     AuthorityKeyRing Keys, LocalAuthority Authority, HostConfigFile HostConfig, string? LocalFingerprint, IPasskeyAdmin? Passkeys, TimeProvider? Clock = null, PairingService? Pairing = null,
-    ApprovalQueue? Approvals = null, Func<IProofMethod?>? ApprovalProof = null, UnlockedKeys? Unlocked = null, bool Remote = false);
+    ApprovalQueue? Approvals = null, Func<IProofMethod?>? ApprovalProof = null, UnlockedKeys? Unlocked = null, bool Remote = false, string? Origin = null);
 
 /// <summary>
 /// The authority's administration, served by the service on its own loopback port as a small server-rendered web app (<see cref="AdminWeb" />). Everything an administrator does lives here;
@@ -226,7 +226,8 @@ public sealed partial class AdminService
     internal TimeProvider Clock => _clock;
 
     /// <summary>The authority's page, for the message of a refused run and the startup lines. Public; it carries nothing.</summary>
-    public string PageUrl => $"http://localhost:{_p.Port}/admin";
+    internal string BrowserOrigin => _p.Origin ?? $"http://localhost:{_p.Port}";
+    public string PageUrl => BrowserOrigin + "/admin";
 
     internal bool IsRemote => _p.Remote;
 

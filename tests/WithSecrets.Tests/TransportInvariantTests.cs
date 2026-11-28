@@ -30,7 +30,7 @@ internal static class TransportInvariantTests
             // The admin command prints the link of the port the running service reports, not a port it was merely told: a wrong --port must not give a dead link next to "running".
             StringWriter adminOut = new();
             int adminCode = await AdminAppCommand.RunAsync(1, adminOut, new StringWriter(), rig.Machine.Trust, endpoint: rig.Service.Endpoint);
-            check(adminCode == 0 && adminOut.ToString().Contains("http://localhost:" + rig.Service.Port + "/admin", StringComparison.Ordinal) && adminOut.ToString().Contains("running", StringComparison.Ordinal), "invariants: admin prints the admin web app's real port as the service reports it, whatever port was asked for (" + adminOut.ToString().Trim().Replace("\n", " | ") + ")");
+            check(adminCode == 0 && adminOut.ToString().Contains(BrowserAddress.Origin(rig.Service.Port) + "/admin", StringComparison.Ordinal) && adminOut.ToString().Contains("running", StringComparison.Ordinal), "invariants: admin prints the admin web app's real port as the service reports it, whatever port was asked for (" + adminOut.ToString().Trim().Replace("\n", " | ") + ")");
 
             await CheckCompanion(rig, check);
             using (HostServiceTests.Rig pending = new(parent, trusted: false, startLocked: true))

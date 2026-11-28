@@ -132,7 +132,7 @@ internal static class RecoveryTests
         byte[] code = KeyVault.NewRecoveryCode();
         string text = RecoveryCode.Format(code);
         check(Regex.IsMatch(text, "^[A-Z2-7]{4}(-[A-Z2-7]{4}){7}$") && text.Length == 39, "recovery code: 8 groups of 4 base32 characters joined by dashes (" + text.Length + " characters)");
-        check(RecoveryCode.Format(new byte[20]) == "AAAA-AAAA-AAAA-AAAA-AAAA-AAAA-AAAA-AAAA" && RecoveryCode.Format(Enumerable.Repeat((byte)0xFF, 20).ToArray()) == "7777-7777-7777-7777-7777-7777-7777-7777", "recovery code: RFC 4648 base32 with no padding (zeros are A, ones are 7)");
+        check(RecoveryCode.Format(new byte[20]) == "AAAA-AAAA-AAAA-AAAA-AAAA-AAAA-AAAA-AAAA" && RecoveryCode.Format([.. Enumerable.Repeat((byte)0xFF, 20)]) == "7777-7777-7777-7777-7777-7777-7777-7777", "recovery code: RFC 4648 base32 with no padding (zeros are A, ones are 7)");
         check(RecoveryCode.TryParse(text, out byte[] back) && back.AsSpan().SequenceEqual(code), "recovery code: the text parses back to the bytes");
         string plain = text.Replace("-", "", StringComparison.Ordinal);
         (string Name, string Typed)[] good =
@@ -626,7 +626,7 @@ internal static class RecoveryTests
             string[] secrets = [.. Values.Values];
             check(!Holds(said, secrets), "recover: no secret value is in any output or audit entry");
             check(!Holds(said, [oldKey, oldMaster, Convert.ToBase64String(Base64Url.DecodeFromChars(oldKey)), Convert.ToBase64String(Convert.FromHexString(oldMaster))]), "recover: the old store key and the old master key are in no output or audit entry");
-            check(!Holds([.. said, flow.AllLines()], CodeForms(w.Code)) && !Holds(said, CodeForms(newCode).Where(form => !sign.Contains(form, StringComparison.Ordinal)).ToArray()), "recover: neither recovery code is in any terminal line, result text or earlier page");
+            check(!Holds([.. said, flow.AllLines()], CodeForms(w.Code)) && !Holds(said, [.. CodeForms(newCode).Where(form => !sign.Contains(form, StringComparison.Ordinal))]), "recover: neither recovery code is in any terminal line, result text or earlier page");
             check(!pageOne.Contains(w.Code, StringComparison.Ordinal) && !codeBody.Contains(w.Code, StringComparison.Ordinal), "recover: page 1 and its answer never hold the code typed");
             string[] folderForms = [oldKey, oldMaster, Convert.ToBase64String(Base64Url.DecodeFromChars(oldKey)), Convert.ToBase64String(Convert.FromHexString(oldMaster))];
             check(folderForms.All(form => !WebApprovalTests.FolderHolds(w.Folder, Encoding.UTF8.GetBytes(form))) && !WebApprovalTests.FolderHolds(w.Folder, Convert.FromHexString(oldMaster)) && !WebApprovalTests.FolderHolds(w.Folder, Encoding.UTF8.GetBytes(oldKey)),
@@ -798,6 +798,7 @@ internal static class RecoveryTests
             StateDatabase serviceState = new(machine.Deployment.Store.Database);
             using HostService service = HostService.Start(new HostServiceOptions
             {
+                HttpBrowserFixture = true,
                 State = serviceState,
                 Store = new SecretStore(serviceState),
                 Deployment = machine.Deployment,
@@ -820,9 +821,9 @@ internal static class RecoveryTests
             check(service.Keys!.TryOpen(before, oldUnlock), "rotate: review is open before the store keys rotate");
             ProviderAuthority providers = service.Providers!;
             string[] tokens = [OnePasswordTests.FakeToken, OnePasswordTests.SlowToken];
-            ProviderInstance[] beforeProviders = tokens.Select((token, index) => providers.Store.AddInstance(
+            ProviderInstance[] beforeProviders = [.. tokens.Select((token, index) => providers.Store.AddInstance(
                 "1Password vault " + index, "onepassword",
-                OnePassword.OnePasswordProvider.SealConfiguration(token, before.Review!.PublicKey), TimeSpan.Zero)).ToArray();
+                OnePassword.OnePasswordProvider.SealConfiguration(token, before.Review!.PublicKey), TimeSpan.Zero))];
             foreach (ProviderInstance instance in beforeProviders)
             {
                 await providers.StartInstanceAsync(instance);
@@ -864,7 +865,7 @@ internal static class RecoveryTests
             check(service.Keys.TryOpen(after!, currentUnlock)
                 && service.Keys.TryDecryptReview(rekeyed.Evidence!.Ciphertext, rekeyed.ReviewKey!)?.Contains(reviewCanary, StringComparison.Ordinal) == true,
                 "rotate: the review key opened by the kept passkey decrypts the re-encrypted approval");
-            ProviderInstance[] afterProviders = beforeProviders.Select(instance => providers.Store.Instance(instance.Id)!).ToArray();
+            ProviderInstance[] afterProviders = [.. beforeProviders.Select(instance => providers.Store.Instance(instance.Id)!)];
             for (int index = 0; index < afterProviders.Length; index++)
             {
                 ProviderInstance updated = afterProviders[index];
@@ -972,7 +973,8 @@ internal static class RecoveryTests
                 {
                     TestState.Settings(w.Db, ToolSettings.Defaults with { ReuseMaxMinutes = 600 });
                     concurrentVersion = TestState.Current(w.Db)!.Version;
-                },
+                }
+                ,
                 4 => rows => rows["A_NAME"] = rows["B_NAME"],
                 _ => null,
             };

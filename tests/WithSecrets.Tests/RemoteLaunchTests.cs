@@ -1,11 +1,11 @@
 using System.Buffers.Text;
-using System.Text.RegularExpressions;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.WebSockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 using Microsoft.Data.Sqlite;
 
@@ -127,6 +127,7 @@ internal static class RemoteLaunchTests
 
             auth.Service = HostService.Start(new HostServiceOptions
             {
+                HttpBrowserFixture = true,
                 CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(),
                 Lock = auth.Gate,
                 State = auth.State,
@@ -274,6 +275,7 @@ internal static class RemoteLaunchTests
             Connect();
             Rig.Service = HostService.Start(new HostServiceOptions
             {
+                HttpBrowserFixture = true,
                 CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(),
                 State = Rig.State,
                 Store = Rig.Store,
@@ -998,7 +1000,7 @@ internal static class RemoteLaunchTests
             using JsonDocument status = JsonDocument.Parse(statusBody);
             (string commandStatus, int? adminPort) = await AdminAppCommand.StatusAsync(host.Rig.Http, service.Endpoint);
             check(status.RootElement.TryGetProperty("remote", out JsonElement remote) && remote.ValueKind == JsonValueKind.True && !status.RootElement.GetProperty("locked").GetBoolean()
-                && commandStatus == "running, using a remote authority" && adminPort == service.Port,
+                && commandStatus == "running, using a remote authority" && adminPort is null,
                 "remote host: browser and command line status identify remote mode with no local lock");
 
             foreach (string op in new[] { AdminService.OpLock, AdminService.OpUnlock })
@@ -1388,7 +1390,7 @@ internal static class RemoteLaunchTests
         check(new MachineListenerOptions { Bind = IPAddress.Any }.Problem() is { } any && any.Contains("every interface", StringComparison.Ordinal) && new MachineListenerOptions { Bind = IPAddress.IPv6Any }.Problem() is not null, "exposure: it will not listen on 0.0.0.0 or [::]");
         check(new MachineListenerOptions { Bind = IPAddress.Loopback, Port = 8790 }.Problem() is null && new MachineListenerOptions { Port = 70000 }.Problem() is not null, "exposure: loopback and a port in range are fine, a port out of range is not");
 
-        CliCommand? Parse(params string[] args) => CliArgs.Parse(args, out _);
+        static CliCommand? Parse(params string[] args) => CliArgs.Parse(args, out _);
         check(Parse("service", "--machine-port", "8790") is CliCommand.Service { MachinePort: 8790, MachineBind: "127.0.0.1" } && Parse("service") is CliCommand.Service { MachinePort: null }, "command line: service --machine-port N serves the machine endpoint on loopback; plain service serves none");
         check(Parse("service", "--machine-port", "8790", "--machine-bind", "0.0.0.0") is null && Parse("service", "--machine-cert", "x.pfx") is null && Parse("service", "--machine-bind", "127.0.0.1") is null, "command line: 0.0.0.0 is never accepted, a bind without a port is refused and there is no certificate flag (the certificate is the machine's own)");
         check(Parse("pair") is CliCommand.Pair && Parse("pair", "--debug") is CliCommand.Pair { Debug: true } && Parse("admin") is CliCommand.AdminApp && Parse("admin", "--port", "9000") is CliCommand.AdminApp, "command line: pair is a top-level command with no argument; bare admin is still the local app");

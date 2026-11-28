@@ -70,7 +70,7 @@ internal static class LocalPipeTests
             try
             {
                 using HostServiceTests.Rig other = new(parent);
-                HostService.Start(new HostServiceOptions { State = other.State, Store = other.Store, Deployment = other.Machine.Deployment, Port = 0, Lock = AuthorityLock.UnlockedForTests(), CommandLineEndpoint = LocalEndpoint.NamedPipe(name) }).Dispose();
+                HostService.Start(new HostServiceOptions { HttpBrowserFixture = true, State = other.State, Store = other.Store, Deployment = other.Machine.Deployment, Port = 0, Lock = AuthorityLock.UnlockedForTests(), CommandLineEndpoint = LocalEndpoint.NamedPipe(name) }).Dispose();
             }
             catch (Exception error)
             {
@@ -151,4 +151,5 @@ internal static class LocalPipeTests
         }
 
         check(LocalChannelException.Find(seen) is { } refused && refused.Message.Contains("elevation", StringComparison.Ordinal), "pipe: an elevated client does not talk to a pipe a normal process made, and the explanation (different elevation levels) reaches the command line through the HTTP client");
-    }}
+    }
+}

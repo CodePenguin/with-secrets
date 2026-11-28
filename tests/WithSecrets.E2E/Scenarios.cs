@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.RegularExpressions;
+
 using Microsoft.Playwright;
 
 namespace WithSecrets.E2E;
@@ -462,7 +463,7 @@ internal static class Scenarios4
 
         // The old recovery code stops working: the recovery page does not accept it (its 400 reply is expected in the console).
         c.Ignore("status of 400");
-        using Cmd<int> again = new((port, o, e) => CommandWiring.Recover(rig.State, port));
+        using Cmd<int> again = new((port, _, _) => CommandWiring.RecoverCore(rig.State, port, https: false));
         await c.Page.GotoAsync(await again.LinkAsync());
         string recoverUrl = c.Page.Url;
         await c.Page.FillAsync("#recovery-code", first.Recovery);
@@ -491,13 +492,25 @@ internal static class Scenarios5
         await Scenarios3.SeedSecret(rig, c);
         await c.StartDemoAsync();
 
+        await RunRecovery(rig, c, first.Recovery, s, https: false);
+        AuditChecks.Expect(s, rig, "setup", "secrets-set", "setup", "recovered");
+    }
+
+    internal static async Task RunRecovery(Rig rig, Ctx c, string originalRecovery, S s, bool https)
+    {
         await c.ClearCredentials(); // every passkey is lost: that is why --recover is used
-        using Cmd<int> cmd = new((port, o, e) => CommandWiring.Recover(rig.State, port));
-        await c.Page.GotoAsync(await cmd.LinkAsync());
+        using Cmd<int> cmd = new((port, _, _) => https ? CommandWiring.Recover(rig.State, port) : CommandWiring.RecoverCore(rig.State, port, https: false));
+        string link = await cmd.LinkAsync();
+        await c.Page.GotoAsync(link);
+        if (https)
+        {
+            s.Check(new Uri(link).GetLeftPart(UriPartial.Authority) == BrowserAddress.Origin(cmd.Port)
+                && await c.Page.EvaluateAsync<bool>("isSecureContext"), "offline recovery uses browser-validated loopback HTTPS");
+        }
         await c.DemoSnapAsync("Run with-secrets --recover in your terminal. On the page it opens, enter your saved recovery code.");
         s.Check(await c.PasskeyCalls() == 0, "tap rule: no prompt on the recovery page");
         string url1 = c.Page.Url;
-        await c.Page.FillAsync("#recovery-code", first.Recovery);
+        await c.Page.FillAsync("#recovery-code", originalRecovery);
         await c.Click("#unlock");
         await c.Page.WaitForURLAsync(u => u != url1, new() { Timeout = 20000 });
         s.Check((await c.Page.TitleAsync()).Contains("Set up") && cmd.LinkCount == 1, "the code page led by itself to the new passkey page, still one link");
@@ -507,19 +520,17 @@ internal static class Scenarios5
         await c.Click("#confirm");
         string code = await c.TextAppears("#code");
         string recovery = await c.TextAppears("#recovery");
-        s.Check(recovery != first.Recovery, "the final page shows a new recovery code");
+        s.Check(recovery != originalRecovery, "the final page shows a new recovery code");
         await cmd.WaitPromptAsync();
         s.Check(cmd.Err.Text.EndsWith(TerminalPrompt.Waiting, StringComparison.Ordinal) && cmd.LinkCount == 1, "the terminal prompt is the last thing shown; still one link");
         int exit = await c.TypeCodeAsync(cmd, code);
         s.Check(exit == 0, "--recover exit code 0");
-        s.Check(!cmd.Err.Text.Contains(code) && !cmd.Err.Text.Contains(recovery) && !cmd.Err.Text.Contains(first.Recovery), "no code is printed on the terminal");
+        s.Check(!cmd.Err.Text.Contains(code) && !cmd.Err.Text.Contains(recovery) && !cmd.Err.Text.Contains(originalRecovery), "no code is printed on the terminal");
         s.Check(Directory.GetFiles(rig.Folder, "with-secrets.db.recovered-*").Count(path => !path.EndsWith("-wal", StringComparison.Ordinal) && !path.EndsWith("-shm", StringComparison.Ordinal)) == 1,
             "recovery takes one snapshot of the previous database");
         s.Check(rig.State.TryManifest(out Manifest? manifest, out _) && manifest!.Keys.Count == 1 && manifest.Recovery is not null, "new state: one key and a recovery slot");
         s.Check(rig.Store.ListNames().SequenceEqual(["E2E_SECRET"]), "the secret was carried over");
         await c.DemoSnapAsync("Recovery finished. The existing secrets were carried over. Save the new recovery code for future use.");
-        // The folder holds the events of the first setup and its secret too; the recovery adds the setup of the new state and "recovered" (recorded when the swap succeeded).
-        AuditChecks.Expect(s, rig, "setup", "secrets-set", "setup", "recovered");
     }
 }
 

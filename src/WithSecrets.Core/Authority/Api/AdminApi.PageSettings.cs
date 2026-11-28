@@ -9,8 +9,8 @@ internal sealed partial class AdminApi
     private static JsonObject PageSettingsBody() => S.Obj(
     [
         ("reuseMaxMinutes", S.Int(ReuseSettings.MinMaxMinutes, ReuseSettings.MaxMinutes, description: "The longest time a grant may be made for.")),
-        ("baseUrl", S.Str(max: ToolSettings.MaxBaseUrlLength, nullable: true, description: "The address of the pages, or null for http://localhost.")),
-        ("port", S.Int(0, ToolSettings.MaxPort, description: "The port the pages listen on; 0 picks a free one.")),
+        ("baseUrl", S.Str(max: ToolSettings.MaxBaseUrlLength, nullable: true, description: "Reserved. Use null when the authority serves its canonical HTTPS origin.")),
+        ("port", S.Int(0, ToolSettings.MaxPort, description: "Reserved for browser HTTPS. Use 0; the service determines its browser port.")),
         ("timeoutMinutes", S.Int(ToolSettings.MinTimeoutMinutes, ApprovalSettings.MaxTimeoutMinutes, description: "How long the program waits for an answer on a page.")),
     ]);
 
@@ -43,6 +43,11 @@ internal sealed partial class AdminApi
             url.ValueKind == JsonValueKind.Null ? null : url.GetString(),
             body.GetProperty("port").GetInt32(),
             body.GetProperty("timeoutMinutes").GetInt32());
+        if (HttpsOnly && (requested.BaseUrl is not null || requested.Port != 0))
+        {
+            return Task.FromResult(SecretProblem(400, "set the browser port when starting the authority. The HTTPS hostname is fixed."));
+        }
+
         (SettingsChangeDto? change, string? problem) = flows.StartSettings(requested, sessionId, call.Context.Request.Headers.Origin.ToString());
 
         return Task.FromResult(change is not null ? new ApiResult(201, change) : SecretProblem(400, problem!));

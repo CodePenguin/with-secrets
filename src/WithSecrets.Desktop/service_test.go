@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const fixtureSetupURL = "http://localhost:8765/admin/quick-start/0123456789abcdefghijklmnopqrstuv"
+const fixtureSetupURL = "https://with-secrets.localhost:8765/admin/quick-start/0123456789abcdefghijklmnopqrstuv"
 
 func TestMain(m *testing.M) {
 	if marker := os.Getenv("WITH_SECRETS_DESKTOP_TEST_MARKER"); marker != "" && len(os.Args) == 2 {
@@ -181,7 +181,7 @@ func TestSetupCancellationDoesNotKillAnInFlightCommit(t *testing.T) {
 
 func TestReviewLink(t *testing.T) {
 	target := review{port: 8766, id: "run-Abc_1"}
-	if !validRequestID(target.id) || target.url() != "http://localhost:8766/admin/access/run-Abc_1" {
+	if !validRequestID(target.id) || target.url() != "https://with-secrets.localhost:8766/admin/access/run-Abc_1" {
 		t.Fatalf("unexpected review link: %s", target.url())
 	}
 	for _, id := range []string{"", "..", "//another-host", "%2f", "run-1?next=1", "review#other"} {
@@ -192,17 +192,32 @@ func TestReviewLink(t *testing.T) {
 }
 
 func TestSetupLinkStaysOnLocalQuickStart(t *testing.T) {
-	if !setupLink(fixtureSetupURL) {
+	if !setupLink(fixtureSetupURL) || !setupLink("https://with-secrets.localhost/admin/quick-start/0123456789abcdefghijklmnopqrstuv") {
 		t.Fatal("a valid Quick Start URL was rejected")
 	}
 	for _, link := range []string{
-		"http://other-host:8765/admin/quick-start/0123456789abcdefghijklmnopqrstuv",
+		"http://with-secrets.localhost:8765/admin/quick-start/0123456789abcdefghijklmnopqrstuv",
+		"https://localhost:8765/admin/quick-start/0123456789abcdefghijklmnopqrstuv",
+		"https://with-secrets.localhost:/admin/quick-start/0123456789abcdefghijklmnopqrstuv",
 		fixtureSetupURL + "?extra=1",
 		fixtureSetupURL + "/another-path",
-		"http://localhost:8765/admin",
+		"https://with-secrets.localhost:8765/admin",
 	} {
 		if setupLink(link) {
 			t.Errorf("accepted an invalid setup link: %s", link)
 		}
+	}
+}
+
+func TestRemoteSnapshotHasNoBrowserListener(t *testing.T) {
+	remote, err := decodeSnapshot([]byte(`{"adminPort":null,"remote":true,"requestIds":[]}`))
+	if err != nil || remote.portAvailable() || remote.label() != "Service running, remote authority" {
+		t.Fatalf("unexpected remote snapshot: %+v, %v", remote, err)
+	}
+	if _, err := decodeSnapshot([]byte(`{"adminPort":8765,"remote":true,"requestIds":[]}`)); err == nil {
+		t.Fatal("remote snapshot supplied a browser port")
+	}
+	if got := adminURL(443); got != "https://with-secrets.localhost/admin" {
+		t.Fatalf("unexpected default-port URL: %q", got)
 	}
 }

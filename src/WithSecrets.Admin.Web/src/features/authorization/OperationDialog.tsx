@@ -89,11 +89,14 @@ function reducer(state: State, action: Action): State {
   }
 }
 
-/** Only an http(s) link on this machine is ever offered as the passkey page. */
+/** Browser HTTPS ceremonies stay on the authority origin. Local HTTP fixtures use a separate loopback port. */
 export function safeLink(link: string | null | undefined): string | null {
   if (!link) return null
   try {
     const url = new URL(link)
+    if (globalThis.location?.protocol === 'https:') {
+      return url.origin === globalThis.location.origin && !url.username && !url.password ? url.toString() : null
+    }
     const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
 
     return url.protocol === 'http:' && loopback ? url.toString() : null

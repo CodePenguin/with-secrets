@@ -45,6 +45,8 @@ public sealed class FileSigningKey : ISigningKey
         }
     }
 
+    internal T UseBrowserKey<T>(Func<ECDsa, T> use) => use(_key);
+
     public void Dispose() => _key.Dispose();
 
     /// <summary>The key file for <paramref name="name" /> under <paramref name="keyFolder" />: only letters, digits and dashes are kept, so a name cannot reach another folder.</summary>
@@ -321,7 +323,7 @@ public sealed class FileSigningKey : ISigningKey
     /// to <paramref name="storeRoot" /> (default: the key folder's parent) that group or other can write, unless it has the sticky bit (then only the owner of an entry can remove or rename it: how a shared temporary folder is made safe).
     /// </summary>
     [System.Runtime.Versioning.UnsupportedOSPlatform("windows")]
-    private static void CheckDirectory(string folder, bool mustExist, string? storeRoot)
+    internal static void CheckDirectory(string folder, bool mustExist, string? storeRoot)
     {
         string root = System.IO.Path.GetFullPath(storeRoot ?? System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(folder)) ?? folder);
         if (Inspect(folder) is not { } facts)

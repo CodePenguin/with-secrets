@@ -425,6 +425,7 @@ internal static class AuthorityLockTests
         (TestAuthenticator laptop, TestAuthenticator phone) = Keys(rig.State);
         using HostService service = HostService.Start(new HostServiceOptions
         {
+            HttpBrowserFixture = true,
             CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(),
             State = rig.State,
             Store = rig.Store,
@@ -449,7 +450,7 @@ internal static class AuthorityLockTests
 
         // A page that is never tapped times out: fail closed. (Short limit on a second asker.)
         Asks quick = new();
-        using (HostService timed = HostService.Start(new HostServiceOptions { CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), State = rig.State, Store = rig.Store, Deployment = rig.Machine.Restart(), Port = 0, AdminAskerFactory = quick.Factory(rig.State, TimeSpan.FromSeconds(1)) }))
+        using (HostService timed = HostService.Start(new HostServiceOptions { HttpBrowserFixture = true, CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), State = rig.State, Store = rig.Store, Deployment = rig.Machine.Restart(), Port = 0, AdminAskerFactory = quick.Factory(rig.State, TimeSpan.FromSeconds(1)) }))
         {
             Tapped silent = await TapOn(timed, http, AdminService.OpUnlock, null);
             await Task.Delay(TimeSpan.FromSeconds(3));
@@ -457,7 +458,7 @@ internal static class AuthorityLockTests
         }
 
         service.Dispose();
-        using HostService live = HostService.Start(new HostServiceOptions { CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), State = rig.State, Store = rig.Store, Deployment = rig.Machine.Restart(), Port = 0, AdminAskerFactory = asks.Factory(rig.State, TimeSpan.FromSeconds(3)) });
+        using HostService live = HostService.Start(new HostServiceOptions { HttpBrowserFixture = true, CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), State = rig.State, Store = rig.Store, Deployment = rig.Machine.Restart(), Port = 0, AdminAskerFactory = asks.Factory(rig.State, TimeSpan.FromSeconds(3)) });
         store = rig.Machine.Deployment.Store;
         check(live.Lock.IsLocked, "unlock: a new service is locked again");
         Tapped unlock = await TapOn(live, http, AdminService.OpUnlock, laptop);
@@ -497,7 +498,7 @@ internal static class AuthorityLockTests
         using HostServiceTests.Rig empty = new(root, startLocked: true);
         empty.Service.Dispose();
         Asks emptyAsks = new();
-        using HostService noKeys = HostService.Start(new HostServiceOptions { CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), State = empty.State, Store = empty.Store, Deployment = empty.Machine.Restart(), Port = 0, AdminAskerFactory = emptyAsks.Factory(empty.State, TimeSpan.FromSeconds(5)) });
+        using HostService noKeys = HostService.Start(new HostServiceOptions { HttpBrowserFixture = true, CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), State = empty.State, Store = empty.Store, Deployment = empty.Machine.Restart(), Port = 0, AdminAskerFactory = emptyAsks.Factory(empty.State, TimeSpan.FromSeconds(5)) });
         Tapped none = await TapOn(noKeys, http, AdminService.OpUnlock, laptop);
         check(none.Link is null && none.Error is not null && noKeys.Lock.IsLocked, "fail closed: with no admin passkey enrolled the unlock gets no page and the authority stays locked (" + none.Error + ")");
     }
@@ -518,7 +519,7 @@ internal static class AuthorityLockTests
         using HostServiceTests.Rig rig = new(root, startLocked: true);
         rig.Service.Dispose();
         (TestAuthenticator laptop, _) = Keys(rig.State);
-        HostService Start() => HostService.Start(new HostServiceOptions { CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), State = rig.State, Store = rig.Store, Deployment = rig.Machine.Restart(), Port = 0, AdminAskerFactory = asks.Factory(rig.State, TimeSpan.FromSeconds(3)) });
+        HostService Start() => HostService.Start(new HostServiceOptions { HttpBrowserFixture = true, CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), State = rig.State, Store = rig.Store, Deployment = rig.Machine.Restart(), Port = 0, AdminAskerFactory = asks.Factory(rig.State, TimeSpan.FromSeconds(3)) });
         using HttpClient http = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(60) };
 
         HostService first = Start();
@@ -596,7 +597,7 @@ internal static class AuthorityLockTests
     {
         using TestMachine machine = new(Path.Combine(root, "store"), trusted: false);
         AuthorityStore store = machine.Deployment.Store;
-        VerifiedAdmin For(string op, string parameters) => VerifiedAdmin.ForTests(op, parameters);
+        static VerifiedAdmin For(string op, string parameters) => VerifiedAdmin.ForTests(op, parameters);
 
         (string retentionOp, IReadOnlyList<(string Name, string Value)> retentionParams) = AuthorityStore.RetentionOperation(7);
         check(Throws<UnauthorizedAccessException>(() => store.SetAuditRetentionDays(7, For(retentionOp, "days=8"))) && store.AuditRetentionDays() == AuthorityStore.DefaultAuditRetentionDays, "setting guard: the audit retention (a security setting) needs a tap for exactly that many days");

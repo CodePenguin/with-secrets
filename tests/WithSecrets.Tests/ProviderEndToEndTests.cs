@@ -57,6 +57,7 @@ internal static class ProviderEndToEndTests
 
             Service = HostService.Start(new HostServiceOptions
             {
+                HttpBrowserFixture = true,
                 CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(),
                 Lock = AuthorityLock.UnlockedForTests(),
                 State = State,
@@ -534,7 +535,7 @@ internal static class ProviderEndToEndTests
 
         // A host whose authority is remote, even over a REAL native store, composes no provider source: its runs are served by the authority.
         StateDatabase hostState = new(hostMachine.Deployment.Store.Database);
-        using (HostService remoteHost = HostService.Start(new HostServiceOptions { CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), State = hostState, Store = new SecretStore(hostState), Deployment = hostMachine.Deployment, Port = 0, ProviderRegistry = new ProviderRegistry() }))
+        using (HostService remoteHost = HostService.Start(new HostServiceOptions { HttpBrowserFixture = true, CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), State = hostState, Store = new SecretStore(hostState), Deployment = hostMachine.Deployment, Port = 0, ProviderRegistry = new ProviderRegistry() }))
         {
             check(remoteHost.Authorization.IsRemote && remoteHost.Providers is null, "e2e remote: a host service over a real native store with a remote authority composes no provider source");
         }

@@ -32,7 +32,7 @@ Create a PRF-capable admin passkey. A second explicit gesture signs the initial 
 
 **The authority starts locked.** An admin passkey with PRF must unlock it after each start. The service keeps the store and Review keys in memory until lock or shutdown and clears pending launches and sessions on lock. Existing grants retain their scope and expiration and can cover runs after the next unlock. A paired host reconnects after restart without a local unlock. It can get secrets only while the authority is unlocked, reachable and vouches for that host.
 
-**There are no lock, unlock or other `admin` verbs.** `with-secrets admin` with nothing after it (only `--port N`, the admin web app's port, and `--debug` are accepted) checks that the program on the command line's channel is this machine's host service (the same identity check as a run), prints the link of the authority's **admin web app** (`http://localhost:PORT/admin`, loopback only) and whether the service is running and locked, and, in a terminal on Windows, opens the link in your browser. It changes nothing and needs no passkey. Every administration function lives in the app.
+**There are no lock, unlock or other `admin` verbs.** `with-secrets admin` with nothing after it (only `--port N`, the admin web app's port, and `--debug` are accepted) checks that the program on the command line's channel is this machine's host service (the same identity check as a run), prints the link of the authority's **admin web app** (`https://with-secrets.localhost:PORT/admin`, loopback only) and whether the service is running and locked, and, in a terminal on Windows, opens the link in your browser. It changes nothing and needs no passkey. Every administration function lives in the app.
 
 ### The admin web app
 
@@ -271,13 +271,7 @@ Note the fingerprints down when you first see them, and check the line on each p
 
 ## Where the page can be reached
 
-By default the page is at `http://localhost:<port>` on the machine that runs the program, with a free port picked each time. When that machine is remote, forward the port with ssh and open the link on your own computer:
-
-```
-ssh -L PORT:localhost:PORT user@host
-```
-
-Set `port` in the admin web app to a fixed number so the forward can be set up once. For one call, `--port N` (1 to 65535) does the same without changing the setting: `with-secrets --recover --port 8765`, then `ssh -L 8765:localhost:8765 user@host`. It is not saved, and if the port is in use the call fails (no other port is tried). To use an HTTPS name (a Cloudflare or Tailscale name, for example), set `baseUrl` and `port`, and point that name at the port. Browsers allow passkeys only on `https` or `localhost`, so plain `http` to another name does not work. A passkey is tied to the host name it was created for. Changing `baseUrl` removes no passkey: a passkey made for `localhost` keeps working on the localhost page (a run picks it by itself). Add a passkey for the new name on the **Passkeys** page of the admin web app (it is approved with a passkey you already have).
+The authority browser interface is at `https://with-secrets.localhost:<port>` on the authority. Set up its leaf as described in [Operations](operations.md#browser-https-certificate). Use `with-secrets service --port N` or `WITH_SECRETS_PORT` to select the browser port. Approval links use this origin. The terminal recovery command can select its own listener port with `--port N`. The relying-party ID remains `with-secrets.localhost`.
 
 ## Settings
 
@@ -291,8 +285,6 @@ With nothing enrolled every setting has its default. A manifest with a value tha
 | Setting | Default | Meaning and limits |
 | --- | --- | --- |
 | `reuseMaxMinutes` | `43200` | Ceiling for the finite durations offered on new approvals. 10 to 43200 minutes. Existing signed settings retain their values |
-| `baseUrl` | none | The address of the page, such as `https://secrets.example.net`. Empty for none. A full `http` or `https` address, no user name or password, at most 2048 characters |
-| `port` | `0` | The port the page listens on. 0 picks a free one. 0 to 65535. `--port N` overrides it for one call |
 | `timeoutMinutes` | `15` | How long a request waits for an answer. 1 to 30 minutes. Existing signed settings retain their values |
 
 ## Approval reuse

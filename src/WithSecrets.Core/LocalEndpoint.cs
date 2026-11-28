@@ -1,8 +1,10 @@
 using System.Net;
 using System.Net.Sockets;
-using Microsoft.Extensions.DependencyInjection;
+using System.Security.Cryptography.X509Certificates;
 
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace WithSecrets;
 
@@ -87,7 +89,7 @@ public abstract class LocalEndpoint
     }
 
     /// <summary>The loopback TCP listener of the browser administration on <paramref name="port" />: 127.0.0.1 and, where the host has IPv6, [::1]. The command line does not use it.</summary>
-    internal static LocalEndpoint Loopback(int port, bool ipv6 = true) => new LoopbackEndpoint(port, ipv6);
+    internal static LocalEndpoint Loopback(int port, bool ipv6 = true, X509Certificate2? certificate = null) => new LoopbackEndpoint(port, ipv6, certificate);
 
     /// <summary>The endpoint the command line of this user uses on this platform. Windows: the user's named pipe. Linux and macOS: the user's Unix-domain socket.</summary>
     public static LocalEndpoint ForCommandLine() => OperatingSystem.IsWindows() ? new NamedPipeEndpoint(NamedPipeEndpoint.DefaultName()) : new UnixSocketEndpoint(UnixSocketEndpoint.DefaultDirectory());
@@ -101,8 +103,8 @@ public abstract class LocalEndpoint
     public static LocalEndpoint NamedPipe(string name) => new NamedPipeEndpoint(name);
 }
 
-/// <summary>Plain HTTP on the loopback addresses. Any process of any user on this machine can connect: it is the transport this work replaces for the command line, and the one the browser administration still uses.</summary>
-internal sealed class LoopbackEndpoint(int port, bool ipv6) : LocalEndpoint
+/// <summary>The browser listener on the two loopback addresses. Unencrypted listeners are used only by in-process test fixtures.</summary>
+internal sealed class LoopbackEndpoint(int port, bool ipv6, X509Certificate2? certificate) : LocalEndpoint
 {
     public int Port { get; } = port;
 
@@ -128,11 +130,17 @@ internal sealed class LoopbackEndpoint(int port, bool ipv6) : LocalEndpoint
 
     internal override void Listen(KestrelServerOptions kestrel)
     {
-        kestrel.Listen(IPAddress.Loopback, Port, Tag(BrowserSurface));
+        kestrel.Listen(IPAddress.Loopback, Port, ConfigureBrowser);
         if (ipv6)
         {
-            kestrel.Listen(IPAddress.IPv6Loopback, Port, Tag(BrowserSurface));
+            kestrel.Listen(IPAddress.IPv6Loopback, Port, ConfigureBrowser);
         }
+    }
+
+    private void ConfigureBrowser(ListenOptions listen)
+    {
+        Tag(BrowserSurface)(listen);
+        if (certificate is not null) listen.UseHttps(certificate);
     }
 }
 

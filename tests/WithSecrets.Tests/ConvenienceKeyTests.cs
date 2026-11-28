@@ -125,6 +125,7 @@ internal static class ConvenienceKeyTests
 
         private HostService Start(bool locked, LocalDeployment deployment) => HostService.Start(new HostServiceOptions
         {
+            HttpBrowserFixture = true,
             CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(),
             Lock = locked ? null : AuthorityLock.UnlockedForTests(),
             State = State,

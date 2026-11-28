@@ -286,7 +286,7 @@ public sealed partial class AdminService
                     throw new ProofUnavailableException(anyKey ? "no enrolled passkey can prove at this address" : "no enrolled admin passkey can prove at this address");
                 }
 
-                InlineAdminProof prepared = _p.Authorizer.PrepareInline(plan.Sentence, plan.Operation, plan.Parameters, target, $"http://localhost:{_p.Port.ToString(CultureInfo.InvariantCulture)}", plan.WantsPrf);
+                InlineAdminProof prepared = _p.Authorizer.PrepareInline(plan.Sentence, plan.Operation, plan.Parameters, target, BrowserOrigin, plan.WantsPrf);
                 lock (_authorizationGate)
                 {
                     if (record.State != AuthorizationState.Pending || !_authorizations.ContainsKey(id) || Volatile.Read(ref _epoch) != epoch)
@@ -446,7 +446,14 @@ public sealed partial class AdminService
 
         if (judged.Ok)
         {
-            ApplyAtTap(record, CallerOf(owner), unlock);
+            if (record.Plan.Delegated is null)
+            {
+                ApplyAtTap(record, CallerOf(owner), unlock);
+            }
+            else
+            {
+                _ = StartDelegatedAsync(record, CallerOf(owner));
+            }
         }
 
         return judged.Ok;
@@ -695,9 +702,9 @@ public sealed partial class AdminService
     /// </summary>
     internal async Task<MutationResult> MutateAsync(object owner, string op, IReadOnlyDictionary<string, string> args, string? authorization, CancellationToken cancel)
     {
-        AuthorizationRecord? record = null;
         (int Status, string Code, string Detail)? refusal = null;
         string caller = CallerOf(owner);
+        AuthorizationRecord? record;
         lock (_authorizationGate)
         {
             SweepAuthorizations();

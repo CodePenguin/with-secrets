@@ -118,6 +118,23 @@ internal static partial class Program
         // Diagnostics: warnings go to the log file always; --debug (or WITH_SECRETS_DEBUG=1) adds the Debug events, to the terminal too.
         AppLog.Configure(AppLog.DebugRequested(command.Debug));
 
+        if (command is CliCommand.Certificate certificate)
+        {
+            try
+            {
+                LinuxHardening.HardenProcess();
+                new BrowserCertificates(StorePath()).Run(certificate.Action,
+                    Environment.UserInteractive && !Console.IsInputRedirected && !Console.IsOutputRedirected,
+                    certificate.Chromium, certificate.Firefox, Console.Out);
+                return 0;
+            }
+            catch (Exception failure) when (BrowserCertificates.IsLifecycleError(failure))
+            {
+                TerminalPrompt.Final("with-secrets: " + BrowserCertificates.Detail(failure));
+                return RunCommand.StoreError;
+            }
+        }
+
         // The host service owns the WithSecrets store and the final application launch.
         if (command is CliCommand.Run run)
         {
@@ -128,6 +145,12 @@ internal static partial class Program
         if (command is CliCommand.AdminApp app)
         {
             // With nothing enrolled, admin is the first-time setup: the first passkey, then the link.
+            var hostConfig = HostConfigFile.InFolder(StorePath());
+            if (hostConfig.Load().Config?.Remote is not null)
+            {
+                return await AdminAppCommand.RunAsync(app.AdminPort, Console.Out, Console.Error, ServiceTrust.From(hostConfig));
+            }
+
             StateDatabase first = StateDatabase.InFolder(StorePath());
             if (!first.TryManifest(out Manifest? enrolled, out string? storeError))
             {
@@ -187,7 +210,15 @@ internal static partial class Program
                 return NeedsCommand.Run(store, needs.EnvFiles, Directory.GetCurrentDirectory(), Console.Out, Console.Error);
 
             case CliCommand.Recover:
-                return CommandWiring.Recover(state, command.Port);
+                try
+                {
+                    return CommandWiring.Recover(state, command.Port);
+                }
+                catch (BrowserCertificateException failure)
+                {
+                    TerminalPrompt.Final("with-secrets: " + failure.Message);
+                    return RunCommand.StoreError;
+                }
 
             case CliCommand.Service:
                 return RunService(command, state, store, folder, quickStart, desktopSetup);
@@ -424,7 +455,10 @@ internal static partial class Program
         catch (Exception failure)
         {
             // The admin web app's port in use; or the command line's endpoint (the pipe or the socket) is unusable or taken: its reason is a path and a rule, nothing else, and is shown as it is.
-            TerminalPrompt.Final(PortInUse(failure)
+            deployment.Dispose();
+            TerminalPrompt.Final(failure is BrowserCertificateException
+                ? "with-secrets: " + failure.Message
+                : PortInUse(failure)
                 ? $"with-secrets: the host service cannot listen on port {port} (the admin web app's port): the port is in use. Is it already running? Use --port N for another port."
                 : EndpointProblem(failure) is { } endpointProblem
                     ? "with-secrets: the host service could not make the channel the command line uses: " + endpointProblem
@@ -476,7 +510,12 @@ internal static partial class Program
 
             if (!quickStart)
             {
-                TerminalPrompt.Line($"with-secrets service: the admin web app is on 127.0.0.1 and [::1], port {service.Port} (this machine only). The command line reaches this service over {service.Endpoint.Describe()}, which only this user can open. Press Ctrl+C to stop.");
+                if (!service.Authorization.IsRemote)
+                {
+                    TerminalPrompt.Line("with-secrets service: the browser interface is on " + service.Admin.PageUrl + " (loopback only).");
+                }
+
+                TerminalPrompt.Line($"with-secrets service: the command line reaches this service over {service.Endpoint.Describe()}, which only this user can open. Press Ctrl+C to stop.");
             }
             stop.Wait();
             Console.CancelKeyPress -= handler;

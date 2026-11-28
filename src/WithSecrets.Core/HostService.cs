@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 
@@ -68,6 +69,9 @@ public sealed class HostServiceOptions
 
     /// <summary>The port on 127.0.0.1 and [::1]. 0 picks a free one (tests).</summary>
     public int Port { get; init; } = AdminPort.DefaultPort;
+
+    internal bool HttpBrowserFixture { get; init; }
+    internal X509Certificate2? BrowserCertificateFixture { get; init; }
 
     /// <summary>The endpoint the command line connects to besides the loopback port (the program passes <see cref="LocalEndpoint.ForCommandLine" />). Null leaves only the loopback port.</summary>
     public LocalEndpoint? CommandLineEndpoint { get; init; }
@@ -158,7 +162,9 @@ public sealed partial class HostService : IDisposable
 
     private readonly HostServiceOptions _options;
     private readonly WebApplication _app;
+    private BrowserCertificateLease? _ownedBrowserCertificate;
     private readonly AdminWebAssets _web;
+    private readonly BrowserPageRouter? _browserPages;
     private readonly Dictionary<string, CancellationTokenSource> _active = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DotenvxHandoff> _dotenvxHandoffs = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTimeOffset> _seen = new(StringComparer.Ordinal);
@@ -179,6 +185,7 @@ public sealed partial class HostService : IDisposable
         _web = options.WebAssets ?? AdminWebAssets.FromAssembly();
         _app = app;
         Port = port;
+        _browserPages = !options.HttpBrowserFixture && options.Deployment.Remote is null ? new BrowserPageRouter(port) : null;
         // The authority believes a grant only when a person's passkey assertion backs it: it checks those against the keys of the signed manifest.
         options.Deployment.Authority.Verifier ??= options.State is { } verifierState ? new ManifestApprovalVerifier(verifierState) : null;
         Authorization = options.Deployment.CreateAuthorization(options.Gate, options.Monotonic);
@@ -215,14 +222,16 @@ public sealed partial class HostService : IDisposable
         Func<Action<string>, IAdminAsker> askers = options.AdminAskerFactory ?? (announce =>
         {
             ApprovalSettings settings = ApprovalSettings.Load(options.State, out _);
+            if (!options.HttpBrowserFixture) settings = settings with { BaseUrl = BrowserOrigin, Port = Port };
             (EnrollmentTarget primary, EnrollmentTarget local) = CommandWiring.Targets(options.State, settings, announce, null);
 
-            return new TargetAdminAsker(primary, local);
+            return new TargetAdminAsker(primary, options.HttpBrowserFixture ? local : primary);
         });
         IPasskeyAdmin? passkeys = options.PasskeyAdminFactory?.Invoke() ?? (options.State is { } passkeyState
             ? new StatePasskeyAdmin(passkeyState)
             {
                 RekeyReview = Keys is null ? null : RekeyReviewData,
+                BrowserPages = _browserPages,
                 AfterStoreChange = Keys is null ? null : () =>
                 {
                     if (Keys.OpenedBy is { } opener && (!passkeyState.TryManifest(out Manifest? current, out _)
@@ -239,11 +248,17 @@ public sealed partial class HostService : IDisposable
         {
             ApprovalSettings proofSettings = ApprovalSettings.Load(options.State, out _).WithPort(options.PagePort);
             if (options.TimeLimit is { } proofTimeout) proofSettings = proofSettings with { Timeout = proofTimeout };
+            if (!options.HttpBrowserFixture)
+            {
+                var method = new PasskeyMethod(new PasskeyStore(options.State), proofSettings with { BaseUrl = BrowserOrigin }, null);
+                return method.CanProve(BrowserAddress.Host) ? method : null;
+            }
+
             (EnrollmentTarget proofPrimary, EnrollmentTarget proofLocal) = CommandWiring.Targets(options.State, proofSettings, _ => { }, null);
             return EnrollmentTarget.FirstThatCanProve(proofPrimary, proofLocal)?.Method;
         };
         Admin = new AdminService(new AdminServiceParts(options.Deployment.Store, Lock, new AdminAuthorizer(options.Deployment.Store, verifier, options.Deployment.Clock), askers, AfterUnlock, port,
-            options.Deployment.Keys, options.Deployment.Authority, options.Deployment.HostConfig, options.Deployment.Fingerprint, passkeys, options.Deployment.Clock, Pairing, Approvals, approvalProof, Keys, Authorization.IsRemote));
+            options.Deployment.Keys, options.Deployment.Authority, options.Deployment.HostConfig, options.Deployment.Fingerprint, passkeys, options.Deployment.Clock, Pairing, Approvals, approvalProof, Keys, Authorization.IsRemote, BrowserOrigin));
 
         // The host's audit: events are signed with the machine key and committed to the outbox tables before a run decrypts anything; the uploader sends them on its own.
         HostAuditOutbox outbox = new(options.Deployment.Store.Database, options.Deployment.MachineKey, options.Deployment.Clock);
@@ -382,6 +397,13 @@ public sealed partial class HostService : IDisposable
     /// <summary>The loopback port of the browser administration. The command line does not use it: it has its own endpoint (<see cref="Endpoint" />).</summary>
     public int Port { get; }
 
+    internal IReadOnlyCollection<string> BrowserListenerAddresses =>
+        _app.Services.GetRequiredService<Microsoft.AspNetCore.Hosting.Server.IServer>().Features
+            .Get<Microsoft.AspNetCore.Hosting.Server.Features.IServerAddressesFeature>()?.Addresses
+            .Where(address => address.StartsWith("https://", StringComparison.Ordinal) || address.StartsWith("http://", StringComparison.Ordinal)).ToArray() ?? [];
+
+    public string BrowserOrigin => _options.HttpBrowserFixture ? $"http://localhost:{Port}" : BrowserAddress.Origin(Port);
+
     /// <summary>Where the command line reaches this service.</summary>
     public LocalEndpoint Endpoint => _options.CommandLineEndpoint ?? throw new InvalidOperationException("this service has no command line endpoint");
 
@@ -402,8 +424,31 @@ public sealed partial class HostService : IDisposable
     /// <summary>Starts the service on 127.0.0.1 and [::1] (the second only where the host has IPv6). Throws when the port cannot be held.</summary>
     public static HostService Start(HostServiceOptions options)
     {
+        bool hasBrowser = options.Deployment.Remote is null || options.HttpBrowserFixture;
+        if (!hasBrowser && options.CommandLineEndpoint is null)
+        {
+            throw new InvalidOperationException("A remote host needs a local IPC endpoint.");
+        }
+
+        BrowserCertificateLease? owned = hasBrowser && !options.HttpBrowserFixture && options.BrowserCertificateFixture is null
+            ? new BrowserCertificates(Path.GetDirectoryName(options.State.FilePath)!).OpenListener() : null;
+        try
+        {
+            var service = StartCore(options, hasBrowser, owned?.Certificate ?? options.BrowserCertificateFixture);
+            service._ownedBrowserCertificate = owned;
+            return service;
+        }
+        catch
+        {
+            owned?.Dispose();
+            throw;
+        }
+    }
+
+    private static HostService StartCore(HostServiceOptions options, bool hasBrowser, X509Certificate2? certificate)
+    {
         int port = options.Port;
-        if (port == 0)
+        if (hasBrowser && port == 0)
         {
             using TcpListener probe = new(IPAddress.Loopback, 0);
             probe.Start();
@@ -411,12 +456,12 @@ public sealed partial class HostService : IDisposable
         }
 
         Exception? failure = null;
-        foreach (bool withIpv6 in Socket.OSSupportsIPv6 ? new[] { true, false } : [false])
+        foreach (bool withIpv6 in hasBrowser && Socket.OSSupportsIPv6 ? new[] { true, false } : [false])
         {
             HostService? service = null;
             try
             {
-                LocalEndpoint endpoint = LocalEndpoint.Loopback(port, withIpv6);
+                LocalEndpoint? endpoint = hasBrowser ? LocalEndpoint.Loopback(port, withIpv6, certificate) : null;
                 WebApplication app = Build(options, endpoint);
                 service = new HostService(options, app, port);
                 // Before any request is accepted: check machine status, host name binding and security revision with the authority (it also vouches for the machine), which needs the authority unlocked.
@@ -457,11 +502,12 @@ public sealed partial class HostService : IDisposable
 
                 return service;
             }
-            catch (Exception error) when (withIpv6)
+            catch (Exception error)
             {
-                // IPv6 loopback could not be held: try IPv4 alone (the failure is kept, so a start that fails for another reason is reported as that reason).
-                failure = error;
                 service?.Dispose();
+                if (!withIpv6) throw;
+                // IPv6 loopback could not be held. Try IPv4 alone.
+                failure = error;
             }
         }
 
@@ -628,7 +674,7 @@ public sealed partial class HostService : IDisposable
         return Task.CompletedTask;
     }
 
-    private static WebApplication Build(HostServiceOptions options, LocalEndpoint endpoint)
+    private static WebApplication Build(HostServiceOptions options, LocalEndpoint? endpoint)
     {
         WebApplicationBuilder builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions
         {
@@ -649,7 +695,7 @@ public sealed partial class HostService : IDisposable
             kestrel.Limits.MaxRequestLineSize = 4096;
             kestrel.Limits.MaxRequestHeadersTotalSize = 16 * 1024;
             kestrel.Limits.RequestHeadersTimeout = options.BodyTimeout;
-            endpoint.Listen(kestrel);
+            endpoint?.Listen(kestrel);
             options.CommandLineEndpoint?.Listen(kestrel);
         });
 
@@ -667,7 +713,13 @@ public sealed partial class HostService : IDisposable
 
         // DNS rebinding: a page on another name that resolves to 127.0.0.1 still sends its own name as Host.
         string path = request.Path.Value ?? "";
-        if (!LoopbackHosts.Contains(request.Host.Host, StringComparer.OrdinalIgnoreCase))
+        string? surface = context.Features.Get<Microsoft.AspNetCore.Connections.Features.IConnectionItemsFeature>()?.Items.TryGetValue(LocalEndpoint.SurfaceItem, out object? marked) == true ? marked as string : null;
+        bool browserHttps = surface == LocalEndpoint.BrowserSurface && !_options.HttpBrowserFixture;
+        bool validHost = browserHttps
+            ? request.IsHttps && string.Equals(request.Host.Host, BrowserAddress.Host, StringComparison.OrdinalIgnoreCase)
+                && (request.Host.Port ?? 443) == Port
+            : LoopbackHosts.Contains(request.Host.Host, StringComparer.OrdinalIgnoreCase);
+        if (!validHost)
         {
             if (path == "/api" || path.StartsWith("/api/", StringComparison.Ordinal))
             {
@@ -685,8 +737,8 @@ public sealed partial class HostService : IDisposable
         // Two surfaces: the browser administration (/api and the /admin application) and the command line's routes (/v1). Each is handled apart.
         // A connection may use only the surface of the listener it came on: the command line's endpoint answers /v1 and nothing of the browser administration; the loopback port answers the browser administration and nothing
         // of /v1. A connection that carries no surface (it cannot happen with the listeners made here) is answered nothing.
-        string? surface = context.Features.Get<Microsoft.AspNetCore.Connections.Features.IConnectionItemsFeature>()?.Items.TryGetValue(LocalEndpoint.SurfaceItem, out object? marked) == true ? marked as string : null;
-        bool browserRoute = IsBrowserSurface(path);
+        var auxiliaryPage = _browserPages?.Find(path);
+        bool browserRoute = auxiliaryPage is not null || IsBrowserSurface(path);
         if (surface != (browserRoute ? LocalEndpoint.BrowserSurface : LocalEndpoint.CommandLineSurface))
         {
             await Refuse(response, 404, "not found");
@@ -696,6 +748,12 @@ public sealed partial class HostService : IDisposable
 
         if (browserRoute)
         {
+            if (auxiliaryPage is not null)
+            {
+                await auxiliaryPage.Serve(context);
+                return;
+            }
+
             if (await HandleQuickStartAsync(context, path))
             {
                 return;
@@ -752,7 +810,7 @@ public sealed partial class HostService : IDisposable
                 running = true,
                 locked = !Authorization.IsRemote && Lock.IsLocked,
                 remote = Authorization.IsRemote,
-                adminPort = Port,
+                adminPort = Authorization.IsRemote ? (int?)null : Port,
             }, options: null, contentType: "application/json");
 
             return;
@@ -784,7 +842,7 @@ public sealed partial class HostService : IDisposable
             bool remote = Authorization.IsRemote;
             await response.WriteAsJsonAsync(new
             {
-                adminPort = Port,
+                adminPort = Authorization.IsRemote ? (int?)null : Port,
                 locked = !remote && Lock.IsLocked,
                 remote,
                 requestIds = remote ? [] : Approvals.ListPending(ApprovalQueue.MaxPending, null, out _).Select(item => item.RequestId).ToArray(),
@@ -1538,7 +1596,14 @@ public sealed partial class HostService : IDisposable
         }
         finally
         {
-            _app.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            try
+            {
+                _app.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            }
+            finally
+            {
+                _ownedBrowserCertificate?.Dispose();
+            }
             if (_endpointStarted)
             {
                 // Only an endpoint this service made is cleaned up: a service that failed to start (another one holds the endpoint) must never remove it.
