@@ -16,6 +16,7 @@ Each run creates a fresh ECDSA P-256 leaf, starts loopback-only listeners and pr
 | `https://with-secrets.localhost:18767/` | Same subject and SAN, different key |
 | `https://localhost:18768/` | Same subject and key, different SAN that matches this URL |
 | `http://localhost:18769/` | Localhost WebAuthn comparison |
+| `https://with-secrets.localhost:18770/` | Reissued leaf with the same key, names and validity and a distinct serial number |
 
 The wire probe captures the certificate presented by each listener and rejects the connection. It verifies the child's signature independently and compares the exact child against an in-memory CA control with the same issuer name and signing key. The control CA never enters a browser or OS trust store. The page verifies registration and authentication in memory using the repository's WebAuthn verifier and one-use server challenges. No production state or passkeys are involved.
 
@@ -30,6 +31,8 @@ dotnet run --no-build --project spikes/LocalHttpsLeaf -- --browser-tests
 The runner uses the installed Edge and Chrome channels and Playwright's Firefox. Optionally specify browser names `msedge chrome firefox` and `--store=TrustedPeople` or `--store=Root`. For Firefox registration and authentication, set `SPIKE_GECKODRIVER` to the path to GeckoDriver 0.37 or later and `SPIKE_FIREFOX_BINARY` to the full path to Firefox 152 or later. The runner checks TLS through Playwright and uses a separate GeckoDriver session with a virtual authenticator to verify Firefox's ceremony. Only the disposable GeckoDriver profile selects Firefox's software authenticator. Without GeckoDriver it records that ceremony as blocked.
 
 The runner installs only the public leaf into CurrentUser TrustedPeople and then CurrentUser Root. Each phase verifies absence from both stores before moving on. Approve Windows Root confirmation dialogs only after verifying the SHA-1 fingerprint printed by the runner. Never click through a browser certificate warning. After unexpected termination, inspect both stores and remove only the exact printed leaf. A browser profile does not isolate CurrentUser trust.
+
+Pass `--replace-trust` to explicitly trust the reissued certificate after the original is removed. This asks Windows to confirm a second Root import and checks that only the replacement is accepted, then removes it and checks rejection again. These tests use separate loopback ports to compare the two TLS certificates. Passkey continuity across an in-place server rotation is outside this test.
 
 ```powershell
 Remove-Item -LiteralPath "Cert:\CurrentUser\Root\<printed SHA-1>"

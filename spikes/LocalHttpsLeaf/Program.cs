@@ -25,7 +25,7 @@ if (mode is "--windows-client" or "--linux-client")
     };
     if (OperatingSystem.IsWindows())
     {
-        await BrowserTests.RunWindowsAsync(remoteLeaf, null, args[2..], stop.Token);
+        await BrowserTests.RunWindowsAsync(remoteLeaf, null, null, args[2..], stop.Token);
     }
     else
     {
@@ -52,7 +52,7 @@ if (automated)
         using var leaf = X509CertificateLoader.LoadCertificate(certificates.Leaf.RawData);
         if (mode == "--browser-tests" && OperatingSystem.IsWindows())
         {
-            await BrowserTests.RunWindowsAsync(leaf, certificates.Child, args[1..], app.Lifetime.ApplicationStopping);
+            await BrowserTests.RunWindowsAsync(leaf, certificates.Child, certificates.Reissued, args[1..], app.Lifetime.ApplicationStopping);
         }
         else if (mode == "--linux-browser-tests" && OperatingSystem.IsLinux())
         {

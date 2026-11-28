@@ -16,6 +16,7 @@ internal sealed class SpikeCertificates : IDisposable
     public const int OtherKeyPort = 18767;
     public const int OtherSanPort = 18768;
     public const int HttpPort = 18769;
+    public const int ReissuedPort = 18770;
     private const string ServerAuth = "1.3.6.1.5.5.7.3.1";
     private readonly List<X509Certificate2> owned = [];
     private readonly List<(string Name, CngProvider Provider)> windowsKeys = [];
@@ -37,6 +38,8 @@ internal sealed class SpikeCertificates : IDisposable
             OtherKey = LoadForTls(Request(Host, Host, otherKey).CreateSelfSigned(start, start.AddYears(10)));
             OtherSan = LoadForTls(Request(Host, "localhost", key).CreateSelfSigned(start, start.AddYears(10)));
 
+            Reissued = LoadForTls(Request(Host, Host, key).CreateSelfSigned(start, start.AddYears(10)));
+
             // Same issuer name and key, with CA extensions. Used only by an in-memory custom chain engine.
             var ca = new CertificateRequest(Leaf.SubjectName, key, HashAlgorithmName.SHA256);
             ca.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
@@ -56,6 +59,7 @@ internal sealed class SpikeCertificates : IDisposable
     public X509Certificate2 Child { get; }
     public X509Certificate2 OtherKey { get; }
     public X509Certificate2 OtherSan { get; }
+    public X509Certificate2 Reissued { get; }
     private X509Certificate2 ControlCa { get; }
 
     public async Task VerifyAsync(CancellationToken stop)
@@ -67,7 +71,15 @@ internal sealed class SpikeCertificates : IDisposable
         using var wireOtherKey = await ReadPresentedAsync(OtherKeyPort, Host, OtherKey, timeout.Token);
         using var wireOtherSan = await ReadPresentedAsync(OtherSanPort, "localhost", OtherSan, timeout.Token);
 
+        using var wireReissued = await ReadPresentedAsync(ReissuedPort, Host, Reissued, timeout.Token);
+
         VerifyLeafProfile(wireLeaf);
+        VerifyLeafProfile(wireReissued);
+        Require(SameKey(wireLeaf, wireReissued) &&
+            wireReissued.SubjectName.RawData.AsSpan().SequenceEqual(wireLeaf.SubjectName.RawData) &&
+            wireReissued.SerialNumber != wireLeaf.SerialNumber &&
+            wireReissued.NotBefore == wireLeaf.NotBefore && wireReissued.NotAfter == wireLeaf.NotAfter,
+            "reissued leaf keeps the key, names and validity and has a distinct serial number");
         using var publicKey = wireLeaf.GetECDsaPublicKey()!;
 
         Require(San(wireChild) == "localhost" && wireChild.MatchesHostname("localhost"), "child matches localhost on the wire");

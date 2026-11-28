@@ -17,6 +17,7 @@ internal static class SpikeApp
             kestrel.ListenLocalhost(SpikeCertificates.OtherKeyPort, listen => listen.UseHttps(certificates.OtherKey));
             kestrel.ListenLocalhost(SpikeCertificates.OtherSanPort, listen => listen.UseHttps(certificates.OtherSan));
             kestrel.ListenLocalhost(SpikeCertificates.HttpPort);
+            kestrel.ListenLocalhost(SpikeCertificates.ReissuedPort, listen => listen.UseHttps(certificates.Reissued));
         });
 
         var app = builder.Build();

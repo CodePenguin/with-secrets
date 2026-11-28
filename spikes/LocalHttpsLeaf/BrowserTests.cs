@@ -12,11 +12,13 @@ namespace LocalHttpsLeaf;
 internal static partial class BrowserTests
 {
     private static readonly string LeafUrl = $"https://{SpikeCertificates.Host}:{SpikeCertificates.LeafPort}/";
+    private static readonly string ReissuedUrl = $"https://{SpikeCertificates.Host}:{SpikeCertificates.ReissuedPort}/";
     private static readonly string LocalhostUrl = $"http://localhost:{SpikeCertificates.HttpPort}/";
     private static readonly StoreName[] Stores = [StoreName.TrustedPeople, StoreName.Root];
 
     [SupportedOSPlatform("windows")]
-    public static async Task RunWindowsAsync(X509Certificate2 leaf, X509Certificate2? child, string[] requested, CancellationToken stop)
+    public static async Task RunWindowsAsync(
+        X509Certificate2 leaf, X509Certificate2? child, X509Certificate2? reissued, string[] requested, CancellationToken stop)
     {
         string[] storeOptions = requested.Where(arg => arg.StartsWith("--store=", StringComparison.Ordinal)).ToArray();
         StoreName[] selectedStores = storeOptions switch
@@ -26,7 +28,13 @@ internal static partial class BrowserTests
             ["--store=Root"] => [StoreName.Root],
             _ => throw new ArgumentException("Choose --store=TrustedPeople or --store=Root, or omit to test both."),
         };
-        string[] channels = requested.Except(storeOptions).ToArray();
+        bool replaceTrust = requested.Contains("--replace-trust", StringComparer.Ordinal);
+        if (replaceTrust && (reissued is null || !selectedStores.Contains(StoreName.Root)))
+        {
+            throw new ArgumentException("--replace-trust requires a local Windows server and a CurrentUser Root phase.");
+        }
+
+        string[] channels = requested.Except(storeOptions).Where(arg => arg != "--replace-trust").ToArray();
         if (channels.Any(channel => channel is not ("msedge" or "chrome" or "firefox")))
         {
             throw new ArgumentException("Browser channels are msedge, chrome and firefox.");
@@ -40,10 +48,12 @@ internal static partial class BrowserTests
 
         using var playwright = await Playwright.CreateAsync();
         VerifyAbsent(leaf);
+        var rootVerifiedChannels = new List<string>();
         foreach (var storeName in selectedStores)
         {
             stop.ThrowIfCancellationRequested();
             var sessions = new Dictionary<string, IBrowser>();
+            var sessionsAfterInstall = new Dictionary<string, IBrowser>();
             try
             {
                 foreach (string channel in channels.Distinct())
@@ -54,6 +64,11 @@ internal static partial class BrowserTests
                         sessions.Add(channel, browser);
                         Console.WriteLine($"{channel} {browser.Version}");
                         await ProbeAsync(browser, channel, storeName, "Before trust", LeafUrl, accept: false);
+                        if (replaceTrust && storeName == StoreName.Root)
+                        {
+                            await ProbeAsync(browser, channel, storeName, "Reissued leaf before trust", ReissuedUrl, accept: false);
+                        }
+
                         if (storeName == selectedStores[0])
                         {
                             await RunCeremonyAsync(browser, channel, "HTTP localhost control", LocalhostUrl);
@@ -104,9 +119,13 @@ internal static partial class BrowserTests
                         await ProbeAsync(warm, channel, storeName, "After install (same browser process)", LeafUrl, accept: true);
                         try
                         {
-                            await using var cold = await LaunchAsync(playwright, channel);
+                            var cold = await LaunchAsync(playwright, channel);
+                            sessionsAfterInstall.Add(channel, cold);
                             await using var context = await cold.NewContextAsync();
-                            await RunTrustedAsync(context, channel, storeName.ToString());
+                            if (await RunTrustedAsync(context, channel, storeName.ToString()) && storeName == StoreName.Root)
+                            {
+                                rootVerifiedChannels.Add(channel);
+                            }
                         }
                         catch (PlaywrightException error)
                         {
@@ -126,7 +145,8 @@ internal static partial class BrowserTests
                 VerifyAbsent(leaf);
                 foreach (var (channel, warm) in sessions)
                 {
-                    await ProbeAsync(warm, channel, storeName, "After removal (same browser process)", LeafUrl, accept: false);
+                    var sameProcess = sessionsAfterInstall.GetValueOrDefault(channel, warm);
+                    await ProbeAsync(sameProcess, channel, storeName, "After removal (browser used after installation)", LeafUrl, accept: false);
                     try
                     {
                         await using var cold = await LaunchAsync(playwright, channel);
@@ -147,12 +167,79 @@ internal static partial class BrowserTests
                 }
                 finally
                 {
-                    foreach (var browser in sessions.Values)
+                    foreach (var browser in sessions.Values.Concat(sessionsAfterInstall.Values))
                     {
                         await browser.DisposeAsync();
                     }
                 }
             }
+        }
+
+        if (replaceTrust && reissued is not null)
+        {
+            if (rootVerifiedChannels.Count == 0)
+            {
+                Report("Windows", "Root replacement", "Install replacement", "BLOCKED", "No working original Root trust baseline.");
+                return;
+            }
+
+            using var publicReissue = X509CertificateLoader.LoadCertificate(reissued.RawData);
+            await RunReplacementAsync(playwright, leaf, publicReissue, rootVerifiedChannels, stop);
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static async Task RunReplacementAsync(IPlaywright playwright, X509Certificate2 original,
+        X509Certificate2 reissued, IEnumerable<string> channels, CancellationToken stop)
+    {
+        const string stage = "Root replacement";
+        VerifyAbsent(original);
+        VerifyAbsent(reissued);
+        using var store = new X509Store(StoreName.Root, StoreLocation.CurrentUser);
+        store.Open(OpenFlags.ReadWrite);
+        try
+        {
+            stop.ThrowIfCancellationRequested();
+            Console.WriteLine($"Adding reissued public-only certificate {reissued.Thumbprint} to CurrentUser/Root.");
+            try
+            {
+                store.Add(reissued);
+            }
+            catch (CryptographicException error)
+            {
+                Report("Windows", stage, "Install replacement", "BLOCKED", error.Message);
+                return;
+            }
+
+            if (!Contains(store, reissued))
+            {
+                Report("Windows", stage, "Install replacement", "BLOCKED", "Certificate absent after Add.");
+                return;
+            }
+
+            Report("Windows", stage, "Install replacement", "PASS", "Exact DER found in CurrentUser/Root.");
+            foreach (string channel in channels)
+            {
+                await using var browser = await LaunchAsync(playwright, channel);
+                await ProbeAsync(browser, channel, StoreName.Root, "Replacement leaf after trust", ReissuedUrl, accept: true);
+                await ProbeAsync(browser, channel, StoreName.Root, "Original leaf after replacement", LeafUrl, accept: false);
+            }
+        }
+        finally
+        {
+            if (Contains(store, reissued))
+            {
+                Console.WriteLine($"Removing exact reissued test certificate {reissued.Thumbprint} from CurrentUser/Root.");
+                store.Remove(reissued);
+            }
+
+            VerifyAbsent(reissued);
+        }
+
+        foreach (string channel in channels)
+        {
+            await using var browser = await LaunchAsync(playwright, channel);
+            await ProbeAsync(browser, channel, StoreName.Root, "Replacement leaf after removal", ReissuedUrl, accept: false);
         }
     }
 
@@ -165,6 +252,7 @@ internal static partial class BrowserTests
         await ProbeAsync(context, channel, stage, "Leaf-issued child", $"https://localhost:{SpikeCertificates.ChildPort}/", accept: false, baseline: accepted);
         await ProbeAsync(context, channel, stage, "Same subject / different key", $"https://{SpikeCertificates.Host}:{SpikeCertificates.OtherKeyPort}/", accept: false, baseline: accepted);
         await ProbeAsync(context, channel, stage, "Same key / different SAN", $"https://localhost:{SpikeCertificates.OtherSanPort}/", accept: false, baseline: accepted);
+        await ProbeAsync(context, channel, stage, "Reissued leaf / same key and SAN", ReissuedUrl, accept: false, baseline: accepted);
         if (accepted)
         {
             await RunCeremonyAsync(context, channel, stage, LeafUrl);
