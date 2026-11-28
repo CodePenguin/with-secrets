@@ -210,7 +210,7 @@ internal static class AuditTrailTests
 
     private static void Redaction(Action<bool, string> check)
     {
-        IReadOnlyList<string> Redact(params string[] arguments) => AuditRedaction.Arguments(arguments);
+        static IReadOnlyList<string> Redact(params string[] arguments) => AuditRedaction.Arguments(arguments);
 
         check(Redact("--token=abc123XYZ")[0] == "--token=[REDACTED]" && Redact("API_KEY=sk-live-1234")[0] == "API_KEY=[REDACTED]" && Redact("password: hunter22")[0] == "password: [REDACTED]" && Redact("--client-secret=zzz")[0] == "--client-secret=[REDACTED]", "redaction: a value after a name like token, key, password or secret is masked");
         check(Redact("--token", "abc123", "--verbose").SequenceEqual(["--token", "[REDACTED]", "--verbose"]) && Redact("--password", "--other").SequenceEqual(["--password", "--other"]) && Redact("--token=abc", "next").SequenceEqual(["--token=[REDACTED]", "next"]), "redaction: the value after a secret-named flag is masked, an option after it is not, and a name=value pair does not mask the next argument");
@@ -256,9 +256,9 @@ internal static class AuditTrailTests
         HostAuditOutbox again = HostAuditOutbox.InFolder(dir, key, clock);
         check(again.LastSequence() == 4 && again.Pending(10).Count == 3 && again.Append(Facts()).Sequence == 5, "outbox restart: a new object over the same file resumes at the next number and still holds the unacknowledged events");
 
-        // Many writers at once: monotonic and gapless.
+        // Many writers at once: monotonic and gapless. This stress case serializes 200 signed commits, so use a generous test deadline; the shared five-second deadline is covered in ArcanaGuardianDatabaseTests.
         string busyDir = Path.Combine(parent, "ob-busy-" + Guid.NewGuid().ToString("N")[..6]);
-        HostAuditOutbox busy = HostAuditOutbox.InFolder(busyDir, key, clock);
+        HostAuditOutbox busy = new(new ArcanaGuardianDatabase(Path.Combine(busyDir, ArcanaGuardianDatabase.FileName), TimeSpan.FromSeconds(30)), key, clock);
         List<long> numbers = [];
         Task[] writers = [.. Enumerable.Range(0, 8).Select(_ => Task.Run(() =>
         {

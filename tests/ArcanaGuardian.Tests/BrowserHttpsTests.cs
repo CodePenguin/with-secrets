@@ -109,7 +109,7 @@ internal static class BrowserHttpsTests
         var trust = new TestTrust();
         var certificates = new BrowserCertificates(folder, trust);
         void Run(string action, TextWriter? output = null) =>
-            certificates.Run(action, false, null, null, output ?? TextWriter.Null);
+            certificates.Run(action, false, OperatingSystem.IsLinux() ? folder : null, null, output ?? TextWriter.Null);
 
         try
         {
@@ -195,13 +195,21 @@ internal static class BrowserHttpsTests
             Run("setup");
 
             trust.Unrelated.Add("unrelated-certificate");
-            trust.MachineWideDigest = digest;
-            check(Refused(() => Run("remove")),
-                "browser HTTPS: cleanup refuses when the exact certificate remains machine-wide trusted");
-            check(JsonNode.Parse(File.ReadAllText(Path.Combine(folder, "browser-https", "state.json")))!
-                    .AsObject()["Retired"]!.AsArray().Count == 1,
-                "browser HTTPS: blocked machine-wide cleanup retains retry information");
-            trust.MachineWideDigest = null;
+            if (OperatingSystem.IsWindows())
+            {
+                trust.MachineWideDigest = digest;
+                check(Refused(() => Run("remove")),
+                    "browser HTTPS: cleanup refuses when the exact certificate remains machine-wide trusted");
+                check(JsonNode.Parse(File.ReadAllText(Path.Combine(folder, "browser-https", "state.json")))!
+                        .AsObject()["Retired"]!.AsArray().Count == 1,
+                    "browser HTTPS: blocked machine-wide cleanup retains retry information");
+                trust.MachineWideDigest = null;
+            }
+            else
+            {
+                Console.WriteLine("  SKIP browser HTTPS LocalMachine Root cleanup checks: Windows-only store");
+            }
+
             Run("remove");
             check(trust.Installed.SetEquals(["unrelated-certificate"]),
                 "browser HTTPS: retried cleanup removes only exact registered trust and preserves unrelated trust");
@@ -222,6 +230,11 @@ internal static class BrowserHttpsTests
 
     internal static void RunRemoteListenerSeparation(Action<bool, string> check)
     {
+        if (PlatformSkip.NoServerTls13("browser HTTPS remote listener separation"))
+        {
+            return;
+        }
+
         string folder = Directory.CreateTempSubdirectory("ws-browser-remote-test-").FullName;
         try
         {
