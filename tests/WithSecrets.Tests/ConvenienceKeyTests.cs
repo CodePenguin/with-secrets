@@ -579,10 +579,17 @@ internal static class ConvenienceKeyTests
         string[] keyTexts = [.. new[] { storeKey, reviewKey }.OfType<byte[]>().Select(Encoding.ASCII.GetString)];
         string hostFiles = string.Join("\n", Directory.EnumerateFiles(host.Machine.Folder, "*", SearchOption.AllDirectories).Where(file => !file.EndsWith("-shm", StringComparison.Ordinal)).Select(file =>
         {
-            using FileStream stream = new(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            using StreamReader reader = new(stream, Encoding.Latin1);
-
-            return reader.ReadToEnd();
+            try
+            {
+                using FileStream stream = new(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using StreamReader reader = new(stream, Encoding.Latin1);
+                return reader.ReadToEnd();
+            }
+            catch (FileNotFoundException) when (file.EndsWith("-wal", StringComparison.Ordinal))
+            {
+                // SQLite can checkpoint and remove the write-ahead log after enumeration. The database is checked separately.
+                return "";
+            }
         }));
         string said = string.Join("\n", raw.Lines) + raw.Stdout + raw.Stderr;
         check(keyTexts.Length == 2 && keyTexts.All(key => key.Length > 0 && !hostFiles.Contains(key, StringComparison.OrdinalIgnoreCase) && !said.Contains(key, StringComparison.OrdinalIgnoreCase)) && !hostFiles.Contains(Value, StringComparison.Ordinal) && !said.Contains(Value, StringComparison.Ordinal),
