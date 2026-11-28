@@ -10,7 +10,7 @@
     -Runtime is a .NET runtime identifier: win-x64, linux-x64, osx-arm64 or osx-x64. The default is the platform this runs on. The program is
     run by the verification (--self-check), so a runtime that this machine cannot run cannot be verified here.
 
-    The result is checked by scripts/verify-publish.ps1: exactly one file (Arcana Guardian, using-secrets.exe on Windows), no loose frontend file, the web
+    The result is checked by scripts/verify-publish.ps1: exactly one file (using-secrets, using-secrets.exe on Windows), no loose frontend file, the web
     application embedded and served by the program itself from the one origin, and the frontend version equal to the backend version at /api/v1/status.
 #>
 [CmdletBinding()]
