@@ -686,6 +686,7 @@ internal static class Scenarios7
         s.Check(await c.PasskeyCalls() == 0, "tap rule: no prompt on page 1");
         await c.DemoSnapAsync("The review opens at the current admin passkey’s host. Check the destination address before approving with the current passkey.");
         c.Ignore("ERR_CONNECTION_REFUSED");
+        c.Ignore("status of 404"); // the refusal of the cross-host HTTP handoff logs a 404 for the link
         await c.Click("#approve");
         ApprovalDecision result = await cmd.Result.WaitAsync(TimeSpan.FromSeconds(30));
         s.Check(!result.Approved && result.Detail.Contains("https address or localhost"), "the program refuses the non-https cross host and says why (" + result.Detail + ")");
