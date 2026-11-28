@@ -2,8 +2,9 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
-using System.Text.RegularExpressions;
 using System.Text.Json;
+using System.Text.RegularExpressions;
+
 using Microsoft.Playwright;
 
 namespace ArcanaGuardian.E2E;
@@ -56,6 +57,7 @@ internal sealed class Rig(bool trusted = true) : IDisposable
     public string Folder { get; } = Path.Combine(Path.GetTempPath(), "ws-e2e-" + Guid.NewGuid().ToString("N"));
     public string Work { get; } = Directory.CreateTempSubdirectory("ws-e2e-work-").FullName;
     public StateDatabase State => StateDatabase.InFolder(Folder);
+    public bool KeepState { get; set; }
     public SecretStore Store => new(State);
 
     private E2EMachine? _machine;
@@ -112,7 +114,7 @@ internal sealed class Rig(bool trusted = true) : IDisposable
     {
         Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         _machine?.Dispose();
-        foreach (string dir in new[] { Folder, Work })
+        foreach (string dir in KeepState ? new[] { Work } : [Folder, Work])
         {
             try { Directory.Delete(dir, true); } catch { }
         }
@@ -202,12 +204,12 @@ internal sealed class Host : IAsyncDisposable
 
     private Host(string? demoDirectory) => DemoDirectory = demoDirectory;
 
-    public static async Task<Host> StartAsync(string? demoDirectory = null)
+    public static async Task<Host> StartAsync(string? demoDirectory = null, string? channel = null)
     {
         Host host = new(demoDirectory) { Pw = await Playwright.CreateAsync() };
         // The same Chromium build is used for tests and demos; Playwright records the actual browser viewport.
         // Slow motion is a demo-only pacing aid: normal runs keep their timing and semantics unchanged.
-        host.Browser = await host.Pw.Chromium.LaunchAsync(new() { Headless = true });
+        host.Browser = await host.Pw.Chromium.LaunchAsync(new() { Headless = true, Channel = channel });
 
         return host;
     }

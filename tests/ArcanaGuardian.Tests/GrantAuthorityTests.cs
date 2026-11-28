@@ -318,7 +318,7 @@ internal static class GrantAuthorityTests
 
     private static void Parsing(Action<bool, string> check)
     {
-        CliCommand? Parse(params string[] args) => CliArgs.Parse(args, out _);
+        static CliCommand? Parse(params string[] args) => CliArgs.Parse(args, out _);
         CliCommand.Approve? approve = Parse("approve", "--secrets", "A,B", "--reason", "why", "--", "node", "x.js") as CliCommand.Approve;
         check(approve is { Args: { Program: "node", Reason: "why" } } && approve.Args.Secrets.SequenceEqual(["A", "B"]) && approve.Args.Arguments.SequenceEqual(["x.js"]), "approve parse: the grammar of a run (secrets, reason, -- program and arguments)");
         check(Parse("approve", "--port", "8000", "--secrets", "A", "--reason", "r", "--", "p") is CliCommand.Approve { Port: 8000 } && Parse("approve", "--service-port", "9000", "--secrets", "A", "--reason", "r", "--", "p") is null, "approve parse: --port (the approval page) is accepted as for a run; there is no service port option");
@@ -1348,6 +1348,7 @@ internal static class GrantAuthorityTests
         string id = made.GrantId!;
         using HostService service = HostService.Start(new HostServiceOptions
         {
+            HttpBrowserFixture = true,
             CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(),
             Lock = AuthorityLock.UnlockedForTests(),
             State = fx.Db,

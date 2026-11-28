@@ -187,7 +187,7 @@ internal static class AdminTests
             StringWriter outText = new();
             StringWriter errText = new();
             int ok = await AdminAppCommand.RunAsync(genuine.Port, outText, errText, pinned, endpoint: LocalEndpoint.Loopback(genuine.Port));
-            check(ok == 0 && outText.ToString().Contains($"http://localhost:{genuine.Port}/admin", StringComparison.Ordinal) && errText.ToString().Length == 0, "admin: a service that proves the pinned key gets its link printed (" + outText.ToString().Trim().Replace('\n', ' ') + ")");
+            check(ok == 0 && outText.ToString().Contains(BrowserAddress.Origin(genuine.Port) + "/admin", StringComparison.Ordinal) && errText.ToString().Length == 0, "admin: a service that proves the pinned key gets its link printed (" + outText.ToString().Trim().Replace('\n', ' ') + ")");
         }
 
         using (Impostor imposter = new(body => Answer(fake, Challenge(body))))
@@ -214,7 +214,7 @@ internal static class AdminTests
             string? opened = null;
             int code = await AdminAppCommand.RunAsync(firstRun.Port, outText, errText, new ServiceTrust(null), link => opened = link, endpoint: LocalEndpoint.Loopback(firstRun.Port));
             string printed = outText.ToString();
-            check(code == 0 && printed.Contains($"http://localhost:{firstRun.Port}/admin", StringComparison.Ordinal) && printed.Contains("Not verified", StringComparison.Ordinal) && opened is null && errText.ToString().Length == 0, "admin: with no identity pinned yet (first run) it prints the link, says it is not verified, opens nothing and exits 0 (" + printed.Trim().Replace((char)10, ' ') + ")");
+            check(code == 0 && printed.Contains(BrowserAddress.Origin(firstRun.Port) + "/admin", StringComparison.Ordinal) && printed.Contains("Not verified", StringComparison.Ordinal) && opened is null && errText.ToString().Length == 0, "admin: with no identity pinned yet (first run) it prints the link, says it is not verified, opens nothing and exits 0 (" + printed.Trim().Replace((char)10, ' ') + ")");
             StringWriter unreadable = new();
             int broken = await AdminAppCommand.RunAsync(firstRun.Port, new StringWriter(), unreadable, new ServiceTrust(null, "host.json cannot be read"), endpoint: LocalEndpoint.Loopback(firstRun.Port));
             check(broken == 7 && unreadable.ToString().Contains("host.json cannot be read", StringComparison.Ordinal), "admin: an unreadable host.json is still a refusal, never 'nothing pinned'");

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography.X509Certificates;
 
 namespace ArcanaGuardian;
 
@@ -29,22 +30,27 @@ internal sealed class PageFlow : IDisposable
     private PageRoute? _reserved;
     private readonly List<Action> _ends = [];
 
-    private PageFlow()
+    private readonly X509Certificate2? _certificate;
+    private readonly BrowserPageRouter? _router;
+
+    private PageFlow(X509Certificate2? certificate, BrowserPageRouter? router)
     {
+        _certificate = certificate;
+        _router = router;
     }
 
     /// <summary>The flow of the command running on this thread (and the tasks it starts), or null.</summary>
     public static PageFlow? Current => Active.Value;
 
     /// <summary>Joins the running flow, or starts one that ends (servers closed) when the returned scope is disposed.</summary>
-    public static IDisposable Enter()
+    public static IDisposable Enter(X509Certificate2? certificate = null, BrowserPageRouter? router = null)
     {
         if (Active.Value is not null)
         {
             return new Scope(null);
         }
 
-        PageFlow flow = new();
+        PageFlow flow = new(certificate, router);
         Active.Value = flow;
 
         return new Scope(flow);
@@ -128,7 +134,8 @@ internal sealed class PageFlow : IDisposable
         {
             if (_server is null)
             {
-                _server = new OneShotServer(prefix, port, handle);
+                _server = _router is { } router ? new OneShotServer(prefix, router, handle) :
+                    new OneShotServer(prefix, port, handle, _certificate);
 
                 return new PageSlot(this, _server, null, _server.Token, _server.Port, false);
             }

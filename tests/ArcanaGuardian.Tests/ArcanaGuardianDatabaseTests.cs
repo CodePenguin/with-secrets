@@ -43,11 +43,11 @@ internal static class ArcanaGuardianDatabaseTests
                 && (long?)RawScalar(db.FilePath, "SELECT COUNT(*) FROM outbox_events") == 2,
                 "database: the outbox can retain an earlier epoch's sequence and preserves append order");
 
-            // Mixed writers, each on its own instance of the one file: raw audit_history rows, authority audit rows, outbox appends (numbered and signed) and spent admin nonces.
+            // Mixed writers, each on its own instance of the one file: raw audit_history rows, authority audit rows, outbox appends (numbered and signed) and spent admin nonces. This is an ordering test, so it gets a generous deadline; the shared five-second deadline is tested below.
             using SoftwareSigningKey machineKey = new();
             await Task.WhenAll(Enumerable.Range(0, 8).Select(task => Task.Run(() =>
             {
-                ArcanaGuardianDatabase writer = new(db.FilePath);
+                ArcanaGuardianDatabase writer = new(db.FilePath, TimeSpan.FromSeconds(30));
                 HostAuditOutbox outbox = new(writer, machineKey);
                 AuthorityStore store = new(writer);
                 for (int index = 0; index < 25; index++)
@@ -198,7 +198,7 @@ internal static class ArcanaGuardianDatabaseTests
     }
 
     // A connection made anywhere: `new SqliteConnection(`, a target-typed `new(` assigned to a SqliteConnection, or any `SqliteConnection(` call.
-    private static readonly System.Text.RegularExpressions.Regex Connects = new(@"\bSqliteConnection\s*\(|\bSqliteConnection\??\s+\w+\s*=\s*new\s*\(|\bSqliteConnection\??\s+\w+\s*\([^)]*\)\s*=>\s*new\s*\(",System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly System.Text.RegularExpressions.Regex Connects = new(@"\bSqliteConnection\s*\(|\bSqliteConnection\??\s+\w+\s*=\s*new\s*\(|\bSqliteConnection\??\s+\w+\s*\([^)]*\)\s*=>\s*new\s*\(", System.Text.RegularExpressions.RegexOptions.Compiled);
 
     /// <summary>Only ArcanaGuardianDatabase.cs opens a connection to arcana-guardian.db (with its pragmas, gate and retries); every other file goes through it.</summary>
     public static void OneOpener(Action<bool, string> check)
@@ -213,7 +213,7 @@ internal static class ArcanaGuardianDatabaseTests
         string[] files = [.. Directory.GetFiles(src, "*.cs", SearchOption.AllDirectories)
             .Where(file => !file.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Any(part => part is "bin" or "obj" or "node_modules"))];
         string[] openers = [.. files.Where(file => Connects.IsMatch(File.ReadAllText(file))).Select(file => Path.GetFileName(file)).Order(StringComparer.Ordinal)];
-        check(files.Length > 50 && Connects.IsMatch("using SqliteConnection connection = new(text);") && Connects.IsMatch("new SqliteConnection(text)") && Connects.IsMatch("private SqliteConnection Connect(string a) => new(text);") &&!Connects.IsMatch("SqliteConnection connection, SqliteTransaction transaction")
+        check(files.Length > 50 && Connects.IsMatch("using SqliteConnection connection = new(text);") && Connects.IsMatch("new SqliteConnection(text)") && Connects.IsMatch("private SqliteConnection Connect(string a) => new(text);") && !Connects.IsMatch("SqliteConnection connection, SqliteTransaction transaction")
             && openers.SequenceEqual(["ArcanaGuardianDatabase.cs"]), "database: only ArcanaGuardianDatabase.cs constructs a SqliteConnection in src (" + string.Join(", ", openers) + ")");
     }
 

@@ -1,15 +1,42 @@
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
+
 using Microsoft.Playwright;
 
 namespace ArcanaGuardian.E2E;
 
 internal static class ScenariosQuickStart
 {
-    public static async Task Start(Rig rig, Ctx browser, SpaApp app, S checks, bool showExample = false, bool desktop = false)
+    public static async Task<string> Start(Rig rig, Ctx browser, SpaApp app, S checks, bool showExample = false, bool desktop = false)
     {
         string? desktopCode = null;
         using Cmd<int> command = new((_, _, _) => CommandWiring.Setup(rig.State, null, app.Service,
             desktopCode: desktop ? code => desktopCode = code : null));
         string link = await command.LinkAsync();
+        async Task<int> PostCreate(string origin)
+        {
+            if (new Uri(link).Scheme == "https")
+            {
+                using var active = new BrowserCertificates(rig.Folder).Open();
+                using var publicLeaf = X509CertificateLoader.LoadCertificate(active.RawData);
+                using HttpClient client = SelfCheck.BrowserProbe(publicLeaf, app.Service.Port);
+                using var request = new HttpRequestMessage(HttpMethod.Post, link + "/create")
+                {
+                    Content = new StringContent("{}", Encoding.UTF8, "application/json"),
+                };
+                request.Headers.Add("Origin", origin);
+                using var response = await client.SendAsync(request);
+                return (int)response.StatusCode;
+            }
+
+            var legacy = await browser.Context.APIRequest.PostAsync(link + "/create", new()
+            {
+                Headers = new Dictionary<string, string> { ["Origin"] = origin },
+                Data = "{}",
+            });
+            return legacy.Status;
+        }
+
         // Check each button's exact clipboard payload without writing to the desktop clipboard.
         await browser.Context.AddInitScriptAsync("""
             Object.defineProperty(navigator, "clipboard", { value: {
@@ -29,18 +56,8 @@ internal static class ScenariosQuickStart
         string fingerprint = await browser.Text("#device-fingerprint");
         checks.Check(command.Err.Text.Contains(fingerprint, StringComparison.Ordinal) &&
             fingerprint == KeyIdentity.Display(rig.Machine.Deployment.Fingerprint), "same full device fingerprint on the page and terminal");
-        IAPIResponse forged = await browser.Context.APIRequest.PostAsync(link + "/create", new()
-        {
-            Headers = new Dictionary<string, string> { ["Origin"] = "http://localhost:1" },
-            Data = "{}",
-        });
-        checks.Check(forged.Status == 403, "a page on a different origin cannot register a passkey");
-        IAPIResponse early = await browser.Context.APIRequest.PostAsync(link + "/create", new()
-        {
-            Headers = new Dictionary<string, string> { ["Origin"] = new Uri(link).GetLeftPart(UriPartial.Authority) },
-            Data = "{}",
-        });
-        checks.Check(early.Status == 403, "even a same-origin registration is refused until the terminal is verified");
+        checks.Check(await PostCreate("http://localhost:1") == 403, "a page on a different origin cannot register a passkey");
+        checks.Check(await PostCreate(app.Service.BrowserOrigin) == 403, "even a same-origin registration is refused until the terminal is verified");
         await browser.DemoSnapAsync("Quick Start shows the device fingerprint and a code for the terminal.");
 
         string code = (await browser.Text("#quick-code code")).Trim();
@@ -59,12 +76,7 @@ internal static class ScenariosQuickStart
         await browser.Page.WaitForFunctionAsync("() => !document.getElementById('verify-device').disabled");
         checks.Check(await name.IsHiddenAsync() && await browser.PasskeyCalls() == 0,
             "the passkey name stays hidden until the person confirms the fingerprint");
-        IAPIResponse beforeFingerprint = await browser.Context.APIRequest.PostAsync(link + "/create", new()
-        {
-            Headers = new Dictionary<string, string> { ["Origin"] = new Uri(link).GetLeftPart(UriPartial.Authority) },
-            Data = "{}",
-        });
-        checks.Check(beforeFingerprint.Status == 403, "the server requires explicit device verification after accepting the code");
+        checks.Check(await PostCreate(app.Service.BrowserOrigin) == 403, "the server requires explicit device verification after accepting the code");
         await browser.DemoSnapAsync("The code is accepted. Compare the full fingerprint, then choose Fingerprint matches.");
         const string background = "element => getComputedStyle(element).backgroundColor";
         string verifyColor = await verify.EvaluateAsync<string>(background);
@@ -97,7 +109,8 @@ internal static class ScenariosQuickStart
         checks.Check(await browser.Page.Locator("#recovery").IsVisibleAsync() &&
             (await browser.Page.Locator("[aria-current=step]").TextContentAsync()) == "Finish setup", "the recovery code is shown on Finish setup after confirmation");
         await browser.DemoSnapAsync("Setup is complete. Save the one-time recovery code before continuing.");
-        await CheckCopy(browser, checks, "#recovery-box", "Copy recovery code", (await browser.Text("#recovery")).Trim());
+        string recovery = (await browser.Text("#recovery")).Trim();
+        await CheckCopy(browser, checks, "#recovery-box", "Copy recovery code", recovery);
         if (showExample) await ShowExample(rig, browser, checks);
         await Spa.Click(browser.Page.GetByRole(AriaRole.Link, new() { Name = "Open Arcana Guardian", Exact = true }));
         await Spa.Heading(browser, "Overview").WaitForAsync();
@@ -105,6 +118,7 @@ internal static class ScenariosQuickStart
         checks.Check(await browser.PasskeyCalls() == 0, "already signed in on the same browser and no extra prompt");
         checks.Check(!(await browser.Page.Locator("header").InnerTextAsync()).Contains("administration", StringComparison.OrdinalIgnoreCase),
             "the signed-in header uses the product brand without an administration label");
+        return recovery;
     }
 
     private static async Task ShowExample(Rig rig, Ctx browser, S checks)

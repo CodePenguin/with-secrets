@@ -24,6 +24,7 @@ export function PageSettingsCard({ canChange }: { canChange: boolean }) {
   const [busy, setBusy] = useState(false)
   const working = useRef(false)
   const data = settings.data
+  const https = globalThis.location?.protocol === 'https:'
 
   useEffect(() => {
     if (!data) return
@@ -41,15 +42,15 @@ export function PageSettingsCard({ canChange }: { canChange: boolean }) {
       <Card title="Approval pages">
         <Facts items={[
           ['Longest grant time', `${settings.data.reuseMaxMinutes} minutes`],
-          ['Address', settings.data.baseUrl ?? 'http://localhost'],
-          ['Port', settings.data.port],
+          ['Address', https ? globalThis.location.origin : settings.data.baseUrl ?? 'http://localhost'],
+          ['Port', https ? new URL(globalThis.location.origin).port || '443' : settings.data.port],
           ['Time limit', `${settings.data.timeoutMinutes} minutes`],
         ]} />
       </Card>
     )
   }
 
-  const body = { reuseMaxMinutes: Number(reuseMax), baseUrl: baseUrl.trim() === '' ? null : baseUrl.trim(), port: Number(port), timeoutMinutes: Number(timeout) }
+  const body = { reuseMaxMinutes: Number(reuseMax), baseUrl: https || baseUrl.trim() === '' ? null : baseUrl.trim(), port: https ? 0 : Number(port), timeoutMinutes: Number(timeout) }
   const unchanged = body.reuseMaxMinutes === data?.reuseMaxMinutes && body.baseUrl === data?.baseUrl && body.port === data?.port && body.timeoutMinutes === data?.timeoutMinutes
 
   async function save() {
@@ -93,6 +94,8 @@ export function PageSettingsCard({ canChange }: { canChange: boolean }) {
           <br />
           <input id="ps-reuse" type="number" min={10} max={43200} value={reuseMax} onChange={(event) => setReuseMax(event.target.value)} />
         </p>
+        {https ? null : (
+          <>
         <p>
           <label htmlFor="ps-url">Address of the pages (empty for http://localhost)</label>
           <br />
@@ -103,6 +106,8 @@ export function PageSettingsCard({ canChange }: { canChange: boolean }) {
           <br />
           <input id="ps-port" type="number" min={0} max={65535} value={port} onChange={(event) => setPort(event.target.value)} />
         </p>
+          </>
+        )}
         <p>
           <label htmlFor="ps-timeout">Time limit of a page (minutes, 1 to 30)</label>
           <br />

@@ -277,7 +277,7 @@ internal static class IdentityTests
                 await host.AuthorizeAsync(Sample("scan-3", now), () => ApprovalDecision.Allow(), CancellationToken.None);
                 HostAuthorization broken = new(new ThrowingAuthority(), machine, "scan-host", deployment.HostConfig, gate, (requestId, digest, present) => deployment.Authority.Offer(requestId, digest, present));
                 await broken.AuthorizeAsync(Sample("scan-4", now), () => ApprovalDecision.Allow(), CancellationToken.None);
-                using HostService service = HostService.Start(new HostServiceOptions { CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), Lock = AuthorityLock.UnlockedForTests(), State = StateDatabase.InFolder(folder), Store = new MemoryStore(new Dictionary<string, string>()), Deployment = deployment, Port = 0 });
+                using HostService service = HostService.Start(new HostServiceOptions { HttpBrowserFixture = true, CommandLineEndpoint = HostServiceTests.Rig.TestEndpoint(), Lock = AuthorityLock.UnlockedForTests(), State = StateDatabase.InFolder(folder), Store = new MemoryStore(new Dictionary<string, string>()), Deployment = deployment, Port = 0 });
                 using HttpClient client = new(service.Endpoint.CreateHandler());
                 string challenge = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
                 using HttpResponseMessage identity = await client.PostAsync(new Uri(service.Endpoint.BaseUri, "v1/identity"), new StringContent("{\"challenge\":\"" + challenge + "\"}", Encoding.UTF8, "application/json"));

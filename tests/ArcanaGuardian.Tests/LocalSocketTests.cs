@@ -359,7 +359,7 @@ internal static class LocalSocketTests
         {
             reason = "started";
 
-            return HostService.Start(new HostServiceOptions { State = other.State, Store = other.Store, Deployment = other.Machine.Deployment, Port = 0, Lock = AuthorityLock.UnlockedForTests(), CommandLineEndpoint = endpoint });
+            return HostService.Start(new HostServiceOptions { HttpBrowserFixture = true, State = other.State, Store = other.Store, Deployment = other.Machine.Deployment, Port = 0, Lock = AuthorityLock.UnlockedForTests(), CommandLineEndpoint = endpoint });
         }
         catch (Exception error)
         {

@@ -23,6 +23,8 @@ public abstract record CliCommand
     /// <summary>admin (no further words): go to the authority's admin web app, where all administration lives (machines, grants, audit, settings, lock and unlock). It has no verbs.</summary>
     public sealed record AdminApp : CliCommand;
 
+    /// <summary>certificate status|prepare|setup|prepare-replacement|replace|remove: manage the dedicated local browser HTTPS leaf and its exact-certificate trust.</summary>
+    public sealed record Certificate(string Action, string? Chromium, string? Firefox) : CliCommand;
 
     /// <summary>approve --secrets ... --reason ... -- PROGRAM [ARGS...]: the approval of a run (same grammar), but it makes a grant for the request and launches nothing.</summary>
     public sealed record Approve(RunArgs Args) : CliCommand;
@@ -104,7 +106,7 @@ public static class CliArgs
         Machines. Every host service has a machine identity (an ECDSA P-256 key that Windows keeps and nobody can read out; its
         fingerprint is the SHA-256 of the public key). The first time the service runs on a machine, the machine is Pending: it
         cannot get secrets until an administrator approves it. All administration is in the authority's admin web app, not in commands:
-        using-secrets admin (no words) prints its link (http://localhost:8765/admin) and the service's status. Sign in there with one passkey tap
+        using-secrets admin (no words) prints its link (https://arcana-guardian.localhost:8765/admin) and the service's status. Sign in there with one passkey tap
         (a read-only session of 15 minutes idle, 8 hours at most); every change (approve, disable, enable, untrust, trust, rename or approve a host
         name change of a machine; extend, renew or revoke a grant; passkeys; settings; the authority key; lock and unlock) is its own fresh
         passkey tap on a one-use page that names that change. Add --port N when the admin web app is not on the default port.
@@ -151,6 +153,11 @@ public static class CliArgs
     /// <summary>Returns the command, or null and an error message when the arguments are wrong.</summary>
     public static CliCommand? Parse(IReadOnlyList<string> args, out string error)
     {
+        if (args.Count > 0 && args[0] == "certificate")
+        {
+            return ParseCertificate(args, out error);
+        }
+
         if (args.Count > 0 && args[0] == "service")
         {
             return ParseService(args, out error);
@@ -199,6 +206,32 @@ public static class CliArgs
         }
 
         return command with { Port = port };
+    }
+
+    /// <summary>certificate ...: manage the dedicated local browser HTTPS leaf and its exact-certificate trust.</summary>
+    private static CliCommand? ParseCertificate(IReadOnlyList<string> args, out string error)
+    {
+        error = "Usage: using-secrets certificate status|prepare|setup|prepare-replacement|replace|remove [--chromium-nss DIR] [--firefox-nss DIR]";
+        if (args.Count < 2 || args[1] is not ("status" or "prepare" or "setup" or "prepare-replacement" or "replace" or "remove"))
+        {
+            return null;
+        }
+
+        string? chromium = null, firefox = null;
+        for (int i = 2; i < args.Count; i += 2)
+        {
+            if (i + 1 >= args.Count || args[1] is not ("setup" or "replace") || !OperatingSystem.IsLinux())
+            {
+                return null;
+            }
+
+            if (args[i] == "--chromium-nss" && chromium is null) chromium = args[i + 1];
+            else if (args[i] == "--firefox-nss" && firefox is null) firefox = args[i + 1];
+            else return null;
+        }
+
+        error = "";
+        return new CliCommand.Certificate(args[1], chromium, firefox);
     }
 
     /// <summary>approve ...: the arguments of a run, with the same checks; the result is an approval that makes a grant.</summary>
@@ -287,7 +320,7 @@ public static class CliArgs
         bool bindGiven = false;
         bool debug = false;
         const string Usage = "Usage: using-secrets service [--port N] [--machine-port N [--machine-bind ADDRESS]]. N is the loopback port of the admin web app, 1 to 65535 (default 8765, or ARCANA_GUARDIAN_PORT); the command line reaches the service another way (a named pipe or a Unix socket of this user). --machine-port also serves the machine API (nothing else: no administration, no pages) over TLS 1.3 mutual authentication and HTTP/2 for another machine's host service such as the one in WSL; it listens on 127.0.0.1 unless --machine-bind names one address (never 0.0.0.0 or [::]).";
-        int Number(string text) => int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out int parsed) && parsed >= 1 && parsed <= ToolSettings.MaxPort ? parsed : -1;
+        static int Number(string text) => int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out int parsed) && parsed >= 1 && parsed <= ToolSettings.MaxPort ? parsed : -1;
         for (int index = 1; index < args.Count; index++)
         {
             if (args[index] == "--debug")

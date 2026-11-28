@@ -28,6 +28,7 @@ type snapshot struct {
 }
 
 const retryDelay = 3 * time.Second
+const browserHost = "arcana-guardian.localhost"
 const serviceNotRunning = 6
 const startupGrace = 12 * time.Second
 
@@ -43,10 +44,10 @@ func (s snapshot) label() string {
 		return "Starting service"
 	case s.Stopped:
 		return "Service stopped"
-	case !s.portAvailable():
-		return "Service needs attention"
 	case s.Remote:
 		return "Service running, remote authority"
+	case !s.portAvailable():
+		return "Service needs attention"
 	case s.NeedsDeviceApproval:
 		return "Local device approval required"
 	case s.Locked:
@@ -70,7 +71,10 @@ func (r review) url() string {
 }
 
 func adminURL(port int) string {
-	return "http://localhost:" + strconv.Itoa(port) + "/admin"
+	if port == 443 {
+		return "https://" + browserHost + "/admin"
+	}
+	return "https://" + browserHost + ":" + strconv.Itoa(port) + "/admin"
 }
 
 func validRequestID(id string) bool {
@@ -114,7 +118,7 @@ func watchService(ctx context.Context, service string, out chan<- snapshot, retr
 		setupRequired := false
 		code := readSnapshots(ctx, service, func(next snapshot) {
 			setupRequired = next.SetupRequired
-			if next.portAvailable() {
+			if next.portAvailable() || next.Remote {
 				automaticStart = false
 				startingUntil = time.Time{}
 				launched = nil
@@ -235,7 +239,8 @@ func decodeSnapshot(line []byte) (snapshot, error) {
 	if err := json.Unmarshal(line, &next); err != nil {
 		return snapshot{}, err
 	}
-	if (!next.portAvailable() && !next.SetupRequired) || (next.portAvailable() && next.SetupRequired) || len(next.RequestIDs) > 64 {
+	hasBrowser := !next.Remote && !next.SetupRequired
+	if (hasBrowser && !next.portAvailable()) || (!hasBrowser && next.AdminPort != 0) || len(next.RequestIDs) > 64 {
 		return snapshot{}, errors.New("invalid service snapshot")
 	}
 	return next, nil

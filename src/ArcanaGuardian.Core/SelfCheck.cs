@@ -1,3 +1,6 @@
+using System.Net;
+using System.Net.Sockets;
+using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -5,7 +8,7 @@ namespace ArcanaGuardian;
 
 /// <summary>
 /// <c>using-secrets --self-check</c>: the check the release pipeline runs on the PUBLISHED program. It starts the host service in this process over a throwaway folder, software keys and a free loopback
-/// port (it touches no user state, no Windows key and no secret), asks it over HTTP for the administration web application and the API, and prints one JSON line: the backend version
+/// port (it touches no user application state or trust store), asks it over HTTPS for the administration web application and the API, and prints one JSON line: the backend version
 /// (<c>/api/v1/status</c>), the frontend version (the <c>version.json</c> embedded with the page), the embedded files, and whether the page, its script and stylesheet and the API answer from the one origin.
 /// Exit code 0 only when everything is consistent.
 /// </summary>
@@ -21,8 +24,12 @@ public static class SelfCheck
         string apiVersion = "";
         AdminWebAssets embedded = AdminWebAssets.FromAssembly();
         int origin = 0;
+        BrowserCertificates certificates = new(folder);
         try
         {
+            certificates.Run("prepare", false, null, null, TextWriter.Null);
+            using X509Certificate2 browserKey = certificates.OpenPreparedForTest();
+            using X509Certificate2 publicLeaf = X509CertificateLoader.LoadCertificate(browserKey.RawData);
             using SoftwareSigningKey machineKey = new();
             Dictionary<int, SoftwareSigningKey> authorityKeys = [];
             LocalDeployment deployment = LocalDeployment.Create(folder, machineKey, generation =>
@@ -35,9 +42,9 @@ public static class SelfCheck
                 return key;
             }, "self-check");
             StateDatabase state = StateDatabase.InFolder(folder);
-            using HostService service = HostService.Start(new HostServiceOptions { State = state, Store = new SecretStore(state), Deployment = deployment, Port = 0 });
+            using HostService service = HostService.Start(new HostServiceOptions { State = state, Store = new SecretStore(state), Deployment = deployment, Port = 0, BrowserCertificateFixture = browserKey });
             origin = service.Port;
-            using HttpClient http = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(30), BaseAddress = new Uri($"http://127.0.0.1:{service.Port}") };
+            using HttpClient http = BrowserProbe(publicLeaf, service.Port);
 
             using (JsonDocument status = JsonDocument.Parse(await http.GetStringAsync("/api/v1/status")))
             {
@@ -125,6 +132,7 @@ public static class SelfCheck
             Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
             try
             {
+                certificates.Run("remove", false, null, null, TextWriter.Null);
                 Directory.Delete(folder, true);
             }
             catch (IOException)
@@ -152,5 +160,37 @@ public static class SelfCheck
         }));
 
         return problems.Count == 0 ? 0 : 1;
+    }
+
+    internal static HttpClient BrowserProbe(X509Certificate2 publicLeaf, int port)
+    {
+        var chain = new X509ChainPolicy
+        {
+            TrustMode = X509ChainTrustMode.CustomRootTrust,
+            RevocationMode = X509RevocationMode.NoCheck,
+            DisableCertificateDownloads = true,
+        };
+        chain.CustomTrustStore.Add(publicLeaf);
+        var handler = new SocketsHttpHandler
+        {
+            UseProxy = false,
+            AllowAutoRedirect = false,
+            SslOptions = new() { CertificateChainPolicy = chain },
+            ConnectCallback = async (_, stop) =>
+            {
+                var client = new TcpClient();
+                try
+                {
+                    await client.ConnectAsync(IPAddress.Loopback, port, stop);
+                    return client.GetStream();
+                }
+                catch
+                {
+                    client.Dispose();
+                    throw;
+                }
+            },
+        };
+        return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(30), BaseAddress = new Uri(BrowserAddress.Origin(port)) };
     }
 }

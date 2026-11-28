@@ -1520,9 +1520,9 @@ export interface components {
         PageSettings: {
             /** @description The longest time a grant may be made for. */
             reuseMaxMinutes: number;
-            /** @description The address of the pages, or null for http://localhost. */
+            /** @description Reserved. Use null when the authority serves its canonical HTTPS origin. */
             baseUrl: string | null;
-            /** @description The port the pages listen on; 0 picks a free one. */
+            /** @description Reserved for browser HTTPS. Use 0; the service determines its browser port. */
             port: number;
             /** @description How long the program waits for an answer on a page. */
             timeoutMinutes: number;
@@ -4445,9 +4445,9 @@ export interface operations {
                 "application/json": {
                     /** @description The longest time a grant may be made for. */
                     reuseMaxMinutes: number;
-                    /** @description The address of the pages, or null for http://localhost. */
+                    /** @description Reserved. Use null when the authority serves its canonical HTTPS origin. */
                     baseUrl: string | null;
-                    /** @description The port the pages listen on; 0 picks a free one. */
+                    /** @description Reserved for browser HTTPS. Use 0; the service determines its browser port. */
                     port: number;
                     /** @description How long the program waits for an answer on a page. */
                     timeoutMinutes: number;

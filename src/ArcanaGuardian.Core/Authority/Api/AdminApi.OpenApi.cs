@@ -569,7 +569,7 @@ internal sealed partial class AdminApi
                     + "bound to the operation and its parameters, single use and time limited. There is no CORS. Changes within v1 are additive; a breaking change is a new major version. Another version number (/api/v2/...) is answered with 400 and the problem code "
                     + "unsupported-api-version listing supportedVersions; an unknown path under /api is 404 route-not-found; /api never falls through to the web application. Every response carries X-Api-Version; a request may carry it too (X-Api-Version: 1) and another value is refused with unsupported-api-version. No answer contains a secret value, a credential, a private key or recovery material.",
             },
-            ["servers"] = new JsonArray(new JsonObject { ["url"] = "/", ["description"] = "The service's own origin (http://localhost:PORT)." }),
+            ["servers"] = new JsonArray(new JsonObject { ["url"] = "/", ["description"] = "The service's own origin (https://arcana-guardian.localhost:PORT)." }),
             ["tags"] = new JsonArray([.. routes.Select(route => route.Tag).Distinct().Select(tag => (JsonNode?)new JsonObject { ["name"] = tag })]),
             ["paths"] = Document0(routes),
             ["components"] = new JsonObject

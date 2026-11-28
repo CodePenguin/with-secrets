@@ -43,9 +43,11 @@ internal sealed partial class AdminApi
     /// <summary>The OpenAPI document.</summary>
     internal JsonObject Document => _document.Value;
 
-    private string[] AllowedOrigins() => [$"http://localhost:{_port}", $"http://127.0.0.1:{_port}", $"http://[::1]:{_port}"];
+    private bool HttpsOnly => admin.BrowserOrigin.StartsWith("https://", StringComparison.Ordinal);
 
-    private static CookieOptions Options(bool expire = false) => new() { HttpOnly = true, SameSite = SameSiteMode.Strict, Path = Prefix, IsEssential = true, MaxAge = expire ? TimeSpan.Zero : null };
+    private string[] AllowedOrigins() => HttpsOnly ? [admin.BrowserOrigin] : [$"http://localhost:{_port}", $"http://127.0.0.1:{_port}", $"http://[::1]:{_port}"];
+
+    private CookieOptions Options(bool expire = false) => new() { HttpOnly = true, Secure = HttpsOnly, SameSite = SameSiteMode.Strict, Path = Prefix, IsEssential = true, MaxAge = expire ? TimeSpan.Zero : null };
 
     /// <summary>
     /// Cookie values are bound to this service's port ("PORT.value"): another service on another localhost port that sets or is sent these names is not mistaken for this one. Cookies are still sent to every
@@ -62,7 +64,7 @@ internal sealed partial class AdminApi
 
     internal void SetQuickStartSession(HttpResponse response, AdminSession session) => SetCookie(response, AdminSessions.SessionCookie, session.Token);
 
-    private static void DropCookie(HttpResponse response, string name) => response.Cookies.Delete(name, Options(expire: true));
+    private void DropCookie(HttpResponse response, string name) => response.Cookies.Delete(name, Options(expire: true));
 
     private static string Title(int status) => status switch
     {
@@ -219,7 +221,11 @@ internal sealed partial class AdminApi
         }
 
         // Defence in depth: the service already refuses a Host that is not a loopback name; the API does not rely on that.
-        if (request.Host.Host is not ("localhost" or "127.0.0.1" or "[::1]" or "::1"))
+        bool hostAllowed = HttpsOnly
+            ? request.IsHttps && (request.Host.Port ?? 443) == _port
+                && string.Equals(request.Host.Host, BrowserAddress.Host, StringComparison.OrdinalIgnoreCase)
+            : request.Host.Host is "localhost" or "127.0.0.1" or "[::1]" or "::1";
+        if (!hostAllowed)
         {
             return new ApiProblem(421, "host-not-allowed", "the Host header is not a loopback name");
         }
@@ -984,6 +990,11 @@ internal sealed partial class AdminApi
         }
 
         bool applyFromSession = body.TryGetProperty("applyFromSession", out JsonElement sessionOnly) && sessionOnly.GetBoolean();
+        if (HttpsOnly && !inline)
+        {
+            return new ApiResult(410, new ApiProblem(410, "inline-required", "authorize this operation in the administration app"));
+        }
+
         (AuthorizationView? view, AdminStart start) = await admin.BeginAuthorizationAsync(owner, op, args, call.Context.RequestAborted, inline, applyFromSession);
         if (loginTicket is not null)
         {

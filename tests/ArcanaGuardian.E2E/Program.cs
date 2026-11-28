@@ -1,6 +1,6 @@
 using System.Diagnostics;
-using System.Text.Json;
 using System.Net;
+using System.Text.Json;
 
 namespace ArcanaGuardian.E2E;
 
@@ -49,6 +49,11 @@ internal static class Program
 
     private static async Task<int> Main(string[] args)
     {
+        if (args is ["--browser-https", ..])
+        {
+            return await ScenariosBrowserHttps.RunAsync(args[1..]);
+        }
+
         bool demo = args.Length > 0 && args[0].Equals("--demo", StringComparison.OrdinalIgnoreCase);
         string? only = demo ? (args.Length > 2 ? args[2] : null) : args.FirstOrDefault();
         string? demoDirectory = null;
@@ -109,8 +114,8 @@ internal static class Program
             }
 
             await host.CloseScenarioAsync();
-            string[] videos = host.WriteViewer(name).ToArray();
-            string[] consoleLogs = host.ConsoleLogsFor(name).ToArray();
+            string[] videos = [.. host.WriteViewer(name)];
+            string[] consoleLogs = [.. host.ConsoleLogsFor(name)];
             results.Add(new(name, s.Failed == 0, s.Passed, s.Failed, clock.Elapsed.TotalSeconds, videos, consoleLogs, screenshots, diagnostics));
             failed += s.Failed;
         }

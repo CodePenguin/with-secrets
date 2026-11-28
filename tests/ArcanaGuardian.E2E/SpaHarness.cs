@@ -8,15 +8,15 @@ namespace ArcanaGuardian.E2E;
 internal sealed class SpaApp : IDisposable
 {
     public SpaApp(Rig rig, bool unlocked = true, bool machineEndpoint = false, TimeSpan? timeLimit = null, ProviderRegistry? providers = null, bool directApproval = false,
-        Func<string, string, string?>? sealBitwarden = null, Func<string, string?>? sealOnePassword = null, Func<string, string?>? sealVault = null)
+        Func<string, string, string?>? sealBitwarden = null, Func<string, string?>? sealOnePassword = null, Func<string, string?>? sealVault = null, bool https = false, int browserPort = 0)
     {
-        Service = HostService.Start(new HostServiceOptions { CommandLineEndpoint = E2EEndpoint.Make(), Lock = unlocked ? AuthorityLock.UnlockedForTests() : null, State = rig.State, Store = rig.Store, Deployment = rig.Machine.Deployment, Port = 0, MachineEndpoint = machineEndpoint ? new MachineListenerOptions { Port = 0 } : null, TimeLimit = timeLimit ?? TimeSpan.FromSeconds(60), ProviderRegistry = providers, SealBitwardenConfiguration = sealBitwarden, SealOnePasswordConfiguration = sealOnePassword, SealVaultConfiguration = sealVault, ApproverFactory = directApproval ? (settings, announce) => CommandWiring.RunApprover(rig.State, settings, announce) : null });
+        Service = HostService.Start(new HostServiceOptions { HttpBrowserFixture = !https, CommandLineEndpoint = E2EEndpoint.Make(), Lock = unlocked ? AuthorityLock.UnlockedForTests() : null, State = rig.State, Store = rig.Store, Deployment = rig.Machine.Deployment, Port = browserPort, MachineEndpoint = machineEndpoint ? new MachineListenerOptions { Port = 0 } : null, TimeLimit = timeLimit ?? TimeSpan.FromSeconds(60), ProviderRegistry = providers, SealBitwardenConfiguration = sealBitwarden, SealOnePasswordConfiguration = sealOnePassword, SealVaultConfiguration = sealVault, ApproverFactory = directApproval ? (settings, announce) => CommandWiring.RunApprover(rig.State, settings, announce) : null });
     }
 
     public HostService Service { get; }
 
     /// <summary>The address of the application as a person types it (a loopback name, the service's port).</summary>
-    public string Url => $"http://localhost:{Service.Port}/admin";
+    public string Url => Service.BrowserOrigin + "/admin";
 
     public void Dispose() => Service.Dispose();
 }
