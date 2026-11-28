@@ -305,7 +305,7 @@ internal sealed partial class AdminApi
         }
 
         if (session is not null && (route.Access is ApiAccess.Authorize or ApiAccess.Mutation or ApiAccess.ApprovalsDecide)
-            && route.OperationId is not ("createAuthorization" or "createInlineAuthorization" or "submitInlineAuthorizationProof")
+            && route.OperationId is not ("createAuthorization" or "createInlineAuthorization" or "submitInlineAuthorizationProof" or "resumeWithAuthenticator")
             && admin.Sessions.ActiveEditingGeneration(session) is null)
         {
             return new ApiProblem(423, "editing-locked", "editing is locked; resume this browser session with a passkey");
@@ -675,6 +675,22 @@ internal sealed partial class AdminApi
         return Task.FromResult(new ApiResult(200, new { ok = true }));
     }
 
+    private Task<ApiResult> ResumeWithAuthenticatorAsync(ApiCall call)
+    {
+        if (call.Session is not { Scope: SessionScope.Admin } session)
+            return Task.FromResult(new ApiResult(401, new ApiProblem(401, "session-required", "an existing administrator session is required")));
+        JsonElement body = call.Body!.Value;
+        string id = body.GetProperty("id").GetString()!;
+        string code = body.GetProperty("code").GetString()!;
+        return Task.FromResult(admin.ResumeEditingWithAuthenticator(session, id, code) switch
+        {
+            200 => new ApiResult(200, new { ok = true }),
+            429 => new ApiResult(429, new ApiProblem(429, "too-many-requests", "too many code attempts; wait 30 seconds or use an admin passkey")),
+            409 => new ApiResult(409, new ApiProblem(409, "session-unavailable", "this browser no longer has a locked editing session")),
+            _ => new ApiResult(403, new ApiProblem(403, "code-refused", "enter a current, unused code for this authenticator app")),
+        });
+    }
+
     private Task<ApiResult> RecordSessionActivityAsync(ApiCall call) => Task.FromResult(call.Session is null
         ? new ApiResult(401, new ApiProblem(401, "session-required", "an administrator session is required"))
         : new ApiResult(200, new { ok = true }));
@@ -917,7 +933,7 @@ internal sealed partial class AdminApi
     }
 
     private AuthorizationDto Dto(AuthorizationView view) => new(view.Id, view.Operation, view.State.ToString().ToLowerInvariant(), view.Detail, view.Link, view.Sentence, [.. view.Parameters.Select(item => new NameValueDto(item.Name, item.Value))], view.Created, view.Expires,
-        (int)AdminService.AuthorizationLifetime.TotalSeconds, view.Result is { } result ? new AuthorizationResultDto(result.Outcome, result.Code, result.Detail, result.Link, result.Invitation, result.InvitationGone) : null, view.Proof, view.PrfKey);
+        (int)AdminService.AuthorizationLifetime.TotalSeconds, view.Result is { } result ? new AuthorizationResultDto(result.Outcome, result.Code, result.Detail, result.Link, result.Invitation, result.InvitationGone, result.AuthenticatorSetup, result.AuthenticatorSetupGone) : null, view.Proof, view.PrfKey);
 
     private Task<ApiResult> CreateAuthorizationAsync(ApiCall call) => CreateAuthorizationAsync(call, false);
 
@@ -1008,12 +1024,15 @@ internal sealed partial class AdminApi
     {
         object? owner = OwnerOf(call);
         IQueryCollection query = call.Context.Request.Query;
-        if (query.Keys.Any(key => key != "collect") || query["collect"].Count > 1 || (query.TryGetValue("collect", out Microsoft.Extensions.Primitives.StringValues collect) && collect[0] != "invitation"))
+        if (query.Keys.Any(key => key != "collect") || query["collect"].Count > 1 || (query.TryGetValue("collect", out Microsoft.Extensions.Primitives.StringValues collect) && collect[0] is not ("invitation" or "authenticator-setup")))
         {
-            return Task.FromResult(new ApiResult(400, new ApiProblem(400, "invalid-request", "the only query parameter of this route is collect=invitation")));
+            return Task.FromResult(new ApiResult(400, new ApiProblem(400, "invalid-request", "use collect=invitation or collect=authenticator-setup")));
         }
 
-        AuthorizationView? view = owner is null ? null : admin.FindAuthorization(owner, call.Path["id"], query.ContainsKey("collect"));
+        bool takeSetup = query["collect"] == "authenticator-setup";
+        if (takeSetup && (call.Session is not { Scope: SessionScope.Admin } session || admin.Sessions.ActiveEditingGeneration(session) is null))
+            return Task.FromResult(new ApiResult(423, new ApiProblem(423, "editing-locked", "an active admin session is required to collect a setup key")));
+        AuthorizationView? view = owner is null ? null : admin.FindAuthorization(owner, call.Path["id"], query["collect"] == "invitation", takeSetup);
 
         return Task.FromResult(view is not null ? new ApiResult(200, Dto(view)) : new ApiResult(404, new ApiProblem(404, "not-found", "no such authorization for this caller")));
     }
@@ -1092,6 +1111,6 @@ internal sealed record NameValueDto(string Name, string Value);
 
 internal sealed record AuthorizationDto(string Id, string Operation, string State, string? Detail, string? Link, string Sentence, IReadOnlyList<NameValueDto> Parameters, DateTimeOffset Created, DateTimeOffset Expires, int LifetimeSeconds, AuthorizationResultDto? Result = null, ProofStart? Proof = null, string? PrfKey = null);
 
-internal sealed record AuthorizationResultDto(string Outcome, string? Code, string? Detail, string? Link, InvitationCreatedDto? Invitation, bool InvitationGone);
+internal sealed record AuthorizationResultDto(string Outcome, string? Code, string? Detail, string? Link, InvitationCreatedDto? Invitation, bool InvitationGone, AuthenticatorSetupDto? AuthenticatorSetup, bool AuthenticatorSetupGone);
 
 internal sealed record MutationResponse(string Operation, string Outcome, string? Link, InvitationCreatedDto? Invitation = null);

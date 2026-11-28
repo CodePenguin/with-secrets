@@ -24,10 +24,10 @@ public sealed record AuthorizationView(string Id, string Operation, Authorizatio
 /// How the change a tap authorized came out: <c>applied</c>, <c>started</c> (the operation's own passkey pages continue at <see cref="Link" />) or <c>failed</c> with a code and one safe line. The bundle of a new
 /// invitation is in <see cref="Invitation" /> in ONE answer only; <see cref="InvitationGone" /> says that it was already given or has been held long enough.
 /// </summary>
-public sealed record AuthorizationResult(string Outcome, string? Code, string? Detail, string? Link, InvitationCreatedDto? Invitation, bool InvitationGone);
+public sealed record AuthorizationResult(string Outcome, string? Code, string? Detail, string? Link, InvitationCreatedDto? Invitation, bool InvitationGone, AuthenticatorSetupDto? AuthenticatorSetup = null, bool AuthenticatorSetupGone = false);
 
 /// <summary>What a mutation came to: applied (200), a passkey page to open for a delegated operation (202), or a refusal with its code, status and one safe line. <see cref="Repeat" /> is true for an answer to a retry.</summary>
-internal sealed record MutationResult(int Status, string? Code, string? Detail, string? Link = null, InvitationCreatedDto? Invitation = null, bool Repeat = false)
+internal sealed record MutationResult(int Status, string? Code, string? Detail, string? Link = null, InvitationCreatedDto? Invitation = null, bool Repeat = false, AuthenticatorSetupDto? AuthenticatorSetup = null)
 {
     public bool Applied => Status == 200;
 }
@@ -68,6 +68,7 @@ public sealed partial class AdminService
 
         /// <summary>True once the bundle of a new invitation was given (or held too long): it is never given again.</summary>
         public bool BundleGone { get; set; }
+        public bool AuthenticatorSetupGone { get; set; }
 
         /// <summary>How many mutation requests were answered with the outcome (the first is the answer, later ones are retries).</summary>
         public int Answers { get; set; }
@@ -152,6 +153,12 @@ public sealed partial class AdminService
             {
                 record.Outcome = record.Outcome with { Invitation = null };
                 record.BundleGone = true;
+            }
+
+            if (record.Outcome?.AuthenticatorSetup is not null && record.AppliedAt is { } setupApplied && now - setupApplied > BundleHold)
+            {
+                record.Outcome = record.Outcome with { AuthenticatorSetup = null };
+                record.AuthenticatorSetupGone = true;
             }
 
             if (!Active(record) && now - (record.VerifiedAt ?? record.Created) > AuthorizationLifetime + TimeSpan.FromMinutes(ApprovalSettings.MaxTimeoutMinutes + 5))
@@ -389,10 +396,10 @@ public sealed partial class AdminService
     }
 
     /// <summary>The view of a record. Caller holds <c>_authorizationGate</c>. The bundle of a new invitation is given only when <paramref name="takeBundle" /> (and then it is gone).</summary>
-    private AuthorizationView View(AuthorizationRecord record, bool takeBundle = false) => new(record.Id, record.Operation, record.State, record.Detail, record.State == AuthorizationState.Pending ? record.Link : null,
+    private AuthorizationView View(AuthorizationRecord record, bool takeBundle = false, bool takeAuthenticatorSetup = false) => new(record.Id, record.Operation, record.State, record.Detail, record.State == AuthorizationState.Pending ? record.Link : null,
         AdminAuthorizer.PageText(record.Plan.Sentence, record.Plan.Operation, record.Plan.Parameters), record.Plan.Parameters, record.Created,
         record.State == AuthorizationState.Verified && record.VerifiedAt is { } verified ? verified + AuthorizationLifetime : record.Created.AddMinutes(ApprovalSettings.MaxTimeoutMinutes + 5),
-        record.Outcome is { } outcome ? ResultOf(record, outcome, takeBundle) : null,
+        record.Outcome is { } outcome ? ResultOf(record, outcome, takeBundle, takeAuthenticatorSetup) : null,
         record.State == AuthorizationState.Pending ? record.InlineProof?.Start : null,
         record.State == AuthorizationState.Pending ? record.InlineProof?.PrfKey : null);
 
@@ -445,7 +452,7 @@ public sealed partial class AdminService
         return judged.Ok;
     }
 
-    private static AuthorizationResult ResultOf(AuthorizationRecord record, MutationResult outcome, bool takeBundle)
+    private static AuthorizationResult ResultOf(AuthorizationRecord record, MutationResult outcome, bool takeBundle, bool takeAuthenticatorSetup)
     {
         InvitationCreatedDto? bundle = null;
         if (outcome.Invitation is not null && takeBundle)
@@ -455,17 +462,25 @@ public sealed partial class AdminService
             record.BundleGone = true;
         }
 
-        return new AuthorizationResult(outcome.Status == 200 ? "applied" : outcome.Status == 202 ? "started" : "failed", outcome.Code, outcome.Detail, outcome.Link, bundle, bundle is null && record.BundleGone);
+        AuthenticatorSetupDto? setup = null;
+        if (takeAuthenticatorSetup && outcome.AuthenticatorSetup is not null)
+        {
+            setup = outcome.AuthenticatorSetup;
+            record.Outcome = (record.Outcome ?? outcome) with { AuthenticatorSetup = null };
+            record.AuthenticatorSetupGone = true;
+        }
+
+        return new AuthorizationResult(outcome.Status == 200 ? "applied" : outcome.Status == 202 ? "started" : "failed", outcome.Code, outcome.Detail, outcome.Link, bundle, bundle is null && record.BundleGone, setup, setup is null && record.AuthenticatorSetupGone);
     }
 
     /// <summary>The state of an authorization, for the caller it was made for; null for an unknown one or another caller's.</summary>
-    internal AuthorizationView? FindAuthorization(object owner, string id, bool takeBundle = false)
+    internal AuthorizationView? FindAuthorization(object owner, string id, bool takeBundle = false, bool takeAuthenticatorSetup = false)
     {
         lock (_authorizationGate)
         {
             SweepAuthorizations();
 
-            return _authorizations.TryGetValue(id, out AuthorizationRecord? record) && SameOwner(record.Owner, owner) ? View(record, takeBundle) : null;
+            return _authorizations.TryGetValue(id, out AuthorizationRecord? record) && SameOwner(record.Owner, owner) ? View(record, takeBundle, takeAuthenticatorSetup) : null;
         }
     }
 
@@ -614,7 +629,9 @@ public sealed partial class AdminService
                             box.Value = null;
                         }
 
-                        outcome = new MutationResult(200, null, record.Plan.Remark?.Value is { } remark ? ApprovalSummary.Clean(remark) : null, null, created);
+                        AuthenticatorSetupDto? setup = record.Plan.AuthenticatorSetup?.Value;
+                        if (record.Plan.AuthenticatorSetup is { } setupBox) setupBox.Value = null;
+                        outcome = new MutationResult(200, null, record.Plan.Remark?.Value is { } remark ? ApprovalSummary.Clean(remark) : null, null, created, AuthenticatorSetup: setup);
                     }
                 }
             }

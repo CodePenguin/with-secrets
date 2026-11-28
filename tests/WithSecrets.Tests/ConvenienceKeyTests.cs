@@ -940,7 +940,7 @@ internal static class ConvenienceKeyTests
         foreach (string op in adminOnly)
         {
             // InteractiveProviderRefreshTests stages the provider batch before checking both proof routes.
-            if (op == "provider-refresh-values")
+            if (op is "provider-refresh-values" or "authenticator-add" or "authenticator-remove")
             {
                 continue;
             }

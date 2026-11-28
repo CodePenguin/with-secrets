@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { SecretsPage } from './features/secrets/SecretsPage'
+import { AccessCredentialsPage } from './features/access-credentials/AccessCredentialsPage'
 import { AccessPage } from './features/access/AccessPage'
 import { AuditPage } from './features/audit/AuditPage'
 import { MachinesPage } from './features/machines/MachinesPage'
@@ -18,6 +19,7 @@ export function App() {
       <Route element={<Shell />}>
         <Route index element={<OverviewPage />} />
         <Route path="sign-in" element={<SignInPage />} />
+        <Route path="access-credentials" element={<AccessCredentialsPage />} />
         <Route path="access" element={<AccessPage />} />
         <Route path="secrets" element={<SecretsPage />} />
         <Route path="providers" element={<ProvidersPage />} />

@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 
 namespace WithSecrets;
@@ -159,6 +160,59 @@ public sealed class UnlockedKeys(ISecretCipher? cipher = null) : IDisposable
         lock (_gate)
         {
             return _store is { } store && _openedBy is { } opener && current.Store == store.PublicKey && current.IsAdmin(opener.Id);
+        }
+    }
+
+    private static ReadOnlySpan<byte> AuthenticatorPurpose => "with-secrets authenticator credential v1"u8;
+
+    internal string? SealAuthenticatorSeed(string reviewKey, string id, string name, ReadOnlySpan<byte> seed)
+    {
+        lock (_gate)
+        {
+            if (_review is not { } review || review.PublicKey != reviewKey || seed.Length != AuthenticatorCode.SeedSize) return null;
+            Span<byte> key = stackalloc byte[32];
+            Span<byte> sealedSeed = stackalloc byte[12 + AuthenticatorCode.SeedSize + 16];
+            RandomNumberGenerator.Fill(sealedSeed[..12]);
+            try
+            {
+                HMACSHA256.HashData(review.Key, AuthenticatorPurpose, key);
+                using AesGcm cipher = new(key, 16);
+                cipher.Encrypt(sealedSeed[..12], seed, sealedSeed.Slice(12, AuthenticatorCode.SeedSize), sealedSeed[^16..], Encoding.UTF8.GetBytes(id + "\n" + name));
+                return Convert.ToBase64String(sealedSeed);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(key);
+            }
+        }
+    }
+
+    internal long? MatchAuthenticatorCode(AuthenticatorCredential credential, string code, DateTimeOffset now)
+    {
+        lock (_gate)
+        {
+            if (_review is not { } review || review.PublicKey != credential.ReviewKey) return null;
+            Span<byte> sealedSeed = stackalloc byte[12 + AuthenticatorCode.SeedSize + 16];
+            if (string.IsNullOrEmpty(credential.SealedSeed) || !Convert.TryFromBase64String(credential.SealedSeed, sealedSeed, out int length) || length != sealedSeed.Length) return null;
+            Span<byte> key = stackalloc byte[32];
+            Span<byte> seed = stackalloc byte[AuthenticatorCode.SeedSize];
+            try
+            {
+                HMACSHA256.HashData(review.Key, AuthenticatorPurpose, key);
+                using AesGcm cipher = new(key, 16);
+                cipher.Decrypt(sealedSeed[..12], sealedSeed.Slice(12, AuthenticatorCode.SeedSize), sealedSeed[^16..], seed,
+                    Encoding.UTF8.GetBytes(credential.Id + "\n" + credential.Name));
+                return AuthenticatorCode.Match(seed, code, now);
+            }
+            catch (CryptographicException)
+            {
+                return null;
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(key);
+                CryptographicOperations.ZeroMemory(seed);
+            }
         }
     }
 

@@ -480,6 +480,11 @@ internal static class Program
             MachineDiagnosticsTests.Run(Check).GetAwaiter().GetResult();
         }
 
+        if (Wants("AuthenticatorEditing"))
+        {
+            AuthenticatorEditingTests.Run(Check).GetAwaiter().GetResult();
+        }
+
         if (Wants("Api"))
         {
             ApiTests.Run(Check).GetAwaiter().GetResult();

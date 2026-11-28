@@ -177,6 +177,7 @@ export function signedIn(extra: Record<string, Handler> = {}): FakeApi {
   return installFakeApi({
     'GET /api/v1/status': { body: status() },
     'GET /api/v1/session': { body: session() },
+    'GET /api/v1/access-credentials/authenticators': { body: { items: [] } },
     'GET /api/v1/machines': { body: { items: [machine()] } },
     'GET /api/v1/pairing/invitations': { body: { items: [] } },
     'GET /api/v1/grants': { body: { items: [grant()] } },

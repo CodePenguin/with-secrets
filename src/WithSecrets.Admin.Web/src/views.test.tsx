@@ -398,6 +398,31 @@ describe('sign-in', () => {
   })
 })
 
+describe('authenticator app resume', () => {
+  it('lets a locked admin session select an app and enter a code without prompting for a passkey', async () => {
+    const user = userEvent.setup()
+    let locked = true
+    const fake = signedIn({
+      'GET /api/v1/session': () => ({ body: session({ editingLocked: locked }) }),
+      'GET /api/v1/access-credentials/authenticators': { body: { items: [{ id: 'phone', name: 'Phone' }, { id: 'backup', name: 'Backup' }] } },
+      'POST /api/v1/session/resume/authenticator': () => {
+        locked = false
+        return { body: { ok: true } }
+      },
+    })
+    renderApp('/')
+    await waitFor(() => expect(fake.count('GET /api/v1/access-credentials/authenticators')).toBe(1))
+    await user.click(await screen.findByRole('button', { name: 'Resume editing' }))
+    const dialog = within(await screen.findByRole('dialog', { name: 'Resume editing' }))
+    await user.selectOptions(dialog.getByRole('combobox', { name: 'Authenticator app' }), 'backup')
+    await user.type(dialog.getByRole('textbox', { name: /Six-digit code/ }), '012345')
+    await user.click(dialog.getByRole('button', { name: 'Resume editing' }))
+    expect(await screen.findByRole('button', { name: 'Lock editing' })).toBeInTheDocument()
+    expect(fake.calls.find(call => call.path === '/api/v1/session/resume/authenticator')?.body).toEqual({ id: 'backup', code: '012345' })
+    expect(fake.count('POST /api/v1/authorizations/inline')).toBe(0)
+  })
+})
+
 describe('the locked authority', () => {
   it('can be unlocked without a session, with its own authorization', async () => {
     const openSpy = vi.spyOn(window, 'open').mockReturnValue(null)

@@ -123,6 +123,26 @@ export const resumeEditing = (): OperationDef =>
     confirmLabel: 'Resume editing',
   })
 
+export const addAuthenticator = (): OperationDef => ({
+  key: 'authenticator-add',
+  title: 'Add authenticator app',
+  fields: [{ name: 'name', label: 'Name', kind: 'text', maxLength: 40, required: true }],
+  confirmLabel: 'Add authenticator app',
+  prepare: (values) => {
+    const name = text(values, 'name')
+    if (!name) return { errors: { name: 'Enter a name for this authenticator app.' } }
+    return { operation: 'authenticator-add', parameters: { name }, summary: `Add ${name} to resume existing admin sessions.`, done: `${name} was added.` }
+  },
+})
+
+export const removeAuthenticator = (id: string, name: string): OperationDef => ({
+  key: 'authenticator-remove',
+  title: `Remove ${name}`,
+  danger: true,
+  confirmLabel: 'Remove authenticator app',
+  prepare: () => ({ operation: 'authenticator-remove', parameters: { id }, summary: `Remove ${name} from access credentials.`, done: `${name} was removed.` }),
+})
+
 export const rotateAuthorityKey = (): OperationDef =>
   simple('rotate-key', 'Rotate the authority signing key', 'authority-key-rotate', 'Rotate the authority signing key (a transition the current key signs).', 'The authority signing key was rotated.', {
     confirmLabel: 'Rotate key',
