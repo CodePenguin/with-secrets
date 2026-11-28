@@ -47,7 +47,7 @@ app.MapGet("/", () =>
         <head>
           <meta charset="utf-8">
           <meta name="viewport" content="width=device-width, initial-scale=1">
-          <title>with-secrets UX demos</title>
+          <title>Arcana Guardian UX demos</title>
           <style>
             body { font: 16px system-ui, sans-serif; max-width: 900px; margin: 3rem auto; padding: 0 1.25rem; }
             h1 { font-size: 1.7rem; }
@@ -57,7 +57,7 @@ app.MapGet("/", () =>
           </style>
         </head>
         <body>
-          <h1>with-secrets UX demos</h1>
+          <h1>Arcana Guardian UX demos</h1>
           <p>Select a recording run to review.</p>
         """);
 

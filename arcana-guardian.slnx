@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ArcanaGuardian.Bitwarden/ArcanaGuardian.Bitwarden.csproj" />
+    <Project Path="src/ArcanaGuardian.Core/ArcanaGuardian.Core.csproj" />
+    <Project Path="src/ArcanaGuardian.LastPass/ArcanaGuardian.LastPass.csproj" />
+    <Project Path="src/ArcanaGuardian.OnePassword/ArcanaGuardian.OnePassword.csproj" />
+    <Project Path="src/ArcanaGuardian.Vault/ArcanaGuardian.Vault.csproj" />
+    <Project Path="src/ArcanaGuardian/ArcanaGuardian.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/ArcanaGuardian.Tests/ArcanaGuardian.Tests.csproj" />
+  </Folder>
+</Solution>

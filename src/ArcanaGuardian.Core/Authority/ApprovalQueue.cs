@@ -1,0 +1,979 @@
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+
+namespace ArcanaGuardian;
+
+/// <summary>Machine identity as shown on the Approvals queue and detail (trusted authority records only).</summary>
+public sealed record ApprovalMachineView(string Fingerprint, string? FriendlyName, string HostName);
+
+/// <summary>Bounded script/program-file view for the Approvals detail projection (never secret material).</summary>
+public sealed record ApprovalScriptProjection(string? Path, string Sha256, long Length, string? Text, bool Guessed, bool Binary);
+
+/// <summary>One decrypted-env metadata row: names and cipher fingerprint only.</summary>
+public sealed record ApprovalDecryptProjection(string Variable, string File, string PublicKey, string CipherShort);
+public sealed record ApprovalNameValue(string Name, string Value);
+public sealed record ApprovalCodeWarning(string Name, string Why, string Value);
+
+/// <summary>
+/// Dedicated bounded review projection for the Approvals SPA. Built from trusted signed context; never a serialization of
+/// <see cref="LaunchRequest" />, <see cref="ApprovalRequest" />, <see cref="PageContext" />, or encrypted dotenv ciphertext.
+/// </summary>
+public sealed record ApprovalReviewProjection(
+    string RequestId,
+    string FingerprintKey,
+    string RequestDigest,
+    DateTimeOffset SubmittedAt,
+    DateTimeOffset ExpiresAt,
+    ApprovalMachineView Machine,
+    string Program,
+    string ResolvedProgram,
+    IReadOnlyList<string> Arguments,
+    string WorkingDirectory,
+    string Reason,
+    IReadOnlyList<string> SecretNames,
+    IReadOnlyDictionary<string, string> SecretSources,
+    string? InlineCode,
+    ApprovalScriptProjection? Script,
+    ApprovalScriptProjection? ProgramFile,
+    IReadOnlyList<string> EnvFiles,
+    IReadOnlyList<string> EnvPairs,
+    IReadOnlyList<ApprovalNameValue> ShownEnvValues,
+    IReadOnlyList<ApprovalCodeWarning> CodeChangeWarnings,
+    IReadOnlyList<ApprovalDecryptProjection> Decrypts,
+    string? InheritedEnvironmentLine,
+    IReadOnlyList<string> ExtraLines,
+    string CanonicalText,
+    string? Heading = null,
+    IReadOnlyList<int>? Times = null,
+    bool AllowOnce = true);
+
+/// <summary>Queue list item (pending only).</summary>
+public sealed record ApprovalQueueItemDto(
+    string RequestId,
+    string Status,
+    DateTimeOffset SubmittedAt,
+    DateTimeOffset ExpiresAt,
+    ApprovalMachineView Machine,
+    string Program,
+    string Reason,
+    IReadOnlyList<string> SecretNames,
+    string? ScriptName);
+
+/// <summary>Detail response including authoritative status and optional full review or minimal terminal facts.</summary>
+public sealed record ApprovalDetailDto(
+    string RequestId,
+    string Status,
+    DateTimeOffset SubmittedAt,
+    DateTimeOffset ExpiresAt,
+    DateTimeOffset? DecidedAt,
+    ApprovalMachineView? Machine,
+    string? Program,
+    string? Reason,
+    IReadOnlyList<string>? SecretNames,
+    ApprovalReviewProjection? Review,
+    bool DecisionInProgress,
+    IReadOnlyList<string> Actions);
+
+/// <summary>Prepared SPA challenge material.</summary>
+public sealed record ApprovalChallengeDto(string FlowId, string Mode, JsonElement Payload, DateTimeOffset ExpiresAt);
+
+/// <summary>API statuses for Approvals decision state (not execution).</summary>
+public enum ApprovalQueueRegistration
+{
+    Created,
+    ExistingPending,
+    ExistingTerminal,
+    Full,
+    Conflict,
+}
+
+public static class ApprovalStatuses
+{
+    public const string Pending = "pending";
+    public const string Approved = "approved";
+    public const string Denied = "denied";
+    public const string Expired = "expired";
+    public const string Cancelled = "cancelled";
+}
+
+/// <summary>
+/// Authority-owned in-memory pending Approvals queue and short-lived proof flows. Pending review data is never persisted.
+/// Decisions still complete through <see cref="LocalAuthority.Offer" /> / <see cref="LocalAuthority.DecideAsync" />.
+/// </summary>
+public sealed class ApprovalQueue : IDisposable
+{
+    private readonly TimeProvider clock;
+    private readonly Func<TimeSpan> approvalTimeout;
+    private readonly ITimer _sweeper;
+
+    public ApprovalQueue(TimeProvider clock, Func<TimeSpan> approvalTimeout)
+    {
+        this.clock = clock;
+        this.approvalTimeout = approvalTimeout;
+        _sweeper = clock.CreateTimer(static state => ((ApprovalQueue)state!).Sweep(), this, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+    }
+
+    public const int MaxPending = 64;
+    public static readonly TimeSpan TerminalRetention = TimeSpan.FromMinutes(10);
+    public static readonly TimeSpan ChallengeLifetime = TimeSpan.FromMinutes(5);
+    public const string ApproveOnceDecision = "approve-once";
+    public const string GrantDecision = "create-grant";
+    public const string ApproveDecision = "approve";
+
+    /// <summary>A request that only makes a grant (nothing runs): its page carries the heading that says so and offers the times, with no "once".</summary>
+    public static bool IsGrant(ApprovalRequest page) => page.Heading is not null && page.Reuse is { IsOn: true };
+
+    /// <summary>A request that offers times: a grant request, or a run that may also be allowed again for a while.</summary>
+    public static bool OffersTimes(ApprovalRequest page) => page.Reuse is { IsOn: true };
+
+    private readonly Lock _gate = new();
+    private readonly Dictionary<string, Entry> _entries = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, ProofFlow> _flows = new(StringComparer.Ordinal);
+
+    private sealed class Entry
+    {
+        public required ApprovalReviewProjection Review { get; init; }
+        public required TaskCompletionSource<ApprovalDecision> Decision { get; set; }
+        public string Status { get; set; } = ApprovalStatuses.Pending;
+        public DateTimeOffset? DecidedAt { get; set; }
+        public bool DecisionInProgress { get; set; }
+        public DateTimeOffset? TerminalUntil { get; set; }
+        public ITimer? Expiry { get; set; }
+    }
+
+    private sealed class ProofFlow
+    {
+        public required string FlowId { get; init; }
+        public required string RequestId { get; init; }
+        public required string SessionId { get; init; }
+        public required string RequestDigest { get; init; }
+        public required string CanonicalText { get; init; }
+        public required string MachineFingerprint { get; init; }
+        public required ProofContext Context { get; init; }
+        public required ProofStart Start { get; init; }
+        public required DateTimeOffset ExpiresAt { get; init; }
+        public required byte[] ReviewBind { get; init; }
+        public required string Nonce { get; init; }
+        public int Consumed;
+    }
+
+    /// <summary>Builds the bounded review projection and canonical signed text from trusted context.</summary>
+    public static ApprovalReviewProjection BuildReview(
+        string launchRequestId,
+        string requestDigest,
+        DateTimeOffset submittedAt,
+        DateTimeOffset expiresAt,
+        MachineRecord machine,
+        ApprovalRequest page)
+        => BuildReview(launchRequestId, requestDigest, submittedAt, expiresAt, new ApprovalMachineView(machine.Fingerprint, machine.FriendlyName, machine.HostName), page);
+
+    /// <summary>The review of a request from <paramref name="machine" />: a paired machine, or this machine itself when its own command asks.</summary>
+    public static ApprovalReviewProjection BuildReview(
+        string launchRequestId,
+        string requestDigest,
+        DateTimeOffset submittedAt,
+        DateTimeOffset expiresAt,
+        ApprovalMachineView machine,
+        ApprovalRequest page)
+    {
+        // A request that offers times (what the passkey signs includes the chosen one) may make a grant; every other request is approved once.
+        bool grant = IsGrant(page);
+        bool timed = OffersTimes(page);
+        ApprovalRequest shown = page with { Reuse = timed ? page.Reuse : ReuseOffer.Off, RequestId = page.RequestId ?? RequestFingerprint.Compute(page).Key };
+        string canonical = BuildCanonicalText(launchRequestId, requestDigest, machine.Fingerprint, shown, submittedAt);
+        string? inline = Policy.InlineCode(shown.Program, shown.Arguments);
+        Dictionary<string, string> sources = shown.Sources is null
+            ? shown.SecretNames.ToDictionary(name => name, _ => "", StringComparer.Ordinal)
+            : shown.SecretNames.ToDictionary(name => name, name => shown.Sources.TryGetValue(name, out string? source) ? ApprovalSummary.Clean(source) : "", StringComparer.Ordinal);
+
+        List<ApprovalNameValue> shownEnv = [];
+        HashSet<string> warned = [.. ApprovalSummary.CodeChanges(shown).Select(item => item.Name)];
+        if (shown.EnvValues is { } values)
+        {
+            foreach ((string name, string value) in values.Where(item => !warned.Contains(item.Key)).OrderBy(item => item.Key, StringComparer.Ordinal))
+            {
+                shownEnv.Add(new ApprovalNameValue(ApprovalSummary.Clean(name), ApprovalSummary.Clean(CredentialHeuristics.Display(name, value))));
+            }
+        }
+
+        List<ApprovalCodeWarning> warnings = [.. ApprovalSummary.CodeChanges(shown).Select(item => new ApprovalCodeWarning(ApprovalSummary.Clean(item.Name), item.Reason, shown.EnvValues is { } envValues && envValues.TryGetValue(item.Name, out string? envValue) ? ApprovalSummary.Clean(CredentialHeuristics.Display(item.Name, envValue)) : ""))];
+        List<string> pairs = [];
+        foreach (SecretMapping pair in shown.Mappings ?? [])
+        {
+            pairs.Add(ApprovalSummary.Clean(pair.Display) + (pair.Variable != pair.Secret ? " (renamed)" : ""));
+        }
+
+        return new ApprovalReviewProjection(
+            ApprovalSummary.Clean(launchRequestId),
+            ApprovalSummary.Clean(shown.RequestId ?? ""),
+            requestDigest,
+            submittedAt,
+            expiresAt,
+            new ApprovalMachineView(machine.Fingerprint, machine.FriendlyName is null ? null : ApprovalSummary.Clean(machine.FriendlyName), ApprovalSummary.Clean(machine.HostName)),
+            ApprovalSummary.Clean(shown.Program),
+            ApprovalSummary.Clean(shown.ResolvedProgram),
+            [.. shown.Arguments.Select(ApprovalSummary.Clean)],
+            ApprovalSummary.Clean(shown.WorkingDirectory),
+            ApprovalSummary.Clean(ApprovalSummary.Truncate(shown.Reason, ApprovalSummary.MaxReasonLength)),
+            [.. shown.SecretNames.Select(ApprovalSummary.Clean)],
+            sources,
+            inline is null ? null : ApprovalSummary.Clean(inline.Length > ApprovalSummary.MaxInlineCharacters ? inline[..ApprovalSummary.MaxInlineCharacters] : inline),
+            ScriptProjection(shown.Script),
+            ScriptProjection(shown.ProgramFile),
+            [.. (shown.EnvFiles ?? []).Select(ApprovalSummary.Clean)],
+            pairs,
+            shownEnv,
+            warnings,
+            [.. (shown.Decrypts ?? []).Select(item => new ApprovalDecryptProjection(ApprovalSummary.Clean(item.Variable), ApprovalSummary.Clean(item.File), ApprovalSummary.Clean(item.PublicKey), ApprovalSummary.Clean(item.Short)))],
+            shown.InheritedEnvironment is { } inherited ? EnvironmentBinding.Line(inherited) : null,
+            [.. (shown.ExtraLines ?? []).Select(ApprovalSummary.Clean), .. new[] { ApprovalSummary.DotenvxLine(shown) }.OfType<string>()],
+            canonical,
+            grant ? ApprovalSummary.Clean(shown.Heading!) : null,
+            timed ? shown.Reuse!.WithAlways : null,
+            !grant);
+    }
+
+    private static ApprovalScriptProjection? ScriptProjection(ScriptView? script)
+    {
+        if (script is null)
+        {
+            return null;
+        }
+
+        string? text = script.Text;
+        if (text is not null)
+        {
+            List<string> lines = ApprovalSummary.Lines(text);
+            if (lines.Count > ApprovalSummary.MaxScriptLines || Encoding.UTF8.GetByteCount(text) > ApprovalSummary.MaxScriptBytes)
+            {
+                int take = Math.Min(lines.Count, ApprovalSummary.MaxScriptLines);
+                StringBuilder clipped = new();
+                int bytes = 0;
+                for (int i = 0; i < take; i++)
+                {
+                    string line = lines[i];
+                    int next = bytes + Encoding.UTF8.GetByteCount(line) + (i == 0 ? 0 : 1);
+                    if (next > ApprovalSummary.MaxScriptBytes)
+                    {
+                        break;
+                    }
+
+                    if (i > 0)
+                    {
+                        clipped.Append('\n');
+                    }
+
+                    clipped.Append(ApprovalSummary.Clean(line));
+                    bytes = next;
+                }
+
+                text = clipped.ToString();
+            }
+            else
+            {
+                text = string.Join('\n', lines.Select(ApprovalSummary.Clean));
+            }
+        }
+
+        return new ApprovalScriptProjection(
+            script.Path.Length == 0 ? null : ApprovalSummary.Clean(script.Path),
+            script.Sha256,
+            script.Length,
+            text,
+            script.Guessed,
+            script.Text is null);
+    }
+
+    /// <summary>Exact canonical review content bound into the approve-once proof (server-owned).</summary>
+    public static string BuildCanonicalText(string launchRequestId, string requestDigest, string machineFingerprint, ApprovalRequest page, DateTimeOffset issued)
+    {
+        bool grant = IsGrant(page);
+        bool timed = OffersTimes(page);
+        ApprovalRequest once = timed ? page : page with { Reuse = ReuseOffer.Off };
+        StringBuilder text = new();
+        text.Append("Decision: ").Append(grant ? GrantDecision : timed ? ApproveDecision : ApproveOnceDecision).Append('\n');
+        text.Append("Launch request id: ").Append(ApprovalSummary.Clean(launchRequestId)).Append('\n');
+        text.Append("Request digest: ").Append(requestDigest).Append('\n');
+        text.Append("Machine fingerprint: ").Append(ApprovalSummary.Clean(machineFingerprint)).Append('\n');
+        text.Append(ApprovalSummary.BuildMessage(once));
+        text.Append('\n').Append(ApprovalSummary.IssuedLine(issued));
+
+        return text.ToString();
+    }
+
+    /// <summary>
+    /// Convenience registration check for callers that only need to know whether this ID is new or already pending.
+    /// Use <see cref="Register" /> when the caller must distinguish duplicates, terminal results, conflicts and capacity.
+    /// </summary>
+    public bool TryRegister(ApprovalReviewProjection review, out TaskCompletionSource<ApprovalDecision> waiter)
+    {
+        ApprovalQueueRegistration result = Register(review, out waiter);
+        return result is ApprovalQueueRegistration.Created or ApprovalQueueRegistration.ExistingPending;
+    }
+
+    public ApprovalQueueRegistration Register(ApprovalReviewProjection review, out TaskCompletionSource<ApprovalDecision> waiter)
+    {
+        waiter = new TaskCompletionSource<ApprovalDecision>(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_gate)
+        {
+            SweepUnlocked();
+            if (_entries.TryGetValue(review.RequestId, out Entry? existing))
+            {
+                if (existing.Review.RequestDigest != review.RequestDigest)
+                {
+                    return ApprovalQueueRegistration.Conflict;
+                }
+
+                waiter = existing.Decision;
+                return existing.Status == ApprovalStatuses.Pending
+                    ? ApprovalQueueRegistration.ExistingPending
+                    : ApprovalQueueRegistration.ExistingTerminal;
+            }
+
+            if (_entries.Values.Count(item => item.Status == ApprovalStatuses.Pending) >= MaxPending)
+            {
+                return ApprovalQueueRegistration.Full;
+            }
+
+            TimeSpan timeout = approvalTimeout();
+            if (timeout > TimeSpan.FromMinutes(ApprovalSettings.MaxTimeoutMinutes))
+            {
+                timeout = TimeSpan.FromMinutes(ApprovalSettings.MaxTimeoutMinutes);
+            }
+            if (timeout <= TimeSpan.Zero)
+            {
+                timeout = TimeSpan.FromMinutes(ApprovalSettings.DefaultTimeoutMinutes);
+            }
+
+            DateTimeOffset byTimeout = clock.GetUtcNow() + timeout;
+            DateTimeOffset expires = review.ExpiresAt < byTimeout ? review.ExpiresAt : byTimeout;
+            ApprovalReviewProjection bounded = review with { ExpiresAt = expires };
+            Entry entry = new()
+            {
+                Review = bounded,
+                Decision = new(TaskCreationOptions.RunContinuationsAsynchronously),
+                Expiry = null,
+            };
+            _entries.Add(review.RequestId, entry);
+            waiter = entry.Decision;
+            ScheduleExpiryUnlocked(entry);
+            return ApprovalQueueRegistration.Created;
+        }
+    }
+
+    private void ScheduleExpiryUnlocked(Entry entry)
+    {
+        entry.Expiry?.Dispose();
+        entry.Expiry = null;
+        TimeSpan delay = entry.Review.ExpiresAt - clock.GetUtcNow();
+        if (delay <= TimeSpan.Zero)
+        {
+            ReleaseUnlocked(entry, ApprovalDecision.Deny(ApprovalDecision.TimeLimitDetail, reasonCode: ReasonCodes.ApprovalTimeout));
+        }
+        else
+        {
+            string requestId = entry.Review.RequestId;
+            entry.Expiry = clock.CreateTimer(static state =>
+            {
+                (ApprovalQueue queue, string id) = ((ApprovalQueue, string))state!;
+                queue.Expire(id);
+            }, (this, requestId), delay, Timeout.InfiniteTimeSpan);
+        }
+    }
+
+    private void Expire(string requestId)
+    {
+        lock (_gate)
+        {
+            if (!_entries.TryGetValue(requestId, out Entry? entry) || entry.Status != ApprovalStatuses.Pending)
+            {
+                return;
+            }
+
+            // Proof verification and the authority's commit are short critical phases. Do not let the deadline race
+            // an already-reserved decision; retry until that decision commits or is released.
+            if (entry.DecisionInProgress)
+            {
+                entry.Expiry?.Dispose();
+                entry.Expiry = clock.CreateTimer(static state =>
+                {
+                    (ApprovalQueue queue, string id) = ((ApprovalQueue, string))state!;
+                    queue.Expire(id);
+                }, (this, requestId), TimeSpan.FromMilliseconds(100), Timeout.InfiniteTimeSpan);
+                return;
+            }
+
+            ReleaseUnlocked(entry, ApprovalDecision.Deny(ApprovalDecision.TimeLimitDetail, reasonCode: ReasonCodes.ApprovalTimeout));
+        }
+    }
+
+    /// <summary>Withdraws a pending request (cancellation, lock, handler dispose) and wakes the waiter.</summary>
+    public void Cancel(string requestId, string detail = "cancelled")
+    {
+        lock (_gate)
+        {
+            if (!_entries.TryGetValue(requestId, out Entry? entry) || entry.Status != ApprovalStatuses.Pending)
+            {
+                return;
+            }
+
+            ReleaseUnlocked(entry, ApprovalDecision.Deny(detail, reasonCode: ReasonCodes.Cancelled));
+        }
+    }
+
+    /// <summary>Removes an uncommitted registration when the authority offer is withdrawn or its durable decision failed.</summary>
+    public void Withdraw(string requestId)
+    {
+        lock (_gate)
+        {
+            if (!_entries.TryGetValue(requestId, out Entry? entry) || entry.Status != ApprovalStatuses.Pending)
+            {
+                return;
+            }
+
+            _entries.Remove(requestId);
+            entry.Expiry?.Dispose();
+            entry.Expiry = null;
+            DropFlowsUnlocked(requestId);
+            entry.Decision.TrySetResult(ApprovalDecision.Deny("the authority offer ended before a decision was committed", reasonCode: ReasonCodes.Cancelled));
+        }
+    }
+
+    /// <summary>Reconciles the SPA projection after LocalAuthority has committed the signed response.</summary>
+    public void MarkCommitted(string requestId, AuthorityResponse response)
+    {
+        lock (_gate)
+        {
+            if (!_entries.TryGetValue(requestId, out Entry? entry) || entry.Status != ApprovalStatuses.Pending)
+            {
+                return;
+            }
+
+            entry.Status = response.Decision == AuthorityDecision.Approved ? ApprovalStatuses.Approved
+                : response.ReasonCode == ReasonCodes.ApprovalTimeout ? ApprovalStatuses.Expired
+                : response.ReasonCode == ReasonCodes.Cancelled ? ApprovalStatuses.Cancelled
+                : ApprovalStatuses.Denied;
+            entry.DecidedAt = response.Issued;
+            entry.DecisionInProgress = false;
+            entry.TerminalUntil = response.Issued + TerminalRetention;
+            entry.Expiry?.Dispose();
+            entry.Expiry = null;
+            DropFlowsUnlocked(requestId);
+            // Do not retain the completed decision/proof result for the ten-minute terminal projection window.
+            entry.Decision = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+    }
+
+    /// <summary>
+    /// Ends the entry of a request that this authority decided itself (a command run on this machine, with no signed response to wait for):
+    /// the projection shows what the decision was, and the waiter's result is dropped as in <see cref="MarkCommitted" />.
+    /// </summary>
+    public void MarkDecided(string requestId, ApprovalDecision decision)
+    {
+        lock (_gate)
+        {
+            if (!_entries.TryGetValue(requestId, out Entry? entry) || entry.Status != ApprovalStatuses.Pending)
+            {
+                return;
+            }
+
+            DateTimeOffset now = clock.GetUtcNow();
+            entry.Status = decision.Approved ? ApprovalStatuses.Approved
+                : decision.TimedOut ? ApprovalStatuses.Expired
+                : decision.ReasonCode == ReasonCodes.Cancelled ? ApprovalStatuses.Cancelled
+                : ApprovalStatuses.Denied;
+            entry.DecidedAt = now;
+            entry.DecisionInProgress = false;
+            entry.TerminalUntil = now + TerminalRetention;
+            entry.Expiry?.Dispose();
+            entry.Expiry = null;
+            DropFlowsUnlocked(requestId);
+            entry.Decision = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+    }
+
+    private void ReleaseUnlocked(Entry entry, ApprovalDecision decision)
+    {
+        entry.DecisionInProgress = true;
+        // Leave the expiry callback armed while the authority commits. It retries while DecisionInProgress is true;
+        // MarkCommitted changes Status before disposing the timer, so a racing expiry callback cannot be mistaken for a new timeout.
+        DropFlowsUnlocked(entry.Review.RequestId);
+        entry.Decision.TrySetResult(decision);
+    }
+
+    private void DropFlowsUnlocked(string requestId)
+    {
+        foreach (string flowId in _flows.Where(item => item.Value.RequestId == requestId).Select(item => item.Key).ToList())
+        {
+            _flows.Remove(flowId);
+        }
+    }
+
+    public IReadOnlyList<ApprovalQueueItemDto> ListPending(int limit, string? cursor, out string? nextCursor)
+    {
+        nextCursor = null;
+        lock (_gate)
+        {
+            SweepUnlocked();
+            List<Entry> pending = [.. _entries.Values
+                .Where(item => item.Status == ApprovalStatuses.Pending)
+                .OrderBy(item => item.Review.SubmittedAt)
+                .ThenBy(item => item.Review.RequestId, StringComparer.Ordinal)];
+            int start = 0;
+            if (!string.IsNullOrEmpty(cursor) && DecodeCursor(cursor) is { } after)
+            {
+                start = pending.FindIndex(item =>
+                {
+                    long ticks = item.Review.SubmittedAt.UtcDateTime.Ticks;
+                    return ticks > after.Ticks || (ticks == after.Ticks && string.CompareOrdinal(item.Review.RequestId, after.RequestId) > 0);
+                });
+                if (start < 0) start = pending.Count;
+            }
+
+            limit = Math.Clamp(limit, 1, MaxPending);
+            List<ApprovalQueueItemDto> items = [];
+            for (int i = start; i < pending.Count && items.Count < limit; i++)
+            {
+                Entry entry = pending[i];
+                items.Add(ToItem(entry));
+            }
+
+            if (start + items.Count < pending.Count && items.Count > 0)
+            {
+                nextCursor = EncodeCursor(items[^1]);
+            }
+
+            return items;
+        }
+    }
+
+    private static ApprovalQueueItemDto ToItem(Entry entry) => new(
+        entry.Review.RequestId,
+        entry.Status,
+        entry.Review.SubmittedAt,
+        entry.Review.ExpiresAt,
+        entry.Review.Machine,
+        entry.Review.Program,
+        entry.Review.Reason,
+        entry.Review.SecretNames,
+        ScriptName(entry.Review.Script?.Path));
+
+    // A request can come from a host on a different operating system.
+    private static string? ScriptName(string? path) =>
+        string.IsNullOrEmpty(path) ? null : path[(path.LastIndexOfAny(['/', '\\']) + 1)..];
+
+    public ApprovalDetailDto? GetDetail(string requestId, Func<string, ProcessedRequest?> processed)
+    {
+        lock (_gate)
+        {
+            SweepUnlocked();
+            if (_entries.TryGetValue(requestId, out Entry? entry))
+            {
+                bool full = entry.Status == ApprovalStatuses.Pending || (entry.TerminalUntil is { } until && until > clock.GetUtcNow());
+                List<string> actions = entry.Status == ApprovalStatuses.Pending && !entry.DecisionInProgress
+                    ? ["approve-once", "deny"]
+                    : [];
+
+                return new ApprovalDetailDto(
+                    entry.Review.RequestId,
+                    entry.Status,
+                    entry.Review.SubmittedAt,
+                    entry.Review.ExpiresAt,
+                    entry.DecidedAt,
+                    entry.Review.Machine,
+                    entry.Review.Program,
+                    full ? entry.Review.Reason : null,
+                    full ? entry.Review.SecretNames : null,
+                    full ? entry.Review : null,
+                    entry.DecisionInProgress,
+                    actions);
+            }
+        }
+
+        if (processed(requestId) is { } done)
+        {
+            string status = done.Response.Decision == AuthorityDecision.Approved
+                ? ApprovalStatuses.Approved
+                : done.Response.ReasonCode is ReasonCodes.ApprovalTimeout ? ApprovalStatuses.Expired
+                : done.Response.ReasonCode is ReasonCodes.Cancelled ? ApprovalStatuses.Cancelled
+                : ApprovalStatuses.Denied;
+
+            return new ApprovalDetailDto(requestId, status, done.Response.Issued, done.Response.Issued, done.Response.Issued, null, null, null, null, null, false, []);
+        }
+
+        return null;
+    }
+
+    public (ApprovalChallengeDto? Challenge, string? ProblemCode, string? Detail) CreateOrReuseChallenge(
+        string requestId,
+        string sessionId,
+        string origin,
+        IProofMethod method)
+    {
+        lock (_gate)
+        {
+            SweepUnlocked();
+            if (!_entries.TryGetValue(requestId, out Entry? entry) || entry.Status != ApprovalStatuses.Pending)
+            {
+                return (null, "request-not-pending", "this request is no longer pending");
+            }
+            if (entry.Review.ExpiresAt <= clock.GetUtcNow())
+                return (null, "request-not-pending", "this request has expired");
+
+            if (entry.DecisionInProgress)
+                return (null, "approval-in-progress", "a decision is already being verified or committed for this request");
+
+            ProofFlow? live = _flows.Values.FirstOrDefault(item => item.RequestId == requestId && item.ExpiresAt > clock.GetUtcNow() && Volatile.Read(ref item.Consumed) == 0);
+            if (live is not null)
+            {
+                if (live.SessionId != sessionId)
+                {
+                    return (null, "approval-in-progress", "another session already prepared the active proof for this request");
+                }
+
+                return (ToChallenge(live), null, null);
+            }
+
+            string nonce = Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlEncode(RandomNumberGenerator.GetBytes(16));
+            byte[] bind = RequestBinding.Compute(nonce, entry.Review.CanonicalText);
+            // Bind also covers digest, machine and fixed decision already present in CanonicalText; ReuseBinding minutes 0 = approve once.
+            // Pass the base request bind to Start; the SPA derives the fixed reuse=0 challenge just as the one-shot page does.
+            ProofContext context = new(bind, origin);
+            ProofStart start;
+            try
+            {
+                start = method.Start(context);
+            }
+            catch (ProofUnavailableException)
+            {
+                return (null, "internal-error", "the passkey challenge could not be prepared");
+            }
+            catch (Exception error) when (error is not OutOfMemoryException)
+            {
+                return (null, "internal-error", "the passkey challenge could not be prepared");
+            }
+
+            if (start.Mode != "webauthn")
+            {
+                return (null, "internal-error", "this proof method cannot be used inside the administration page");
+            }
+
+            DateTimeOffset challengeDeadline = clock.GetUtcNow() + ChallengeLifetime;
+            DateTimeOffset expires = challengeDeadline < entry.Review.ExpiresAt ? challengeDeadline : entry.Review.ExpiresAt;
+            ProofFlow flow = new()
+            {
+                FlowId = Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlEncode(RandomNumberGenerator.GetBytes(16)),
+                RequestId = requestId,
+                SessionId = sessionId,
+                RequestDigest = entry.Review.RequestDigest,
+                CanonicalText = entry.Review.CanonicalText,
+                MachineFingerprint = entry.Review.Machine.Fingerprint,
+                Context = context,
+                Start = start,
+                ExpiresAt = expires,
+                ReviewBind = bind,
+                Nonce = nonce,
+            };
+            _flows[flow.FlowId] = flow;
+
+            return (ToChallenge(flow), null, null);
+        }
+    }
+
+    private static ApprovalChallengeDto ToChallenge(ProofFlow flow)
+    {
+        using JsonDocument document = JsonDocument.Parse(flow.Start.Payload);
+
+        return new ApprovalChallengeDto(flow.FlowId, flow.Start.Mode, document.RootElement.Clone(), flow.ExpiresAt);
+    }
+
+    public (ApprovalDetailDto? Detail, string? ProblemCode, string? DetailText) Approve(
+        string requestId,
+        string sessionId,
+        string flowId,
+        string proof,
+        IProofMethod method,
+        Func<string, ProcessedRequest?> processed,
+        int minutes = 0)
+    {
+        ProofFlow? flow;
+        Entry? entry;
+        lock (_gate)
+        {
+            SweepUnlocked();
+            if (!_flows.TryGetValue(flowId, out flow) || flow.RequestId != requestId)
+            {
+                return ReconcileConflict(requestId, processed, expected: ApprovalStatuses.Approved);
+            }
+
+            if (flow.SessionId != sessionId)
+            {
+                return (null, "approval-in-progress", "this proof belongs to another session");
+            }
+
+            if (flow.ExpiresAt <= clock.GetUtcNow() || Volatile.Read(ref flow.Consumed) != 0)
+            {
+                _flows.Remove(flowId);
+
+                return (null, "request-not-pending", "this proof is no longer valid");
+            }
+
+            if (!_entries.TryGetValue(requestId, out entry) || entry.Status != ApprovalStatuses.Pending)
+            {
+                return ReconcileConflict(requestId, processed, expected: ApprovalStatuses.Approved);
+            }
+            if (entry.Review.ExpiresAt <= clock.GetUtcNow())
+                return (null, "request-not-pending", "this request has expired");
+
+            if (entry.Review.RequestDigest != flow.RequestDigest
+                || entry.Review.Machine.Fingerprint != flow.MachineFingerprint
+                || entry.Review.CanonicalText != flow.CanonicalText)
+            {
+                return (null, "request-not-pending", "this proof is not for the current request");
+            }
+
+            if (entry.DecisionInProgress)
+                return (null, "approval-in-progress", "a decision is already being verified or committed for this request");
+
+            // The time is one the request offered, or none (once) when the request allows it. The passkey signs it, so it cannot change after the tap.
+            if (entry.Review.Times is { Count: > 0 } offered ? !(offered.Contains(minutes) || (entry.Review.AllowOnce && minutes == 0)) : minutes != 0)
+            {
+                return (null, "invalid-request", "the time is not one this request offers");
+            }
+
+            entry.DecisionInProgress = true;
+        }
+
+        ProofResult verified;
+        try
+        {
+            verified = method.Verify(flow.Context with { Bind = ReuseBinding.Challenge(flow.Context.Bind, minutes) }, proof);
+        }
+        catch (Exception error) when (error is not OutOfMemoryException)
+        {
+            lock (_gate)
+            {
+                if (_entries.TryGetValue(requestId, out Entry? current) && ReferenceEquals(current, entry) && current.Status == ApprovalStatuses.Pending)
+                    current.DecisionInProgress = false;
+            }
+            return (null, "internal-error", "the passkey proof could not be checked");
+        }
+
+        if (!verified.Ok || verified.Credential is null)
+        {
+            lock (_gate)
+            {
+                if (_entries.TryGetValue(requestId, out Entry? current) && ReferenceEquals(current, entry) && current.Status == ApprovalStatuses.Pending)
+                {
+                    current.DecisionInProgress = false;
+                }
+            }
+
+            return (null, "proof-invalid", "the passkey proof was not accepted");
+        }
+
+        if (Interlocked.Exchange(ref flow.Consumed, 1) != 0)
+        {
+            return ReconcileConflict(requestId, processed, expected: ApprovalStatuses.Approved);
+        }
+
+        // Every approval is a grant (once: a consumed once-only grant), so what was signed is kept for each of them, the time (0: once) included. The tap releases no key.
+        ApprovalDecision decision = ApprovalDecision.Allow(verified.Detail, reuseMinutes: minutes, evidence: new ApprovalEvidence(flow.Nonce, flow.CanonicalText, proof), actor: verified.Credential.Name, credential: verified.Credential);
+        lock (_gate)
+        {
+            _flows.Remove(flowId);
+            if (!_entries.TryGetValue(requestId, out Entry? current) || !ReferenceEquals(current, entry) || current.Status != ApprovalStatuses.Pending)
+            {
+                return ReconcileConflict(requestId, processed, expected: ApprovalStatuses.Approved);
+            }
+
+            ReleaseUnlocked(current, decision);
+        }
+
+        return (GetDetail(requestId, processed), null, null);
+    }
+
+    public (ApprovalDetailDto? Detail, string? ProblemCode, string? DetailText) Deny(
+        string requestId,
+        string sessionIdentity,
+        Func<string, ProcessedRequest?> processed,
+        VerifiedCredential? sessionKey = null)
+    {
+        lock (_gate)
+        {
+            SweepUnlocked();
+            if (!_entries.TryGetValue(requestId, out Entry? entry))
+            {
+                return ReconcileConflict(requestId, processed, expected: ApprovalStatuses.Denied);
+            }
+
+            if (entry.Status == ApprovalStatuses.Denied)
+            {
+                return (GetDetail(requestId, processed), null, null);
+            }
+            if (entry.Review.ExpiresAt <= clock.GetUtcNow())
+                return (null, "request-not-pending", "this request has expired");
+
+            if (entry.Status != ApprovalStatuses.Pending || entry.DecisionInProgress)
+            {
+                return (null, "decision-already-made", "a different decision is already being committed for this request");
+            }
+
+            ReleaseUnlocked(entry, ApprovalDecision.Deny("denied on the approvals page", sessionIdentity) with { SessionKey = sessionKey });
+        }
+
+        return (GetDetail(requestId, processed), null, null);
+    }
+
+    private (ApprovalDetailDto? Detail, string? ProblemCode, string? DetailText) ReconcileConflict(
+        string requestId,
+        Func<string, ProcessedRequest?> processed,
+        string expected)
+    {
+        ApprovalDetailDto? detail = GetDetail(requestId, processed);
+        if (detail is null)
+        {
+            return (null, "request-unavailable", "no request is available for that id");
+        }
+
+        if (detail.Status == expected)
+        {
+            return (detail, null, null);
+        }
+
+        if (detail.Status != ApprovalStatuses.Pending)
+        {
+            return (null, "decision-already-made", "a different decision was already recorded for this request");
+        }
+
+        return (null, "request-not-pending", "this request is no longer pending");
+    }
+
+    /// <summary>Waits for a SPA or CLI decision for a registered pending request.</summary>
+    public ApprovalDecision Wait(string requestId, CancellationToken cancel)
+    {
+        TaskCompletionSource<ApprovalDecision>? waiter;
+        lock (_gate)
+        {
+            waiter = _entries.TryGetValue(requestId, out Entry? entry) && entry.Status == ApprovalStatuses.Pending
+                ? entry.Decision
+                : null;
+        }
+
+        if (waiter is null)
+        {
+            return ApprovalDecision.Deny("nobody could be asked for exactly this request");
+        }
+
+        try
+        {
+            return waiter.Task.WaitAsync(cancel).GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException)
+        {
+            Cancel(requestId);
+
+            return waiter.Task.IsCompletedSuccessfully ? waiter.Task.Result : ApprovalDecision.Deny("cancelled");
+        }
+    }
+
+    public int PendingCount
+    {
+        get
+        {
+            lock (_gate)
+            {
+                SweepUnlocked();
+
+                return _entries.Values.Count(item => item.Status == ApprovalStatuses.Pending);
+            }
+        }
+    }
+
+    private void Sweep()
+    {
+        lock (_gate)
+        {
+            SweepUnlocked();
+        }
+    }
+
+    public void Dispose()
+    {
+        _sweeper.Dispose();
+        lock (_gate)
+        {
+            Entry[] entries = [.. _entries.Values];
+            _entries.Clear();
+            _flows.Clear();
+
+            foreach (Entry entry in entries)
+            {
+                entry.Status = ApprovalStatuses.Cancelled;
+                entry.DecisionInProgress = false;
+                entry.Expiry?.Dispose();
+                entry.Decision.TrySetResult(ApprovalDecision.Deny("the authority service stopped", reasonCode: ReasonCodes.Cancelled));
+            }
+        }
+    }
+
+    private void SweepUnlocked()
+    {
+        DateTimeOffset now = clock.GetUtcNow();
+        foreach (Entry entry in _entries.Values.Where(item => item.Status == ApprovalStatuses.Pending && !item.DecisionInProgress && item.Review.ExpiresAt <= now).ToList())
+        {
+            ReleaseUnlocked(entry, ApprovalDecision.Deny(ApprovalDecision.TimeLimitDetail, reasonCode: ReasonCodes.ApprovalTimeout));
+        }
+
+        foreach (string id in _entries.Where(item => item.Value.TerminalUntil is { } until && until <= now).Select(item => item.Key).ToList())
+        {
+            if (_entries.TryGetValue(id, out Entry? entry))
+            {
+                entry.Expiry?.Dispose();
+                _entries.Remove(id);
+            }
+        }
+
+        foreach (string flowId in _flows.Where(item => item.Value.ExpiresAt <= now || Volatile.Read(ref item.Value.Consumed) != 0).Select(item => item.Key).ToList())
+        {
+            _flows.Remove(flowId);
+        }
+    }
+
+    public static bool IsCursorValid(string cursor) => DecodeCursor(cursor) is not null;
+
+    private static string EncodeCursor(ApprovalQueueItemDto item)
+    {
+        string text = item.SubmittedAt.UtcDateTime.Ticks.ToString(CultureInfo.InvariantCulture) + "\n" + item.RequestId;
+        return Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlEncode(Encoding.UTF8.GetBytes(text));
+    }
+
+    private static (long Ticks, string RequestId)? DecodeCursor(string cursor)
+    {
+        try
+        {
+            string text = Encoding.UTF8.GetString(Microsoft.AspNetCore.WebUtilities.WebEncoders.Base64UrlDecode(cursor));
+            int separator = text.IndexOf('\n');
+            if (separator <= 0 || separator == text.Length - 1
+                || !long.TryParse(text[..separator], NumberStyles.None, CultureInfo.InvariantCulture, out long ticks)
+                || ticks < 0 || ticks > DateTime.MaxValue.Ticks)
+            {
+                return null;
+            }
+
+            string requestId = text[(separator + 1)..];
+            if (!System.Text.RegularExpressions.Regex.IsMatch(requestId, "^[A-Za-z0-9_-]{1,64}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant))
+            {
+                return null;
+            }
+
+            return (ticks, requestId);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+}

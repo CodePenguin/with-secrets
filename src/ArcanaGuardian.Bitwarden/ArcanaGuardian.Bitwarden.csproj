@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <ItemGroup>
+        <ProjectReference Include="../ArcanaGuardian.Core/ArcanaGuardian.Core.csproj" />
+        <InternalsVisibleTo Include="ArcanaGuardian.Tests" />
+    </ItemGroup>
+</Project>

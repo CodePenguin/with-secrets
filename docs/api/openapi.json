@@ -1,14 +1,14 @@
-{
+﻿{
   "openapi": "3.1.0",
   "info": {
-    "title": "with-secrets authority administration API",
+    "title": "Arcana Guardian authority administration API",
     "version": "1.0.0",
-    "description": "The administration API of the with-secrets authority on the Windows host service\u0027s loopback port (same origin as the administration web application). JSON only. A browser session is READ-ONLY (an HttpOnly, SameSite=Strict cookie plus a secret given once, in service memory only). Every administrative change needs its own fresh passkey authorization; the narrow exception is Deny request in Approvals, which releases no secrets. Approve once uses its own fresh request-bound WebAuthn challenge and assertion; it records a once-only grant that the run it approves uses up, and it is not an administrative authorization, bound to the operation and its parameters, single use and time limited. There is no CORS. Changes within v1 are additive; a breaking change is a new major version. Another version number (/api/v2/...) is answered with 400 and the problem code unsupported-api-version listing supportedVersions; an unknown path under /api is 404 route-not-found; /api never falls through to the web application. Every response carries X-Api-Version; a request may carry it too (X-Api-Version: 1) and another value is refused with unsupported-api-version. No answer contains a secret value, a credential, a private key or recovery material."
+    "description": "The administration API of the Arcana Guardian authority on the Windows host service\u0027s loopback port (same origin as the administration web application). JSON only. A browser session is READ-ONLY (an HttpOnly, SameSite=Strict cookie plus a secret given once, in service memory only). Every administrative change needs its own fresh passkey authorization; the narrow exception is Deny request in Approvals, which releases no secrets. Approve once uses its own fresh request-bound WebAuthn challenge and assertion; it records a once-only grant that the run it approves uses up, and it is not an administrative authorization, bound to the operation and its parameters, single use and time limited. There is no CORS. Changes within v1 are additive; a breaking change is a new major version. Another version number (/api/v2/...) is answered with 400 and the problem code unsupported-api-version listing supportedVersions; an unknown path under /api is 404 route-not-found; /api never falls through to the web application. Every response carries X-Api-Version; a request may carry it too (X-Api-Version: 1) and another value is refused with unsupported-api-version. No answer contains a secret value, a credential, a private key or recovery material."
   },
   "servers": [
     {
       "url": "/",
-      "description": "The service\u0027s own origin (https://with-secrets.localhost:PORT)."
+      "description": "The service\u0027s own origin (https://arcana-guardian.localhost:PORT)."
     }
   ],
   "tags": [
@@ -12482,7 +12482,7 @@
         "properties": {
           "type": {
             "type": "string",
-            "description": "A URI naming the kind of problem (urn:with-secrets:problem:CODE)."
+            "description": "A URI naming the kind of problem (urn:arcana-guardian:problem:CODE)."
           },
           "title": {
             "type": "string"

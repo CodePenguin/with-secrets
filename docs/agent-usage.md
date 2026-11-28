@@ -1,4 +1,4 @@
-# Using with-secrets safely from an agent
+# Using Arcana Guardian safely from an agent
 
 This page is for an agent's author and for the agent's instructions. The rules come from how the tool works: the program gets a secret as an **environment variable**, the person approves the **exact command**, and the output is redacted.
 
@@ -17,14 +17,14 @@ This page is for an agent's author and for the agent's instructions. The rules c
 `--secrets` names the secret; the program reads `$DB_URL`. Single quotes keep your shell from expanding it:
 
 ```bash
-with-secrets --secrets DB_URL --reason "list tables in the staging database" -- \
+using-secrets --secrets DB_URL --reason "list tables in the staging database" -- \
   sh -c 'psql "$DB_URL" -c "\dt"'
 ```
 
 A script file, which the approval page shows in full:
 
 ```bash
-with-secrets --secrets DB_URL --reason "run the nightly report" -- sh ./scripts/report.sh
+using-secrets --secrets DB_URL --reason "run the nightly report" -- sh ./scripts/report.sh
 # report.sh uses $DB_URL; it contains no value
 ```
 
@@ -37,8 +37,8 @@ LOG_LEVEL=info
 ```
 
 ```bash
-with-secrets --needs
-with-secrets --reason "apply migrations" -- sh ./scripts/migrate.sh
+using-secrets --needs
+using-secrets --reason "apply migrations" -- sh ./scripts/migrate.sh
 ```
 
 ## PowerShell
@@ -46,19 +46,19 @@ with-secrets --reason "apply migrations" -- sh ./scripts/migrate.sh
 `pwsh` is allowed in one form: `-NoProfile`, then `-File` or `-Command`. Single quotes keep your own shell from expanding `$env:DB_URL`:
 
 ```powershell
-with-secrets --secrets DB_URL --reason "list tables in the staging database" -- `
+using-secrets --secrets DB_URL --reason "list tables in the staging database" -- `
   pwsh -NoProfile -Command 'psql $env:DB_URL -c "\dt"'
 ```
 
 ```powershell
-with-secrets --secrets DB_URL --reason "run the nightly report" -- `
+using-secrets --secrets DB_URL --reason "run the nightly report" -- `
   pwsh -NoProfile -File .\scripts\report.ps1
 # report.ps1 uses $env:DB_URL; it contains no value
 ```
 
 ```powershell
-with-secrets --needs
-with-secrets --reason "apply migrations" -- pwsh -NoProfile -File .\scripts\migrate.ps1
+using-secrets --needs
+using-secrets --reason "apply migrations" -- pwsh -NoProfile -File .\scripts\migrate.ps1
 ```
 
 ## What not to do

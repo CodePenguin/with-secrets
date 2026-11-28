@@ -1,6 +1,6 @@
-# Browser HTTPS verification
+﻿# Browser HTTPS verification
 
-The earlier spike covers the browser trust matrix, including rejection of a child certificate issued by the trusted leaf. The production runs below exercise the authority and its server-side passkey verification. [HTTPS spike results at 86254c24](https://github.com/CodePenguin/with-secrets/blob/86254c24/spikes/LocalHttpsLeaf/results.md)
+The earlier spike covers the browser trust matrix, including rejection of a child certificate issued by the trusted leaf. The production runs below exercise the authority and its server-side passkey verification. [HTTPS spike results at 86254c24](https://github.com/CodePenguin/arcana-guardian/blob/86254c24/spikes/LocalHttpsLeaf/results.md)
 
 | Environment or check | Result | Evidence |
 | --- | --- | --- |
@@ -15,7 +15,7 @@ The earlier spike covers the browser trust matrix, including rejection of a chil
 | macOS Safari and Chromium | NOT TESTED | No macOS environment was available. Treat the documented login-keychain steps as unverified. |
 | Hardware and synchronized passkeys, managed browser policy | NOT TESTED | Production Chromium verification used disposable virtual authenticators. |
 
-The production leaf has a ten-calendar-year validity period, ECDSA P-256, the sole DNS SAN `with-secrets.localhost`, critical basic constraints with CA=false, critical Digital Signature-only usage, and Server Authentication as the sole EKU. Trust and cleanup match the exact DER. Each generation has a distinct subject so NSS can distinguish active and pending leaves while replacement is in progress. The origin and relying-party ID stay fixed across rotation when the authority port is unchanged.
+The production leaf has a ten-calendar-year validity period, ECDSA P-256, the sole DNS SAN `arcana-guardian.localhost`, critical basic constraints with CA=false, critical Digital Signature-only usage, and Server Authentication as the sole EKU. Trust and cleanup match the exact DER. Each generation has a distinct subject so NSS can distinguish active and pending leaves while replacement is in progress. The origin and relying-party ID stay fixed across rotation when the authority port is unchanged.
 
 An early Chromium rotation run produced `An NSS entry has the expected nickname but different certificate bytes. It was left alone.` The application conservatively preserved lifecycle state. After the subject change, replacement and cleanup succeeded. The early run's exact leaves were removed from its disposable NSS database after checking their full DER fingerprints. The final cleanup check independently found both disposable NSS databases empty, the isolated key directories absent, and the last HTTPS test port no longer listening. No production passkeys, keys or machine-wide trust were used.
 
@@ -34,7 +34,7 @@ The React SPA handles ordinary sign-in, unlock, administration and launch approv
 The key stays separate from machine enrollment and mTLS. Browser trust is scoped to the selected user or NSS database. The spike characterized the issuer checks in specific browser verifiers. Other software, enterprise policies, OS releases and macOS trust may evaluate that trust differently. Unix file permissions protect the private key from other ordinary users. Code running as the same user or root can read the Unix private key. Cleanup requires access to the original trust target. Keep lifecycle state until cleanup succeeds.
  # Browser HTTPS verification
 
-The earlier spike covers the browser trust matrix, including rejection of a child certificate issued by the trusted leaf. The production runs below exercise the authority and its server-side passkey verification. [HTTPS spike results at 86254c24](https://github.com/CodePenguin/with-secrets/blob/86254c24/spikes/LocalHttpsLeaf/results.md)
+The earlier spike covers the browser trust matrix, including rejection of a child certificate issued by the trusted leaf. The production runs below exercise the authority and its server-side passkey verification. [HTTPS spike results at 86254c24](https://github.com/CodePenguin/arcana-guardian/blob/86254c24/spikes/LocalHttpsLeaf/results.md)
 
 | Environment or check | Result | Evidence |
 | --- | --- | --- |
@@ -48,7 +48,7 @@ The earlier spike covers the browser trust matrix, including rejection of a chil
 | macOS Safari and Chromium | NOT TESTED | No macOS environment was available. Treat the documented login-keychain steps as unverified. |
 | Hardware and synchronized passkeys, managed browser policy | NOT TESTED | Production Chromium verification used disposable virtual authenticators. |
 
-The production leaf has a ten-calendar-year validity period, ECDSA P-256, the sole DNS SAN `with-secrets.localhost`, critical basic constraints with CA=false, critical Digital Signature-only usage, and Server Authentication as the sole EKU. Trust and cleanup match the exact DER. Each generation has a distinct subject so NSS can distinguish active and pending leaves while replacement is in progress. The origin and relying-party ID stay fixed across rotation when the authority port is unchanged.
+The production leaf has a ten-calendar-year validity period, ECDSA P-256, the sole DNS SAN `arcana-guardian.localhost`, critical basic constraints with CA=false, critical Digital Signature-only usage, and Server Authentication as the sole EKU. Trust and cleanup match the exact DER. Each generation has a distinct subject so NSS can distinguish active and pending leaves while replacement is in progress. The origin and relying-party ID stay fixed across rotation when the authority port is unchanged.
 
 An early Chromium rotation run produced `An NSS entry has the expected nickname but different certificate bytes. It was left alone.` The application conservatively preserved lifecycle state. After the subject change, replacement and cleanup succeeded. The early run's exact leaves were removed from its disposable NSS database after checking their full DER fingerprints. The final cleanup check independently found both disposable NSS databases empty, the isolated key directories absent, and the last HTTPS test port no longer listening. No production passkeys, keys or machine-wide trust were used.
 

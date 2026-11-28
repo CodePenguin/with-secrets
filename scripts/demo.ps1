@@ -21,10 +21,10 @@ if (-not [string]::IsNullOrWhiteSpace($OutputDirectory)) {
 
 Push-Location $repo
 try {
-    dotnet build tests/WithSecrets.E2E
+    dotnet build tests/ArcanaGuardian.E2E
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-    dotnet run --no-build --project tests/WithSecrets.E2E -- @demoArgs
+    dotnet run --no-build --project tests/ArcanaGuardian.E2E -- @demoArgs
     exit $LASTEXITCODE
 }
 finally {
