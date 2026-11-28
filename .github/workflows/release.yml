@@ -16,9 +16,9 @@ jobs:
       fail-fast: false # collect smoke-test results from every platform before publishing
       matrix:
         include:
-        - { os: windows-latest, runtime: win-x64, file: with-secrets.exe }
-        - { os: ubuntu-latest, runtime: linux-x64, file: with-secrets }
-        - { os: macos-latest, runtime: osx-arm64, file: with-secrets }
+        - { os: windows-latest, runtime: win-x64, file: using-secrets.exe }
+        - { os: ubuntu-latest, runtime: linux-x64, file: using-secrets }
+        - { os: macos-latest, runtime: osx-arm64, file: using-secrets }
 
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
@@ -46,10 +46,10 @@ jobs:
         node-version: 22
     - uses: actions/setup-go@v7
       with:
-        go-version-file: src/WithSecrets.Desktop/go.mod
-        cache-dependency-path: src/WithSecrets.Desktop/go.sum
+        go-version-file: src/ArcanaGuardian.Desktop/go.mod
+        cache-dependency-path: src/ArcanaGuardian.Desktop/go.sum
     - name: Test
-      run: dotnet run --project tests/WithSecrets.Tests
+      run: dotnet run --project tests/ArcanaGuardian.Tests
     - name: Publish and verify
       shell: pwsh
       run: scripts/publish.ps1 -Runtime ${{ matrix.runtime }}
@@ -59,14 +59,14 @@ jobs:
       run: |
         mkdir release
         if [ "${{ matrix.os }}" = "windows-latest" ]; then
-          cp "artifacts/publish/${{ matrix.runtime }}/${{ matrix.file }}" "release/with-secrets-${{ matrix.runtime }}.exe"
+          cp "artifacts/publish/${{ matrix.runtime }}/${{ matrix.file }}" "release/using-secrets-${{ matrix.runtime }}.exe"
         else
-          tar -czf "release/with-secrets-${{ matrix.runtime }}.tar.gz" -C "artifacts/publish/${{ matrix.runtime }}" "${{ matrix.file }}"
+          tar -czf "release/using-secrets-${{ matrix.runtime }}.tar.gz" -C "artifacts/publish/${{ matrix.runtime }}" "${{ matrix.file }}"
         fi
     - name: Build and package desktop bundle
       shell: pwsh
       run: |
-        $name = 'with-secrets-desktop-${{ matrix.runtime }}'
+        $name = 'arcana-guardian-desktop-${{ matrix.runtime }}'
         $bundle = Join-Path $env:RUNNER_TEMP $name
         scripts/build-desktop.ps1 -Output $bundle
         Copy-Item 'artifacts/publish/${{ matrix.runtime }}/${{ matrix.file }}', LICENSE, THIRD-PARTY-NOTICES.md $bundle
@@ -79,16 +79,16 @@ jobs:
     - name: Smoke-test the extracted desktop bundle
       shell: pwsh
       run: |
-        $name = 'with-secrets-desktop-${{ matrix.runtime }}'
+        $name = 'arcana-guardian-desktop-${{ matrix.runtime }}'
         $scratch = Join-Path $env:RUNNER_TEMP 'extracted-bundle'
         New-Item -ItemType Directory -Path $scratch | Out-Null
         if ($IsWindows) {
           Expand-Archive -LiteralPath "release/$name.zip" -DestinationPath $scratch
-          $desktopFile = 'with-secrets-desktop.exe'
+          $desktopFile = 'arcana-guardian-desktop.exe'
         } else {
           tar -xzf "release/$name.tar.gz" -C $scratch
           if ($LASTEXITCODE -ne 0) { throw "Could not extract $name" }
-          $desktopFile = if ($IsMacOS) { 'With Secrets.app/Contents/MacOS/with-secrets-desktop' } else { 'with-secrets-desktop' }
+          $desktopFile = if ($IsMacOS) { 'Arcana Guardian.app/Contents/MacOS/arcana-guardian-desktop' } else { 'arcana-guardian-desktop' }
         }
         $bundle = Join-Path $scratch $name
         $cli = Join-Path $bundle '${{ matrix.file }}'
@@ -102,7 +102,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'The desktop executable lost its executable bit' }
         }
         if ($IsMacOS) {
-          codesign --verify --strict (Join-Path $bundle 'With Secrets.app')
+          codesign --verify --strict (Join-Path $bundle 'Arcana Guardian.app')
           if ($LASTEXITCODE -ne 0) { throw 'The extracted macOS app signature is invalid' }
         }
         & $cli --self-check
