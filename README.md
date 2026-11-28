@@ -128,7 +128,6 @@ The full lists are in [Known limits](docs/reference.md#known-limits) and the [th
 | [Operations guide](docs/operations.md) | Install, first run, machines, backup, recovery, Docker and WSL, troubleshooting, exit codes |
 | [Reference](docs/reference.md) | Every behaviour in detail: approval, the store, `.env`, grants, the admin API, audit, mutual TLS, known limits |
 | [Architecture](docs/architecture.md) | Design, trust boundaries and threat model |
-| [Repository rename cutover](docs/repository-rename.md) | Exact substitutions for the final GitHub repository rename |
 | [OpenAPI contract](docs/api/openapi.json) | The admin API |
 
 ## Development
