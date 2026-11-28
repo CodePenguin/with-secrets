@@ -1,6 +1,6 @@
 # Arcana Guardian
 
-[![ci](https://github.com/CodePenguin/with-secrets/actions/workflows/ci.yml/badge.svg)](https://github.com/CodePenguin/with-secrets/actions/workflows/ci.yml)
+[![ci](https://github.com/CodePenguin/arcana-guardian/actions/workflows/ci.yml/badge.svg)](https://github.com/CodePenguin/arcana-guardian/actions/workflows/ci.yml)
 
 *Trusted execution. Protected secrets.*
 
@@ -39,7 +39,7 @@ Deny, a wrong proof, an error or no answer before the time limit all end the run
 
 You need an admin passkey with WebAuthn PRF for setup and unlock. You can then enroll a convenience passkey for approvals, grant changes, and adding or replacing secret values. The Secrets page saves up to 20 values with one tap.
 
-**From a release.** Download the asset for your platform from the [releases page](https://github.com/CodePenguin/with-secrets/releases) and verify it against `SHA256SUMS`.
+**From a release.** Download the asset for your platform from the [releases page](https://github.com/CodePenguin/arcana-guardian/releases) and verify it against `SHA256SUMS`.
 
 | Platform | Desktop companion and CLI | CLI only |
 | --- | --- | --- |
@@ -52,7 +52,7 @@ Extract the entire desktop bundle and keep its contents together. Open `arcana-g
 **From source.** You need the .NET 10 SDK and Node.js 22 or newer.
 
 ```
-git clone https://github.com/CodePenguin/with-secrets.git arcana-guardian
+git clone https://github.com/CodePenguin/arcana-guardian.git arcana-guardian
 cd arcana-guardian
 pwsh scripts/publish.ps1        # builds and verifies artifacts/publish/<platform>/
 ```

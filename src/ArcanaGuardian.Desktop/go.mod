@@ -1,4 +1,4 @@
-module github.com/CodePenguin/with-secrets/desktop
+module github.com/CodePenguin/arcana-guardian/desktop
 
 go 1.27.4
 
